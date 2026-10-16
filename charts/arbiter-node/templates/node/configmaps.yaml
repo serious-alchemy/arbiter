@@ -24,9 +24,14 @@ the rest. There is deliberately no checksum annotation on the Deployment: a conf
 {{- end }}
 {{- if $w.timeouts }}{{ $_ := set $config "timeouts" $w.timeouts }}{{ end }}
 {{- if $w.snapshotIntervalS }}{{ $_ := set $config "snapshot_interval_s" (int $w.snapshotIntervalS) }}{{ end }}
-{{- $pull := list }}
-{{- range .Values.registries }}{{ if .pullSecret }}{{ $pull = append $pull .pullSecret }}{{ end }}{{ end }}
-{{- if $pull }}{{ $_ := set $config "image_pull_secrets" (uniq $pull) }}{{ end }}
+{{- /* KH13 (§20.10): the registry list the controller scopes pull secrets by: a pod gets only the secret of the longest matching prefix. */ -}}
+{{- $registries := list }}
+{{- range .Values.registries }}
+{{- $entry := dict "prefix" (printf "%s/" (trimSuffix "/" .prefix)) }}
+{{- if .pullSecret }}{{ $_ := set $entry "pull_secret" .pullSecret }}{{ end }}
+{{- $registries = append $registries $entry }}
+{{- end }}
+{{- if $registries }}{{ $_ := set $config "registries" $registries }}{{ end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

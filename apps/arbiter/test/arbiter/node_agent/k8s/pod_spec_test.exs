@@ -426,16 +426,22 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       end
     end
 
-    test "a tag-only or off-registry reference is bad_spec" do
+    test "a tag-only or malformed reference is bad_spec" do
       for ref <- [
             "#{registry()}/beam:latest",
             "#{registry()}/beam@sha256:abc",
-            "evil.example/beam@sha256:#{digest()}",
             "-#{registry()}/beam@sha256:#{digest()}"
           ] do
         assert {:error, {:bad_spec, {:bad_image, _}}} =
                  PodSpec.build(put_ref(run_spec(), ref), config())
       end
+    end
+
+    test "a pinned reference under no configured registry is registry_not_configured (KH13)" do
+      ref = "evil.example/beam@sha256:#{digest()}"
+
+      assert {:error, {:bad_spec, {:registry_not_configured, ^ref}}} =
+               PodSpec.build(put_ref(run_spec(), ref), config())
     end
 
     test "a spec with no image reference is bad_spec" do
@@ -1113,4 +1119,79 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
   defp do_expand("", acc), do: acc
 
   defp env_pairs(container), do: Enum.map(container["env"] || [], &{&1["name"], &1["value"]})
+
+  describe "KH13: multi-registry pull secrets (§20.10)" do
+    @gitlab "registry.gitlab.com/vstim/"
+    @ghcr "ghcr.io/ryan/"
+    @registries [
+      %{prefix: @gitlab, pull_secret: "gitlab-vstim"},
+      %{prefix: @ghcr, pull_secret: "ghcr-arbiter"}
+    ]
+
+    defp pod_for(ref), do: build!(put_ref(run_spec(), ref), %{registries: @registries})
+
+    test "a pod gets only the pull secret of its image's registry prefix" do
+      vstim = pod_for("#{@gitlab}app/worker@sha256:#{digest()}")
+      arbiter = pod_for("#{@ghcr}arbiter/worker@sha256:#{digest()}")
+
+      assert vstim["spec"]["imagePullSecrets"] == [%{"name" => "gitlab-vstim"}]
+      assert arbiter["spec"]["imagePullSecrets"] == [%{"name" => "ghcr-arbiter"}]
+    end
+
+    test "every container image of the pod is the pinned ref under the matched prefix" do
+      pod = pod_for("#{@ghcr}arbiter/worker@sha256:#{digest()}")
+
+      for name <- ["seed", "snapshotter", "worker"] do
+        assert container(pod, name)["image"] == "#{@ghcr}arbiter/worker@sha256:#{digest()}"
+      end
+    end
+
+    test "the longest matching prefix wins and is the only secret" do
+      pod =
+        build!(put_ref(run_spec(), "#{@ghcr}private/w@sha256:#{digest()}"), %{
+          registries: @registries ++ [%{prefix: "#{@ghcr}private/", pull_secret: "ghcr-private"}]
+        })
+
+      assert pod["spec"]["imagePullSecrets"] == [%{"name" => "ghcr-private"}]
+    end
+
+    test "a prefix with no pull secret is an anonymous pull: no imagePullSecrets" do
+      pod =
+        build!(put_ref(run_spec(), "docker.io/acme/w@sha256:#{digest()}"), %{
+          registries: [%{prefix: "docker.io/acme/"}]
+        })
+
+      refute Map.has_key?(pod["spec"], "imagePullSecrets")
+    end
+
+    test "the derived `registry` stays allowed and keeps the legacy flat list" do
+      pod =
+        build!(nil, %{registries: @registries, image_pull_secrets: ["legacy"]})
+
+      assert pod["spec"]["imagePullSecrets"] == [%{"name" => "legacy"}]
+    end
+
+    test "an image under no configured prefix is registry_not_configured" do
+      for ref <- [
+            "evil.example/w@sha256:#{digest()}",
+            "ghcr.io/ryan-evil/w@sha256:#{digest()}"
+          ] do
+        assert {:error, {:bad_spec, {:registry_not_configured, ^ref}}} =
+                 PodSpec.build(put_ref(run_spec(), ref), config(%{registries: @registries}))
+      end
+    end
+
+    test "a service image under a configured prefix is allowed, one outside is not" do
+      spec = run_spec(%{"services" => [%{"preset" => "s3"}]})
+
+      assert {:error, {:bad_spec, {:service_image_not_allowed, "docker.io/pgsty/silo"}}} =
+               PodSpec.build(spec, config(%{registries: @registries}))
+
+      assert {:ok, _} =
+               PodSpec.build(
+                 spec,
+                 config(%{registries: @registries ++ [%{prefix: "docker.io/pgsty/"}]})
+               )
+    end
+  end
 end

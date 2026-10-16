@@ -25,7 +25,7 @@ defmodule Arbiter.Nodes.ClusterInstall do
   alias Arbiter.Settings
   alias Arbiter.Worker.Image.Publisher
 
-  @form_keys ~w(name namespace max cpu memory node_selector pull_secret reach admission self_upgrade api_cidrs cluster_cidrs primary_cidrs proxy_url proxy_cidrs)
+  @form_keys ~w(name namespace max cpu memory node_selector pull_secret registries reach admission self_upgrade api_cidrs cluster_cidrs primary_cidrs proxy_url proxy_cidrs)
 
   @default_chart "oci://ghcr.io/ryanrborn/charts/arbiter-node"
 
@@ -49,6 +49,7 @@ defmodule Arbiter.Nodes.ClusterInstall do
           manifest_url: String.t() | nil,
           apply_command: String.t() | nil,
           secret_command: String.t(),
+          pull_secret_commands: [%{registry: String.t(), secret: String.t(), command: String.t()}],
           namespace: String.t(),
           image: String.t() | nil,
           node_name: String.t(),
@@ -199,6 +200,7 @@ defmodule Arbiter.Nodes.ClusterInstall do
          manifest_url: raw[:manifest_url],
          apply_command: raw[:apply_command],
          secret_command: secret_command(spec.namespace),
+         pull_secret_commands: pull_secret_commands(spec.registries, spec.namespace),
          namespace: spec.namespace,
          image: raw[:image],
          node_name: spec.node_name,
@@ -334,6 +336,31 @@ defmodule Arbiter.Nodes.ClusterInstall do
     do:
       "helm upgrade #{release} #{chart} --version #{version} -n #{namespace} " <>
         "--reset-then-reuse-values"
+
+  @doc """
+  KH13 (§20.10): one command per registry that names a pull secret, creating it with a
+  read-only deploy token read from the terminal. `kubectl create secret docker-registry
+  --docker-password=` would put the password on argv, so the dockerconfigjson is built by
+  `printf` from two `read`s (`-s` for the password) and piped in. The registry host is
+  the first path segment of the prefix.
+  """
+  @spec pull_secret_commands([%{prefix: String.t(), pull_secret: String.t() | nil}], String.t()) ::
+          [%{registry: String.t(), secret: String.t(), command: String.t()}]
+  def pull_secret_commands(registries, namespace) do
+    for %{prefix: prefix, pull_secret: secret} <- registries, is_binary(secret) do
+      host = prefix |> String.split("/", parts: 2) |> hd()
+
+      %{
+        registry: prefix,
+        secret: secret,
+        command:
+          "read -r U && read -rs P && printf " <>
+            ~s|'{"auths":{"#{host}":{"username":"%s","password":"%s"}}}' "$U" "$P" \| | <>
+            "kubectl -n #{namespace} create secret generic #{secret} " <>
+            "--type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson=/dev/stdin"
+      }
+    end
+  end
 
   @doc """
   The one command that moves an `outdated` cluster node to `image` by hand: its Deployment

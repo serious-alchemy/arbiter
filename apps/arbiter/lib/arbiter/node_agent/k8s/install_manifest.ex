@@ -95,6 +95,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
 
   @dns_label ~r/\A[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\z/
   @dns_subdomain ~r/\A[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?\z/
+  @registry_prefix ~r/\A[a-z0-9][a-z0-9.:\/_-]*\/\z/
   @selector_key ~r/\A([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?\/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?\z/
   @selector_value ~r/\A([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?\z/
 
@@ -108,6 +109,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
           runtime_class: String.t(),
           runtime_handler: String.t(),
           pull_secret: String.t() | nil,
+          registries: [%{prefix: String.t(), pull_secret: String.t() | nil}],
           reach: ControllerManifest.reach(),
           admission: boolean(),
           self_upgrade: boolean(),
@@ -131,7 +133,8 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   Parse the query / form values (string keys): `name` (required), `namespace`, `max`,
   `cpu`, `memory`, `node_selector` (`k=v,k=v`), `runtime_class` and `runtime_handler`
   (`placement.runtime_class` / `placement.runtime_handler`; a `runsc*` handler marks a kernel
-  sandbox and relaxes the admission policy's `hostUsers` rule for that class), `pull_secret`, `reach`
+  sandbox and relaxes the admission policy's `hostUsers` rule for that class), `pull_secret`, `registries`
+  (KH13: `prefix=secret,prefix=secret`, each prefix ending in `/`; a bare prefix pulls anonymously), `reach`
   (`direct|tailscale|proxy`), `primary_cidrs` (required for `direct`), `proxy_url` and
   `proxy_cidrs` (required for `proxy`), `admission` (`policy` or none), `self_upgrade`
   (`on|off`), `api_cidrs` (the API server's node addresses, added to the ClusterIP),
@@ -150,6 +153,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       runtime_class: field(params, "runtime_class", &subdomain/1, ""),
       runtime_handler: field(params, "runtime_handler", &subdomain/1, ""),
       pull_secret: field(params, "pull_secret", &subdomain/1, nil),
+      registries: field(params, "registries", &registries/1, []),
       reach: field(params, "reach", &reach/1, :direct),
       admission: field(params, "admission", &admission/1, false),
       self_upgrade: field(params, "self_upgrade", &self_upgrade/1, true),
@@ -183,6 +187,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       runtime_class: v.runtime_class,
       runtime_handler: v.runtime_handler,
       pull_secret: v.pull_secret,
+      registries: v.registries,
       reach: v.reach,
       admission: v.admission,
       self_upgrade: v.self_upgrade,
@@ -278,6 +283,34 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     do: Regex.match?(@selector_key, key) and Regex.match?(@selector_value, value)
 
   defp selector_pair?(_), do: false
+
+  # KH13 (§20.10): `prefix=secret,prefix=secret`. The prefix is a registry path ending in
+  # `/`, the secret a Secret name already in the namespace (a name, never a credential);
+  # a bare prefix pulls anonymously.
+  defp registries(value) do
+    parsed =
+      value
+      |> String.split(",", trim: true)
+      |> Enum.map(fn entry ->
+        case entry |> String.trim() |> String.split("=", parts: 2) do
+          [prefix] -> %{prefix: prefix, pull_secret: nil}
+          [prefix, secret] -> %{prefix: prefix, pull_secret: secret}
+        end
+      end)
+
+    if parsed != [] and Enum.all?(parsed, &registry_entry?/1) and
+         length(Enum.uniq_by(parsed, & &1.prefix)) == length(parsed),
+       do: {:ok, parsed},
+       else:
+         {:error,
+          "must be comma separated prefix=secret pairs, each prefix a registry path ending in / " <>
+            "(registry.gitlab.com/vstim/=gitlab-vstim), listed once"}
+  end
+
+  defp registry_entry?(%{prefix: prefix, pull_secret: secret}) do
+    Regex.match?(@registry_prefix, prefix) and
+      (secret == nil or Regex.match?(@dns_subdomain, secret))
+  end
 
   defp reach(value) do
     case ControllerManifest.parse_reach(value) do
@@ -518,6 +551,16 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   end
 
   defp registry_values(_spec, nil), do: nil
+
+  defp registry_values(%{registries: [_ | _] = registries}, registry) do
+    extra =
+      for %{prefix: prefix, pull_secret: secret} <- registries do
+        put_value(%{"prefix" => prefix}, "pullSecret", secret)
+      end
+
+    default = %{"prefix" => registry}
+    if Enum.any?(extra, &(&1["prefix"] == registry)), do: extra, else: [default | extra]
+  end
 
   defp registry_values(%{admission: false, pull_secret: nil}, _registry), do: nil
 
@@ -780,6 +823,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       AdmissionPolicy.manifests(
         registry: Keyword.fetch!(server, :registry),
         namespace: spec.namespace,
+        registries: Enum.map(spec.registries, & &1.prefix),
         sandbox_classes: sandbox_classes(spec)
       )
 
@@ -908,6 +952,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     |> put_unless_empty("placement", %{"node_selector" => spec.node_selector}, spec.node_selector)
     |> put_runtime(spec)
     |> put_unless_empty("image_pull_secrets", List.wrap(spec.pull_secret), spec.pull_secret)
+    |> put_unless_empty("registries", registry_entries(spec.registries), spec.registries)
   end
 
   defp put_runtime(config, %{runtime_class: ""}), do: config
@@ -917,9 +962,15 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     Map.update(config, "placement", runtime, &Map.merge(&1, runtime))
   end
 
-  defp put_unless_empty(map, _key, _value, empty)
-       when empty in [nil, %{}], do: map
+  defp registry_entries(registries) do
+    for %{prefix: prefix, pull_secret: secret} <- registries do
+      if secret,
+        do: %{"prefix" => prefix, "pull_secret" => secret},
+        else: %{"prefix" => prefix}
+    end
+  end
 
+  defp put_unless_empty(map, _key, _value, empty) when empty in [nil, %{}, []], do: map
   defp put_unless_empty(map, key, value, _), do: Map.put(map, key, value)
 
   defp lease(namespace) do

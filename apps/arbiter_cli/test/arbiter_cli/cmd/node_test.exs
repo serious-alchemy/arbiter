@@ -225,6 +225,34 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert body["primary_cidrs"] == "100.64.0.10/32"
     end
 
+    test "--registries is sent and each registry's pull-Secret command is printed (KH13)" do
+      tty(true)
+
+      pull =
+        "read -r U && read -rs P && printf '{...}' \"$U\" \"$P\" | kubectl create secret generic gitlab-vstim"
+
+      minted =
+        put_in(@cluster_minted, ["cluster", "pull_secret_commands"], [
+          %{
+            "registry" => "registry.gitlab.com/vstim/",
+            "secret" => "gitlab-vstim",
+            "command" => pull
+          }
+        ])
+
+      capture_request(:post, "/api/nodes/join-tokens", 201, minted)
+
+      {out, _err, 0} =
+        capture(fn ->
+          Node.run(@cluster_argv ++ ~w(--registries registry.gitlab.com/vstim/=gitlab-vstim))
+        end)
+
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+      assert Jason.decode!(raw)["registries"] == "registry.gitlab.com/vstim/=gitlab-vstim"
+      assert ("  " <> pull) in String.split(out, "\n")
+      assert out =~ "# registry.gitlab.com/vstim/"
+    end
+
     test "sends --api-cidrs: the API server's node address for post-DNAT CNIs (k3s)" do
       tty(true)
       capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)

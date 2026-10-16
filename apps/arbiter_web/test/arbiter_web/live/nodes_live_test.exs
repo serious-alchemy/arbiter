@@ -481,6 +481,31 @@ defmodule ArbiterWeb.NodesLiveTest do
       assert text_of(view, "#cluster-apply-command") =~ "api_cidrs=192.168.5.10%2F32"
     end
 
+    test "registries typed into the form give one pull-Secret command per registry (KH13)",
+         %{conn: conn} do
+      view = open_add(conn)
+      pick_cluster(view)
+
+      assert has_element?(view, "#add-node-registries")
+      registries = "registry.gitlab.com/vstim/=gitlab-vstim,ghcr.io/ryan/=ghcr-arbiter"
+
+      view
+      |> form("#add-node-form", Map.put(@cluster_form, :registries, registries))
+      |> render_submit()
+
+      show_manifests(view)
+      assert text_of(view, "#cluster-apply-command") =~ "registries="
+
+      assert text_of(view, "#cluster-pull-secret-command-0") =~
+               "create secret generic gitlab-vstim"
+
+      assert text_of(view, "#cluster-pull-secret-command-1") =~
+               "create secret generic ghcr-arbiter"
+
+      assert text_of(view, "#cluster-pull-secret-command-0") =~ "read -rs P"
+      refute has_element?(view, "#cluster-pull-secret-command-2")
+    end
+
     test "without nodes.registry it warns but does not block: Helm needs no worker registry",
          %{conn: conn} do
       {:ok, _} = Settings.set_nodes_registry(nil)

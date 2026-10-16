@@ -516,6 +516,48 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
       assert config.placement["node_selector"] == %{"pool" => "arb"}
     end
 
+    test "registries land in the ConfigMap and the admission policy, and round-trip (KH13)" do
+      params = %{
+        "name" => "n",
+        "admission" => "policy",
+        "registries" => "registry.gitlab.com/vstim/=gitlab-vstim, ghcr.io/ryan/=ghcr-arbiter"
+      }
+
+      docs = render!(params)
+      cm = find(docs, "ConfigMap", "arbiter-controller-config")
+      assert {:ok, config} = ControllerConfig.parse(cm["data"]["controller.yaml"])
+
+      assert config.registries == [
+               %{"prefix" => "registry.gitlab.com/vstim/", "pull_secret" => "gitlab-vstim"},
+               %{"prefix" => "ghcr.io/ryan/", "pull_secret" => "ghcr-arbiter"}
+             ]
+
+      [policy | _] =
+        AdmissionPolicy.manifests(
+          registry: @server[:registry],
+          registries: ["registry.gitlab.com/vstim/", "ghcr.io/ryan/"]
+        )
+
+      assert find(docs, "ValidatingAdmissionPolicy") == policy
+    end
+
+    test "no registries leaves the ConfigMap and the policy as they were (KH13)" do
+      cm = find(render!(%{"name" => "n"}), "ConfigMap", "arbiter-controller-config")
+      refute cm["data"]["controller.yaml"] =~ "registries"
+    end
+
+    test "malformed registries are refused with the field name (KH13)" do
+      for bad <- [
+            "registry.gitlab.com/vstim=a",
+            "no-slash=a",
+            "a.io/x/=Bad_Name",
+            "a.io/x/,a.io/x/"
+          ] do
+        assert {:error, errors} = InstallManifest.parse(%{"name" => "n", "registries" => bad})
+        assert Enum.any?(errors, &String.starts_with?(&1, "registries")), bad
+      end
+    end
+
     test "the CA ConfigMap and the credential Secrets are empty placeholders" do
       docs = render!(%{"name" => "n"})
 

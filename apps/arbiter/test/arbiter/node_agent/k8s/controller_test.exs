@@ -304,6 +304,27 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
                Enum.count(calls, &match?({:release, _}, &1))
     end
 
+    test "an image under no configured registry is refused image_unavailable, nothing created (KH13)",
+         env do
+      controller = start_controller(env)
+      ref = "evil.example/beam@sha256:#{K8sPodFixtures.digest()}"
+
+      assert {:error, {:refuse, :image_unavailable, detail}} =
+               Controller.assign(
+                 controller,
+                 wire(1, %{"image" => %{"tag" => "x", "plan" => nil, "ref" => ref}})
+               )
+
+      assert detail == "no pull secret for evil.example on this node"
+      assert creates(env) == []
+    end
+
+    test "the report names the registry prefixes the node can pull from (KH13)", env do
+      controller = start_controller(env)
+      expected = ["#{K8sPodFixtures.registry()}/"]
+      assert %{registries: ^expected} = Controller.report(controller)
+    end
+
     test "an invalid spec is refused bad_spec", env do
       controller = start_controller(env)
       assert {:error, {:refuse, :bad_spec, _}} = Controller.assign(controller, %{"run" => "x"})

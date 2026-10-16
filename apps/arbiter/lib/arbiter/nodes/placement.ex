@@ -82,7 +82,11 @@ defmodule Arbiter.Nodes.Placement do
   deny-all is not real) is **not a candidate** unless the operator set that node's
   `allow_unenforced_network` override (`Arbiter.Nodes.update_node/3`, audited). Likewise
   `psa_unenforced` (KH4: Pod Security `restricted` is not enforced on the namespace), under the
-  same override. The cap is
+  same override. A request that names the `:registry` its images live in (KH13, §20.10:
+  `image_registry/2`) is not placed on a cluster node whose `caps.registries` does not cover
+  it (`registry_covered?/2`), so a repo whose images are in the vstim GitLab registry never
+  reaches a node that cannot pull from it. A node that reports no `caps.registries` (an older
+  controller) and every machine node are not filtered. The cap is
   `Hello.effective_max_workers/2`:
   the operator's override or the node's own suggestion, bounded by a ceiling the
   node's owner set.
@@ -104,7 +108,9 @@ defmodule Arbiter.Nodes.Placement do
   """
 
   alias Arbiter.Nodes.Overview
+  alias Arbiter.Settings
   alias Arbiter.Worker.GitCredential
+  alias Arbiter.Worker.Image.RepoConfig
 
   @registry __MODULE__.Registry
   @modes [:local_only, :prefer_remote, :remote_only]
@@ -171,7 +177,8 @@ defmodule Arbiter.Nodes.Placement do
           optional(:inspect?) => boolean(),
           optional(:local_work?) => boolean(),
           optional(:git_credential) => GitCredential.kind() | atom() | nil,
-          optional(:labels) => [String.t()]
+          optional(:labels) => [String.t()],
+          optional(:registry) => String.t() | nil
         }
   @type info :: %{
           required(:task_id) => String.t(),
@@ -419,7 +426,46 @@ defmodule Arbiter.Nodes.Placement do
       row.live + Map.get(reserved, row.id, 0) < Arbiter.Nodes.Capacity.offered(row) and
       network_enforced?(row) and
       pin_allows?(Map.get(row, :workspace_ids, []), Map.get(request, :workspace_id)) and
-      labels_match?(Map.get(row, :labels, []), Map.get(request, :labels, []))
+      labels_match?(Map.get(row, :labels, []), Map.get(request, :labels, [])) and
+      registry_covered?(row, Map.get(request, :registry))
+  end
+
+  @doc """
+  KH13: can `row` pull images from `registry` (the repo's registry reference, e.g.
+  `registry.gitlab.com/vstim`)? True without a registry to check, for a node that does not
+  advertise `caps.registries` (a machine node builds from a plan; an older controller
+  predates the cap), and for a cluster node when one of its prefixes (each ending in `/`)
+  covers `registry`.
+  """
+  @spec registry_covered?(map(), String.t() | nil) :: boolean()
+  def registry_covered?(row, registry) when is_binary(registry) and registry != "" do
+    case get_in(Map.get(row, :caps) || %{}, ["registries"]) do
+      prefixes when is_list(prefixes) ->
+        Enum.any?(prefixes, &(is_binary(&1) and String.starts_with?(registry <> "/", &1)))
+
+      _ ->
+        true
+    end
+  end
+
+  def registry_covered?(_row, _registry), do: true
+
+  @doc """
+  The registry reference the images of `repo` in `workspace` live in (KH12's resolution:
+  the repo's `image.registry`, else the workspace's, else the install's `nodes.registry`),
+  or `nil` when none is configured or it cannot be read. What callers put in a request's
+  `:registry`.
+  """
+  @spec image_registry(term(), String.t() | nil) :: String.t() | nil
+  def image_registry(workspace, repo) do
+    case RepoConfig.resolve(workspace, repo) do
+      %{registry: registry} when is_binary(registry) -> registry
+      _ -> Settings.nodes_registry()
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   @doc """

@@ -2898,6 +2898,7 @@ defmodule Arbiter.Worker.Dispatch do
       inspect?: Keyword.get(opts, :review) != true and inspect_checkout?(task, opts),
       local_work?: local_work?(task, opts, Placement.mode(workspace)),
       git_credential: Placement.git_credential(workspace, Keyword.get(opts, :repo) || task.repo),
+      registry: Placement.image_registry(workspace, Keyword.get(opts, :repo) || task.repo),
       mode: Placement.mode(workspace)
     }
   end

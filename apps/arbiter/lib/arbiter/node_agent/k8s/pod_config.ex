@@ -26,7 +26,8 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   | `worker` | `requests`, `limits`, `work_size_limit`, `tmp_size_limit`. An `ephemeral-storage` limit left unset is `work_size_limit + tmp_size_limit` (§20.2) |
   | `services_resources` | `requests` / `limits` for the `seed`, `snapshotter` and service containers |
   | `placement` | `node_selector`, `tolerations`, `priority_class`, `runtime_class`, `runtime_handler` (the class's handler, which the Role cannot read: `runsc*` marks a kernel sandbox, see `kernel_sandboxed?/1`), `spread` (`enabled`, `topology_keys`, `max_skew`, `when_unsatisfiable`: §20.2, a soft hostname spread by default) |
-  | `image_pull_secrets` | names |
+  | `image_pull_secrets` | names; the legacy flat list, referenced by a pod whose image is under `registry` and under no `registries` prefix |
+  | `registries` | KH13 (§20.10): `[%{prefix, pull_secret}]`, the image prefixes this node can pull from (`registry.gitlab.com/vstim/`) and the **one** pull secret a pod whose image is under that prefix references (longest prefix wins; omitted = anonymous pull). `registry` stays the derived default prefix |
   | `timeouts` | `grace_s` (pod grace), `gate_timeout_s`; the others belong to the controller |
   | `snapshot_interval_s` | default 300 |
   | `service_image_allowlist` | extra service image prefixes (`docker.io/pgsty/`) |
@@ -35,7 +36,7 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   alias Arbiter.NodeAgent.K8s.Quantity
 
   @required ~w(registry install_id node_id owner_uid bridge_addr gate_addr boot_nonce max_wall_s)a
-  @optional ~w(namespace worker services_resources placement image_pull_secrets timeouts snapshot_interval_s service_image_allowlist)a
+  @optional ~w(namespace worker services_resources placement image_pull_secrets registries timeouts snapshot_interval_s service_image_allowlist)a
 
   @dns_re ~r/\A[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\z/
   @subdomain_re ~r/\A[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?\z/
@@ -80,6 +81,7 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
       }
     },
     image_pull_secrets: [],
+    registries: [],
     timeouts: %{"grace_s" => 120, "gate_timeout_s" => 30},
     snapshot_interval_s: 300,
     service_image_allowlist: []
@@ -127,6 +129,7 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
          {:ok, services} <- optional(config, :services_resources, &resources/1),
          {:ok, placement} <- optional(config, :placement, &placement/1),
          {:ok, pull} <- optional(config, :image_pull_secrets, &names/1),
+         {:ok, registries} <- optional(config, :registries, &registries/1),
          {:ok, timeouts} <- optional(config, :timeouts, &timeouts/1),
          {:ok, interval} <- optional(config, :snapshot_interval_s, &int(&1, 10..3600//1)),
          {:ok, allow} <- optional(config, :service_image_allowlist, &prefixes/1) do
@@ -145,6 +148,7 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
          services_resources: services,
          placement: placement,
          image_pull_secrets: pull,
+         registries: registries,
          timeouts: timeouts,
          snapshot_interval_s: interval,
          service_image_allowlist: allow
@@ -153,6 +157,38 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   end
 
   def normalize(_other), do: bad({:not_a_map, :config})
+
+  @doc """
+  The image prefixes a pod built from `cfg` may use: every `registries` prefix and
+  the derived default `registry/`. The admission policy is generated from the same
+  list (`Arbiter.NodeAgent.K8s.AdmissionPolicy`), so the controller and the API
+  server agree on what may run.
+  """
+  @spec image_prefixes(t()) :: [String.t()]
+  def image_prefixes(cfg) do
+    Enum.uniq(Enum.map(cfg.registries, & &1["prefix"]) ++ [cfg.registry <> "/"])
+  end
+
+  @doc """
+  The pull secrets a pod running `ref` references: the **one** secret of the longest
+  `registries` prefix that matches (`[]` for a match with no secret: an anonymous
+  pull), the legacy flat `image_pull_secrets` for a ref under `registry` and under no
+  prefix, and `:none` when the ref is under no configured prefix at all.
+  """
+  @spec pull_secrets(t(), String.t()) :: [String.t()] | :none
+  def pull_secrets(cfg, ref) when is_binary(ref) do
+    matches = Enum.filter(cfg.registries, &String.starts_with?(ref, &1["prefix"]))
+
+    case Enum.max_by(matches, &byte_size(&1["prefix"]), fn -> nil end) do
+      %{"pull_secret" => nil} -> []
+      %{"pull_secret" => secret} -> [secret]
+      nil -> legacy_pull_secrets(cfg, ref)
+    end
+  end
+
+  defp legacy_pull_secrets(cfg, ref) do
+    if String.starts_with?(ref, cfg.registry <> "/"), do: cfg.image_pull_secrets, else: :none
+  end
 
   # The container's ephemeral-storage limit bounds the runaway write by the container
   # and the quota, not only by the kubelet's eviction tick (§20.2): the `work` volume
@@ -256,6 +292,64 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   end
 
   defp prefixes(_), do: :error
+
+  # KH13: `[%{prefix, pull_secret}]`. A prefix ends in `/` (so `ghcr.io/ryan/` never
+  # matches `ghcr.io/ryan-evil/…`), appears once, and names at most one Secret.
+  defp registries(list) when is_list(list) do
+    with {:ok, entries} <- collect(list, &registry_entry/1),
+         :ok <- unique_prefixes(entries) do
+      {:ok, entries}
+    end
+  end
+
+  defp registries(_), do: {:error, {:bad_value, :registries}}
+
+  defp collect(list, fun) do
+    Enum.reduce_while(list, {:ok, []}, fn item, {:ok, acc} ->
+      case fun.(item) do
+        {:ok, value} -> {:cont, {:ok, acc ++ [value]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp registry_entry(%{} = entry) do
+    entry = stringify(entry)
+
+    with :ok <- only_keys(entry, ~w(prefix pull_secret), :registries),
+         {:ok, prefix} <- registry_prefix(Map.get(entry, "prefix")),
+         {:ok, secret} <- registry_secret(Map.get(entry, "pull_secret")) do
+      {:ok, %{"prefix" => prefix, "pull_secret" => secret}}
+    end
+  end
+
+  defp registry_entry(_), do: {:error, {:bad_value, :registries}}
+
+  defp registry_prefix(value) when is_binary(value) do
+    if Regex.match?(@prefix_re, value),
+      do: {:ok, value},
+      else: {:error, {:bad_value, {:registries, :prefix}}}
+  end
+
+  defp registry_prefix(_), do: {:error, {:bad_value, {:registries, :prefix}}}
+
+  defp registry_secret(value) when value in [nil, ""], do: {:ok, nil}
+
+  defp registry_secret(value) when is_binary(value) do
+    if Regex.match?(@subdomain_re, value),
+      do: {:ok, value},
+      else: {:error, {:bad_value, {:registries, :pull_secret}}}
+  end
+
+  defp registry_secret(_), do: {:error, {:bad_value, {:registries, :pull_secret}}}
+
+  defp unique_prefixes(entries) do
+    prefixes = Enum.map(entries, & &1["prefix"])
+
+    if prefixes == Enum.uniq(prefixes),
+      do: :ok,
+      else: {:error, {:bad_value, {:registries, :duplicate_prefix}}}
+  end
 
   # -- nested ---------------------------------------------------------------------------------
 

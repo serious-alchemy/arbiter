@@ -119,7 +119,8 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   @default_tick_ms 5_000
   @default_protect_s 60
 
-  @type refusal :: {:refuse, :no_capacity | :bad_spec | :unschedulable, String.t()}
+  @type refusal ::
+          {:refuse, :no_capacity | :bad_spec | :unschedulable | :image_unavailable, String.t()}
 
   # --- API ----------------------------------------------------------------------
 
@@ -509,6 +510,12 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     case PodSpec.build(run_spec, ControllerConfig.pod_config(config, facts)) do
       {:ok, pod} ->
         {:ok, pod}
+
+      # KH13: an image under no configured registry prefix is one this node cannot pull,
+      # not a malformed spec; the primary holds the run or runs it elsewhere.
+      {:error, {:bad_spec, {:registry_not_configured, ref}}} ->
+        host = ref |> String.split("/", parts: 2) |> hd()
+        {:error, {:refuse, :image_unavailable, "no pull secret for #{host} on this node"}}
 
       {:error, {:bad_spec, reason}} ->
         {:error, {:refuse, :bad_spec, inspect(reason, limit: 10)}}
@@ -1221,6 +1228,24 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     }
   end
 
+  # KH13: the image prefixes this node can pull from, as `hello` `caps.registries`: the
+  # config's `registries` and the primary's `registry` (the derived default).
+  defp registry_prefixes(state) do
+    configured =
+      case current_config(state) do
+        %{registries: list} when is_list(list) -> Enum.map(list, & &1["prefix"])
+        _ -> []
+      end
+
+    default =
+      case state.identity do
+        %{registry: registry} when is_binary(registry) and registry != "" -> [registry <> "/"]
+        _ -> []
+      end
+
+    Enum.uniq(configured ++ default)
+  end
+
   defp build_report(state) do
     runs =
       state.runs |> Map.values() |> Enum.sort_by(& &1.run) |> Enum.map(&RunReport.inventory/1)
@@ -1236,6 +1261,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     %{
       runs: runs,
       capacity: capacity,
+      registries: registry_prefixes(state),
       degraded: Enum.uniq(ConfigLoader.degraded(state.loader) ++ degraded),
       readiness: readiness
     }
