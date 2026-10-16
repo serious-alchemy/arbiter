@@ -352,7 +352,24 @@ defmodule Arbiter.Trackers.Tracker do
               {:ok, [summary()]} | {:error, term()}
 
   @doc """
-  Prepare the current process to make adapter calls for `workspace`.
+  The tracker-side grouping (epic, milestone, ...) the fetched `issue_map`
+  belongs to, or `nil` when it belongs to none. Claim mirrors it as one local
+  epic ticket per grouping (`Arbiter.Tasks.Claim`).
+
+  `ref` must be unique across the adapter's issue refs and stable between
+  calls (it becomes the epic ticket's `tracker_ref`). May call the tracker to
+  resolve the grouping's name; an `{:error, _}` is non-fatal to the claim.
+
+  Optional — adapters without a grouping concept simply omit it.
+  """
+  @callback epic_for(issue_map :: map()) ::
+              {:ok, %{ref: ref, title: String.t(), description: String.t()}}
+              | nil
+              | {:error, term()}
+
+  @doc """
+  Prepare the current process
+  to make adapter calls for `workspace`.
 
   Seeds the adapter's per-process config so subsequent adapter calls in this
   process see the workspace's configuration without threading the workspace
@@ -374,6 +391,7 @@ defmodule Arbiter.Trackers.Tracker do
                       gating_fields: 2,
                       search_by_title: 1,
                       search_stories: 1,
+                      epic_for: 1,
                       extract_priority: 1,
                       extract_difficulty: 1,
                       extract_issue_type: 1
