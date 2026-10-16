@@ -32,12 +32,13 @@ metadata:
   namespace: arbiter-workers
 spec:
   hard:
-    limits.cpu: 6500m
+    limits.cpu: 6300m
+    limits.ephemeral-storage: 24Gi
     limits.memory: 11008Mi
     pods: '4'
-    requests.cpu: 2450m
+    requests.cpu: 2675m
     requests.ephemeral-storage: 12544Mi
-    requests.memory: 5056Mi
+    requests.memory: 5Gi
 
 ---
 apiVersion: v1
@@ -48,13 +49,26 @@ metadata:
 spec:
   limits:
     - default:
-        cpu: 500m
-        memory: 512Mi
+        cpu: 400m
+        ephemeral-storage: 1Gi
+        memory: 256Mi
       defaultRequest:
         cpu: 100m
         ephemeral-storage: 128Mi
         memory: 128Mi
+      max:
+        cpu: '4'
+        ephemeral-storage: 9Gi
+        memory: 4Gi
+      maxLimitRequestRatio:
+        cpu: '4'
+        memory: '2'
       type: Container
+    - max:
+        cpu: '4'
+        ephemeral-storage: 14Gi
+        memory: 6656Mi
+      type: Pod
 
 ---
 apiVersion: networking.k8s.io/v1
@@ -379,7 +393,7 @@ spec:
               cpu: '1'
               memory: 512Mi
             requests:
-              cpu: 100m
+              cpu: 250m
               memory: 256Mi
           securityContext:
             allowPrivilegeEscalation: false

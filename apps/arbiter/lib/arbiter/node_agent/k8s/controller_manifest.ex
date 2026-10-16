@@ -123,7 +123,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
       "env" => env,
       "securityContext" => hardening(),
       "resources" => %{
-        "requests" => %{"cpu" => "100m", "memory" => "256Mi"},
+        "requests" => %{"cpu" => "250m", "memory" => "256Mi"},
         "limits" => %{"cpu" => "1", "memory" => "512Mi"}
       },
       "volumeMounts" => [
@@ -176,7 +176,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
         },
         "securityContext" => hardening(),
         "resources" => %{
-          "requests" => %{"cpu" => "50m", "memory" => "64Mi"},
+          "requests" => %{"cpu" => "125m", "memory" => "128Mi"},
           "limits" => %{"cpu" => "500m", "memory" => "256Mi"}
         },
         "volumeMounts" => [%{"name" => "tmp", "mountPath" => "/tmp"}]

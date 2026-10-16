@@ -68,18 +68,29 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
 
   # Per-worker cpu limits and ephemeral storage come from `Quota.demand/1` (the
   # effective pod size, `LimitRange` defaults included, so the snapshotter's
-  # defaulted 500m cpu limit counts). The rest is a flat per-pod allowance over the
+  # defaulted 400m cpu limit counts). The rest is a flat per-pod allowance over the
   # worker container's own request (a little over the `seed`/`snapshotter` sizes, so
   # run services have room) and what the controller (with room for the tailscale
   # sidecar) reserves. They size the quota; the quota, not these, is what the
   # cluster enforces.
   @pod_overhead_cpu_m 150
   @pod_overhead_mem_mi 320
-  @controller_cpu_m 150
-  @controller_mem_mi 320
+  @controller_cpu_m 375
+  @controller_mem_mi 384
   @controller_limit_cpu_m 1_500
   @pod_overhead_limit_mem_mi 1024
   @controller_limit_mem_mi 768
+  # The controller's own container limits (`ControllerManifest`); the LimitRange `max`
+  # must admit them whatever worker size is configured.
+  @controller_container_cpu_m 1_000
+  @controller_container_mem_mi 512
+  # ephemeral-storage limits: the controller and the tailscale sidecar take the
+  # LimitRange default (1Gi each); a pod allows one run service on top.
+  @controller_limit_storage_gi 2
+  @pod_service_limit_storage_gi 1
+  # How many run services (each sized by `services_resources`) the `Pod` max leaves
+  # room for beyond the worker and the snapshotter.
+  @pod_services 4
 
   @dns_label ~r/\A[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\z/
   @dns_subdomain ~r/\A[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?\z/
@@ -437,6 +448,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     {:ok, mem_b} = Quantity.memory(spec.memory, :k8s)
     n = spec.max_concurrent
     mi = 1_048_576
+    gi = 1_073_741_824
     {:ok, storage} = Quantity.memory(@worker_storage, :k8s)
     {:ok, controller_config} = ControllerConfig.parse(Ymlr.document!(config(spec)))
     pod = Quota.demand(controller_config)
@@ -450,7 +462,14 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       "limits.memory" =>
         fmt_mem(n * (2 * mem_b + @pod_overhead_limit_mem_mi * mi) + @controller_limit_mem_mi * mi),
       # `storage` once more for the controller (and its sidecar) and the run services.
-      "requests.ephemeral-storage" => fmt_mem(n * pod["requests.ephemeral-storage"] + storage)
+      "requests.ephemeral-storage" => fmt_mem(n * pod["requests.ephemeral-storage"] + storage),
+      # §20.2: the runaway write is bounded by the container limit and this quota, not
+      # only by an eviction tick.
+      "limits.ephemeral-storage" =>
+        fmt_mem(
+          n * (pod["limits.ephemeral-storage"] + @pod_service_limit_storage_gi * gi) +
+            @controller_limit_storage_gi * gi
+        )
     }
 
     %{
@@ -464,7 +483,42 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   defp fmt_cpu(millis), do: Quantity.format_cpu(millis)
   defp fmt_mem(bytes), do: Quantity.format_memory(bytes)
 
+  # §20.2: the cluster, not only the builder, bounds a pod. `max` caps what one
+  # container may ask for (cpu 2x the worker limit, memory the worker limit,
+  # ephemeral-storage the work + tmp volumes) and `maxLimitRequestRatio` how far a limit
+  # may sit above its request. The `Pod` max is the effective pod: the worker plus the
+  # native `snapshotter` sidecar plus room for run services. A `Pod` max equal to the
+  # worker limit would refuse the worker's own pod (H14).
   defp limit_range(spec) do
+    {:ok, controller_config} = ControllerConfig.parse(Ymlr.document!(config(spec)))
+    {:ok, worker_cpu} = Quantity.cpu(controller_config.worker["limits"]["cpu"], :k8s)
+    {:ok, worker_mem} = Quantity.memory(controller_config.worker["limits"]["memory"], :k8s)
+    pod = Quota.demand(controller_config)
+    aux = Quota.demand_of(controller_config.services_resources)
+    mi = 1_048_576
+
+    container_max = %{
+      "cpu" => fmt_cpu(max(2 * worker_cpu, @controller_container_cpu_m)),
+      "memory" => fmt_mem(max(worker_mem, @controller_container_mem_mi * mi)),
+      "ephemeral-storage" => controller_config.worker["limits"]["ephemeral-storage"]
+    }
+
+    pod_max = %{
+      "cpu" =>
+        fmt_cpu(
+          max(pod["limits.cpu"] + @pod_services * aux["limits.cpu"], @controller_limit_cpu_m)
+        ),
+      "memory" =>
+        fmt_mem(
+          max(
+            pod["limits.memory"] + @pod_services * aux["limits.memory"],
+            @controller_limit_mem_mi * mi
+          )
+        ),
+      "ephemeral-storage" =>
+        fmt_mem(pod["limits.ephemeral-storage"] + @pod_services * aux["limits.ephemeral-storage"])
+    }
+
     %{
       "apiVersion" => "v1",
       "kind" => "LimitRange",
@@ -473,11 +527,15 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
         "limits" => [
           %{
             "type" => "Container",
-            # The quota counts ephemeral-storage requests, so a container that names none
-            # (the controller, the tailscale sidecar) would be refused without a default.
+            # The quota counts ephemeral-storage requests and limits, so a container that
+            # names none (the controller, the tailscale sidecar) would be refused without
+            # a default, and one with no limit would otherwise be given the `max`.
             "defaultRequest" => Quota.limit_range_default_request(),
-            "default" => Quota.limit_range_default_limit()
-          }
+            "default" => Quota.limit_range_default_limit(),
+            "max" => container_max,
+            "maxLimitRequestRatio" => %{"cpu" => "4", "memory" => "2"}
+          },
+          %{"type" => "Pod", "max" => pod_max}
         ]
       }
     }

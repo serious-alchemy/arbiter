@@ -8,7 +8,12 @@ defmodule Arbiter.NodeAgent.K8s.PodConfigTest do
   test "defaults are the design's §4.1 values" do
     assert {:ok, cfg} = PodConfig.normalize(config(%{}))
     assert cfg.namespace == "arbiter-workers"
-    assert cfg.worker["limits"] == %{"cpu" => "2", "memory" => "4Gi"}
+    # the container limit bounds the runaway write: work + tmp (KH2, §20.2)
+    assert cfg.worker["limits"] == %{
+             "cpu" => "2",
+             "memory" => "4Gi",
+             "ephemeral-storage" => "9Gi"
+           }
 
     assert cfg.worker["requests"] == %{
              "cpu" => "1",
@@ -25,7 +30,13 @@ defmodule Arbiter.NodeAgent.K8s.PodConfigTest do
 
   test "a partial nested map keeps the other defaults; atom and string keys both work" do
     assert {:ok, cfg} = PodConfig.normalize(config(%{worker: %{limits: %{memory: "8Gi"}}}))
-    assert cfg.worker["limits"] == %{"cpu" => "2", "memory" => "8Gi"}
+
+    assert cfg.worker["limits"] == %{
+             "cpu" => "2",
+             "memory" => "8Gi",
+             "ephemeral-storage" => "9Gi"
+           }
+
     assert cfg.worker["requests"]["memory"] == "2Gi"
 
     assert {:ok, cfg} =
@@ -73,5 +84,58 @@ defmodule Arbiter.NodeAgent.K8s.PodConfigTest do
 
   test "non-maps are refused" do
     assert {:error, {:bad_config, {:not_a_map, :config}}} = PodConfig.normalize("x")
+  end
+
+  describe "placement.spread (KH2, §20.2)" do
+    test "defaults to a soft hostname spread" do
+      assert {:ok, cfg} = PodConfig.normalize(config(%{}))
+
+      assert cfg.placement["spread"] == %{
+               "enabled" => true,
+               "topology_keys" => ["kubernetes.io/hostname"],
+               "max_skew" => 1,
+               "when_unsatisfiable" => "ScheduleAnyway"
+             }
+    end
+
+    test "a partial spread keeps the other defaults; zone spread is a second key" do
+      keys = ["kubernetes.io/hostname", "topology.kubernetes.io/zone"]
+
+      assert {:ok, cfg} =
+               PodConfig.normalize(config(%{placement: %{spread: %{topology_keys: keys}}}))
+
+      assert cfg.placement["spread"]["topology_keys"] == keys
+      assert cfg.placement["spread"]["max_skew"] == 1
+      assert cfg.placement["spread"]["enabled"]
+    end
+
+    test "can be switched off and made hard" do
+      assert {:ok, cfg} =
+               PodConfig.normalize(
+                 config(%{
+                   placement: %{spread: %{enabled: false, when_unsatisfiable: "DoNotSchedule"}}
+                 })
+               )
+
+      refute cfg.placement["spread"]["enabled"]
+      assert cfg.placement["spread"]["when_unsatisfiable"] == "DoNotSchedule"
+    end
+
+    test "bad values are bad_config" do
+      for spread <- [
+            %{when_unsatisfiable: "Maybe"},
+            %{max_skew: 0},
+            %{max_skew: "1"},
+            %{topology_keys: []},
+            %{topology_keys: ["not a key!"]},
+            %{topology_keys: ["a", "a"]},
+            %{enabled: "yes"},
+            %{bogus: 1}
+          ] do
+        assert {:error, {:bad_config, _}} =
+                 PodConfig.normalize(config(%{placement: %{spread: spread}})),
+               inspect(spread)
+      end
+    end
   end
 end

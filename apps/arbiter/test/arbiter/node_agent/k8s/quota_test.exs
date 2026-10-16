@@ -39,8 +39,8 @@ defmodule Arbiter.NodeAgent.K8s.QuotaTest do
       assert d["requests.memory"] == 2 * 1_073_741_824 + 256 * 1_048_576
       # worker 4Gi + the snapshotter's LimitRange defaultRequest of 128Mi
       assert d["requests.ephemeral-storage"] == 4 * 1_073_741_824 + 128 * 1_048_576
-      # worker limit 2 cpu + the LimitRange default 500m for the snapshotter
-      assert d["limits.cpu"] == 2500
+      # worker limit 2 cpu + the snapshotter's own 400m limit
+      assert d["limits.cpu"] == 2400
       assert d["limits.memory"] == 4 * 1_073_741_824 + 512 * 1_048_576
     end
 
@@ -51,12 +51,12 @@ defmodule Arbiter.NodeAgent.K8s.QuotaTest do
         assert real[name] <= per_pod, name
       end
 
-      # the snapshotter's defaulted 500m sits on top of the worker's cpu limit
+      # the snapshotter's 400m sits on top of the worker's cpu limit
       worker_cpu =
         build!()["spec"]["containers"] |> hd() |> get_in(["resources", "limits", "cpu"])
 
       {:ok, worker_m} = Arbiter.NodeAgent.K8s.Quantity.cpu(worker_cpu, :k8s)
-      assert real["limits.cpu"] == worker_m + 500
+      assert real["limits.cpu"] == worker_m + 400
     end
   end
 
@@ -86,13 +86,13 @@ defmodule Arbiter.NodeAgent.K8s.QuotaTest do
       end
     end
 
-    test "n=2 with tailscale sizes limits.cpu at 6500m" do
+    test "n=2 with tailscale sizes limits.cpu at 6300m" do
       {:ok, spec} =
         InstallManifest.parse(%{"reach" => "tailscale", "max" => "2", "name" => "n1"})
 
       %{bootstrap: bootstrap} = InstallManifest.documents(spec, @server)
       quota = Enum.find(bootstrap, &(&1["kind"] == "ResourceQuota"))
-      assert quota["spec"]["hard"]["limits.cpu"] == "6500m"
+      assert quota["spec"]["hard"]["limits.cpu"] == "6300m"
     end
   end
 
