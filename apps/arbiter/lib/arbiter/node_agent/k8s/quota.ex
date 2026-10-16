@@ -7,10 +7,12 @@ defmodule Arbiter.NodeAgent.K8s.Quota do
   hands the items here.
 
   `demand/1` is what one pod asks for, derived from the same config the builder
-  reads: the worker container plus the `seed` and `snapshotter` containers at
-  `services_resources` (a quota that counts requests needs every container to state
-  some). Test-service sidecars depend on the run and are not counted; the API
-  server's own 403 on `POST pods` is the backstop for them.
+  reads and sized the way Kubernetes sizes a pod for quota: the worker, plus the
+  restartable `snapshotter` sidecar, with the `seed` init container counting only as
+  a max, and the install's `LimitRange` defaults (shared with `InstallManifest`)
+  filling whatever a container leaves unset. Test-service sidecars depend on the
+  run and are not counted; the API server's own 403 on `POST pods` is the backstop
+  for them.
 
   Only resources a quota bounds *and* a pod demands count. A namespace with no
   quota (or none that names those resources) is `:unbounded`. A quantity the
@@ -30,16 +32,102 @@ defmodule Arbiter.NodeAgent.K8s.Quota do
 
   @type demand :: %{optional(String.t()) => non_neg_integer()}
 
-  @doc "One pod's demand, keyed by quota resource name."
+  # What the install's `LimitRange` gives a container that states nothing (K§4.3). The
+  # install manifest renders these same maps, so the quota arithmetic here and the
+  # object the API server enforces cannot drift apart.
+  @limit_range_default_request %{
+    "cpu" => "100m",
+    "memory" => "128Mi",
+    "ephemeral-storage" => "128Mi"
+  }
+  @limit_range_default_limit %{"cpu" => "500m", "memory" => "512Mi"}
+
+  @doc "The `LimitRange` `defaultRequest`: applied to a container with no request and no limit."
+  @spec limit_range_default_request() :: %{String.t() => String.t()}
+  def limit_range_default_request, do: @limit_range_default_request
+
+  @doc "The `LimitRange` `default` (limit): applied to a container that names no limit."
+  @spec limit_range_default_limit() :: %{String.t() => String.t()}
+  def limit_range_default_limit, do: @limit_range_default_limit
+
+  @doc """
+  One pod's demand, keyed by quota resource name: the Kubernetes *effective* pod
+  size of the pod the builder makes, a `seed` init container (runs alone, before
+  the sidecar), a restartable `snapshotter` sidecar and the worker, with the
+  `LimitRange` defaults applied.
+  """
   @spec demand(map()) :: demand()
   def demand(config) do
-    worker = config.worker
-    services = config.services_resources
+    aux = %{"resources" => config.services_resources}
 
-    %{"pods" => 1}
-    |> add_resources("requests", [worker["requests"], services["requests"], services["requests"]])
-    |> add_resources("limits", [worker["limits"], services["limits"], services["limits"]])
+    effective_pod(%{
+      "spec" => %{
+        "initContainers" => [
+          Map.put(aux, "name", "seed"),
+          aux |> Map.put("name", "snapshotter") |> Map.put("restartPolicy", "Always")
+        ],
+        "containers" => [%{"name" => "worker", "resources" => config.worker}]
+      }
+    })
   end
+
+  @doc """
+  The effective request/limit of a Pod (or pod template) map, as the quota
+  charges it: `max(app containers + restartable init sidecars, peak over the
+  init containers in order)` where a plain init container counts with the sidecars
+  started before it and a sidecar keeps counting for everything after it.
+  `LimitRange` defaults fill what a container leaves unset: a request defaults to
+  its own limit, then to the `defaultRequest`; a limit to the `default`.
+  """
+  @spec effective_pod(map()) :: demand()
+  def effective_pod(pod) do
+    spec = pod["spec"] || %{}
+    init = spec["initContainers"] || []
+    app = Enum.map(spec["containers"] || [], &container_demand/1)
+
+    {peak, sidecars} =
+      Enum.reduce(init, {%{}, %{}}, fn container, {peak, sidecars} ->
+        own = container_demand(container)
+
+        if container["restartPolicy"] == "Always" do
+          sidecars = sum_demands([sidecars, own])
+          {max_demands(peak, sidecars), sidecars}
+        else
+          {max_demands(peak, sum_demands([sidecars, own])), sidecars}
+        end
+      end)
+
+    steady = sum_demands([sidecars | app])
+    Map.put(max_demands(peak, steady), "pods", 1)
+  end
+
+  @doc "A quota quantity as an integer (millicores for cpu, bytes otherwise), or `:error`."
+  @spec parse_quantity(String.t(), String.t() | integer()) :: non_neg_integer() | :error
+  def parse_quantity(name, value), do: parse(name, value)
+
+  defp container_demand(container) do
+    resources = container["resources"] || %{}
+    limits = resources["limits"] || %{}
+    requests = resources["requests"] || %{}
+    default_limits = @limit_range_default_limit
+
+    effective_limits = Map.merge(default_limits, limits)
+
+    effective_requests =
+      @limit_range_default_request
+      |> Map.merge(Map.take(limits, Map.keys(@limit_range_default_request)))
+      |> Map.merge(requests)
+
+    %{}
+    |> add_resources("requests", [effective_requests])
+    |> add_resources("limits", [effective_limits])
+  end
+
+  defp sum_demands(demands) do
+    Enum.reduce(demands, %{}, fn d, acc -> Map.merge(acc, d, fn _k, a, b -> a + b end) end)
+  end
+
+  defp max_demands(a, b), do: Map.merge(a, b, fn _k, x, y -> max(x, y) end)
 
   @doc """
   Pods that still fit: a non-negative integer, or `:unbounded` when no quota bounds
