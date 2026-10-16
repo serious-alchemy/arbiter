@@ -180,8 +180,10 @@ defmodule Arbiter.NodeAgent.K8s.LimitRangeAdmissionTest do
           assert admit(pod, i.limit_range) == [], "LimitRange refuses the #{name} pod"
         end
 
-        # Each pod fits the quota alone beside the controller, and a probe pod never takes
-        # more than a worker slot (the quota keeps a spare `pods` slot for it).
+        # Each pod fits the quota alone beside the controller. The canary and sandbox
+        # probe never take more than a worker slot (the quota keeps a spare `pods` slot
+        # for them); the dry run and PSA probe are worker-shaped (worktree mount, so the
+        # snapshotter too) and are held to the quota check alone.
         for {name, pod} <- pods, name != :controller do
           demand = Quota.effective_pod(pod)
           controller_demand = Quota.effective_pod(controller)
@@ -197,7 +199,7 @@ defmodule Arbiter.NodeAgent.K8s.LimitRangeAdmissionTest do
         worker_demand = Quota.effective_pod(worker)
 
         for {name, pod} <- pods,
-            name in [:canary, :sandbox_probe, :dry_run, :psa_probe],
+            name in [:canary, :sandbox_probe],
             {res, used} <- Quota.effective_pod(pod) do
           assert used <= Map.get(worker_demand, res, 0),
                  "#{name}: #{res} #{used} > a worker pod's"
