@@ -276,11 +276,9 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
   # The `LimitRange` defaults, stated: a limit chosen apart from them can break the
   # `maxLimitRequestRatio` (a bare memory limit gets the default 400m cpu limit: ratio 8).
   defp probe_resources do
-    keys = ["cpu", "memory"]
-
     %{
-      "requests" => Map.take(Quota.limit_range_default_request(), keys),
-      "limits" => Map.take(Quota.limit_range_default_limit(), keys)
+      "requests" => Quota.limit_range_default_request(),
+      "limits" => Quota.limit_range_default_limit()
     }
   end
 

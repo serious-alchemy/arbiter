@@ -22,6 +22,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
   Returns plain maps (JSON-shaped, as `PodSpec` does).
   """
 
+  alias Arbiter.NodeAgent.K8s.Quota
+
   @uid 10_001
   @name "arbiter-controller"
   @proxy_addr "127.0.0.1:1055"
@@ -122,10 +124,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
       "image" => image,
       "env" => env,
       "securityContext" => hardening(),
-      "resources" => %{
-        "requests" => %{"cpu" => "250m", "memory" => "256Mi"},
-        "limits" => %{"cpu" => "1", "memory" => "512Mi"}
-      },
+      "resources" => Quota.controller_resources(),
       "volumeMounts" => [
         %{"name" => "join", "mountPath" => "/etc/arb/join", "readOnly" => true},
         %{"name" => "config", "mountPath" => "/etc/arb/config", "readOnly" => true},
@@ -175,10 +174,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
           "failureThreshold" => 12
         },
         "securityContext" => hardening(),
-        "resources" => %{
-          "requests" => %{"cpu" => "125m", "memory" => "128Mi"},
-          "limits" => %{"cpu" => "500m", "memory" => "256Mi"}
-        },
+        "resources" => Quota.tailscale_resources(),
         "volumeMounts" => [%{"name" => "tmp", "mountPath" => "/tmp"}]
       }
     ]
