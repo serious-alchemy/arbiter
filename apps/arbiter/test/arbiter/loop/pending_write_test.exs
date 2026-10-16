@@ -331,7 +331,7 @@ defmodule Arbiter.Loop.PendingWriteTest do
           candidate(%{
             workspace_id: ws.id,
             kind: :config_set,
-            scope: :workspace,
+            scope: :fleet,
             target: "routing.rules.D1",
             payload: %{"patch" => %{"routing" => %{"rules" => %{"D1" => "sonnet"}}}}
           })
