@@ -149,12 +149,14 @@ defmodule ArbiterCli.Client do
   """
   @spec probe_url(String.t(), keyword()) :: {:ok, any()} | {:error, term()}
   def probe_url(url, opts \\ []) when is_binary(url) do
+    {connect_opts, opts} = Keyword.pop(opts, :connect_options, [])
+
     req_opts =
       [
         method: :get,
         url: url,
         receive_timeout: 5_000,
-        connect_options: [timeout: 5_000],
+        connect_options: Keyword.merge([timeout: 5_000], connect_opts),
         retry: false,
         redirect: false,
         headers: []

@@ -15,7 +15,7 @@ defmodule ArbiterCli.Cmd.Node do
                       [--primary-cidrs CIDR,CIDR] [--proxy-url URL]
                       [--proxy-cidrs CIDR,CIDR] [--api-cidrs CIDR,CIDR]
                       [--admission policy] [--self-upgrade on|off] [--ttl 15m]
-                      [--format manifests|helm|values] [-o FILE]
+                      [--format manifests|helm|values] [-o FILE] [--cacert FILE]
                       [--token-file PATH] [--json]
                       add a Kubernetes cluster as a node. Prints the `kubectl
                       apply` for the install manifests (they carry no secret; -o
@@ -27,7 +27,8 @@ defmodule ArbiterCli.Cmd.Node do
                       saves its values file and installs from it). --format
                       values prints that values file to stdout (needs
                       --token-file or -o). Without --format: the manifests, or
-                      Helm while the primary has no nodes.registry.
+                      Helm while the primary has no nodes.registry. --cacert FILE trusts a
+                      private CA when fetching the values or manifests.
       arb node pending [--json]                         (device-code pairing requests waiting)
       arb node approve <code> [--name N] [--max-workers N] [--yes] [--json]
                       approve the pairing request showing <code> (XXXX-XXXX) on
@@ -91,9 +92,10 @@ defmodule ArbiterCli.Cmd.Node do
     admission: :string,
     self_upgrade: :string,
     output: :string,
+    cacert: :string,
     format: :string
   ]
-  @cluster_only ~w(namespace cpu memory node_selector pull_secret registries reach primary_cidrs api_cidrs proxy_url proxy_cidrs admission self_upgrade output format)a
+  @cluster_only ~w(namespace cpu memory node_selector pull_secret registries reach primary_cidrs api_cidrs proxy_url proxy_cidrs admission self_upgrade output format cacert)a
   @set_switches [
     name: :string,
     label: [:string, :keep],
@@ -230,7 +232,7 @@ defmodule ArbiterCli.Cmd.Node do
       |> put(:ttl_seconds, ttl(opts[:ttl]))
 
     case Client.post("/api/nodes/join-tokens", stringify(body)) do
-      {:ok, resp} -> deliver_cluster(resp, sink, output, format, mode)
+      {:ok, resp} -> deliver_cluster(resp, sink, output, format, mode, fetch_opts(opts[:cacert]))
       {:error, err} -> Output.die(err)
     end
   end
@@ -250,7 +252,7 @@ defmodule ArbiterCli.Cmd.Node do
     path
   end
 
-  defp deliver_cluster(resp, sink, output, format, mode) do
+  defp deliver_cluster(resp, sink, output, format, mode, fetch_opts) do
     cluster = resp["cluster"] || %{}
     token = resp["token"]
     expires = get_in(resp, ["join_token", "expires_at"])
@@ -262,12 +264,19 @@ defmodule ArbiterCli.Cmd.Node do
         :tty -> nil
       end
 
-    saved = save_output(format, cluster, output)
+    saved = save_output(format, cluster, output, fetch_opts)
 
     if mode == :json do
       emit_cluster_json(resp, format, saved, token_file)
     else
-      print_cluster_result(format, cluster, expires, {token, token_file}, {output, saved})
+      print_cluster_result(
+        format,
+        cluster,
+        expires,
+        {token, token_file},
+        {output, saved},
+        fetch_opts
+      )
     end
   end
 
@@ -288,13 +297,20 @@ defmodule ArbiterCli.Cmd.Node do
     )
   end
 
-  defp print_cluster_result("values", cluster, expires, {_token, token_file}, {nil, _saved}),
-    do: print_values(cluster, expires, token_file)
+  defp print_cluster_result("values", cluster, expires, {_token, token_file}, {nil, _saved}, fo),
+    do: print_values(cluster, expires, token_file, fo)
 
-  defp print_cluster_result("manifests", cluster, expires, {token, token_file}, {_output, saved}),
-    do: print_cluster(cluster, expires, token, token_file, saved)
+  defp print_cluster_result(
+         "manifests",
+         cluster,
+         expires,
+         {token, token_file},
+         {_output, saved},
+         _fo
+       ),
+       do: print_cluster(cluster, expires, token, token_file, saved)
 
-  defp print_cluster_result(_helm, cluster, expires, {token, token_file}, {_output, saved}),
+  defp print_cluster_result(_helm, cluster, expires, {token, token_file}, {_output, saved}, _fo),
     do: print_helm(cluster, expires, token, token_file, saved)
 
   defp effective_format(nil, %{"manifest_url" => url}) when is_binary(url), do: "manifests"
@@ -313,26 +329,39 @@ defmodule ArbiterCli.Cmd.Node do
 
   defp effective_format(format, _cluster), do: format
 
+  # `--cacert FILE`: trust a private CA for the unauthenticated values/manifests fetch, the
+  # way `curl --cacert` does. Without it the default (OS) trust store applies.
+  @doc false
+  def __fetch_opts__(path), do: fetch_opts(path)
+
+  defp fetch_opts(nil), do: []
+
+  defp fetch_opts(path) do
+    File.exists?(path) || Output.die("--cacert #{path} does not exist")
+    [connect_options: [transport_opts: [cacertfile: path]]]
+  end
+
   # The manifests and the values hold no secret, so they are fetched from the primary like
   # `kubectl apply -f <(curl ...)` would. A failed fetch does not waste the token: the
   # command that reads the URL itself still works.
-  defp save_output(_format, _cluster, nil), do: nil
+  defp save_output(_format, _cluster, nil, _fo), do: nil
 
-  defp save_output("manifests", cluster, path),
-    do: fetch_to_file(cluster["manifest_url"], path, "manifests", "the apply command")
+  defp save_output("manifests", cluster, path, fo),
+    do: fetch_to_file(cluster["manifest_url"], path, "manifests", "the apply command", fo)
 
-  defp save_output(_helm_or_values, cluster, path),
+  defp save_output(_helm_or_values, cluster, path, fo),
     do:
       fetch_to_file(
         get_in(cluster, ["helm", "values_url"]),
         path,
         "values",
-        "the install command"
+        "the install command",
+        fo
       )
 
-  defp fetch_to_file(url, path, what, instead) do
+  defp fetch_to_file(url, path, what, instead, fo) do
     with url when is_binary(url) <- url,
-         {:ok, yaml} when is_binary(yaml) <- Client.probe_url(url, decode_body: false),
+         {:ok, yaml} when is_binary(yaml) <- Client.probe_url(url, [decode_body: false] ++ fo),
          :ok <- File.write(path, yaml, [:exclusive]) do
       path
     else
@@ -352,8 +381,11 @@ defmodule ArbiterCli.Cmd.Node do
 
   # `--format values` without `-o`: the values file and nothing else on stdout, so
   # `arb node add ... --format values --token-file t > values.yaml` is a file `helm -f` reads.
-  defp print_values(cluster, expires, token_file) do
-    case Client.probe_url(get_in(cluster, ["helm", "values_url"]) || "", decode_body: false) do
+  defp print_values(cluster, expires, token_file, fo) do
+    case Client.probe_url(
+           get_in(cluster, ["helm", "values_url"]) || "",
+           [decode_body: false] ++ fo
+         ) do
       {:ok, yaml} when is_binary(yaml) ->
         IO.write(yaml)
 
