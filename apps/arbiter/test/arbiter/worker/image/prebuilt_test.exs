@@ -97,6 +97,26 @@ defmodule Arbiter.Worker.Image.PrebuiltTest do
       assert "docker://registry.example.com/vstim/ci:main" in rest
     end
 
+    test "the plan's pinned tag round-trips through RunSpec validation", %{tmp_dir: tmp} do
+      {repo, sha} = repo!(tmp)
+      {:ok, plan} = Prebuilt.plan(repo, "main", opts(self(), labels(sha.c2)))
+
+      spec = %{
+        "version" => 1,
+        "run" => "run-1",
+        "task" => "bd-abc",
+        "name" => "arb-bd-abc-1234",
+        "install" => "inst1",
+        "image" => %{"tag" => plan.tag, "plan" => nil},
+        "cwd" => "/work/tree",
+        "mounts" => [%{"kind" => "worktree", "path" => "/work/tree"}],
+        "command" => ["/bin/true"]
+      }
+
+      assert {:ok, %{image: %{tag: tag}}} = Arbiter.NodeAgent.RunSpec.validate(spec)
+      assert tag == plan.tag
+    end
+
     test "an older ancestor of the default tip is accepted", %{tmp_dir: tmp} do
       {repo, sha} = repo!(tmp)
       assert {:ok, plan} = Prebuilt.plan(repo, "main", opts(self(), labels(sha.c1)))
