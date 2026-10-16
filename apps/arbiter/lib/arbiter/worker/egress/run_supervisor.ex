@@ -12,7 +12,7 @@ defmodule Arbiter.Worker.Egress.RunSupervisor do
   """
   use Supervisor
 
-  alias Arbiter.Worker.Egress.{Forward, Listener, OwnerWatch}
+  alias Arbiter.Worker.Egress.{Forward, Listener, OwnerWatch, SocketCleanup}
 
   @registry Arbiter.Worker.Egress.Registry
 
@@ -27,7 +27,13 @@ defmodule Arbiter.Worker.Egress.RunSupervisor do
     run_id = Keyword.fetch!(opts, :run_id)
     tasks = {:via, Registry, {@registry, {run_id, :tasks}}}
 
+    bridges = Keyword.get(opts, :bridges, [])
+    paths = [Keyword.fetch!(opts, :socket_path) | Enum.map(bridges, & &1.path)]
+
     children = [
+      # First, so terminated last: removes the socket files once the listeners
+      # are gone, even when one was killed and skipped its own terminate/2.
+      %{id: SocketCleanup, start: {SocketCleanup, :start_link, [paths]}},
       {Task.Supervisor, name: tasks},
       %{
         id: Listener,
@@ -47,7 +53,7 @@ defmodule Arbiter.Worker.Egress.RunSupervisor do
 
     children =
       children ++
-        Enum.map(Keyword.get(opts, :bridges, []), &bridge_child(run_id, &1, tasks)) ++
+        Enum.map(bridges, &bridge_child(run_id, &1, tasks)) ++
         owner_child(Keyword.get(opts, :owner))
 
     Supervisor.init(children, strategy: :one_for_all, max_restarts: 0)
