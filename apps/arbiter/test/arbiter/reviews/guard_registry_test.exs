@@ -126,6 +126,10 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "bd-203cl5: pages when an APPROVE's review-coverage row could not be written " <>
        "(§3.3). It refuses nothing — the approval stands, last_reviewed_sha is " <>
        "stamped and the merge proceeds — and is bounded by the bd-5jr49o breaker"},
+    {Arbiter.Worker.ReviewGate, :escalate_quota_exhausted, 1,
+     "bd-44qs5l: last-resort park when every eligible reviewer provider is quota-held or " <>
+       "out of quota — a provider-availability deferral (no verdict, nothing approved), " <>
+       "not a refusal of the work; resumed when a window resets"},
     {Arbiter.Worker.ReviewGate, :record_mechanical_coverage, 2,
      "bd-954ym8: records the `:mechanical` row a clean integration of the target implies; " <>
        "its {:error, _} (head moved, no approval row, unrecordable) answers 'cannot cover', " <>
