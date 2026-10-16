@@ -538,6 +538,13 @@ defmodule Arbiter.Trackers.Shortcut do
 
   def extract_description(_), do: ""
 
+  @impl true
+  def extract_checklist(%{"tasks" => [_ | _] = tasks}) do
+    for %{"description" => d} when is_binary(d) <- tasks, do: d
+  end
+
+  def extract_checklist(_), do: []
+
   # Priority is the org's "Priority" custom field (Highest/High/Medium/Low →
   # 0/1/2/3), located by name in `fetch/1` (field ids differ per workspace).
   # Unset or unrecognised returns nil so the schema default applies.

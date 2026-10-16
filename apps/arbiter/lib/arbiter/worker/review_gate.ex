@@ -7635,7 +7635,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     Acceptance criteria:
     #{task.acceptance}
-
+    #{tracker_spec_block(task)}
     The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`.
     #{head_sha_instruction(state)}#{review_checkout_block(state)}
     #{scope_guidance(state)}
@@ -7681,6 +7681,19 @@ defmodule Arbiter.Worker.ReviewGate do
 
         arb done
     """
+  end
+
+  # A tracker-claimed ticket with no checklist or acceptance section carries the
+  # tracker-spec waiver: its description IS the spec. Say so, so the reviewer
+  # doesn't treat "(none)" acceptance as nothing to judge against.
+  defp tracker_spec_block(%{acceptance_waived: waived}) do
+    if waived == Issue.tracker_spec_waiver() do
+      "\nNOTE: this ticket has no separate acceptance criteria — the tracker " <>
+        "description is the spec. Judge the change by whether it does what the " <>
+        "Description asks: review against the Description above.\n"
+    else
+      ""
+    end
   end
 
   # Emit the per-criterion CRITERIA breakdown instruction only when the task has
@@ -8744,13 +8757,15 @@ defmodule Arbiter.Worker.ReviewGate do
         %{
           title: task.title || "(untitled)",
           description: task.description || "(none)",
-          acceptance: task.acceptance || "(none)"
+          acceptance: task.acceptance || "(none)",
+          acceptance_waived: task.acceptance_waived
         }
 
       _ ->
-        %{title: "(unknown)", description: "(none)", acceptance: "(none)"}
+        %{title: "(unknown)", description: "(none)", acceptance: "(none)", acceptance_waived: nil}
     end
   rescue
-    _ -> %{title: "(unknown)", description: "(none)", acceptance: "(none)"}
+    _ ->
+      %{title: "(unknown)", description: "(none)", acceptance: "(none)", acceptance_waived: nil}
   end
 end

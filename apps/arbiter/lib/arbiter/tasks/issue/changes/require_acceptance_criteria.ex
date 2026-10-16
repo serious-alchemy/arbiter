@@ -37,6 +37,10 @@ defmodule Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria do
       present?(issue.acceptance) ->
         changeset
 
+      # A claim already recorded a waiver (tracker description is the spec).
+      present?(issue.acceptance_waived) ->
+        changeset
+
       issue.difficulty == 0 ->
         Changeset.force_change_attribute(
           changeset,
