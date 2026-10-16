@@ -11,9 +11,13 @@ defmodule Arbiter.NodeAgent.K8s.LimitRangeAdmissionTest do
 
   import Arbiter.Test.K8sPodFixtures, only: [build!: 2, run_spec: 1]
 
+  alias Arbiter.Test.K8sPodFixtures, as: Fx
+
+  alias Arbiter.NodeAgent.K8s.Canary
   alias Arbiter.NodeAgent.K8s.ControllerConfig
   alias Arbiter.NodeAgent.K8s.InstallManifest
   alias Arbiter.NodeAgent.K8s.Quota
+  alias Arbiter.NodeAgent.K8s.Readiness
 
   @server [image: "img:1", primary_url: "https://arbiter.example.test", registry: "r.test/a"]
 
@@ -148,6 +152,58 @@ defmodule Arbiter.NodeAgent.K8s.LimitRangeAdmissionTest do
         install: i
       } do
         assert_admitted(i.deployment["spec"]["template"], i.limit_range)
+      end
+
+      test "EVERY pod Arbiter creates is admitted and the full set fits the quota", %{install: i} do
+        opts = [image: "#{Fx.registry()}/beam@sha256:#{Fx.digest()}", targets: %{}]
+        config = Fx.config(i.pod_config)
+
+        {:ok, canary} = Canary.pod(config, opts)
+        {:ok, sandbox} = Canary.sandbox_probe_pod(config, opts)
+        {:ok, dry} = Canary.dry_run_pod(config, opts)
+
+        worker = build!(nil, i.pod_config)
+        controller = i.deployment["spec"]["template"]
+
+        pods = [
+          worker: worker,
+          worker_with_services:
+            build!(run_spec(%{"services" => [%{"preset" => "postgres"}]}), i.pod_config),
+          controller: controller,
+          canary: canary,
+          sandbox_probe: sandbox,
+          dry_run: dry,
+          psa_probe: Readiness.psa_probe_pod(dry)
+        ]
+
+        for {name, pod} <- pods do
+          assert admit(pod, i.limit_range) == [], "LimitRange refuses the #{name} pod"
+        end
+
+        # Each pod fits the quota alone beside the controller. The canary and sandbox
+        # probe never take more than a worker slot (the quota keeps a spare `pods` slot
+        # for them); the dry run and PSA probe are worker-shaped (worktree mount, so the
+        # snapshotter too) and are held to the quota check alone.
+        for {name, pod} <- pods, name != :controller do
+          demand = Quota.effective_pod(pod)
+          controller_demand = Quota.effective_pod(controller)
+
+          for {res, limit} <- i.quota["spec"]["hard"] do
+            total = Map.get(demand, res, 0) + Map.get(controller_demand, res, 0)
+
+            assert total <= Quota.parse_quantity(res, limit),
+                   "#{name}: #{res} #{total} > #{limit}"
+          end
+        end
+
+        worker_demand = Quota.effective_pod(worker)
+
+        for {name, pod} <- pods,
+            name in [:canary, :sandbox_probe],
+            {res, used} <- Quota.effective_pod(pod) do
+          assert used <= Map.get(worker_demand, res, 0),
+                 "#{name}: #{res} #{used} > a worker pod's"
+        end
       end
 
       test "the pod fits the quota at max_concurrent, controller included", %{install: i} do

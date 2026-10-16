@@ -76,15 +76,11 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   # cluster enforces.
   @pod_overhead_cpu_m 150
   @pod_overhead_mem_mi 320
-  @controller_cpu_m 375
-  @controller_mem_mi 384
-  @controller_limit_cpu_m 1_500
   @pod_overhead_limit_mem_mi 1024
-  @controller_limit_mem_mi 768
-  # The controller's own container limits (`ControllerManifest`); the LimitRange `max`
-  # must admit them whatever worker size is configured.
-  @controller_container_cpu_m 1_000
-  @controller_container_mem_mi 512
+  # The controller pod's own sizes come from `Quota.controller_resources/0` and
+  # `Quota.tailscale_resources/0` (what `ControllerManifest` renders): the controller
+  # container's limits bound the LimitRange `max` whatever worker size is configured,
+  # and controller + tailscale sidecar are what the quota reserves for it.
   # ephemeral-storage limits: the controller and the tailscale sidecar take the
   # LimitRange default (1Gi each); a pod allows one run service on top.
   @controller_limit_storage_gi 2
@@ -623,15 +619,16 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     {:ok, storage} = Quantity.memory(@worker_storage, :k8s)
     {:ok, controller_config} = ControllerConfig.parse(Ymlr.document!(config(spec)))
     pod = Quota.demand(controller_config)
+    controller = controller_pod_demand()
 
     hard = %{
       "pods" => Integer.to_string(n + 2),
-      "requests.cpu" => fmt_cpu(n * (cpu_m + @pod_overhead_cpu_m) + @controller_cpu_m),
+      "requests.cpu" => fmt_cpu(n * (cpu_m + @pod_overhead_cpu_m) + controller["requests.cpu"]),
       "requests.memory" =>
-        fmt_mem(n * (mem_b + @pod_overhead_mem_mi * mi) + @controller_mem_mi * mi),
-      "limits.cpu" => fmt_cpu(n * pod["limits.cpu"] + @controller_limit_cpu_m),
+        fmt_mem(n * (mem_b + @pod_overhead_mem_mi * mi) + controller["requests.memory"]),
+      "limits.cpu" => fmt_cpu(n * pod["limits.cpu"] + controller["limits.cpu"]),
       "limits.memory" =>
-        fmt_mem(n * (2 * mem_b + @pod_overhead_limit_mem_mi * mi) + @controller_limit_mem_mi * mi),
+        fmt_mem(n * (2 * mem_b + @pod_overhead_limit_mem_mi * mi) + controller["limits.memory"]),
       # `storage` once more for the controller (and its sidecar) and the run services.
       "requests.ephemeral-storage" => fmt_mem(n * pod["requests.ephemeral-storage"] + storage),
       # §20.2: the runaway write is bounded by the container limit and this quota, not
@@ -651,6 +648,15 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     }
   end
 
+  # Controller container + tailscale sidecar (sized for the worst case, with the sidecar).
+  defp controller_pod_demand do
+    Map.merge(
+      Quota.demand_of(Quota.controller_resources()),
+      Quota.demand_of(Quota.tailscale_resources()),
+      fn _k, a, b -> a + b end
+    )
+  end
+
   defp fmt_cpu(millis), do: Quantity.format_cpu(millis)
   defp fmt_mem(bytes), do: Quantity.format_memory(bytes)
 
@@ -666,24 +672,25 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     {:ok, worker_mem} = Quantity.memory(controller_config.worker["limits"]["memory"], :k8s)
     pod = Quota.demand(controller_config)
     aux = Quota.demand_of(controller_config.services_resources)
-    mi = 1_048_576
+    controller = controller_pod_demand()
+    container = Quota.demand_of(Quota.controller_resources())
 
     container_max = %{
-      "cpu" => fmt_cpu(max(2 * worker_cpu, @controller_container_cpu_m)),
-      "memory" => fmt_mem(max(worker_mem, @controller_container_mem_mi * mi)),
+      "cpu" => fmt_cpu(max(2 * worker_cpu, container["limits.cpu"])),
+      "memory" => fmt_mem(max(worker_mem, container["limits.memory"])),
       "ephemeral-storage" => controller_config.worker["limits"]["ephemeral-storage"]
     }
 
     pod_max = %{
       "cpu" =>
         fmt_cpu(
-          max(pod["limits.cpu"] + @pod_services * aux["limits.cpu"], @controller_limit_cpu_m)
+          max(pod["limits.cpu"] + @pod_services * aux["limits.cpu"], controller["limits.cpu"])
         ),
       "memory" =>
         fmt_mem(
           max(
             pod["limits.memory"] + @pod_services * aux["limits.memory"],
-            @controller_limit_mem_mi * mi
+            controller["limits.memory"]
           )
         ),
       "ephemeral-storage" =>

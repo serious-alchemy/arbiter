@@ -50,6 +50,25 @@ defmodule Arbiter.NodeAgent.K8s.Quota do
     "ephemeral-storage" => "1Gi"
   }
 
+  # The controller pod's containers, stated (never defaulted): `ControllerManifest`
+  # renders these and `InstallManifest` sizes the `LimitRange` / quota from them.
+  @controller_resources %{
+    "requests" => %{"cpu" => "250m", "memory" => "256Mi"},
+    "limits" => %{"cpu" => "1", "memory" => "512Mi"}
+  }
+  @tailscale_resources %{
+    "requests" => %{"cpu" => "125m", "memory" => "128Mi"},
+    "limits" => %{"cpu" => "500m", "memory" => "256Mi"}
+  }
+
+  @doc "Resources of the controller container (shared by the Deployment and the install sizing)."
+  @spec controller_resources() :: map()
+  def controller_resources, do: @controller_resources
+
+  @doc "Resources of the tailscale sidecar in the controller pod."
+  @spec tailscale_resources() :: map()
+  def tailscale_resources, do: @tailscale_resources
+
   @doc "The `LimitRange` `defaultRequest`: applied to a container with no request and no limit."
   @spec limit_range_default_request() :: %{String.t() => String.t()}
   def limit_range_default_request, do: @limit_range_default_request

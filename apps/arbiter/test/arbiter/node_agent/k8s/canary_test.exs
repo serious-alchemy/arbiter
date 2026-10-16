@@ -3,6 +3,7 @@ defmodule Arbiter.NodeAgent.K8s.CanaryTest do
 
   alias Arbiter.NodeAgent.K8s.Canary
   alias Arbiter.NodeAgent.K8s.PodSecurity
+  alias Arbiter.NodeAgent.K8s.Quota
   alias Arbiter.Test.FakeK8sApi
   alias Arbiter.Test.K8sPodFixtures, as: Fx
 
@@ -102,7 +103,7 @@ defmodule Arbiter.NodeAgent.K8s.CanaryTest do
     test "asks for little: the quota sees small requests and a short deadline" do
       pod = pod!()
       worker = Fx.worker(pod)
-      assert worker["resources"]["requests"]["cpu"] == "50m"
+      assert worker["resources"]["requests"]["cpu"] == Quota.limit_range_default_request()["cpu"]
       assert pod["spec"]["activeDeadlineSeconds"] <= 300
     end
 
