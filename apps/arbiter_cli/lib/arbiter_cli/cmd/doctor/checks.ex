@@ -2201,11 +2201,10 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         "(pod-security.kubernetes.io/enforce=restricted), a cluster-admin step."
 
     words
-    |> Enum.map(fn
+    |> Enum.map_join(" ", fn
       "netpol_unenforced" -> netpol
       "psa_unenforced" -> psa
     end)
-    |> Enum.join(" ")
   end
 
   defp node_result(n) do
