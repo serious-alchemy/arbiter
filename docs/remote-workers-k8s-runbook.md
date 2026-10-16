@@ -286,6 +286,10 @@ pod-security.kubernetes.io/warn=restricted`. One release per namespace; object n
 fixed. `values.schema.json` rejects unknown keys, a `direct` install without `primaryCIDRs`
 and a `/0` entry.
 
+Never template the Namespace into a release: Helm 3 refuses an existing unlabelled
+namespace, and Helm 4.3 adopts it, so `helm uninstall` would delete the namespace and any
+worker pods with it. Test your chart commands on both Helm 3 and 4.
+
 **Join token.** Never in values, argv or shell history:
 `read -rs T && printf %s "$T" | kubectl -n arbiter-workers create secret generic arbiter-join --from-file=token=/dev/stdin`.
 The token is single-use and expires in 15 minutes. `--set-file join.token=` is the
@@ -293,11 +297,14 @@ automation fallback only: the token then lands in Helm's release record.
 
 **Install.** `helm install <node> oci://ghcr.io/ryanrborn/charts/arbiter-node -n
 arbiter-workers -f values.yaml`, with the values the primary prints. On k3s add the API
-server's node IP to `networkPolicy.apiServerCIDRs` (step 5). Then steps 7-8.
+server's node IP to `networkPolicy.apiServerCIDRs` (step 5). A join Secret created after
+the pod started reaches it after about 90 s (the kubelet sync period), so expect that wait
+before the node shows `online`. Then steps 7-8.
 
 **Upgrade.** Helm owns the controller image: the Role has no write verb on the Deployment
 and `ARB_K8S_SELF_UPGRADE=false`. The node reports the exact command, of the form
 `helm upgrade <release> <chartRef> --version <v> -n arbiter-workers --reset-then-reuse-values`.
+`--reset-then-reuse-values` is upgrade-only; it does not belong in an install command.
 Upgrade the `-bootstrap` release too when the guardrails changed. A config-only upgrade
 does not roll the pod: the controller re-reads `controller.yaml` every 30 s.
 
