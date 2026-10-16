@@ -42,6 +42,11 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartTest do
       assert values["mode"] == "all"
     end
 
+    test "the controller config template renders runtime_handler from runtimeClass.handler" do
+      text = File.read!(Path.join(@chart, "templates/node/configmaps.yaml"))
+      assert text =~ ~s("runtime_handler" (.Values.runtimeClass.handler)
+    end
+
     test "no template renders a Namespace or grants the patch verb" do
       for file <- Path.wildcard(Path.join(@chart, "templates/**/*.{yaml,tpl,txt}")) do
         text = File.read!(file)
@@ -77,6 +82,16 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartTest do
 
       assert render!(@direct, release: "mesaana") |> Enum.map(&identity/1) |> Enum.sort() ==
                expected
+    end
+
+    test "gvisor via the chart renders runtime_class and runtime_handler into controller.yaml" do
+      docs =
+        render!(@direct ++ ["placement.runtimeClassName=gvisor", "runtimeClass.handler=runsc"])
+
+      config = find!(docs, "ConfigMap", "arbiter-controller-config")
+      assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
+      assert parsed.placement["runtime_class"] == "gvisor"
+      assert parsed.placement["runtime_handler"] == "runsc"
     end
 
     test "mode node holds no guardrail and mode bootstrap no controller" do
