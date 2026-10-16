@@ -146,6 +146,25 @@ With no `placement.runtime_class` the row is ok and `arb server doctor` prints a
 `shared kernel` line: worker pods share the node's kernel with every other pod. A configured
 class the cluster lacks is a `fail` (`RuntimeClass … not found`).
 
+With a class configured the controller also creates one real, short-lived pod under it
+(a dry run never reaches the kubelet) and deletes it. A kubelet that cannot create the
+sandbox is a `fail` that quotes the error from the pod's `FailedCreatePodSandBox` event
+(the Role grants `get`/`list` on `events` for this); a pod that neither starts nor says why
+is a `warn`.
+
+**gVisor (`runsc`).** runsc refuses `hostUsers: false` (`RuntimeClass handler "runsc" does
+not support user namespaces`): its sandbox replaces the user namespace. Name the handler in
+`arbiter-controller-config` next to the class:
+
+    placement:
+      runtime_class: gvisor
+      runtime_handler: runsc
+
+With a `runsc` (or `runsc-*`) handler the worker and canary pods omit `hostUsers`; with
+anything else they keep `hostUsers: false`. For the admission policy, install with
+`runtime_class=gvisor&runtime_handler=runsc` so its `host-users` rule admits an absent
+`hostUsers` for that class only.
+
 ### `PriorityClass`, `ResourceQuota`, `Image pull`, `Clock`
 
 * PriorityClass: create the one in the install manifest (`value: -100`,
