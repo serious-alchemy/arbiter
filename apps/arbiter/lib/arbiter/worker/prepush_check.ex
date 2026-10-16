@@ -493,9 +493,12 @@ defmodule Arbiter.Worker.PrepushCheck do
   `N tests, M failures` summary and `Result:` lines, then the generic tail. The
   blocks are printed before the summary, so the tail alone loses them whenever a
   sandbox-kill report or crash dump follows (bd-8e8t72). Any other output is the
-  plain `tail/2`.
+  plain `tail/2`, as is any output that already fits.
   """
   @spec digest(String.t()) :: String.t()
+  def digest(output) when is_binary(output) and byte_size(output) <= @max_output_bytes,
+    do: tail(output)
+
   def digest(output) when is_binary(output) do
     case failure_section(output) do
       nil ->
@@ -533,6 +536,7 @@ defmodule Arbiter.Worker.PrepushCheck do
         ~r/^(?:(?:\d+ (?:doctests?|properties), )*\d+ tests?, \d+ failures?.*|Result:.*)$/m
         |> Regex.scan(output)
         |> Enum.map(&hd/1)
+        |> Enum.uniq()
 
       body = Enum.map_join(blocks, "\n", &cap(&1, @max_failure_block_bytes))
 
