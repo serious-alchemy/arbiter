@@ -599,24 +599,25 @@ defmodule Arbiter.MCP.Tools do
          {:ok, opts} <- Claim.claim_opts(args),
          {:ok, selector} <- bulk_selector(args) do
       case selector do
-        nil ->
-          with {:ok, ref} <- require_string(args, "ref") do
-            case workspace
-                 |> Claim.claim(ref, Keyword.put(opts, :force, force))
-                 |> Claim.typed() do
-              {:ok, status, task} -> {:ok, Claim.serialize_claim(status, task)}
-              {:error, reason} -> {:error, claim_error(reason)}
-            end
-          end
-
-        selector ->
-          opts = Keyword.merge(opts, force: force, yes: yes)
-
-          case workspace |> Claim.bulk(selector, opts) |> Claim.typed() do
-            {:ok, result} -> {:ok, Claim.serialize_bulk(result)}
-            {:error, reason} -> {:error, claim_error(reason)}
-          end
+        nil -> claim_single(workspace, args, Keyword.put(opts, :force, force))
+        selector -> claim_bulk(workspace, selector, Keyword.merge(opts, force: force, yes: yes))
       end
+    end
+  end
+
+  defp claim_single(workspace, args, opts) do
+    with {:ok, ref} <- require_string(args, "ref") do
+      case workspace |> Claim.claim(ref, opts) |> Claim.typed() do
+        {:ok, status, task} -> {:ok, Claim.serialize_claim(status, task)}
+        {:error, reason} -> {:error, claim_error(reason)}
+      end
+    end
+  end
+
+  defp claim_bulk(workspace, selector, opts) do
+    case workspace |> Claim.bulk(selector, opts) |> Claim.typed() do
+      {:ok, result} -> {:ok, Claim.serialize_bulk(result)}
+      {:error, reason} -> {:error, claim_error(reason)}
     end
   end
 

@@ -369,9 +369,8 @@ defmodule Arbiter.Trackers.Shortcut do
 
   # Shortcut's `next` is a relative URL (`/api/v3/search/stories?...&next=<token>`).
   defp next_page_token(next) when is_binary(next) do
-    with %URI{query: q} when is_binary(q) <- URI.parse(next) do
-      Map.get(URI.decode_query(q), "next")
-    else
+    case URI.parse(next) do
+      %URI{query: q} when is_binary(q) -> Map.get(URI.decode_query(q), "next")
       _ -> nil
     end
   end

@@ -130,13 +130,7 @@ defmodule ArbiterCli.Cmd.Claim do
         else: "Preview — #{length(rows)} stories (nothing claimed):"
     )
 
-    for row <- rows do
-      detail = row["reason"] || row["task_id"] || ""
-
-      IO.puts(
-        "  #{String.pad_trailing(row["ref"] || "", 10)} #{String.pad_trailing(row["status"] || "", 13)} #{row["title"]}#{if detail != "", do: " (#{detail})"}"
-      )
-    end
+    Enum.each(rows, &emit_bulk_row/1)
 
     counts =
       rows
@@ -149,6 +143,15 @@ defmodule ArbiterCli.Cmd.Claim do
   end
 
   defp emit_bulk(payload, :text), do: IO.puts(Jason.encode!(payload))
+
+  defp emit_bulk_row(row) do
+    detail = row["reason"] || row["task_id"] || ""
+    suffix = if detail != "", do: " (#{detail})", else: ""
+
+    IO.puts(
+      "  #{String.pad_trailing(row["ref"] || "", 10)} #{String.pad_trailing(row["status"] || "", 13)} #{row["title"]}#{suffix}"
+    )
+  end
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, false), do: map
