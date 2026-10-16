@@ -777,6 +777,96 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  # KH11 (bd-cexq4j, docs/design/remote-workers.md §20.9)
+  describe "worker.repos.<repo>.image validation (bd-cexq4j)" do
+    defp image_ws(image, level \\ :repo) do
+      worker =
+        case level do
+          :repo -> %{"repos" => %{"vstim" => %{"image" => image}}}
+          :workspace -> %{"image" => image}
+        end
+
+      Ash.create(Workspace, %{
+        name: "img-#{System.unique_integer([:positive])}",
+        config: %{"worker" => worker}
+      })
+    end
+
+    test "accepts source/ref/registry/credentials_ref/seed per repo, the rest workspace-wide" do
+      image = %{
+        "source" => "prebuilt",
+        "ref" => "registry.gitlab.com/vstim/app/arbiter-worker:main",
+        "registry" => "registry.gitlab.com/vstim/app/arbiter",
+        "credentials_ref" => "secret:GITLAB_REGISTRY",
+        "seed" => "image"
+      }
+
+      assert {:ok, ws} = image_ws(image)
+      assert get_in(ws.config, ["worker", "repos", "vstim", "image"]) == image
+
+      assert {:ok, _} = image_ws(Map.drop(image, ["source", "ref"]), :workspace)
+
+      assert {:ok, _} =
+               image_ws(%{
+                 "source" => "containerfile",
+                 "registry" => "ghcr.io/ryan/arbiter-worker"
+               })
+
+      assert {:ok, _} = image_ws(%{})
+    end
+
+    test "rejects an unknown source, seed, key or a non-map, naming the key" do
+      for {bad, message} <- [
+            {%{"source" => "dockerfile"}, "worker.repos.vstim.image.source must be one of"},
+            {%{"seed" => "cache"}, "worker.repos.vstim.image.seed must be one of"},
+            {%{"nope" => 1}, "worker.repos.vstim.image has unknown key nope"},
+            {"x", "worker.repos.vstim.image must be a map"}
+          ] do
+        assert {:error, %Ash.Error.Invalid{} = err} = image_ws(bad)
+        assert Exception.message(err) =~ message
+      end
+
+      assert {:error, %Ash.Error.Invalid{} = err} = image_ws(%{"source" => "x"}, :workspace)
+      assert Exception.message(err) =~ "worker.image.source must be one of"
+    end
+
+    test "registry must be a host[:port][/path] with no scheme or credentials" do
+      for bad <- ["https://ghcr.io/x", "user:pw@ghcr.io", "has space", "", 3] do
+        assert {:error, %Ash.Error.Invalid{} = err} = image_ws(%{"registry" => bad})
+        assert Exception.message(err) =~ "worker.repos.vstim.image.registry must be a registry"
+      end
+    end
+
+    test "credentials_ref must be a secret: reference" do
+      for bad <- ["env:TOKEN", "literal-token", "secret:", 3] do
+        assert {:error, %Ash.Error.Invalid{} = err} = image_ws(%{"credentials_ref" => bad})
+
+        assert Exception.message(err) =~
+                 ~s(worker.repos.vstim.image.credentials_ref must be "secret:<key>")
+      end
+    end
+
+    test "ref is per repo, required for prebuilt and refused for any other source" do
+      assert {:error, %Ash.Error.Invalid{} = err} = image_ws(%{"source" => "prebuilt"})
+      assert Exception.message(err) =~ "worker.repos.vstim.image.ref is required"
+
+      for source <- ["auto", "containerfile", "generated"] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 image_ws(%{"source" => source, "ref" => "ghcr.io/x/y:main"})
+
+        assert Exception.message(err) =~ "worker.repos.vstim.image.ref is only for source"
+      end
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               image_ws(%{"source" => "prebuilt", "ref" => "has space"})
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               image_ws(%{"source" => "prebuilt", "ref" => "ghcr.io/x/y:main"}, :workspace)
+
+      assert Exception.message(err) =~ "worker.image.ref is per repo"
+    end
+  end
+
   describe "worker.seed_paths validation (bd-2jerqw)" do
     test "accepts a list of strings workspace-wide and per repo" do
       assert {:ok, _} =

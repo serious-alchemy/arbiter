@@ -407,7 +407,28 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       pre_push_max_attempts
                       non-negative integer — send-backs before the run escalates
                       (default 2).
-      repos           map, repo name -> {seed_paths, prepush_check,
+      image           map — which worker image a repo's remote runs use (KH11,
+                      docs/design/remote-workers.md §20.9). Set under
+                      worker.repos.<repo>.image, or worker.image for every repo;
+                      the repo's block wins key by key. Nothing set = today.
+                        source           "auto" (default: the default branch's
+                                         .arbiter/Containerfile when committed, else the
+                                         generated toolchain image), "containerfile"
+                                         (insist on it), "generated" (ignore it) or
+                                         "prebuilt" (an image the repo's CI builds; needs
+                                         ref, not built by the primary yet)
+                        ref              prebuilt only, per repo only: image reference
+                        registry         host[:port][/path] Arbiter pushes this repo's
+                                         images to
+                        credentials_ref  "secret:<key>" — workspace secret holding the
+                                         push credential
+                        seed             "primary" (default), "image" or "none"
+                      Images always go to <registry>/<repo>/worker, one repository per
+                      repo; there is no shared <registry>/worker.
+                      Only source is acted on today; registry, credentials_ref and seed
+                      are validated and stored, and read once registry resolution
+                      and prebuilt images land (KH12, KH14).
+      repos           map, repo name -> {seed_paths, image, prepush_check,
                       prepush_check_timeout_seconds, prepush_check_on_timeout,
                       pre_push_checks, pre_push_budget_seconds,
                       pre_push_max_attempts, max_concurrent},

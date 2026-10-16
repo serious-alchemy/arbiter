@@ -140,6 +140,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.Image.Publisher
+  alias Arbiter.Worker.Image.RepoConfig
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.ResearchGrant
@@ -1022,14 +1023,18 @@ defmodule Arbiter.Worker.ContainerSpawn do
   end
 
   defp plan_image(opts, repo_path, node) do
-    base = Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
+    workspace = Keyword.get(opts, :workspace)
+    repo = Keyword.get(opts, :repo)
+    base = Mergers.base_branch(workspace, repo) || "main"
+    image = RepoConfig.resolve(workspace, repo)
 
-    case Image.plan(repo_path, base) do
+    case Image.plan(repo_path, base, [source: image.source] ++ Keyword.get(opts, :plan, [])) do
       {:ok, plan} ->
         ctx = %{
+          repo: repo,
           repo_path: repo_path,
           base: base,
-          seed_paths: SeedPaths.resolve(Keyword.get(opts, :workspace), Keyword.get(opts, :repo))
+          seed_paths: SeedPaths.resolve(workspace, repo)
         }
 
         registry_image(%{tag: plan.tag, plan: plan}, node, ctx, opts)
@@ -1046,7 +1051,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   call, so its single-flight cache makes the spawn's own call instant.
   `{:error, {:image_unavailable, reason}}` is what `Publisher.fallback/2` maps
   to local or a hold. Options are `prepare_remote/1`'s `:image`, `:workspace`,
-  `:repo` and `:publish`.
+  `:repo`, `:publish` and `:plan` (extra `Image.plan/3` options).
   """
   @spec preflight_image(String.t() | nil, map(), keyword()) :: :ok | {:error, term()}
   def preflight_image(repo_path, node, opts) do

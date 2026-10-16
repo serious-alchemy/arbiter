@@ -178,6 +178,9 @@ defmodule Arbiter.Worker.Image do
 
   Options: `:resolver` (`ref -> {:ok, "sha256:…"} | {:error, term}`, default the
   pin store), `:defaults` (a toolchain map overriding the configured default),
+  `:source` (KH11, `Arbiter.Worker.Image.RepoConfig`: `:auto` (default) takes the
+  committed `.arbiter/Containerfile` when there is one, `:containerfile` insists on it,
+  `:generated` ignores it; `:prebuilt` is not built by the primary),
   `:repo_name` (names the image of a repo-supplied Containerfile), `:arb_otp`
   (the release of the Erlang/OTP the base carries for arb; default
   `Arbiter.Worker.ArbCli.runtime_otp/1`, the host arb's, which takes `:arb_path`).
@@ -190,6 +193,7 @@ defmodule Arbiter.Worker.Image do
     with {:ok, ref} <- default_ref(repo_path, default_branch),
          {:ok, tool_versions} <- read_file(repo_path, ref, ".tool-versions"),
          {:ok, repo_cf} <- read_file(repo_path, ref, ".arbiter/Containerfile"),
+         {:ok, repo_cf} <- choose_source(Keyword.get(opts, :source, :auto), repo_cf),
          toolchain = toolchain(tool_versions, opts),
          {:ok, base} <- base_layer(resolver, arb_otp),
          {source, text} = toolchain_source(repo_cf, toolchain),
@@ -261,6 +265,21 @@ defmodule Arbiter.Worker.Image do
     end
   end
 
+  # Which Containerfile (if any) the plan builds from, per `image.source`.
+  defp choose_source(:auto, repo_cf), do: {:ok, repo_cf}
+  defp choose_source(:generated, _repo_cf), do: {:ok, nil}
+  defp choose_source(:containerfile, text) when is_binary(text), do: {:ok, text}
+
+  defp choose_source(:containerfile, nil),
+    do:
+      {:error,
+       {:source_unavailable, :containerfile, "no .arbiter/Containerfile on the default branch"}}
+
+  defp choose_source(:prebuilt, _repo_cf),
+    do:
+      {:error,
+       {:source_unavailable, :prebuilt, "prebuilt images are not supported by this build yet"}}
+
   defp toolchain_source(nil, toolchain), do: {:generated, generated_containerfile(toolchain)}
   # `FROM ${ARBITER_BASE}` needs the arg declared before the first FROM.
   defp toolchain_source(text, _toolchain) do
@@ -276,7 +295,12 @@ defmodule Arbiter.Worker.Image do
       if(toolchain.node, do: "-node#{toolchain.node}", else: "")
   end
 
-  defp slug(name) do
+  @doc """
+  The image-name slug of a repo name: lower case, runs of anything but `a-z0-9`
+  folded to `-`, `custom` when nothing is left.
+  """
+  @spec slug(String.t()) :: String.t()
+  def slug(name) do
     name
     |> String.downcase()
     |> String.replace(~r/[^a-z0-9]+/, "-")

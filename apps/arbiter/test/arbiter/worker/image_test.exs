@@ -342,6 +342,46 @@ defmodule Arbiter.Worker.ImageTest do
     end
   end
 
+  describe "plan/3: the source option (KH11)" do
+    test "containerfile refuses a repo with no .arbiter/Containerfile on the default branch" do
+      repo = repo_with(%{"README.md" => "hi\n"})
+
+      assert {:error, {:source_unavailable, :containerfile, _}} =
+               Image.plan(repo, "main", opts(source: :containerfile))
+    end
+
+    test "containerfile plans the committed Containerfile" do
+      repo = repo_with(%{".arbiter/Containerfile" => @repo_containerfile})
+      assert {:ok, plan} = Image.plan(repo, "main", opts(source: :containerfile))
+      assert plan.source == :repo
+    end
+
+    test "generated ignores the repo's Containerfile" do
+      repo = repo_with(%{".arbiter/Containerfile" => @repo_containerfile})
+      assert {:ok, plan} = Image.plan(repo, "main", opts(source: :generated))
+      assert plan.source == :generated
+      refute plan.containerfile =~ "default-branch-toolchain"
+    end
+
+    test "auto (and no option) is today: the Containerfile when committed, else generated" do
+      with_cf = repo_with(%{".arbiter/Containerfile" => @repo_containerfile})
+      without = repo_with(%{"README.md" => "hi\n"})
+
+      for source <- [nil, :auto] do
+        o = opts(if(source, do: [source: source], else: []))
+        assert {:ok, %{source: :repo}} = Image.plan(with_cf, "main", o)
+        assert {:ok, %{source: :generated}} = Image.plan(without, "main", o)
+      end
+    end
+
+    test "prebuilt is not planned by the primary's builder yet" do
+      repo = repo_with(%{"README.md" => "hi\n"})
+
+      assert {:error, {:source_unavailable, :prebuilt, _}} =
+               Image.plan(repo, "main", opts(source: :prebuilt))
+    end
+  end
+
   describe "plan/3: base images are pinned by digest" do
     test "an unpinned FROM is rewritten to ref@sha256 through the resolver" do
       repo =
