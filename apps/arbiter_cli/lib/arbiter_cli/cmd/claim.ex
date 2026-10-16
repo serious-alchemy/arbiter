@@ -20,6 +20,9 @@ defmodule ArbiterCli.Cmd.Claim do
   references that issue.
 
   Flags:
+    --assign       Also take ownership of the tracker issue. Without it the
+                   tracker owner is never changed; the result reports
+                   owner_changed.
     --force        Skip the assignment-as-claim check. Use only when you
                    *know* you want a task for an issue you don't own (e.g.
                    to track someone else's work).
@@ -53,6 +56,7 @@ defmodule ArbiterCli.Cmd.Claim do
 
   @switches [
     force: :boolean,
+    assign: :boolean,
     difficulty: :string,
     priority: :integer,
     type: :string,
@@ -99,6 +103,7 @@ defmodule ArbiterCli.Cmd.Claim do
     body =
       %{"ref" => ref}
       |> maybe_put("force", opts[:force])
+      |> maybe_put("assign", opts[:assign])
       |> maybe_put("difficulty", opts[:difficulty])
       |> maybe_put("repo", opts[:repo])
       |> maybe_put("priority", opts[:priority])

@@ -576,12 +576,13 @@ defmodule Arbiter.Trackers.Jira do
         workspace_prefix: prefix,
         current_user: account_id,
         host: host
-      }) do
+      } = ctx) do
     body =
       "Claimed as #{task_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
 
     add_comment(ref, body)
-    assign_user(ref, account_id)
+    # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
+    if Map.get(ctx, :assign, false), do: assign_user(ref, account_id)
     :ok
   end
 
