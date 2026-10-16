@@ -106,10 +106,7 @@ defmodule Arbiter.Worker.Image.Publisher do
   defp ensure_private(%Registry{origin: :config, public_ok: false} = cfg, ctx, opts) do
     repository = Pipeline.worker_repository(ctx)
 
-    probe =
-      Keyword.get_lazy(opts, :anonymous_probe, fn ->
-        config(:anonymous_probe, &Registry.anonymous_read/2)
-      end)
+    probe = Keyword.get_lazy(opts, :anonymous_probe, &anonymous_probe/0)
 
     case probe.(cfg, repository) do
       :public ->
@@ -223,7 +220,12 @@ defmodule Arbiter.Worker.Image.Publisher do
   @spec status(keyword()) :: map()
   def status(opts \\ []) do
     probe = Keyword.get_lazy(opts, :probe, fn -> config(:probe, &Registry.reachable/1) end)
-    registries = RegistryReport.build(Keyword.put(opts, :probe, probe))
+
+    registries =
+      opts
+      |> Keyword.put(:probe, probe)
+      |> Keyword.put_new_lazy(:anonymous_probe, &anonymous_probe/0)
+      |> RegistryReport.build()
 
     case Registry.fetch(opts) do
       :unset ->
@@ -264,6 +266,8 @@ defmodule Arbiter.Worker.Image.Publisher do
   catch
     :exit, _ -> %{published: [], last_error: nil, seed_excluded: []}
   end
+
+  defp anonymous_probe, do: config(:anonymous_probe, &Registry.anonymous_read/2)
 
   defp config(key, default),
     do: :arbiter |> Application.get_env(:image_publisher, []) |> Keyword.get(key, default)
