@@ -238,6 +238,57 @@ defmodule Arbiter.Agents.Codex.StreamTest do
       assert reason.remediation =~ "codex login"
     end
 
+    test "the rmcp MCP-transport GET 401 warning is not an auth failure" do
+      msg =
+        "ERROR rmcp::transport::streamable_http_client: fail to get common stream: " <>
+          "unexpected server response: GET returned HTTP 401"
+
+      assert [{_, false}] = Stream.format_event(%{"type" => "error", "message" => msg})
+    end
+
+    test "rmcp 401 warning followed by a clean completion is not auth_expired" do
+      warn = %{
+        "type" => "error",
+        "message" =>
+          "ERROR rmcp::transport::streamable_http_client: fail to get common stream: " <>
+            "unexpected server response: GET returned HTTP 401"
+      }
+
+      done = %{
+        "type" => "turn.completed",
+        "usage" => %{"input_tokens" => 1, "output_tokens" => 2}
+      }
+
+      lines = [warn, done] |> Enum.flat_map(&Stream.format_event/1) |> Enum.map(&elem(&1, 0))
+
+      refute Arbiter.Worker.StopReason.classify(0, lines, "codex").category == :auth_expired
+    end
+
+    test "a clean completion outranks an earlier genuine-looking auth line" do
+      auth = %{"type" => "error", "message" => "401 Unauthorized"}
+
+      done = %{
+        "type" => "turn.completed",
+        "usage" => %{"input_tokens" => 1, "output_tokens" => 2}
+      }
+
+      lines = [auth, done] |> Enum.flat_map(&Stream.format_event/1) |> Enum.map(&elem(&1, 0))
+
+      assert Enum.any?(lines, &(&1 =~ "codex authentication error"))
+      refute Arbiter.Worker.StopReason.classify(0, lines, "codex").category == :auth_expired
+    end
+
+    test "model API 401 and not-logged-in errors still classify as auth" do
+      for msg <- ["unexpected status 401 Unauthorized: Missing bearer", "Not logged in"] do
+        lines =
+          %{"type" => "turn.failed", "error" => %{"message" => msg}}
+          |> Stream.format_event()
+          |> Enum.map(&elem(&1, 0))
+
+        assert Arbiter.Worker.StopReason.classify(1, lines, "codex").category == :auth_expired
+      end
+    end
+
     test "an unrelated turn.failed stays a plain failure line" do
       event = %{"type" => "turn.failed", "error" => %{"message" => "model stream disconnected"}}
       assert [{_, false}] = Stream.format_event(event)
