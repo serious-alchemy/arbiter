@@ -450,7 +450,6 @@ defmodule ArbiterCli.Cmd.Node do
     end
   end
 
-
   # KH13: one pull Secret per registry. Each command reads the read-only deploy token's
   # username and password from the terminal (`read -rs`), so neither reaches argv.
   defp print_pull_secrets([_ | _] = commands) do
