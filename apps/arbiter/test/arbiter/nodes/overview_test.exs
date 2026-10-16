@@ -135,6 +135,18 @@ defmodule Arbiter.Nodes.OverviewTest do
       assert %{readiness: []} = row(Overview.build(), "box")
     end
 
+    test "a psa_unenforced node is placed only under the audited override (KH4)" do
+      node = enroll!("kube")
+      connect!(node, cluster_hello(%{"degraded" => ["psa_unenforced"]}))
+
+      assert %{contributes: 0} = row(Overview.build(), "kube")
+
+      assert {:ok, _} =
+               Nodes.update_node(node, %{allow_unenforced_network: true}, @operator)
+
+      assert %{contributes: 3} = row(Overview.build(), "kube")
+    end
+
     test "a netpol_unenforced node adds nothing to capacity until the override is set" do
       node = enroll!("kube")
       connect!(node, cluster_hello(%{"degraded" => ["netpol_unenforced"]}))

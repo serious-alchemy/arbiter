@@ -164,7 +164,7 @@ defmodule Arbiter.Test.FakeK8sApi do
   Makes `POST pods` (dry run or not) refuse any pod with a `privileged` container, as
   a namespace labelled `pod-security.kubernetes.io/enforce: restricted` does.
   """
-  def enforce_psa(api), do: GenServer.call(api, {:set_psa, true})
+  def enforce_psa(api, on \\ true), do: GenServer.call(api, {:set_psa, on})
 
   @doc "Blocks until at least `n` watches are open."
   def await_watchers(api, n), do: GenServer.call(api, {:await_watchers, n}, 5_000)

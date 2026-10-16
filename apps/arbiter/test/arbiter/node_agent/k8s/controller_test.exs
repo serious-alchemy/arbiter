@@ -26,6 +26,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerTest do
 
   setup %{tmp_dir: dir} do
     env = FakeK8sApi.start!(namespace: "arb")
+    FakeK8sApi.enforce_psa(env.api)
     config_path = Path.join(dir, "controller.yaml")
     File.write!(config_path, @config)
 

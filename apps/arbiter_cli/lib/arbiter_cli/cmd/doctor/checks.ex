@@ -2127,7 +2127,28 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         _ -> [cluster_no_report_result(name)]
       end
 
-    List.wrap(cluster_placement_result(name, n)) ++ checks
+    List.wrap(cluster_placement_result(name, n)) ++
+      checks ++ List.wrap(cluster_shared_kernel_result(name, n))
+  end
+
+  # KH4: no RuntimeClass means worker pods share the node's kernel with every other pod on it.
+  defp cluster_shared_kernel_result(node, n) do
+    shared? =
+      Enum.any?(List.wrap(n["readiness"]), fn check ->
+        check["id"] == "runtime_class" and check["status"] == "ok" and
+          check["runtime_class"] in [nil, ""]
+      end)
+
+    if shared? do
+      nodes_result(
+        "cluster #{node}: shared kernel",
+        :warn,
+        "worker pods use the node's default runtime and share its kernel with every other pod; " <>
+          "a kernel escape reaches the host and its neighbours",
+        "Set worker placement.runtime_class to a sandboxed RuntimeClass (gVisor) on a shared cluster. " <>
+          "See docs/design/remote-workers.md, section 20."
+      )
+    end
   end
 
   defp cluster_check_result(node, check) do
@@ -2150,22 +2171,40 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   end
 
   defp cluster_placement_result(node, n) do
-    if "netpol_unenforced" in List.wrap(n["degraded"]) do
+    words = Enum.filter(~w(netpol_unenforced psa_unenforced), &(&1 in List.wrap(n["degraded"])))
+
+    if words != [] do
       override? = n["allow_unenforced_network"] == true
+      list = Enum.join(words, ", ")
 
       nodes_result(
         "cluster #{node}: placement",
         :warn,
         if(override?,
           do:
-            "degraded: netpol_unenforced, but placement is allowed by the operator's " <>
+            "degraded: #{list}, but placement is allowed by the operator's " <>
               "allow_unenforced_network override (audited)",
-          else: "degraded: netpol_unenforced: no work is placed on this node"
+          else: "degraded: #{list}: no work is placed on this node"
         ),
-        "The cluster's CNI does not enforce the worker NetworkPolicies (or the canary could not prove it). " <>
-          "See docs/remote-workers-k8s-runbook.md, 'The canary says netpol_unenforced'."
+        placement_hint(words)
       )
     end
+  end
+
+  defp placement_hint(words) do
+    netpol =
+      "The cluster's CNI does not enforce the worker NetworkPolicies (or the canary could not prove it). " <>
+        "See docs/remote-workers-k8s-runbook.md, 'The canary says netpol_unenforced'."
+
+    psa =
+      "The namespace does not enforce Pod Security restricted: label it " <>
+        "(pod-security.kubernetes.io/enforce=restricted), a cluster-admin step."
+
+    words
+    |> Enum.map_join(" ", fn
+      "netpol_unenforced" -> netpol
+      "psa_unenforced" -> psa
+    end)
   end
 
   defp node_result(n) do

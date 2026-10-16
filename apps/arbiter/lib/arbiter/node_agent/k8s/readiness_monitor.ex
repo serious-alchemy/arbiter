@@ -14,7 +14,7 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
         at: DateTime | nil,              # when the last run finished
         canary: Canary result | nil}
 
-  `degraded` is what the controller puts in `hello`/`hb` (`Controller.report/1`);
+  `degraded` may also hold `"psa_unenforced"` (KH4: the `psa` check is not ok). `degraded` is what the controller puts in `hello`/`hb` (`Controller.report/1`);
   `hello_readiness/1` is the `readiness` block of `hello`.
 
   ## Fail closed
@@ -56,6 +56,7 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
 
   @default_interval_ms 600_000
   @unenforced "netpol_unenforced"
+  @psa_unenforced "psa_unenforced"
 
   @type report :: %{
           degraded: [String.t()],
@@ -284,6 +285,7 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
 
   defp build_report(state) do
     {degraded, netpol} = verdict(state)
+    degraded = degraded ++ psa_degraded(state.checks)
     %{degraded: degraded, checks: [netpol | state.checks], at: state.at, canary: state.latest}
   end
 
@@ -311,6 +313,17 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitor do
 
       nil ->
         {[@unenforced], Readiness.netpol(latest)}
+    end
+  end
+
+  # KH4 (OD5): Pod Security `restricted` not proven enforced on the namespace (an unlabelled
+  # namespace is the likely mistake on a shared cluster) degrades the node like an unenforced
+  # NetworkPolicy. A run with no psa check (inconclusive) says nothing here: the netpol
+  # verdict already degrades it.
+  defp psa_degraded(checks) do
+    case Enum.find(checks, &(&1["id"] == "psa")) do
+      %{"status" => status} when status != "ok" -> [@psa_unenforced]
+      _ -> []
     end
   end
 

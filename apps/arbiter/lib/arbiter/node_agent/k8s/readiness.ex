@@ -13,6 +13,7 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
   | `netpol` | the CNI enforces the deny-all policies | `Canary` (see `netpol/2`) |
   | `psa` | Pod Security `restricted` is enforced on the namespace **and** the builder's own pod passes it | two server-side dry-run creates: the worker pod as the builder emits it must be admitted, the same pod with a `privileged` container must be refused with `violates PodSecurity` |
   | `priority_class` | the configured `priority_class` exists | the dry-run's admission verdict (`no PriorityClass with name …`); the controller's Role cannot read cluster-scoped `PriorityClass` objects, and the dry-run is the check that matches what a real pod meets |
+  | `runtime_class` | the configured `placement.runtime_class` exists (none: worker pods share the node's kernel) | the same dry run's admission verdict (`RuntimeClass … not found`) |
   | `quota` | a `ResourceQuota` bounds the namespace and has room for a pod | `resourcequotas` (`Quota.headroom/2`) |
   | `registry_pull` | the kubelet can pull the worker image | the canary pod's own pull (it runs the worker image) |
   | `clock` | the API server and this controller agree on the time to within 30 s | `Date` of `GET /version` |
@@ -33,16 +34,23 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
   @type check :: %{required(String.t()) => String.t() | nil}
 
   @doc """
-  The five cluster checks for `config` (a `PodSpec` config) given the latest canary
+  The six cluster checks for `config` (a `PodSpec` config) given the latest canary
   `result` (`nil` before the first run). Options: `:image` (the worker image, a
   digest-pinned reference under `config.registry`) and `:now_fun`.
   """
   @spec run(Client.t(), map() | keyword(), Canary.result() | nil, keyword()) :: [check()]
   def run(client, config, canary, opts) do
     now = Keyword.get(opts, :now_fun, &DateTime.utc_now/0)
-    {psa, priority, quota_msg} = admission(client, config, opts)
+    {psa, priority, quota_msg, runtime} = admission(client, config, opts)
 
-    [psa, priority, quota(client, config, quota_msg), registry_pull(canary), clock(client, now)]
+    [
+      psa,
+      priority,
+      runtime,
+      quota(client, config, quota_msg),
+      registry_pull(canary),
+      clock(client, now)
+    ]
   end
 
   @doc """
@@ -121,19 +129,26 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
       {:ok, pod} ->
         case classify(Client.create_pod(client, pod, dry_run: true)) do
           :accepted ->
-            {psa_negative(client, pod), priority_ok(config), nil}
+            {psa_negative(client, pod), priority_ok(config), nil, runtime_ok(config)}
 
           {:quota, msg} ->
-            {psa_negative(client, pod), priority_ok(config), msg}
+            {psa_negative(client, pod), priority_ok(config), msg, runtime_ok(config)}
 
           {:pod_security, msg} ->
-            {psa_violated(msg), not_evaluated("priority_class", "PriorityClass"), nil}
+            {psa_violated(msg), not_evaluated("priority_class", "PriorityClass"), nil,
+             runtime_unevaluated(config)}
 
           {:priority, msg} ->
-            {not_evaluated("psa", "Pod Security"), priority_missing(msg), nil}
+            {not_evaluated("psa", "Pod Security"), priority_missing(msg), nil,
+             runtime_unevaluated(config)}
+
+          {:runtime_class, msg} ->
+            {not_evaluated("psa", "Pod Security"), priority_ok(config), nil,
+             runtime_missing(config, msg)}
 
           {:other, msg} ->
-            {psa_unproven(msg), not_evaluated("priority_class", "PriorityClass"), nil}
+            {psa_unproven(msg), not_evaluated("priority_class", "PriorityClass"), nil,
+             runtime_unevaluated(config)}
         end
 
       {:error, reason} ->
@@ -143,7 +158,7 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
            "fail",
            "the builder refused its own pod: #{inspect(reason)}",
            nil
-         ), not_evaluated("priority_class", "PriorityClass"), nil}
+         ), not_evaluated("priority_class", "PriorityClass"), nil, runtime_unevaluated(config)}
     end
   end
 
@@ -156,6 +171,7 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
   defp by_message(msg) do
     cond do
       msg =~ "violates PodSecurity" -> {:pod_security, msg}
+      msg =~ ~r/RuntimeClass/i -> {:runtime_class, msg}
       msg =~ ~r/PriorityClass/i -> {:priority, msg}
       msg =~ "exceeded quota" -> {:quota, msg}
       true -> {:other, msg}
@@ -245,6 +261,66 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
         "or set worker placement.priority_class to one that exists."
     )
   end
+
+  # -- runtime class (KH4) -------------------------------------------------------------------
+  # The RuntimeClass is cluster-scoped, which the controller's Role cannot read, so (like the
+  # PriorityClass) the dry run's admission verdict is the check. The extra "runtime_class" key
+  # names the class (nil: none), so the doctor can print the shared-kernel line.
+
+  defp runtime_ok(config) do
+    case runtime_class(config) do
+      nil ->
+        runtime_check(
+          "ok",
+          "none configured: worker pods run on the node's own kernel (runc), shared with every other pod there",
+          nil,
+          nil
+        )
+
+      class ->
+        runtime_check("ok", "#{class} accepted by the dry run", nil, class)
+    end
+  end
+
+  defp runtime_missing(config, msg) do
+    runtime_check(
+      "fail",
+      "the configured RuntimeClass does not exist: #{trim(msg)}",
+      "Install the RuntimeClass (and its handler on the nodes) or clear worker placement.runtime_class.",
+      runtime_class(config)
+    )
+  end
+
+  defp runtime_unevaluated(config) do
+    case runtime_class(config) do
+      nil ->
+        runtime_ok(config)
+
+      class ->
+        runtime_check(
+          "warn",
+          "not evaluated: the dry-run pod was rejected before this check ran",
+          "Fix the other admission failure first.",
+          class
+        )
+    end
+  end
+
+  defp runtime_check(status, detail, hint, class),
+    do:
+      "runtime_class"
+      |> check("RuntimeClass", status, detail, hint)
+      |> Map.put("runtime_class", class)
+
+  defp runtime_class(config) do
+    case PodConfig.normalize(config) do
+      {:ok, cfg} -> blank_to_nil(get_in(cfg, [:placement, "runtime_class"]))
+      _ -> nil
+    end
+  end
+
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(value), do: value
 
   defp not_evaluated(id, name) do
     check(
