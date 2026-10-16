@@ -383,7 +383,22 @@ defmodule Arbiter.Trackers.Tracker do
   @callback prepare(workspace :: Arbiter.Tasks.Workspace.t() | map() | nil, opts :: keyword()) ::
               :ok
 
-  @optional_callbacks prepare: 2,
+  @typedoc "A dependency link on an issue, relative to that issue."
+  @type issue_link :: %{
+          kind: :blocks | :blocked_by | :relates_to | :other,
+          ref: String.t(),
+          verb: String.t()
+        }
+
+  @doc """
+  The tracker-side links on a fetched issue (Shortcut story links), each
+  relative to that issue: `:blocks` (it blocks `ref`), `:blocked_by`,
+  `:relates_to`, or `:other` (kept only as a note).
+  """
+  @callback links_for(raw_issue :: map()) :: [issue_link()]
+
+  @optional_callbacks links_for: 1,
+                      prepare: 2,
                       add_remote_link: 3,
                       add_comment: 2,
                       check_prior_claim: 1,

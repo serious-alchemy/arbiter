@@ -19,7 +19,7 @@ defmodule Arbiter.Tasks.Claim do
       against open tasks, in both directions.
   """
 
-  alias Arbiter.Tasks.{Dependencies, Issue, IssueSerializer, Workspace}
+  alias Arbiter.Tasks.{Dependencies, Dependency, Issue, IssueSerializer, Workspace}
   alias Arbiter.Trackers
 
   require Ash.Query
@@ -442,10 +442,12 @@ defmodule Arbiter.Tasks.Claim do
           case maybe_apply_overrides(task, overrides) do
             {:ok, updated_task} ->
               mirror_epic(adapter, workspace, issue_map, updated_task)
+              import_links(adapter, type, workspace, issue_map, updated_task)
               {:ok, :existing, updated_task}
 
             :no_changes ->
               mirror_epic(adapter, workspace, issue_map, task)
+              import_links(adapter, type, workspace, issue_map, task)
               {:ok, :existing, task}
 
             {:error, err} ->
@@ -462,6 +464,7 @@ defmodule Arbiter.Tasks.Claim do
               {:ok, :created, task} = result ->
                 maybe_signal_claim(adapter, ref, task, workspace, current_user_id)
                 mirror_epic(adapter, workspace, issue_map, task)
+                import_links(adapter, type, workspace, issue_map, task)
                 result
 
               error ->
@@ -470,6 +473,93 @@ defmodule Arbiter.Tasks.Claim do
           end
       end
     end
+  end
+
+  # Translate the issue's tracker links into edges. `blocks` / `blocked-by`
+  # become `blocks` edges and `relates to` a `relates_to` edge, but only when the
+  # other end is a claimed task in this workspace; anything else (unclaimed
+  # story, other verb, a would-be cycle) is recorded in `notes` so nothing is
+  # dropped silently. Runs inside the claim, before the caller can promote the
+  # ticket. Idempotent, and re-run on the other end's claim, so the edge forms
+  # whichever order the two are claimed in. Best effort like `mirror_epic/4`.
+  defp import_links(adapter, type, workspace, issue_map, task) do
+    if function_exported?(adapter, :links_for, 1) do
+      notes =
+        for link <- adapter.links_for(issue_map),
+            note = import_link(workspace, type, task, link),
+            do: note
+
+      append_link_notes(task, notes)
+    end
+
+    :ok
+  rescue
+    e -> Logger.warning("claim: link import failed: #{Exception.message(e)}")
+  end
+
+  defp import_link(workspace, type, task, %{kind: kind, ref: ref, verb: verb}) do
+    case find_existing(workspace, type, ref) do
+      {:ok, other} when kind in [:blocks, :blocked_by, :relates_to] ->
+        link_edge(task, other, kind, ref)
+
+      _ ->
+        "tracker link: #{link_verb(kind, verb)} #{ref} (not a claimed ticket, no edge)"
+    end
+  end
+
+  defp link_edge(task, other, kind, ref) do
+    {from, to, edge_type} =
+      case kind do
+        :blocks -> {task.id, other.id, :blocks}
+        :blocked_by -> {other.id, task.id, :blocks}
+        :relates_to -> {task.id, other.id, :relates_to}
+      end
+
+    if edge_present?(from, to, edge_type) do
+      nil
+    else
+      from
+      |> Dependencies.add(to, edge_type, notes: "imported from tracker link")
+      |> add_outcome_note(link_verb(kind, ""), ref)
+    end
+  end
+
+  defp add_outcome_note({:ok, _}, _verb, _ref), do: nil
+
+  defp add_outcome_note({:error, {:cyclic, _}}, verb, ref),
+    do: "tracker link: #{verb} #{ref} rejected, edge would form a cycle"
+
+  defp add_outcome_note({:error, reason}, verb, ref),
+    do: "tracker link: #{verb} #{ref} not imported (#{inspect(reason)})"
+
+  defp edge_present?(from, to, :relates_to),
+    do: edge_exists?(from, to, :relates_to) or edge_exists?(to, from, :relates_to)
+
+  defp edge_present?(from, to, type), do: edge_exists?(from, to, type)
+
+  defp edge_exists?(from, to, type) do
+    Dependency
+    |> Ash.Query.filter(from_issue_id == ^from and to_issue_id == ^to and type == ^type)
+    |> Ash.read!()
+    |> Enum.any?()
+  end
+
+  defp link_verb(:blocked_by, _verb), do: "blocked by"
+  defp link_verb(:blocks, _verb), do: "blocks"
+  defp link_verb(:relates_to, _verb), do: "relates to"
+  defp link_verb(:other, verb), do: verb
+
+  defp append_link_notes(_task, []), do: :ok
+
+  defp append_link_notes(task, notes) do
+    current = Ash.get!(Issue, task.id).notes || ""
+    fresh = Enum.reject(Enum.uniq(notes), &String.contains?(current, &1))
+
+    if fresh != [] do
+      Ash.update!(task, %{append_notes: Enum.join(fresh, "\n")})
+    end
+
+    :ok
   end
 
   # Mirror the issue's tracker epic (Shortcut epic, GitHub milestone) as one

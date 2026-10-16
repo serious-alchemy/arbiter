@@ -502,6 +502,34 @@ defmodule Arbiter.Trackers.Shortcut do
 
   def epic_for(_), do: nil
 
+  # Shortcut story links are directional `subject --verb--> object`; "blocks"
+  # means the subject blocks the object. Re-expressed relative to this story.
+  @impl true
+  def links_for(%{"id" => id, "story_links" => links}) when is_list(links) do
+    self_id = to_string(id)
+
+    Enum.flat_map(links, fn
+      %{"subject_id" => s, "object_id" => o, "verb" => verb} ->
+        {subject, object} = {to_string(s), to_string(o)}
+
+        cond do
+          subject == self_id -> [%{kind: link_kind(verb, :subject), ref: object, verb: verb}]
+          object == self_id -> [%{kind: link_kind(verb, :object), ref: subject, verb: verb}]
+          true -> []
+        end
+
+      _ ->
+        []
+    end)
+  end
+
+  def links_for(_), do: []
+
+  defp link_kind("blocks", :subject), do: :blocks
+  defp link_kind("blocks", :object), do: :blocked_by
+  defp link_kind("relates to", _), do: :relates_to
+  defp link_kind(_, _), do: :other
+
   @impl true
   def extract_description(%{
         "description" => desc
