@@ -822,7 +822,8 @@ defmodule Arbiter.Trackers.ShortcutTest do
         workspace_name: "my-ws",
         workspace_prefix: "mw",
         current_user: "member-uuid-999",
-        host: "arbiter.local"
+        host: "arbiter.local",
+        assign: true
       }
 
       assert :ok = Shortcut.signal_claim(@ref, "bd-abc123", context)

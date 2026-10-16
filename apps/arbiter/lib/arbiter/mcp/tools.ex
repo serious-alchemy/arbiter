@@ -607,8 +607,8 @@ defmodule Arbiter.MCP.Tools do
 
   defp claim_single(workspace, args, opts) do
     with {:ok, ref} <- require_string(args, "ref") do
-      case workspace |> Claim.claim(ref, opts) |> Claim.typed() do
-        {:ok, status, task} -> {:ok, Claim.serialize_claim(status, task)}
+      case workspace |> Claim.claim_with_owner(ref, opts) |> Claim.typed() do
+        {:ok, status, task, owner} -> {:ok, Claim.serialize_claim(status, task, owner)}
         {:error, reason} -> {:error, claim_error(reason)}
       end
     end

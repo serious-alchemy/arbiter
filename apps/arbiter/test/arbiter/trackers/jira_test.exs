@@ -1308,7 +1308,8 @@ defmodule Arbiter.Trackers.JiraTest do
         workspace_name: "my-ws",
         workspace_prefix: "mw",
         current_user: "account-id-999",
-        host: "arbiter.local"
+        host: "arbiter.local",
+        assign: true
       }
 
       assert :ok = Jira.signal_claim(@ref, "bd-abc123", context)

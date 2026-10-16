@@ -41,7 +41,9 @@ defmodule ArbiterCli.Cmd.WorkerTest do
             "status" => "failed",
             "exit_status" => 1,
             "duration_ms" => 1234,
-            "output" => "** (Mix) mix format failed"
+            "output" =>
+              "ExUnit failures:\n  1) test boom (X)\n     x_test.exs:1\n--- output tail ---\nTAILNOISE",
+            "log_path" => "/logs/r.prepush/1-0-format.log"
           },
           %{
             "attempt" => 2,
@@ -59,7 +61,9 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "Pre-push checks"
       assert out =~ ~r/attempt 1\s+format\s+failed.*exit 1.*1\.2s/
       assert out =~ ~r/attempt 2\s+format\s+passed/
-      assert out =~ "mix format failed"
+      assert out =~ "1) test boom (X)"
+      refute out =~ "TAILNOISE"
+      assert out =~ "full log: /logs/r.prepush/1-0-format.log"
     end
 
     test "prints no pre-push section when the gate never ran" do
