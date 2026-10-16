@@ -535,6 +535,105 @@ defmodule Arbiter.Tasks.ClaimTest do
     end
   end
 
+  describe "tracker owner is untouched unless assign: true (D1)" do
+    defp gh_stub_reporting(assignees) do
+      test_pid = self()
+
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"GET", _} ->
+            Req.Test.json(conn, issue_payload(%{"assignees" => assignees}))
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            send(test_pid, :assignee_write)
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+    end
+
+    defp sc_stub_reporting(owner_ids) do
+      test_pid = self()
+
+      stub_sc(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/member"} ->
+            Req.Test.json(conn, %{"id" => @sc_member_id})
+
+          {"GET", "/api/v3/stories/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"GET", "/api/v3/stories/43"} ->
+            Req.Test.json(conn, sc_story_payload(%{"owner_ids" => owner_ids}))
+
+          {"POST", "/api/v3/stories/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"PUT", "/api/v3/stories/43"} ->
+            send(test_pid, {:owner_write, conn.body_params})
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{})
+        end
+      end)
+    end
+
+    test "github: force on an unowned issue leaves assignees alone", %{github_ws: ws} do
+      gh_stub_reporting([])
+
+      assert {:ok, :created, _task, owner} = Claim.claim_with_owner(ws, "43", force: true)
+      assert owner == %{changed: false, old: [], new: []}
+      refute_received :assignee_write
+    end
+
+    test "github: assign: true takes ownership and reports old/new", %{github_ws: ws} do
+      gh_stub_reporting([])
+
+      assert {:ok, :created, _task, owner} =
+               Claim.claim_with_owner(ws, "43", force: true, assign: true)
+
+      assert owner == %{changed: true, old: [], new: [@viewer]}
+      assert_received :assignee_write
+    end
+
+    test "github: already-assigned viewer is not reported as changed", %{github_ws: ws} do
+      gh_stub_reporting([%{"login" => @viewer}])
+
+      assert {:ok, :created, _task, %{changed: false}} =
+               Claim.claim_with_owner(ws, "43", assign: true)
+    end
+
+    test "shortcut: force on an unowned story leaves owner_ids alone", %{sc_ws: ws} do
+      sc_stub_reporting([])
+
+      assert {:ok, :created, _task, owner} = Claim.claim_with_owner(ws, "43", force: true)
+      assert owner == %{changed: false, old: [], new: []}
+      refute_received {:owner_write, _}
+    end
+
+    test "shortcut: assign: true sets the owner and reports old/new", %{sc_ws: ws} do
+      sc_stub_reporting([])
+
+      assert {:ok, :created, _task, owner} =
+               Claim.claim_with_owner(ws, "43", force: true, assign: true)
+
+      assert owner == %{changed: true, old: [], new: [@sc_member_id]}
+      assert_received {:owner_write, %{"owner_ids" => [@sc_member_id]}}
+    end
+
+    test "serialize_claim/3 carries owner_changed", %{sc_ws: ws} do
+      sc_stub_reporting([])
+      {:ok, status, task, owner} = Claim.claim_with_owner(ws, "43", force: true)
+      assert %{owner_changed: %{changed: false}} = Claim.serialize_claim(status, task, owner)
+    end
+  end
+
   # bd-9dwbvt: the claim/sync creation paths' slice of "every issue carries a
   # repo". `arb ticket claim` and the `tracker_claim` MCP tool both land on
   # `Claim.claim/3`; `tracker_sync` / `arb ticket sync` land on

@@ -397,15 +397,24 @@ defmodule ArbiterCli.Cmd.Worker do
 
       if s["status"] in ["failed", "timeout", "error"] and is_binary(s["output"]) do
         s["output"]
-        |> String.split("\n")
-        |> Enum.take(-20)
+        |> output_lines()
         |> Enum.each(&IO.puts("      | #{&1}"))
+
+        if is_binary(s["log_path"]), do: IO.puts("      full log: #{s["log_path"]}")
       end
     end)
   end
 
   defp duration_label(ms) when is_integer(ms), do: "#{Float.round(ms / 1000, 1)}s"
   defp duration_label(_), do: ""
+
+  # An extracted ExUnit failure digest leads with the failing tests: show its
+  # head (names first), not the last lines, which are the raw tail behind it.
+  defp output_lines("ExUnit failures:" <> _ = output) do
+    output |> String.split("\n--- output tail ---\n", parts: 2) |> hd() |> String.split("\n")
+  end
+
+  defp output_lines(output), do: output |> String.split("\n") |> Enum.take(-20)
 
   # bd-1uu19b: the ticket's recent runs, each labelled with its kind; `*`
   # marks the current one.

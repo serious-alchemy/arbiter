@@ -105,13 +105,26 @@ defmodule Arbiter.Tasks.Claim do
   """
   @spec claim(Workspace.t(), String.t(), keyword()) :: claim_result
   def claim(%Workspace{} = workspace, ref, opts \\ []) when is_binary(ref) do
+    case claim_with_owner(workspace, ref, opts) do
+      {:ok, status, task, _owner} -> {:ok, status, task}
+      other -> other
+    end
+  end
+
+  @doc """
+  Like `claim/3`, returning `{:ok, status, task, owner_changed}` where
+  `owner_changed` is `%{changed: boolean, old: [owner], new: [owner]}`. The
+  tracker owner is left alone unless `assign: true` is passed (D1).
+  """
+  def claim_with_owner(%Workspace{} = workspace, ref, opts \\ []) when is_binary(ref) do
     type = Trackers.workspace_type(workspace)
     adapter = Trackers.for_type(type)
     force? = Keyword.get(opts, :force, false)
+    assign? = Keyword.get(opts, :assign, false)
     overrides = Keyword.take(opts, [:difficulty, :repo, :priority, :issue_type])
 
     Trackers.with_workspace(type, workspace, fn ->
-      do_claim(adapter, type, workspace, ref, force?, overrides)
+      do_claim(adapter, type, workspace, ref, force?, assign?, overrides)
     end)
   end
 
@@ -266,7 +279,9 @@ defmodule Arbiter.Tasks.Claim do
          {:ok, repo} <- optional_repo(Map.get(params, "repo")),
          {:ok, priority} <- optional_priority(Map.get(params, "priority")),
          {:ok, issue_type} <- optional_issue_type(Map.get(params, "issue_type")) do
-      {:ok, [difficulty: difficulty, repo: repo, priority: priority, issue_type: issue_type]}
+      {:ok,
+       [difficulty: difficulty, repo: repo, priority: priority, issue_type: issue_type] ++
+         [assign: params["assign"] in [true, "true", "1", 1]]}
     end
   end
 
@@ -369,7 +384,14 @@ defmodule Arbiter.Tasks.Claim do
   @doc "The claim response: `%{status: status, task: <ticket record>}`, status `created` or `existing`."
   @spec serialize_claim(:created | :existing, Issue.t()) :: map()
   def serialize_claim(status, %Issue{} = task),
+    do: serialize_claim(status, task, nil)
+
+  @doc "As `serialize_claim/2`, plus `owner_changed: %{changed, old, new}` (the tracker owner before/after)."
+  def serialize_claim(status, %Issue{} = task, nil),
     do: %{status: Atom.to_string(status), task: IssueSerializer.data(task)}
+
+  def serialize_claim(status, %Issue{} = task, owner),
+    do: status |> serialize_claim(task, nil) |> Map.put(:owner_changed, owner)
 
   @doc """
   The bulk selector in a claim request's string-keyed params: `{:ok,
@@ -440,23 +462,26 @@ defmodule Arbiter.Tasks.Claim do
 
   # ---- internals: claim ----------------------------------------------------
 
-  defp do_claim(adapter, type, workspace, ref, force?, overrides) do
+  defp do_claim(adapter, type, workspace, ref, force?, assign?, overrides) do
     with {:ok, current_user_id} <- get_current_user(adapter, workspace),
          {:ok, ref} <- normalize_ref(adapter, ref),
          {:ok, issue_map} <- adapter.fetch(ref),
          :ok <- check_assignment(adapter, issue_map, current_user_id, force?) do
+      old_owners = adapter.assignees(issue_map)
+      unchanged = %{changed: false, old: old_owners, new: old_owners}
+
       case find_existing(workspace, type, ref) do
         {:ok, task} ->
           case maybe_apply_overrides(task, overrides) do
             {:ok, updated_task} ->
               mirror_epic(adapter, workspace, issue_map, updated_task)
               import_links(adapter, type, workspace, issue_map, updated_task)
-              {:ok, :existing, updated_task}
+              {:ok, :existing, updated_task, unchanged}
 
             :no_changes ->
               mirror_epic(adapter, workspace, issue_map, task)
               import_links(adapter, type, workspace, issue_map, task)
-              {:ok, :existing, task}
+              {:ok, :existing, task, unchanged}
 
             {:error, err} ->
               {:error, err}
@@ -469,11 +494,12 @@ defmodule Arbiter.Tasks.Claim do
             # code is held to it; see the note in .credo.exs.
             # credo:disable-for-next-line Credo.Check.Refactor.Nesting
             case create_task(workspace, type, ref, issue_map, adapter, overrides) do
-              {:ok, :created, task} = result ->
-                maybe_signal_claim(adapter, ref, task, workspace, current_user_id)
+              {:ok, :created, task} ->
+                maybe_signal_claim(adapter, ref, task, workspace, current_user_id, assign?)
+                owner = owner_change(old_owners, current_user_id, assign?)
                 mirror_epic(adapter, workspace, issue_map, task)
                 import_links(adapter, type, workspace, issue_map, task)
-                result
+                {:ok, :created, task, owner}
 
               error ->
                 error
@@ -744,7 +770,16 @@ defmodule Arbiter.Tasks.Claim do
     end
   end
 
-  defp maybe_signal_claim(adapter, ref, task, workspace, current_user_id) do
+  # Only an explicit `assign: true` moves the tracker owner (D1); an owner already
+  # on the issue is kept, the viewer is added alongside.
+  defp owner_change(old, _viewer, false), do: %{changed: false, old: old, new: old}
+
+  defp owner_change(old, viewer, true) do
+    new = Enum.uniq(old ++ [viewer])
+    %{changed: new != old, old: old, new: new}
+  end
+
+  defp maybe_signal_claim(adapter, ref, task, workspace, current_user_id, assign?) do
     if function_exported?(adapter, :signal_claim, 3) do
       host = System.get_env("ARB_HOST") || local_hostname()
 
@@ -753,6 +788,7 @@ defmodule Arbiter.Tasks.Claim do
         workspace_name: workspace.name,
         workspace_prefix: workspace.prefix,
         current_user: current_user_id,
+        assign: assign?,
         host: host
       }
 
