@@ -26,6 +26,43 @@ defmodule Arbiter.Sessions.HeartbeatTest do
     :ok
   end
 
+  test "two instances with different data homes get distinct heartbeat files in one runtime dir" do
+    previous = Application.fetch_env(:arbiter, :data_dir)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, v} -> Application.put_env(:arbiter, :data_dir, v)
+        :error -> Application.delete_env(:arbiter, :data_dir)
+      end
+    end)
+
+    Application.put_env(:arbiter, :data_dir, "/tmp/arb-instance-a")
+    {:ok, a} = Naming.heartbeat_path()
+    Application.put_env(:arbiter, :data_dir, "/tmp/arb-instance-b")
+    {:ok, b} = Naming.heartbeat_path()
+
+    assert Path.dirname(a) == Path.dirname(b)
+    refute a == b
+
+    Heartbeat.touch()
+    assert File.regular?(b)
+    refute File.exists?(a)
+  end
+
+  test "the runtime dir honors XDG_RUNTIME_DIR when no override is set" do
+    Application.delete_env(:arbiter, :sessions_runtime_dir)
+    xdg = System.get_env("XDG_RUNTIME_DIR")
+    System.put_env("XDG_RUNTIME_DIR", "/tmp/xdg-probe")
+
+    on_exit(fn ->
+      if xdg,
+        do: System.put_env("XDG_RUNTIME_DIR", xdg),
+        else: System.delete_env("XDG_RUNTIME_DIR")
+    end)
+
+    assert {:ok, "/tmp/xdg-probe/arbiter"} = Naming.socket_dir()
+  end
+
   test "touch/0 writes the heartbeat file, creating its directory" do
     assert :ok = Heartbeat.touch()
     assert {:ok, path} = Naming.heartbeat_path()
