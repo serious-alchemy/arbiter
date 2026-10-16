@@ -954,16 +954,36 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
       (get_in(pod, ["spec", "containers"]) || []) ++
         (get_in(pod, ["spec", "initContainers"]) || [])
 
-    if FakeK8sApi.handle(api, :psa) and
-         Enum.any?(containers, &(get_in(&1, ["securityContext", "privileged"]) == true)) do
-      status(
-        conn,
-        403,
-        "Forbidden",
-        ~s(pods "#{get_in(pod, ["metadata", "name"])}" is forbidden: violates PodSecurity "restricted:latest": privileged)
-      )
-    else
-      :ok
+    # The real API server validates the spec before admission runs: a privileged container
+    # with allowPrivilegeEscalation=false is `Invalid` and never reaches Pod Security.
+    inconsistent? =
+      Enum.any?(containers, fn c ->
+        get_in(c, ["securityContext", "privileged"]) == true and
+          get_in(c, ["securityContext", "allowPrivilegeEscalation"]) == false
+      end)
+
+    privileged? = Enum.any?(containers, &(get_in(&1, ["securityContext", "privileged"]) == true))
+    name = get_in(pod, ["metadata", "name"])
+
+    cond do
+      inconsistent? ->
+        status(
+          conn,
+          422,
+          "Invalid",
+          ~s(Pod "#{name}" is invalid: spec.containers[0].securityContext.allowPrivilegeEscalation: Invalid value: false: must be true when privileged is true)
+        )
+
+      privileged? and FakeK8sApi.handle(api, :psa) ->
+        status(
+          conn,
+          403,
+          "Forbidden",
+          ~s(pods "#{name}" is forbidden: violates PodSecurity "restricted:latest": privileged)
+        )
+
+      true ->
+        :ok
     end
   end
 

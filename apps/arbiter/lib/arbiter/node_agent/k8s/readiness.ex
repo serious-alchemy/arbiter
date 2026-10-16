@@ -178,13 +178,27 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
     end
   end
 
-  defp psa_negative(client, pod) do
-    probe =
-      update_in(pod, ["spec", "containers"], fn [worker | rest] ->
-        [put_in(worker, ["securityContext", "privileged"], true) | rest]
-      end)
+  @doc """
+  The pod the psa negative probe dry-runs: the builder's pod with a privileged worker
+  container. It must pass API validation to reach Pod Security admission, so
+  `allowPrivilegeEscalation` is true (privileged forbids false) and the capability drop is
+  removed.
+  """
+  @spec psa_probe_pod(map()) :: map()
+  def psa_probe_pod(pod) do
+    update_in(pod, ["spec", "containers"], fn [worker | rest] ->
+      sc =
+        (worker["securityContext"] || %{})
+        |> Map.put("privileged", true)
+        |> Map.put("allowPrivilegeEscalation", true)
+        |> Map.delete("capabilities")
 
-    case classify(Client.create_pod(client, probe, dry_run: true)) do
+      [Map.put(worker, "securityContext", sc) | rest]
+    end)
+  end
+
+  defp psa_negative(client, pod) do
+    case classify(Client.create_pod(client, psa_probe_pod(pod), dry_run: true)) do
       {:pod_security, _msg} ->
         check(
           "psa",
