@@ -1805,4 +1805,130 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:error, %Error{kind: :config_missing}} = Gitlab.self_approved?(@ref)
     end
   end
+
+  describe "rerun_ci/2" do
+    @mr_path "/api/v4/projects/12345/merge_requests/42"
+    @mr_pipelines_path "/api/v4/projects/12345/merge_requests/42/pipelines"
+    @rerun_jobs_path "/api/v4/projects/12345/pipelines/99/jobs"
+    @retry_path "/api/v4/projects/12345/pipelines/99/retry"
+    @new_pipeline_path "/api/v4/projects/12345/pipeline"
+
+    # Routes the MR / pipelines / jobs reads; `extra` handles the POST under test
+    # and the stub reports what it received.
+    defp rerun_stub(pipelines, jobs, extra) do
+      test = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", @mr_path} ->
+            Req.Test.json(conn, %{"sha" => "abc", "source_branch" => "feat/x"})
+
+          {"GET", @mr_pipelines_path} ->
+            Req.Test.json(conn, pipelines)
+
+          {"GET", @rerun_jobs_path} ->
+            Req.Test.json(conn, jobs)
+
+          {"POST", path} ->
+            {:ok, raw, conn} = Plug.Conn.read_body(conn)
+            send(test, {:post, path, raw})
+            extra.(conn)
+        end
+      end)
+    end
+
+    defp failed_pipeline(id \\ 99),
+      do: %{"id" => id, "sha" => "abc", "status" => "failed", "web_url" => "https://gl/p/#{id}"}
+
+    defp created(conn, id) do
+      conn
+      |> Plug.Conn.put_status(201)
+      |> Req.Test.json(%{"id" => id, "web_url" => "https://gl/p/#{id}"})
+    end
+
+    test ":failed_jobs hits the pipeline retry endpoint" do
+      rerun_stub([failed_pipeline()], [], &created(&1, 99))
+
+      assert {:ok, result} = Gitlab.rerun_ci(@ref, %{mode: :failed_jobs})
+      assert_received {:post, @retry_path, _}
+      assert result.mode == :failed_jobs
+      assert result.run_id == 99
+      assert result.url == "https://gl/p/99"
+      assert is_list(result.reused_jobs)
+      assert is_binary(result.rationale)
+      assert result.run_attempt == 1
+    end
+
+    test ":all_jobs creates a new pipeline on the MR source branch" do
+      rerun_stub([failed_pipeline()], [], &created(&1, 100))
+
+      assert {:ok, result} = Gitlab.rerun_ci(@ref, %{mode: :all_jobs})
+      assert_received {:post, @new_pipeline_path, body}
+      assert Jason.decode!(body)["ref"] == "feat/x"
+      assert result.mode == :all_jobs
+      assert result.run_id == 100
+      assert result.url == "https://gl/p/100"
+    end
+
+    test ":workflow sends inputs as pipeline variables" do
+      rerun_stub([failed_pipeline()], [], &created(&1, 101))
+
+      assert {:ok, %{mode: :workflow, run_id: 101}} =
+               Gitlab.rerun_ci(@ref, %{mode: :workflow, inputs: %{"force_deploy" => true}})
+
+      assert_received {:post, @new_pipeline_path, body}
+
+      assert %{"ref" => "feat/x", "variables" => [%{"key" => "force_deploy", "value" => "true"}]} =
+               Jason.decode!(body)
+    end
+
+    test "auto with succeeded upstream jobs picks all_jobs" do
+      jobs = [
+        %{"id" => 1, "name" => "build", "status" => "success"},
+        %{"id" => 2, "name" => "e2e", "status" => "failed"}
+      ]
+
+      rerun_stub([failed_pipeline()], jobs, &created(&1, 100))
+
+      assert {:ok, result} = Gitlab.rerun_ci(@ref, %{})
+      assert result.mode == :all_jobs
+      assert result.reused_jobs == ["build"]
+      assert_received {:post, @new_pipeline_path, _}
+    end
+
+    test "auto with an all-failed first attempt picks failed_jobs" do
+      jobs = [%{"id" => 2, "name" => "e2e", "status" => "failed"}]
+      rerun_stub([failed_pipeline()], jobs, &created(&1, 99))
+
+      assert {:ok, %{mode: :failed_jobs, run_attempt: 1}} = Gitlab.rerun_ci(@ref, %{mode: :auto})
+      assert_received {:post, @retry_path, _}
+    end
+
+    test "auto at attempt >= 2 (several pipelines on the head SHA) picks all_jobs" do
+      jobs = [%{"id" => 2, "name" => "e2e", "status" => "failed"}]
+      rerun_stub([failed_pipeline(99), failed_pipeline(98)], jobs, &created(&1, 100))
+
+      assert {:ok, %{mode: :all_jobs, run_attempt: 2}} = Gitlab.rerun_ci(@ref, %{})
+    end
+
+    test "inputs with an explicit failed_jobs mode is a validation error" do
+      assert {:error, %Error{kind: :validation_failed}} =
+               Gitlab.rerun_ci(@ref, %{mode: :failed_jobs, inputs: %{"a" => "b"}})
+    end
+
+    test "errors (no crash) when the head pipeline is not a settled failure" do
+      rerun_stub([%{failed_pipeline() | "status" => "running"}], [], & &1)
+      assert {:error, %Error{kind: :not_found, message: msg}} = Gitlab.rerun_ci(@ref, %{})
+      assert msg =~ "still running"
+    end
+
+    test "errors when no pipeline matches the head SHA" do
+      rerun_stub([%{failed_pipeline() | "sha" => "old"}], [], & &1)
+      assert {:error, %Error{kind: :not_found}} = Gitlab.rerun_ci(@ref, %{})
+    end
+
+    test "an unknown mode is rejected" do
+      assert {:error, %Error{kind: :validation_failed}} = Gitlab.rerun_ci(@ref, %{mode: :bogus})
+    end
+  end
 end

@@ -328,6 +328,10 @@ defmodule Arbiter.Mergers.Merger do
   `:workflow`, `:run_attempt`, `:reused_jobs`, `:rationale`, `:url`) or
   `{:error, term()}`.
 
+  On GitLab, `:failed_jobs` retries the head-SHA pipeline, `:all_jobs` and
+  `:workflow` create a new pipeline on the MR source branch (`:inputs` become
+  pipeline variables), and `:run_id` is the pipeline id.
+
   Optional — adapters with no re-run primitive simply don't implement it;
   callers guard with `function_exported?/3`.
   """
