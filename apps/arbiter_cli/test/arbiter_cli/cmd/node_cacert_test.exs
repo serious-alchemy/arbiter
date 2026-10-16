@@ -67,9 +67,10 @@ defmodule ArbiterCli.Cmd.NodeCacertTest do
   test "a private-CA chain is unknown_ca without --cacert and fetched with it" do
     {url, pem} = start_tls_server()
 
-    # pkix_test_data names the leaf after this host; the URL stays on localhost.
-    {:ok, host} = :inet.gethostname()
-    host_opts = [hostname: to_string(host)]
+    # pkix_test_data names the leaf after the machine (its FQDN, not what gethostname returns),
+    # so skip only the hostname match; the CA chain is still verified.
+    any_host = [customize_hostname_check: [match_fun: fn _, _ -> true end]]
+    host_opts = [transport_opts: any_host]
 
     assert {:error, {:tls_alert, {:unknown_ca, _}}} =
              ArbiterCli.Client.probe_url(url,
@@ -77,12 +78,13 @@ defmodule ArbiterCli.Cmd.NodeCacertTest do
                connect_options: host_opts
              )
 
-    [connect_options: ca_opts] = Node.__fetch_opts__(pem)
+    [connect_options: [transport_opts: ca_trust]] = Node.__fetch_opts__(pem)
+    ca_opts = [transport_opts: any_host ++ ca_trust]
 
     assert {:ok, "mode:"} =
              ArbiterCli.Client.probe_url(url,
                decode_body: false,
-               connect_options: host_opts ++ ca_opts
+               connect_options: ca_opts
              )
   end
 end
