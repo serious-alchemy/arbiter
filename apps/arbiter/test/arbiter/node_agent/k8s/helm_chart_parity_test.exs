@@ -26,7 +26,7 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartParityTest do
   @helm System.find_executable("helm")
   @moduletag skip: is_nil(@helm) && "helm is not installed"
 
-  @image_repository "ghcr.io/ryanrborn/arbiter-controller"
+  @image_repository "ghcr.io/serious-alchemy/arbiter-controller"
   @image_tag "9.9.9"
   @primary_url "https://arbiter.example.test"
   @primary_cidrs "100.64.0.10/32,100.64.0.11/32"

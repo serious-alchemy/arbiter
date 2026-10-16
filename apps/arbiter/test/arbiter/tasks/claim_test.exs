@@ -1456,6 +1456,79 @@ defmodule Arbiter.Tasks.ClaimTest do
     end
   end
 
+  describe "claim/3 and sync — Shortcut priority and story type" do
+    @sc_priority_field "654fc774-629c-41a5-81fa-3131ed1aee06"
+
+    defp stub_sc_story(story_extra) do
+      stub_sc(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/member"} ->
+            Req.Test.json(conn, %{"id" => @sc_member_id})
+
+          {"POST", "/api/v3/stories/search"} ->
+            Req.Test.json(conn, [Map.merge(sc_story_payload(), story_extra)])
+
+          {"GET", "/api/v3/stories/43"} ->
+            Req.Test.json(conn, Map.merge(sc_story_payload(), story_extra))
+
+          {"GET", "/api/v3/custom-fields"} ->
+            Req.Test.json(conn, [%{"id" => @sc_priority_field, "name" => "Priority"}])
+
+          {"GET", "/api/v3/stories/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/api/v3/stories/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"PUT", "/api/v3/stories/43"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{})
+        end
+      end)
+    end
+
+    defp priority_field(value),
+      do: %{"custom_fields" => [%{"field_id" => @sc_priority_field, "value" => value}]}
+
+    for {value, n} <- [{"Highest", 0}, {"High", 1}, {"Medium", 2}, {"Low", 3}] do
+      test "claim maps Priority #{value} to P#{n} and story_type bug to :bug", %{sc_ws: ws} do
+        stub_sc_story(Map.put(priority_field(unquote(value)), "story_type", "bug"))
+        assert {:ok, :created, task} = Claim.claim(ws, "43")
+        assert task.priority == unquote(n)
+        assert task.issue_type == :bug
+      end
+    end
+
+    test "claim with Priority unset keeps the default priority; chore maps", %{sc_ws: ws} do
+      stub_sc_story(%{"story_type" => "chore"})
+      assert {:ok, :created, task} = Claim.claim(ws, "43")
+      assert task.priority == 2
+      assert task.issue_type == :chore
+    end
+
+    test "explicit priority and issue_type opts override the mapping", %{sc_ws: ws} do
+      stub_sc_story(Map.put(priority_field("Highest"), "story_type", "bug"))
+      assert {:ok, :created, task} = Claim.claim(ws, "43", priority: 3, issue_type: :feature)
+      assert task.priority == 3
+      assert task.issue_type == :feature
+    end
+
+    test "claim_opts accepts priority and issue_type, validating them" do
+      assert {:ok, opts} = Claim.claim_opts(%{"priority" => "1", "issue_type" => "bug"})
+      assert opts[:priority] == 1
+      assert opts[:issue_type] == :bug
+      assert {:error, {:invalid_request, _}} = Claim.claim_opts(%{"priority" => 9})
+      assert {:error, {:invalid_request, _}} = Claim.claim_opts(%{"issue_type" => "nope"})
+    end
+
+    test "sync auto-claim uses the same mapping", %{sc_ws: ws} do
+      stub_sc_story(Map.put(priority_field("Low"), "story_type", "feature"))
+      assert {:ok, plan} = Claim.plan(ws)
+      assert {:ok, [{:created, task}]} = Claim.apply_plan(ws, plan)
+      assert task.priority == 3
+      assert task.issue_type == :feature
+    end
+  end
+
   describe "plan/1 and apply_plan/2 — Shortcut" do
     test "creates tasks for assigned open Shortcut stories with no task", %{sc_ws: ws} do
       stub_sc(fn conn ->

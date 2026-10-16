@@ -2176,7 +2176,8 @@ defmodule Arbiter.MCP.Catalog do
           "assigned to the workspace user (skip with `force: true`) and creates a linked ticket. " <>
           "Idempotent — returns the existing ticket if one already references the issue. " <>
           "`difficulty` and `issue_type` are otherwise derived from the issue's tracker labels " <>
-          "where the adapter supports it (currently GitHub); `difficulty` and `repo` below " <>
+          "where the adapter supports it (GitHub labels; Shortcut story_type and Priority field); " <>
+          "`priority`, `issue_type`, `difficulty` and `repo` below " <>
           "override whatever would otherwise be derived or left unset (`difficulty` is checked " <>
           "against 0..5 before the tracker is called). Returns `{status: created | existing, " <>
           "task}` — the REST shape; refusals are typed `already_claimed` (409) / `not_assigned` (403). " <>
@@ -2217,6 +2218,18 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "0 (D0, trivial) .. 5 (D5). Overrides any value derived from the issue's " <>
                 "labels. Omit to keep the derived value (or nil, which routing treats as D2)."
+          },
+          "priority" => %{
+            "type" => "integer",
+            "description" =>
+              "0 (P0, highest) .. 4. Overrides any priority derived from the issue " <>
+                "(GitHub label / Shortcut Priority field). Omit to keep it (default P2)."
+          },
+          "issue_type" => %{
+            "type" => "string",
+            "description" =>
+              "Ticket type (bug, feature, chore, ...). Overrides any type derived from " <>
+                "the issue (GitHub labels / Shortcut story_type)."
           },
           "repo" => %{
             "type" => "string",

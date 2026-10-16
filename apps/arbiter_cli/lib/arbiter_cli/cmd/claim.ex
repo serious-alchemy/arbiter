@@ -1,6 +1,7 @@
 defmodule ArbiterCli.Cmd.Claim do
   @moduledoc """
-  `arb claim <ref> [--force] [--difficulty N] [--repo <repo>] [--json]` — create a task
+  `arb claim <ref> [--force] [--difficulty N] [--priority N] [--type T]
+  [--repo <repo>] [--json]` — create a task
   linked to a tracker issue assigned to the workspace user.
 
   Bulk: `arb ticket claim --epic <tracker-epic-id>` or `--query <tracker search>`
@@ -29,6 +30,12 @@ defmodule ArbiterCli.Cmd.Claim do
                    budget routed to workers. **Default when unspecified**:
                    the task is created with no difficulty set; routing
                    treats an unset difficulty as D2 at dispatch time.
+    --priority N   Task priority (0..4, P0 highest). Overrides the priority the
+                   tracker adapter derives (GitHub `priority: N` label;
+                   Shortcut "Priority" custom field Highest/High/Medium/Low →
+                   0/1/2/3). Unset keeps the derived value, else P2.
+    --type T       Issue type (bug, feature, chore, ...). Overrides the type
+                   the adapter derives (GitHub labels; Shortcut story_type).
     --repo <repo>  Repo the claimed task belongs to, as a configured
                    `repo_paths` key. Persisted on the task and also printed
                    as a tip for a later `arb dispatch`. Usually unnecessary
@@ -47,6 +54,8 @@ defmodule ArbiterCli.Cmd.Claim do
   @switches [
     force: :boolean,
     difficulty: :string,
+    priority: :integer,
+    type: :string,
     repo: :string,
     epic: :string,
     query: :string,
@@ -92,6 +101,8 @@ defmodule ArbiterCli.Cmd.Claim do
       |> maybe_put("force", opts[:force])
       |> maybe_put("difficulty", opts[:difficulty])
       |> maybe_put("repo", opts[:repo])
+      |> maybe_put("priority", opts[:priority])
+      |> maybe_put("issue_type", opts[:type])
 
     case Client.post("/api/workspaces/#{workspace_id}/claim", body) do
       {:ok, payload} -> emit(payload, opts[:repo], mode)

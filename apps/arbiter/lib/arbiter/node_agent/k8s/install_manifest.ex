@@ -441,7 +441,13 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   `:registry` prefix (optional: the chart does not need it for its own image) and the
   `:chart_ref` the node reports back for `helm upgrade` (optional).
   """
-  @type values_server :: [primary_url: String.t(), registry: String.t(), chart_ref: String.t()]
+  @type values_server :: [
+          primary_url: String.t(),
+          registry: String.t(),
+          chart_ref: String.t(),
+          image_repository: String.t(),
+          image_tag: String.t()
+        ]
 
   @doc """
   The `arbiter-node` chart's values for `spec` (`charts/arbiter-node/values.yaml`), as a
@@ -473,10 +479,19 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
          "limitRange" => limit_range_values(spec)
        }
        |> put_value("chartRef", present(Keyword.get(server, :chart_ref)))
+       |> put_value("image", image_values(server))
        |> put_value("placement", placement_values(spec))
        |> put_value("admissionPolicy", if(spec.admission, do: %{"enabled" => true}))
        |> put_value("registries", registry_values(spec, registry))}
     end
+  end
+
+  # The running release's controller image, so a default install pulls what exists.
+  defp image_values(server) do
+    for {key, opt} <- [{"repository", :image_repository}, {"tag", :image_tag}],
+        value = present(Keyword.get(server, opt)),
+        into: %{},
+        do: {key, value}
   end
 
   @doc "`values/2` as a values file, headed by a comment (no secret: safe to commit)."

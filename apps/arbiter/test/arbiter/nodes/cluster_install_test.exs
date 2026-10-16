@@ -119,7 +119,7 @@ defmodule Arbiter.Nodes.ClusterInstallTest do
     test "the Helm install: namespace, join Secret, and the values piped into helm install" do
       assert {:ok, %{helm: helm}} = ClusterInstall.plan(@params, version: "v0.2.43")
 
-      assert helm.chart_ref == "oci://ghcr.io/ryanrborn/charts/arbiter-node"
+      assert helm.chart_ref == "oci://ghcr.io/serious-alchemy/charts/arbiter-node"
       assert helm.chart_version == "0.2.43"
       assert helm.release == "mesaana-k3s"
 
@@ -133,7 +133,7 @@ defmodule Arbiter.Nodes.ClusterInstallTest do
 
       assert helm.install_command ==
                ~s(curl -fsSL "#{helm.values_url}" | helm install mesaana-k3s ) <>
-                 "oci://ghcr.io/ryanrborn/charts/arbiter-node --version 0.2.43 " <>
+                 "oci://ghcr.io/serious-alchemy/charts/arbiter-node --version 0.2.43 " <>
                  "--namespace ci-workers -f -"
     end
 

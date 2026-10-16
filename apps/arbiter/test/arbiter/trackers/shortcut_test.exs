@@ -1058,9 +1058,98 @@ defmodule Arbiter.Trackers.ShortcutTest do
   # ---- extract_priority/1 ----------------------------------------------------
 
   describe "extract_priority/1" do
-    test "always returns nil — Shortcut has no native priority field" do
-      assert nil == Shortcut.extract_priority(%{"name" => "Some Story", "estimate" => 5})
+    @field_id "654fc774-629c-41a5-81fa-3131ed1aee06"
+
+    defp story_with_priority(value) do
+      %{
+        "arbiter_priority_field_id" => @field_id,
+        "custom_fields" => [
+          %{"field_id" => "other-field", "value" => "Highest"},
+          %{"field_id" => @field_id, "value" => value}
+        ]
+      }
+    end
+
+    for {value, n} <- [{"Highest", 0}, {"High", 1}, {"Medium", 2}, {"Low", 3}] do
+      test "#{value} maps to #{n}" do
+        assert {:ok, unquote(n)} = Shortcut.extract_priority(story_with_priority(unquote(value)))
+      end
+    end
+
+    test "case-insensitive value" do
+      assert {:ok, 1} = Shortcut.extract_priority(story_with_priority("hIgH"))
+    end
+
+    test "unset (no Priority entry on the story) returns nil" do
+      story = %{"arbiter_priority_field_id" => @field_id, "custom_fields" => []}
+      assert nil == Shortcut.extract_priority(story)
+    end
+
+    test "unknown value, unresolved field, or bare story returns nil" do
+      assert nil == Shortcut.extract_priority(story_with_priority("Urgent"))
+
+      assert nil ==
+               Shortcut.extract_priority(%{
+                 "custom_fields" => [%{"field_id" => @field_id, "value" => "High"}]
+               })
+
       assert nil == Shortcut.extract_priority(%{})
+    end
+  end
+
+  describe "extract_issue_type/1" do
+    test "maps story_type bug/feature/chore" do
+      assert {:ok, :bug} = Shortcut.extract_issue_type(%{"story_type" => "bug"})
+      assert {:ok, :feature} = Shortcut.extract_issue_type(%{"story_type" => "feature"})
+      assert {:ok, :chore} = Shortcut.extract_issue_type(%{"story_type" => "chore"})
+    end
+
+    test "missing or unknown story_type returns nil" do
+      assert nil == Shortcut.extract_issue_type(%{})
+      assert nil == Shortcut.extract_issue_type(%{"story_type" => "epic"})
+    end
+  end
+
+  describe "fetch/1 — Priority custom field resolution" do
+    @field_id "654fc774-629c-41a5-81fa-3131ed1aee06"
+
+    test "annotates the story with the org's Priority field id, found by name" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v3/stories/1234" ->
+            Req.Test.json(conn, %{
+              "id" => 1234,
+              "custom_fields" => [%{"field_id" => @field_id, "value" => "High"}]
+            })
+
+          "/api/v3/custom-fields" ->
+            Req.Test.json(conn, [
+              %{"id" => "zzz", "name" => "Squad"},
+              %{"id" => @field_id, "name" => "priority"}
+            ])
+        end
+      end)
+
+      assert {:ok, story} = Shortcut.fetch("1234")
+      assert {:ok, 1} = Shortcut.extract_priority(story)
+    end
+
+    test "a failing custom-fields lookup leaves the story intact (priority nil)" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v3/stories/1234" ->
+            Req.Test.json(conn, %{
+              "id" => 1234,
+              "custom_fields" => [%{"field_id" => @field_id, "value" => "High"}]
+            })
+
+          "/api/v3/custom-fields" ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, story} = Shortcut.fetch("1234")
+      assert nil == Shortcut.extract_priority(story)
     end
   end
 
