@@ -1989,7 +1989,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     else
       [
         public_url_result(url, nodes),
-        exposure_result(url, resp)
+        exposure_result(url, resp),
+        cluster_url_result(url, nodes)
       ] ++
         Enum.flat_map(nodes, &node_results/1) ++
         registry ++
@@ -2001,6 +2002,38 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   end
 
   defp public_url_result(nil, []), do: nil
+
+  # A cluster controller accepts only https, or http to loopback
+  # (`Arbiter.NodeAgent.Config.validate_url/1`); anything else retries forever.
+  defp cluster_url_result(url, nodes) when is_binary(url) do
+    if Enum.any?(nodes, &(&1["kind"] == "cluster")) and not cluster_url_ok?(url) do
+      nodes_result(
+        "nodes.public_url cluster-safe",
+        :warn,
+        "#{url} would be refused by a cluster controller (insecure_url)",
+        "Cluster controllers need https (or http to loopback): " <>
+          "arb settings set nodes.public_url https://<primary>.<tailnet>.ts.net"
+      )
+    end
+  end
+
+  defp cluster_url_result(_url, _nodes), do: nil
+
+  defp cluster_url_ok?(url) do
+    case URI.parse(url) do
+      %URI{scheme: "https", host: host} when is_binary(host) and host != "" -> true
+      %URI{scheme: "http", host: host} when is_binary(host) -> loopback?(host)
+      _ -> false
+    end
+  end
+
+  defp loopback?(host) do
+    host = host |> String.trim_leading("[") |> String.trim_trailing("]")
+
+    host == "localhost" or
+      match?({:ok, {127, _, _, _}}, :inet.parse_address(String.to_charlist(host))) or
+      match?({:ok, {0, 0, 0, 0, 0, 0, 0, 1}}, :inet.parse_address(String.to_charlist(host)))
+  end
 
   defp public_url_result(nil, _nodes) do
     nodes_result(

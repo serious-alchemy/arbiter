@@ -398,6 +398,10 @@ defmodule ArbiterWeb.NodesLive do
 
       {:error, :no_public_url} ->
         {:error, "nodes.public_url is not set."}
+
+      {:error, {:insecure_public_url, url}} ->
+        {:error,
+         "nodes.public_url #{url} is refused by the cluster controller (only https, or http to loopback)."}
     end
   end
 

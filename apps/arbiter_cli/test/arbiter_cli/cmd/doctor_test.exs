@@ -2568,6 +2568,22 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert detail =~ @url
     end
 
+    test "a cluster node with a public_url the controller refuses is flagged" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => "http://172.26.0.1:4949",
+          "exposure" => "private",
+          "nodes" => [%{"id" => "n1", "name" => "k", "kind" => "cluster", "state" => "active"}]
+        })
+      )
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(nodes_results(), "nodes.public_url cluster-safe")
+
+      assert detail =~ "http://172.26.0.1:4949"
+      assert hint =~ "https"
+    end
+
     test "an unreachable public_url fails, non-fatal, with a hint" do
       stub_nodes(nodes_resp(%{"public_url" => @url, "exposure" => "private"}), {%{}, 502})
 

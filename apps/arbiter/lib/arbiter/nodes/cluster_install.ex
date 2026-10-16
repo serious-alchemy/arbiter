@@ -49,13 +49,24 @@ defmodule Arbiter.Nodes.ClusterInstall do
   `{:error, :no_release}` (no deployed release to name an image for). Options:
   `:version` (a seam for tests).
   """
-  @spec server_opts(keyword()) :: {:ok, InstallManifest.server()} | {:error, atom()}
+  @spec server_opts(keyword()) ::
+          {:ok, InstallManifest.server()} | {:error, atom() | {:insecure_public_url, String.t()}}
   def server_opts(opts \\ []) do
     with {:ok, url} <- present(Settings.nodes_public_url(), :no_public_url),
+         :ok <- controller_accepts(url),
          {:ok, registry} <- present(Settings.nodes_registry(), :no_registry),
          {:ok, version} <-
            present(Keyword.get_lazy(opts, :version, &Agent.release_tag/0), :no_release) do
       {:ok, [image: image(registry, version), primary_url: url, registry: registry]}
+    end
+  end
+
+  # The controller refuses a primary URL that is neither https nor loopback http
+  # (`Arbiter.NodeAgent.Config`); rendering one would leave it retrying forever.
+  defp controller_accepts(url) do
+    case Arbiter.NodeAgent.Config.validate_url(url) do
+      {:ok, _} -> :ok
+      {:error, _} -> {:error, {:insecure_public_url, url}}
     end
   end
 
