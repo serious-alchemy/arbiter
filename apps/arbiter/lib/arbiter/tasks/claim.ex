@@ -99,7 +99,7 @@ defmodule Arbiter.Tasks.Claim do
     type = Trackers.workspace_type(workspace)
     adapter = Trackers.for_type(type)
     force? = Keyword.get(opts, :force, false)
-    overrides = Keyword.take(opts, [:difficulty, :repo])
+    overrides = Keyword.take(opts, [:difficulty, :repo, :priority, :issue_type])
 
     Trackers.with_workspace(type, workspace, fn ->
       do_claim(adapter, type, workspace, ref, force?, overrides)
@@ -172,10 +172,36 @@ defmodule Arbiter.Tasks.Claim do
   @spec claim_opts(map()) :: {:ok, keyword()} | {:error, {:invalid_request, String.t()}}
   def claim_opts(params) when is_map(params) do
     with {:ok, difficulty} <- optional_difficulty(Map.get(params, "difficulty")),
-         {:ok, repo} <- optional_repo(Map.get(params, "repo")) do
-      {:ok, [difficulty: difficulty, repo: repo]}
+         {:ok, repo} <- optional_repo(Map.get(params, "repo")),
+         {:ok, priority} <- optional_priority(Map.get(params, "priority")),
+         {:ok, issue_type} <- optional_issue_type(Map.get(params, "issue_type")) do
+      {:ok, [difficulty: difficulty, repo: repo, priority: priority, issue_type: issue_type]}
     end
   end
+
+  defp optional_priority(nil), do: {:ok, nil}
+  defp optional_priority(v) when is_integer(v) and v in 0..4, do: {:ok, v}
+
+  defp optional_priority(v) when is_binary(v) do
+    case Integer.parse(v) do
+      {n, ""} when n in 0..4 -> {:ok, n}
+      _ -> {:error, {:invalid_request, "priority must be an integer 0..4"}}
+    end
+  end
+
+  defp optional_priority(_), do: {:error, {:invalid_request, "priority must be an integer 0..4"}}
+
+  defp optional_issue_type(nil), do: {:ok, nil}
+  defp optional_issue_type(""), do: {:ok, nil}
+
+  defp optional_issue_type(v) when is_binary(v) do
+    case Enum.find(Issue.issue_types(), &(Atom.to_string(&1) == v)) do
+      nil -> {:error, {:invalid_request, "unknown issue_type \"#{v}\""}}
+      type -> {:ok, type}
+    end
+  end
+
+  defp optional_issue_type(_), do: {:error, {:invalid_request, "issue_type must be a string"}}
 
   defp optional_difficulty(nil), do: {:ok, nil}
   defp optional_difficulty(v) when is_integer(v), do: difficulty_in_range(v)
@@ -338,6 +364,8 @@ defmodule Arbiter.Tasks.Claim do
       |> maybe_put_extracted(:issue_type, adapter, :extract_issue_type, issue_map)
       |> maybe_put_override(:difficulty, overrides)
       |> maybe_put_override(:repo, overrides)
+      |> maybe_put_override(:priority, overrides)
+      |> maybe_put_override(:issue_type, overrides)
 
     case Ash.create(Issue, attrs) do
       {:ok, task} -> {:ok, :created, task}
