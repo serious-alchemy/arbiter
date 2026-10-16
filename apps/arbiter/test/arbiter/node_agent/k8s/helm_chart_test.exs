@@ -6,8 +6,8 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartTest do
   The static tests read the chart's files and need nothing installed. The `:helm`
   tests render it with the `helm` binary and are skipped where it is absent (CI's
   `helm-chart` job installs it and runs `scripts/helm-chart-check.sh`, which is the
-  lint + kubeconform half). The full chart-vs-`InstallManifest` document diff is KH6;
-  here the two renderers are only held to the same kinds and names.
+  lint + kubeconform half). The full chart-vs-`InstallManifest` document diff is `helm_chart_parity_test.exs`
+  (KH6); here the two renderers are only held to the same kinds and names.
   """
   use ExUnit.Case, async: true
 

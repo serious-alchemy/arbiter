@@ -281,6 +281,19 @@ correctly prepared namespace; the monitor fails closed until a canary has run.
 kube-router specifically (use the rollout's step 1 for that), or the agent-to-primary
 connection.
 
+**The chart, on the same cluster (KH6).** `test/k8s/chart_install_e2e_test.exs` `helm install`s
+`charts/arbiter-node` (`mode=all`) into an `arb-e2e-<random>` namespace labelled Pod Security
+`restricted`, then runs the canary and every readiness check against what the chart made, so the
+guardrails under test are the chart's (`K8sE2E.chart_namespace!/2`), not `InstallManifest`'s.
+It additionally needs `helm` on `PATH` (it runs `helm` with `--kubeconfig <that file>` only, and
+uninstalls the release by name at the end). The real controller image is not available to a
+throwaway cluster, so after the install the controller container is swapped for the same `socat`
+stand-in the other tests use; the chart's Service, Role, ConfigMaps and NetworkPolicies are all
+live. The offline half of KH6 needs no cluster: `helm_chart_parity_test.exs` (tag `:helm`, skipped
+without `helm`) renders the chart and `InstallManifest.render/2` for the same configuration and
+fails on any difference outside a short allow-list (Helm's labels, the Namespace, `imagePullPolicy`,
+the three `ARB_*` Helm env vars), and compares `controller.yaml` through `ControllerConfig`.
+
 ## 6. What is and is not wired (as of K14)
 
 In the tree: the canary, the readiness checks, `ReadinessMonitor`, the controller
