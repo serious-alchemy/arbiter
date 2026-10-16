@@ -62,3 +62,30 @@ cd apps/arbiter && mix test test/arbiter/node_agent/k8s/helm_chart_test.exs   # 
 `quota.hard` and `limitRange` are explicit figures for `concurrency.max=2` and the default worker size:
 Helm templates cannot parse Kubernetes quantities. For another shape take the numbers from the primary's
 `InstallManifest` or edit them by hand.
+
+## Published artefacts (release CI)
+
+Every tagged release (`.github/workflows/release.yml`, job `publish-oci`) publishes, all `linux/amd64`:
+
+| Artefact | Reference |
+|---|---|
+| controller image | `ghcr.io/<owner>/arbiter-controller:<version>` (also `:v<version>`) |
+| this chart | `oci://ghcr.io/<owner>/charts/arbiter-node` at `--version <version>` (`appVersion` is the same) |
+| worker base | `ghcr.io/<owner>/arbiter-worker-base:<hash>`, the content hash a primary tags the same base with |
+
+The controller image and the worker base are built from the Containerfiles the primary generates
+(`mix arbiter.containerfile controller|worker-base --pin`), so CI and the primary cannot drift.
+
+**Signing** is optional: set the repository variable `RELEASE_COSIGN=true`, or run the workflow by hand
+with `sign` ticked. Verify with
+
+    cosign verify ghcr.io/<owner>/arbiter-controller@<digest> \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      --certificate-identity-regexp '^https://github.com/<owner>/<repo>/\.github/workflows/release\.yml@'
+
+and pin the verified digest with `--set image.digest=sha256:...`.
+
+**After the first release (operator, one-time):** open each of the three packages on GitHub and confirm
+visibility is *public* (Package settings, Change visibility), since a package a workflow creates is not
+necessarily public even when the repository is (H7). The packages are linked to the repository by the
+`org.opencontainers.image.source` label. An arm64 node needs an arm64 release build, which is not built (H4).

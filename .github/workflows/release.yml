@@ -9,6 +9,10 @@ on:
       tag:
         description: "Tag name to release (e.g. v0.1.0)"
         required: true
+      sign:
+        description: "Sign the GHCR images and chart with cosign (keyless)"
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -19,6 +23,9 @@ jobs:
 
     permissions:
       contents: write
+
+    outputs:
+      tag: ${{ steps.tag.outputs.name }}
 
     env:
       LANG: en_US.UTF-8
@@ -62,6 +69,7 @@ jobs:
             unzip \
             tar \
             gzip \
+            skopeo \
             which \
             glibc-langpack-en
 
@@ -203,6 +211,30 @@ jobs:
         run: |
           bash scripts/check-release-shared-libs.sh "${TARBALL}"
 
+      - name: Render the container build inputs for the GHCR job
+        # KH7 (docs/design/remote-workers.md §20.8): the controller image and the
+        # shared worker base are built from the Containerfiles the primary itself
+        # uses (`mix arbiter.containerfile`), digest-pinned here, where Erlang/Elixir
+        # already are; the publish-oci job below only needs docker and helm.
+        # The controller tarball has a top-level `arbiter/` (the primary's own
+        # layout), unlike the release asset, which unpacks to `.`.
+        run: |
+          mkdir -p dist
+          (cd apps/arbiter \
+            && mix arbiter.containerfile controller --pin --out "${GITHUB_WORKSPACE}/dist/Containerfile.controller" \
+            && mix arbiter.containerfile worker-base --pin \
+                 --out "${GITHUB_WORKSPACE}/dist/Containerfile.worker-base" \
+                 --hash-out "${GITHUB_WORKSPACE}/dist/worker-base.hash")
+          tar -czf dist/release.tar.gz -C _build/prod/rel arbiter
+
+      - name: Upload the container build inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-inputs
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -216,3 +248,147 @@ jobs:
             arb.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-oci:
+    name: Publish controller image, chart and worker base to GHCR
+    # KH7 (OD6): the controller image, the arbiter-node chart and the worker base are
+    # public artefacts of a tagged release. Optional cosign signing is behind the
+    # `sign` dispatch input or the repository variable RELEASE_COSIGN=true; it is never
+    # a gate. Operator checks after the first release: the package visibility on the
+    # GHCR packages page (H7) and an arm64 node (H4, the image is linux/amd64 only).
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+      SIGN: ${{ inputs.sign == true || vars.RELEASE_COSIGN == 'true' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the container build inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: container-inputs
+          path: dist/
+
+      - name: Work out names and versions
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          # Chart `version` / `appVersion` and the image tag are the release without the
+          # leading v: the chart's image tag defaults to its appVersion.
+          VERSION="${TAG#v}"
+          {
+            echo "CONTROLLER=ghcr.io/${OWNER}/arbiter-controller"
+            echo "WORKER_BASE=ghcr.io/${OWNER}/arbiter-worker-base"
+            echo "CHARTS=oci://ghcr.io/${OWNER}/charts"
+            echo "CHART_REPO=ghcr.io/${OWNER}/charts/arbiter-node"
+            echo "VERSION=${VERSION}"
+            echo "BASE_HASH=$(tr -d '[:space:]' < dist/worker-base.hash)"
+            echo "BASE_IMAGE=$(grep -m1 '^FROM ' dist/Containerfile.controller | cut -d' ' -f2)"
+          } >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the controller image
+        id: controller
+        uses: docker/build-push-action@v6
+        with:
+          # The Containerfile ADDs release.tar.gz from the context and copies nothing
+          # else, so the rest of dist/ stays out of the image.
+          context: dist
+          file: dist/Containerfile.controller
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.CONTROLLER }}:${{ env.VERSION }}
+            ${{ env.CONTROLLER }}:${{ env.TAG }}
+          # `source` links the package to this repository, which is what lets a
+          # public repository's package inherit public visibility (H7).
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=Arbiter controller (open-core release)
+            arbiter.base-image=${{ env.BASE_IMAGE }}
+
+      - name: Build and push the worker base
+        id: base
+        run: |
+          REF="${WORKER_BASE}:${BASE_HASH}"
+          # The tag is the content hash of the pinned Containerfile: an existing tag is
+          # already this base, and re-pushing would only move its digest.
+          if docker buildx imagetools inspect "${REF}" >/dev/null 2>&1; then
+            echo "${REF} already published"
+            docker buildx imagetools inspect "${REF}" --format '{{.Manifest.Digest}}' \
+              | sed 's/^/digest=/' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p "${RUNNER_TEMP}/empty-context"
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false --sbom=false \
+            --file dist/Containerfile.worker-base \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.licenses=Apache-2.0" \
+            --label "org.opencontainers.image.description=Arbiter shared worker image base" \
+            --tag "${REF}" \
+            --metadata-file "${RUNNER_TEMP}/base-metadata.json" \
+            --push \
+            "${RUNNER_TEMP}/empty-context"
+          jq -r '"digest=" + .["containerimage.digest"]' "${RUNNER_TEMP}/base-metadata.json" >> "$GITHUB_OUTPUT"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Package and push the chart
+        id: chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm package charts/arbiter-node --version "${VERSION}" --app-version "${VERSION}" --destination dist
+          echo "${GH_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          helm push "dist/arbiter-node-${VERSION}.tgz" "${CHARTS}" 2>&1 | tee "${RUNNER_TEMP}/helm-push.log"
+          DIGEST="$(sed -n 's/^Digest: //p' "${RUNNER_TEMP}/helm-push.log")"
+          test -n "${DIGEST}" || { echo "helm push printed no digest" >&2; exit 1; }
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        if: env.SIGN == 'true'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the images and the chart (cosign, keyless)
+        if: env.SIGN == 'true'
+        # Identity is this workflow's GitHub OIDC token; verify with
+        #   cosign verify <ref>@<digest> --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        #     --certificate-identity-regexp '^https://github.com/<owner>/<repo>/\.github/workflows/release\.yml@'
+        run: |
+          cosign sign --yes "${CONTROLLER}@${{ steps.controller.outputs.digest }}"
+          cosign sign --yes "${WORKER_BASE}@${{ steps.base.outputs.digest }}"
+          cosign sign --yes "${CHART_REPO}@${{ steps.chart.outputs.digest }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### GHCR artefacts for ${TAG}"
+            echo "- controller: \`${CONTROLLER}:${VERSION}@${{ steps.controller.outputs.digest }}\`"
+            echo "- worker base: \`${WORKER_BASE}:${BASE_HASH}@${{ steps.base.outputs.digest }}\`"
+            echo "- chart: \`${CHARTS}/arbiter-node:${VERSION}@${{ steps.chart.outputs.digest }}\`"
+            echo "- cosign: ${SIGN}"
+            echo
+            echo "First release only: check the three packages are public (Package settings, Change visibility)."
+          } >> "$GITHUB_STEP_SUMMARY"
