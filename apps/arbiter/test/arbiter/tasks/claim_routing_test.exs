@@ -43,6 +43,19 @@ defmodule Arbiter.Tasks.ClaimRoutingTest do
     :ok
   end
 
+  defp story_map(id, area, estimate) do
+    %{
+      "id" => String.to_integer(id),
+      "name" => "Story #{id}",
+      "description" => "d",
+      "owner_ids" => [@member],
+      "completed" => false,
+      "started" => false,
+      "estimate" => estimate,
+      "custom_fields" => if(area, do: [%{"field_id" => "f-area", "value" => area}], else: [])
+    }
+  end
+
   defp stub_story(area, estimate) do
     Req.Test.stub(Arbiter.Trackers.Shortcut.HTTP, fn conn ->
       case {conn.method, conn.request_path} do
@@ -56,17 +69,10 @@ defmodule Arbiter.Tasks.ClaimRoutingTest do
           ])
 
         {"GET", "/api/v3/stories/" <> id} when id in ~w(1 2 3 4 5 6 7 8) ->
-          Req.Test.json(conn, %{
-            "id" => String.to_integer(id),
-            "name" => "Story #{id}",
-            "description" => "d",
-            "owner_ids" => [@member],
-            "completed" => false,
-            "started" => false,
-            "estimate" => estimate,
-            "custom_fields" =>
-              if(area, do: [%{"field_id" => "f-area", "value" => area}], else: [])
-          })
+          Req.Test.json(conn, story_map(id, area, estimate))
+
+        {"GET", "/api/v3/epics/9/stories"} ->
+          Req.Test.json(conn, [story_map("7", area, estimate)])
 
         {_, _} ->
           Req.Test.json(conn, [])
@@ -110,6 +116,41 @@ defmodule Arbiter.Tasks.ClaimRoutingTest do
     assert {:ok, :created, task} = Claim.claim(ws, "4")
     assert task.repo == "server"
     assert task.notes =~ "nonexistent"
+  end
+
+  describe "an explicit repo is validated against repo_paths keys (bd-7u1b6n)" do
+    test "claim maps a slug-shaped repo onto its configured key" do
+      ws = make_ws(%{})
+      stub_story(nil, nil)
+      assert {:ok, :created, task} = Claim.claim(ws, "1", repo: "emricare/web")
+      assert task.repo == "web"
+    end
+
+    test "claim refuses an unconfigured repo and lists the valid keys" do
+      ws = make_ws(%{})
+      stub_story(nil, nil)
+      assert {:error, err} = Claim.claim(ws, "1", repo: "emricare/nowhere")
+      assert inspect(err) =~ "emricare/nowhere"
+      assert inspect(err) =~ "server"
+      assert inspect(err) =~ "web"
+    end
+
+    test "bulk claim maps a slug and refuses an unconfigured repo per row" do
+      ws = make_ws(%{})
+      stub_story(nil, nil)
+
+      assert {:ok, %{results: [%{status: "created", task_id: id}]}} =
+               Claim.bulk(ws, {:epic, "9"}, yes: true, repo: "emricare/web")
+
+      assert Ash.get!(Arbiter.Tasks.Issue, id).repo == "web"
+
+      ws2 = make_ws(%{})
+
+      assert {:ok, %{results: [%{status: "refused", reason: reason}]}} =
+               Claim.bulk(ws2, {:epic, "9"}, yes: true, repo: "emricare/nowhere")
+
+      assert reason =~ "server"
+    end
   end
 
   test "difficulty_from_estimate seeds difficulty from points" do

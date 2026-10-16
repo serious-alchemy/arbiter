@@ -298,6 +298,9 @@ defmodule Arbiter.Tasks.Issue do
 
       require_atomic? false
 
+      # bd-7u1b6n: a changed `repo` must be a configured `repo_paths` key.
+      change {Arbiter.Tasks.Issue.Changes.ResolveRepo, []}
+
       # bd-54m4vv (G12): a change to `permissions` is authority-checked and
       # audited in `permission_events`; an update that leaves it alone is not.
       change {Arbiter.Tasks.Issue.Changes.ApplyPermissions, []}

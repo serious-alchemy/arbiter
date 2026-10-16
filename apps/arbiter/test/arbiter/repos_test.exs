@@ -181,4 +181,35 @@ defmodule Arbiter.ReposTest do
       assert Enum.map(entries, & &1.workspace_id) |> Enum.sort() == Enum.sort([ws1.id, ws2.id])
     end
   end
+
+  describe "open tickets on an unconfigured repo (bd-7u1b6n)" do
+    setup do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-uc",
+          prefix: "uc",
+          config: %{"repo_paths" => %{"tonic" => "/tmp/tonic"}}
+        })
+
+      {:ok, issue} = Ash.create(Arbiter.Tasks.Issue, %{title: "t", workspace_id: ws.id})
+      %{ws: ws, issue: issue}
+    end
+
+    defp set_repo!(issue, repo),
+      do: issue |> Ecto.Changeset.change(repo: repo) |> Arbiter.Repo.update!()
+
+    test "is listed as (unconfigured)", %{issue: issue} do
+      set_repo!(issue, "emricare/tonic")
+
+      assert [%{name: "emricare/tonic", path: nil}] =
+               Enum.filter(Repos.list(), &(&1.source == "(unconfigured)"))
+    end
+
+    test "a configured key, or a closed ticket, is not listed", %{issue: issue} do
+      assert Enum.filter(Repos.list(), &(&1.source == "(unconfigured)")) == []
+
+      issue |> set_repo!("emricare/tonic") |> Ash.update!(%{}, action: :close)
+      assert Enum.filter(Repos.list(), &(&1.source == "(unconfigured)")) == []
+    end
+  end
 end

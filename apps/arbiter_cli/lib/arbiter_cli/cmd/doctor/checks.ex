@@ -528,12 +528,10 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp check_repo_count(workspaces) do
     case Client.get("/api/repos") do
       {:ok, %{"data" => [_ | _] = repos}} ->
-        %Result{
-          name: "repos resolved",
-          status: :ok,
-          detail: "#{length(repos)} repo(s)",
-          blocks_readiness: false
-        }
+        case unconfigured_repo_names(repos) do
+          [] -> repos_ok_result(repos)
+          names -> unconfigured_repos_result(names)
+        end
 
       {:ok, %{"data" => []}} ->
         no_repos_result(workspaces)
@@ -541,6 +539,37 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       other ->
         unknown_result("repos resolved", other)
     end
+  end
+
+  # bd-7u1b6n: `/api/repos` lists, as `(unconfigured)`, every repo name a live
+  # worker or an open ticket carries that is not a configured `repo_paths` key.
+  # Such a ticket dispatches against a repo nothing resolves and is refused on
+  # resume, so it is a warning with the fix named, not an all-clear.
+  defp unconfigured_repo_names(repos) do
+    for %{"source" => "(unconfigured)", "name" => name} <- repos, do: name
+  end
+
+  defp unconfigured_repos_result(names) do
+    %Result{
+      name: "repos resolved",
+      status: :warn,
+      detail:
+        "#{length(names)} repo name(s) on open tickets or workers are not configured " <>
+          "`repo_paths` keys: #{Enum.join(names, ", ")}",
+      hint:
+        "Repoint the tickets to a configured key (`ticket_update repo: <key>`), " <>
+          "or add the repo to the workspace's `repo_paths`; see `arb repo list`.",
+      blocks_readiness: false
+    }
+  end
+
+  defp repos_ok_result(repos) do
+    %Result{
+      name: "repos resolved",
+      status: :ok,
+      detail: "#{length(repos)} repo(s)",
+      blocks_readiness: false
+    }
   end
 
   # Zero repos on a fresh install with no workspace yet is expected, not a

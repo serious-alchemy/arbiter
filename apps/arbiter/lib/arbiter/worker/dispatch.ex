@@ -1321,16 +1321,22 @@ defmodule Arbiter.Worker.Dispatch do
   # The repo: an explicit opt wins; otherwise inherit the task's most recent run's
   # repo so `arb resume <task>` works without re-specifying it. No run + no opt is
   # an error — we can't resolve the worktree without knowing the repo.
-  defp resolve_resume_repo(%Issue{id: task_id}, opts) do
-    case Keyword.get(opts, :repo) do
-      repo when is_binary(repo) and repo != "" ->
-        {:ok, repo}
+  defp resolve_resume_repo(%Issue{id: task_id, workspace_id: ws_id} = task, opts) do
+    # bd-7u1b6n: an explicit opt, else the latest run's repo, else the ticket's
+    # own `repo` — whatever dispatch accepted must also be resumable. Each is
+    # canonicalized onto its configured key the same way dispatch does.
+    candidates = [
+      Keyword.get(opts, :repo),
+      case latest_run(task_id) do
+        %Run{repo: repo} -> repo
+        _ -> nil
+      end,
+      task.repo
+    ]
 
-      _ ->
-        case latest_run(task_id) do
-          %Run{repo: repo} when is_binary(repo) and repo != "" -> {:ok, repo}
-          _ -> {:error, :repo_unknown}
-        end
+    case Enum.find(candidates, &(is_binary(&1) and &1 != "")) do
+      nil -> {:error, :repo_unknown}
+      repo -> {:ok, IssueRepo.canonical_repo(ws_id, repo)}
     end
   end
 
@@ -3782,11 +3788,11 @@ defmodule Arbiter.Worker.Dispatch do
   # EVERY dispatch of it, not just `start_claude: true` ones — a dry dispatch
   # of an assigned task should provision a worktree from that repo rather than
   # park with none. A caller's explicit `repo:` opt is left untouched.
-  defp apply_issue_repo_default(%Issue{repo: repo}, opts)
+  defp apply_issue_repo_default(%Issue{repo: repo, workspace_id: ws_id}, opts)
        when is_binary(repo) and repo != "" do
     case Keyword.get(opts, :repo) do
       given when is_binary(given) and given != "" -> opts
-      _ -> Keyword.put(opts, :repo, repo)
+      _ -> Keyword.put(opts, :repo, IssueRepo.canonical_repo(ws_id, repo))
     end
   end
 

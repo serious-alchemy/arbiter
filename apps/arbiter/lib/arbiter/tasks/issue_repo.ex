@@ -85,6 +85,16 @@ defmodule Arbiter.Tasks.IssueRepo do
   end
 
   @doc """
+  The repo name dispatch, resume and adoption should look up for a repo value
+  that is already stored (on a ticket or a run): the configured key it matches,
+  else `repo` unchanged. Rows written before create/update validated the value
+  (bd-7u1b6n) may hold a forge slug such as `acme/tonic`; this is the one place
+  that turns it back into the key, so every consumer resolves it identically.
+  """
+  @spec canonical_repo(String.t() | nil, String.t() | nil) :: String.t() | nil
+  def canonical_repo(workspace_id, repo), do: configured_key(workspace_id, repo) || repo
+
+  @doc """
   Every repo key configured for `workspace_id` — the workspace's own
   `repo_paths` plus the install-wide `:repo_paths` application env, deduped
   and sorted. Entries with no usable path are dropped.

@@ -275,7 +275,11 @@ defmodule Arbiter.Sessions.RefineTest do
       {:ok, issue} =
         Ash.create(Issue, %{title: "Unmapped repo", workspace_id: ws.id, repo: "widget"})
 
-      {:ok, issue} = Ash.update(issue, %{repo: "nowhere"}, action: :update)
+      # update validates the repo now, so write the stale value directly
+      %{num_rows: 1} =
+        Arbiter.Repo.query!("UPDATE issues SET repo = 'nowhere' WHERE id = $1", [issue.id])
+
+      issue = Ash.get!(Issue, issue.id)
 
       %{session: session} = open!(issue)
       refute File.exists?(Layout.repo_checkout_dir(session.id))
