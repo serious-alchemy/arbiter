@@ -313,7 +313,7 @@ defmodule ArbiterWeb.NodesLive do
 
   # ---- add node --------------------------------------------------------------
 
-  @add_keys ~w(kind name labels max_workers ttl_minutes namespace cpu memory node_selector pull_secret reach admission self_upgrade)
+  @add_keys ~w(kind name labels max_workers ttl_minutes namespace cpu memory node_selector pull_secret reach admission self_upgrade primary_cidrs proxy_url proxy_cidrs)
 
   defp new_add do
     %{
@@ -1328,13 +1328,43 @@ defmodule ArbiterWeb.NodesLive do
           value={@add.form["pull_secret"].value}
           placeholder="gitlab-registry"
         />
+        <Forms.input
+          name="primary_cidrs"
+          id="add-node-primary-cidrs"
+          label="Primary CIDRs"
+          hint="HTTPS endpoint: the primary's address(es); the controller may reach nothing else"
+          value={@add.form["primary_cidrs"].value}
+          placeholder="100.64.0.10/32"
+        />
+        <div class="grid grid-cols-2 gap-3">
+          <Forms.input
+            name="proxy_url"
+            id="add-node-proxy-url"
+            label="Proxy URL"
+            hint="HTTP proxy only"
+            value={@add.form["proxy_url"].value}
+            placeholder="http://proxy.corp:3128"
+          />
+          <Forms.input
+            name="proxy_cidrs"
+            id="add-node-proxy-cidrs"
+            label="Proxy CIDRs"
+            hint="HTTP proxy only"
+            value={@add.form["proxy_cidrs"].value}
+            placeholder="10.9.0.5/32"
+          />
+        </div>
         <div class="grid grid-cols-3 gap-3">
           <Forms.select
             name="reach"
             id="add-node-reach"
             label="Reach the primary"
             value={@add.form["reach"].value || "direct"}
-            options={[{"HTTPS endpoint", "direct"}, {"Tailscale sidecar", "tailscale"}]}
+            options={[
+              {"HTTPS endpoint", "direct"},
+              {"Tailscale sidecar", "tailscale"},
+              {"HTTP proxy", "proxy"}
+            ]}
           />
           <Forms.select
             name="admission"

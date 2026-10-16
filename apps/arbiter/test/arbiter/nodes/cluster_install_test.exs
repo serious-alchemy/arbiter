@@ -58,8 +58,26 @@ defmodule Arbiter.Nodes.ClusterInstallTest do
   end
 
   test "plan/2 refuses what the renderer would refuse" do
-    assert {:error, [error]} = ClusterInstall.plan(%{"name" => "x", "max" => "0"}, version: "1")
+    assert {:error, [error]} =
+             ClusterInstall.plan(
+               %{"name" => "x", "max" => "0", "primary_cidrs" => "100.64.0.10/32"},
+               version: "1"
+             )
+
     assert error =~ "max"
+  end
+
+  test "a direct install without the primary's CIDRs is refused, and with them carried into the URL" do
+    assert {:error, [error]} = ClusterInstall.plan(%{"name" => "x"}, version: "1")
+    assert error =~ "primary_cidrs is required"
+
+    assert {:ok, plan} =
+             ClusterInstall.plan(
+               %{"name" => "x", "primary_cidrs" => "100.64.0.10/32,100.64.0.11/32"},
+               version: "1"
+             )
+
+    assert plan.manifest_url =~ "primary_cidrs=100.64.0.10%2F32%2C100.64.0.11%2F32"
   end
 
   test "set_image_command/2 names the controller's own Deployment and container" do
