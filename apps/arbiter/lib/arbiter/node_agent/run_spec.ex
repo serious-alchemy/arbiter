@@ -84,7 +84,9 @@ defmodule Arbiter.NodeAgent.RunSpec do
   @name_re ~r/\Aarb-[A-Za-z0-9][A-Za-z0-9_.-]{0,59}\z/
   @env_re ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
   @sha_re ~r/\A[0-9a-f]{64}\z/
-  @tag_re ~r/\A[a-z0-9][a-z0-9._\/:-]{0,200}\z/
+  # `name`, `name:tag`, or the digest-pinned `name[:tag]@sha256:<64 hex>` a prebuilt
+  # image resolves to; `@` is only ever allowed as that digest suffix.
+  @tag_re ~r/\A[a-z0-9][a-z0-9._\/:-]{0,200}(@sha256:[0-9a-f]{64})?\z/
   @cli_name_re ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
   @cli_dir "/opt/arbiter/cli/"
   @max_secret_bytes 65_536
