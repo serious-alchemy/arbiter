@@ -821,6 +821,18 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert StubFixPassDispatcher.call_count() == 0
     end
 
+    test "a re-run refused as ci_in_progress waits for CI: no fix pass (bd-8o35da)" do
+      StubMerger.set_failing_checks("!flk8", failing_in(@drain))
+      StubMerger.queue_get("!flk8", [red("h1")])
+      StubMerger.queue_rerun_results([{:error, :ci_in_progress}])
+
+      {wpid, _task_id} = flake_watchdog("!flk8")
+
+      wait_until(fn -> length(reruns("!flk8")) >= 1 end)
+      _ = :sys.get_state(wpid)
+      assert StubFixPassDispatcher.call_count() == 0
+    end
+
     test "the same untouched test failing again on the re-run dispatches a briefed fix pass" do
       StubMerger.set_failing_checks("!flk2", failing_in(@drain))
       StubMerger.queue_get("!flk2", [red("h1"), pending("h1")])

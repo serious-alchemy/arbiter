@@ -329,6 +329,39 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:ok, %{pipeline: :failed}} = Gitlab.get(@ref)
     end
 
+    test "pipeline comes from the head SHA's newest pipeline: an older failed one on the same SHA is superseded" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            Req.Test.json(conn, %{"iid" => @iid, "state" => "opened", "sha" => "head"})
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            # Deliberately out of order: the pick must not rely on list order.
+            Req.Test.json(conn, [
+              %{"id" => 5, "sha" => "head", "status" => "failed"},
+              %{"id" => 7, "sha" => "head", "status" => "created"},
+              %{"id" => 9, "sha" => "older-head", "status" => "success"}
+            ])
+        end
+      end)
+
+      assert {:ok, %{pipeline: :pending}} = Gitlab.get(@ref)
+    end
+
+    test "pipeline is :pending (not the previous head's verdict) while the new head has no pipeline yet" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            Req.Test.json(conn, %{"iid" => @iid, "state" => "opened", "sha" => "head"})
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            Req.Test.json(conn, [%{"id" => 3, "sha" => "prev", "status" => "failed"}])
+        end
+      end)
+
+      assert {:ok, %{pipeline: :pending}} = Gitlab.get(@ref)
+    end
+
     test "pipeline is :success when the latest pipeline succeeded" do
       stub(fn conn ->
         case conn.request_path do
@@ -1916,10 +1949,27 @@ defmodule Arbiter.Mergers.GitlabTest do
                Gitlab.rerun_ci(@ref, %{mode: :failed_jobs, inputs: %{"a" => "b"}})
     end
 
-    test "errors (no crash) when the head pipeline is not a settled failure" do
-      rerun_stub([%{failed_pipeline() | "status" => "running"}], [], & &1)
-      assert {:error, %Error{kind: :not_found, message: msg}} = Gitlab.rerun_ci(@ref, %{})
-      assert msg =~ "still running"
+    test "a head whose latest pipeline is unfinished returns :ci_in_progress, not an error struct" do
+      for status <- ["created", "pending", "running", "preparing", "waiting_for_resource"] do
+        rerun_stub([%{failed_pipeline() | "status" => status}], [], & &1)
+        assert {:error, :ci_in_progress} = Gitlab.rerun_ci(@ref, %{})
+      end
+    end
+
+    test "an older failed pipeline on the head SHA does not mask a newer unfinished one" do
+      rerun_stub(
+        [%{failed_pipeline(100) | "status" => "created"}, failed_pipeline(99)],
+        [],
+        fn _ -> flunk("must not re-run while the newest pipeline is unfinished") end
+      )
+
+      assert {:error, :ci_in_progress} = Gitlab.rerun_ci(@ref, %{})
+      refute_received {:post, _, _}
+    end
+
+    test "a settled non-failure (success) is still a plain not_found error" do
+      rerun_stub([%{failed_pipeline() | "status" => "success"}], [], & &1)
+      assert {:error, %Error{kind: :not_found}} = Gitlab.rerun_ci(@ref, %{})
     end
 
     test "errors when no pipeline matches the head SHA" do

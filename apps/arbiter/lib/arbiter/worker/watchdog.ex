@@ -2982,6 +2982,10 @@ defmodule Arbiter.Worker.Watchdog do
             cancel_rerun: %{rerun | count: rerun.count + 1, poll: state.poll_count}
         })
 
+      {:error, :ci_in_progress} ->
+        # A newer run / pipeline on the head is already going: wait for it.
+        reschedule(%{state | last_block_reason: :ci_cancelled})
+
       other ->
         Logger.warning(
           "Worker.Watchdog: CI re-run for cancelled checks on task=#{state.task_id} " <>
@@ -3296,6 +3300,10 @@ defmodule Arbiter.Worker.Watchdog do
           | last_block_reason: :ci_failed,
             flake_rerun: %{head: head, files: files, poll: state.poll_count, seen_pending: false}
         })
+
+      {:error, :ci_in_progress} ->
+        # CI on this head has not finished: no verdict yet, so no fix pass.
+        reschedule(%{state | last_block_reason: :ci_failed})
 
       other ->
         Logger.warning(
