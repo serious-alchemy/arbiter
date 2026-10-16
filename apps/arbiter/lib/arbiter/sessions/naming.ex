@@ -205,11 +205,21 @@ defmodule Arbiter.Sessions.Naming do
   defp heartbeat_basename do
     key =
       :sha256
-      |> :crypto.hash(Arbiter.Nodes.Agent.data_home())
+      |> :crypto.hash(data_home())
       |> Base.encode16(case: :lower)
       |> binary_part(0, 12)
 
     "heartbeat-" <> key
+  end
+
+  # Same resolution as the deploy data home (`:data_dir`, `ARB_DATA_HOME`, `~/.arbiter`),
+  # kept local: sessions/ must not depend on the node layer.
+  defp data_home do
+    case {Application.fetch_env(:arbiter, :data_dir), System.get_env("ARB_DATA_HOME")} do
+      {{:ok, dir}, _} when is_binary(dir) -> Path.expand(dir)
+      {_, dir} when is_binary(dir) and dir != "" -> Path.expand(dir)
+      _ -> Path.join(System.user_home!(), ".arbiter")
+    end
   end
 
   # `XDG_RUNTIME_DIR` is set for every systemd user session, which is the only
