@@ -2186,8 +2186,7 @@ defmodule Arbiter.Mergers.GithubTest do
         end
       end)
 
-      assert {:error, %Error{kind: :not_found, message: msg}} = Github.rerun_ci(@ref, %{})
-      assert msg =~ "still running"
+      assert {:error, :ci_in_progress} = Github.rerun_ci(@ref, %{})
     end
 
     test "auto mode re-runs ALL jobs when the failing check has successful upstream jobs" do
@@ -2391,7 +2390,7 @@ defmodule Arbiter.Mergers.GithubTest do
         end
       end)
 
-      assert {:error, %Error{kind: :not_found}} = Github.rerun_ci(@ref, %{})
+      assert {:error, :ci_in_progress} = Github.rerun_ci(@ref, %{})
     end
   end
 

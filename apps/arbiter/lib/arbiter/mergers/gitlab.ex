@@ -149,7 +149,7 @@ defmodule Arbiter.Mergers.Gitlab do
       case request(cfg, :get, "/merge_requests/#{iid}", []) do
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
           merge_status = Map.get(body, "merge_status", "")
-          pipeline = fetch_pipeline_status(cfg, iid)
+          pipeline = fetch_pipeline_status(cfg, iid, Map.get(body, "sha"))
           status = map_state(Map.get(body, "state"))
 
           {:ok,
@@ -283,7 +283,7 @@ defmodule Arbiter.Mergers.Gitlab do
     case request(cfg, :get, "/merge_requests/#{iid}/pipelines", params: [per_page: 100])
          |> handle_json() do
       {:ok, pipelines} when is_list(pipelines) ->
-        {:ok, Enum.filter(pipelines, &(Map.get(&1, "sha") == sha))}
+        {:ok, pipelines |> Enum.filter(&(Map.get(&1, "sha") == sha)) |> newest_first()}
 
       {:ok, _} ->
         {:ok, []}
@@ -292,6 +292,8 @@ defmodule Arbiter.Mergers.Gitlab do
         err
     end
   end
+
+  defp newest_first(pipelines), do: Enum.sort_by(pipelines, &(Map.get(&1, "id") || 0), :desc)
 
   defp settled_failed_pipeline([], sha),
     do: {:error, rerun_not_found("no pipeline on head SHA #{sha}")}
@@ -302,14 +304,16 @@ defmodule Arbiter.Mergers.Gitlab do
         {:ok, latest}
 
       status ->
-        {:error,
-         rerun_not_found(
-           "the latest pipeline on head SHA #{sha} is #{status}, not a failure" <>
-             if(map_pipeline_status(status) in [:running, :pending],
-               do: " (a pipeline is still running)",
-               else: ""
-             )
-         )}
+        # An unfinished latest pipeline has not produced a verdict: say so
+        # distinctly so callers wait for CI instead of reading a refusal as a
+        # real failure (bd-8o35da). Any older failed pipeline on the same SHA is
+        # superseded by it.
+        if map_pipeline_status(status) in [:running, :pending] do
+          {:error, :ci_in_progress}
+        else
+          {:error,
+           rerun_not_found("the latest pipeline on head SHA #{sha} is #{status}, not a failure")}
+        end
     end
   end
 
@@ -1164,15 +1168,30 @@ defmodule Arbiter.Mergers.Gitlab do
   # Fetch the latest pipeline for the MR and map its status to a domain atom.
   # Returns nil when there are no pipelines (no CI configured) or the request
   # fails (best-effort — a transient API error must not block the MR poll).
-  defp fetch_pipeline_status(cfg, iid) do
-    case request(cfg, :get, "/merge_requests/#{iid}/pipelines", params: [per_page: 1]) do
-      {:ok, %Req.Response{status: status, body: [latest | _]}} when status in 200..299 ->
-        map_pipeline_status(Map.get(latest, "status"))
+  #
+  # With a known head SHA the verdict is the newest pipeline ON THAT SHA, never an
+  # older failed one on the same SHA nor the previous head's result; a head with
+  # no pipeline yet is `:pending` (bd-8o35da).
+  defp fetch_pipeline_status(cfg, iid, head_sha) do
+    case request(cfg, :get, "/merge_requests/#{iid}/pipelines", params: [per_page: 100]) do
+      {:ok, %Req.Response{status: status, body: [_ | _] = pipelines}} when status in 200..299 ->
+        pipelines
+        |> head_pipeline_candidates(head_sha)
+        |> newest_first()
+        |> case do
+          [latest | _] -> map_pipeline_status(Map.get(latest, "status"))
+          [] -> :pending
+        end
 
       _ ->
         nil
     end
   end
+
+  defp head_pipeline_candidates(pipelines, sha) when sha in [nil, ""], do: pipelines
+
+  defp head_pipeline_candidates(pipelines, sha),
+    do: Enum.filter(pipelines, &(Map.get(&1, "sha") == sha))
 
   defp map_pipeline_status("success"), do: :success
   defp map_pipeline_status("failed"), do: :failed

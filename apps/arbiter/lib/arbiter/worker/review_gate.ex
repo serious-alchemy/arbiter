@@ -1837,10 +1837,11 @@ defmodule Arbiter.Worker.ReviewGate do
         {:wait, ci_schedule(state, ReviewCi.rerun_started(wait, checks))}
 
       {:error, why} ->
-        if run_in_flight?(why) and wait.polls < wait.max_polls do
-          # bd-9m6wl0: the forge only reruns a FINISHED run, and a sibling job (e.g.
-          # `mix audit`) is still going. The failure is not yet judged real: poll
-          # again and rerun once the run has finished.
+        if why == :ci_in_progress and wait.polls < wait.max_polls do
+          # bd-9m6wl0 / bd-8o35da: the forge only reruns a FINISHED run, and the
+          # head's latest run / pipeline (or a sibling job, e.g. `mix audit`) is
+          # still going. The failure is not yet judged real: poll again and rerun
+          # once it has finished.
           Logger.info(
             "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red but its run is " <>
               "still in progress; waiting to re-run the failed jobs"
@@ -1869,6 +1870,10 @@ defmodule Arbiter.Worker.ReviewGate do
             "re-running it (#{wait.infra_reruns})"
         )
 
+        {:wait, ci_schedule(state, wait)}
+
+      {:error, :ci_in_progress} ->
+        # A newer run is already going on the head: wait for it, no escalation.
         {:wait, ci_schedule(state, wait)}
 
       {:error, why} ->
@@ -1919,11 +1924,6 @@ defmodule Arbiter.Worker.ReviewGate do
     ci_log_leave(state, wait, "CI could not vouch (#{reason})")
     {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
   end
-
-  defp run_in_flight?(why) when is_binary(why),
-    do: String.contains?(why, "a run is still running")
-
-  defp run_in_flight?(_why), do: false
 
   defp ci_review_unreviewed_red_head(state, sha) do
     jobs =
@@ -2129,6 +2129,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     case ReviewCi.call(ctx.workspace, state.repo, rerun) do
       {:ok, {:ok, _info}} -> :ok
+      {:ok, {:error, :ci_in_progress}} -> {:error, :ci_in_progress}
       {:ok, {:error, reason}} -> {:error, inspect(reason)}
       {:error, why} -> {:error, why}
     end

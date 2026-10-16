@@ -332,6 +332,10 @@ defmodule Arbiter.Mergers.Merger do
   `:workflow` create a new pipeline on the MR source branch (`:inputs` become
   pipeline variables), and `:run_id` is the pipeline id.
 
+  Returns `{:error, :ci_in_progress}` when the head's latest run / pipeline has
+  not finished (queued, pending, running): there is no verdict to re-run, and
+  callers must wait for CI, never treat it as a real failure.
+
   Optional — adapters with no re-run primitive simply don't implement it;
   callers guard with `function_exported?/3`.
   """
