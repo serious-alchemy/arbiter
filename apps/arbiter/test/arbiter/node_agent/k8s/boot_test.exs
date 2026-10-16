@@ -205,7 +205,7 @@ defmodule Arbiter.NodeAgent.K8s.BootTest do
     boot!(ctx)
     wait_until(&booted?/0)
 
-    assert_received {:primary, "POST", "/nodes/enroll", body}
+    assert_receive {:primary, "POST", "/nodes/enroll", body}
 
     assert %{
              "token" => "arbj_join",
@@ -225,7 +225,7 @@ defmodule Arbiter.NodeAgent.K8s.BootTest do
     boot!(ctx)
     wait_until(&booted?/0)
 
-    assert_received {:primary, "GET", "/nodes/cluster", _}
+    assert_receive {:primary, "GET", "/nodes/cluster", _}
     assert %{capacity: %{"ceiling" => 2}, runs: []} = Controller.report(Controller)
 
     informer_list =
@@ -302,7 +302,7 @@ defmodule Arbiter.NodeAgent.K8s.BootTest do
     # Once the API lets it, the same credential is stored: one enrolment, no second token.
     wait_until(&booted?/0)
     assert stored(ctx.api, "arbiter-node-credential", "credential") == @credential
-    assert_received {:primary, "POST", "/nodes/enroll", _}
+    assert_receive {:primary, "POST", "/nodes/enroll", _}
     refute_received {:primary, "POST", "/nodes/enroll", _}
   end
 
@@ -316,7 +316,7 @@ defmodule Arbiter.NodeAgent.K8s.BootTest do
     wait_until(&booted?/0)
 
     refute_received {:primary, "POST", "/nodes/enroll", _}
-    assert_received {:primary, "GET", "/nodes/cluster", _}
+    assert_receive {:primary, "GET", "/nodes/cluster", _}
   end
 
   test "before the join Secret exists it stays up, says why, and boots once it appears", ctx do
