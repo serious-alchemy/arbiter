@@ -249,7 +249,15 @@ defmodule Arbiter.Worker.Image do
     |> binary_part(0, 12)
   end
 
-  defp base_layer(resolver, arb_otp) do
+  @doc """
+  The shared base as a layer: its digest-pinned Containerfile, content-hash tag
+  and pins, for arb's Erlang/OTP release `arb_otp`. `plan/3` builds on it and
+  release CI (`mix arbiter.containerfile worker-base`) publishes the same text,
+  so the hash a repo's CI `FROM`s is the one a primary would have built.
+  """
+  @spec base_layer((String.t() -> {:ok, String.t()} | {:error, term()}), String.t()) ::
+          {:ok, layer()} | {:error, term()}
+  def base_layer(resolver, arb_otp) do
     with {:ok, pinned, pins} <- pin(base_containerfile(arb_otp), resolver) do
       hash = hash([pinned])
 
