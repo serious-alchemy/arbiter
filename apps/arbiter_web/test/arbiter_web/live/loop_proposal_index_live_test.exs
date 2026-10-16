@@ -303,7 +303,9 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       {:ok, view, _html} = live_loop(conn)
       view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
 
-      html = view |> element("button[phx-click=apply]") |> render_click()
+      # Needs authoring => no Apply button at all; a forced event is still refused.
+      refute has_element?(view, "button[phx-click=apply]")
+      html = render_click(view, "apply", %{"id" => row.id})
       render_async(view, @async_timeout)
 
       assert html =~ "authored"
@@ -413,7 +415,13 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
 
     test "a decided row keeps its created_at-sorted position instead of jumping to the bottom",
          %{conn: conn} do
-      older = proposed()
+      {:ok, skill} =
+        Skills.create_skill(%{
+          name: "loop-live-2697",
+          body: "# before"
+        })
+
+      older = proposed(%{payload: %{"skill" => skill.name, "body" => "# after"}})
 
       {:ok, view, _html} = live_loop(conn)
       view |> element("button[phx-value-id='#{older.id}']", "Review") |> render_click()
@@ -422,7 +430,8 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
 
       newer = proposed()
       settle(view)
-      html = render_async(view, @async_timeout)
+      render_async(view, @async_timeout)
+      html = proposals_html(view)
 
       {older_pos, _} = :binary.match(html, older.gist)
       {newer_pos, _} = :binary.match(html, newer.gist)

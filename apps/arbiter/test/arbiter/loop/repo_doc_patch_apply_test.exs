@@ -268,7 +268,7 @@ defmodule Arbiter.Loop.RepoDocPatchApplyTest do
     test "a proposal with no repo attribution fails cleanly, naming the gap", %{ws: ws} do
       {:ok, row} = Loop.record(candidate(ws, %{repo: nil, target: nil}))
 
-      assert {:error, {:unmapped, reason}} = Loop.apply_pending(row.id)
+      assert {:error, {:not_applicable, reason}} = Loop.apply_pending(row.id)
       assert reason =~ "no repo"
     end
   end
