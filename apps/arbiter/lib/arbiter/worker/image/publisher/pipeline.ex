@@ -199,14 +199,11 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
         primary_seed(
           ctx,
           plan,
-          repository,
-          cli_suffix,
-          parent,
+          {repository, cli_suffix, parent},
+          {shipped, excluded},
           work,
           cfg,
-          opts,
-          shipped,
-          excluded
+          opts
         )
 
       mode ->
@@ -225,7 +222,15 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   defp seed_note(%{prebuilt: %{seed_note: note}}) when is_binary(note), do: note
   defp seed_note(_plan), do: nil
 
-  defp primary_seed(ctx, plan, repository, cli_suffix, parent, work, cfg, opts, shipped, excluded) do
+  defp primary_seed(
+         ctx,
+         plan,
+         {repository, cli_suffix, parent},
+         {shipped, excluded},
+         work,
+         cfg,
+         opts
+       ) do
     case seed_source(ctx, plan, shipped, opts) do
       {:ok, dir, lock_hash, artifacts} ->
         sp8 = artifacts |> Enum.join(",") |> sha256() |> binary_part(0, 8)

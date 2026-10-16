@@ -41,10 +41,10 @@ defmodule Arbiter.Worker.Image.Prebuilt do
   """
 
   alias Arbiter.Config.Paths
-  alias Arbiter.Worker.Image
   alias Arbiter.Mergers
   alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.Image
   alias Arbiter.Worker.Image.Registry
   alias Arbiter.Worker.Image.RegistryReport
   alias Arbiter.Worker.Image.RepoConfig
