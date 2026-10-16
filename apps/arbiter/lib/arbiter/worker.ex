@@ -7123,7 +7123,7 @@ defmodule Arbiter.Worker do
         :secret_in_commit ->
           "SECURITY: the committed diff (#{target}..HEAD on `#{branch}`) contains " <>
             "an Arbiter-injected agent-config file (.mcp.json / .gemini/ / .codex/ / " <>
-            ".arbiter/ other than .arbiter/Containerfile). " <>
+            ".arbiter/INBOX). " <>
             "Offending path(s): #{injected_config_paths_blurb(worktree, target)}. " <>
             "The .mcp.json / .gemini/ / .codex/ files carry per-spawn bearer tokens and " <>
             "must NEVER appear in VCS. " <>

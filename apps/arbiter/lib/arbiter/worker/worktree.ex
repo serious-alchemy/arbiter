@@ -1372,13 +1372,11 @@ defmodule Arbiter.Worker.Worktree do
   # secret, but an out-of-band Arbiter artifact that must equally never reach a
   # contributor commit. Each entry is either a filename (exact match) or a
   # directory prefix (ends with "/", matches any path within it).
-  @injected_config_patterns ~w(.mcp.json .gemini/ .codex/ .arbiter/)
+  @injected_config_patterns ~w(.mcp.json .gemini/ .codex/ .arbiter/INBOX)
 
-  # The one `.arbiter/` file that is repo content, not an Arbiter artifact:
-  # `Arbiter.Worker.Image` builds the worker image from the committed
-  # `.arbiter/Containerfile` (`git cat-file blob <ref>:.arbiter/Containerfile`),
-  # so a repo adopting a custom image must be able to commit it (bd-1ejfc1,
-  # #813). Exact path only — `.arbiter/sub/Containerfile` is still refused.
+  # Only `.arbiter/INBOX` (WorktreeDelivery) is Arbiter-written; the rest of
+  # `.arbiter/` is repo-authored image build context (bd-8mem7f). The Containerfile
+  # stays listed for the extra-explicit exclude/readers.
   @committable_arbiter_files ~w(.arbiter/Containerfile)
 
   @doc """
@@ -1447,7 +1445,7 @@ defmodule Arbiter.Worker.Worktree do
     [root | _] = String.split(path, "/", parts: 2)
 
     path not in @committable_arbiter_files and
-      (root in @excluded_checkout_roots or injected_config_path?(path))
+      ((root in @excluded_checkout_roots and root != ".arbiter") or injected_config_path?(path))
   end
 
   defp injected_config_path?(file) do
