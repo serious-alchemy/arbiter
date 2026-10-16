@@ -57,6 +57,16 @@ defmodule Arbiter.Nodes.ClusterInstallTest do
     assert {:error, :no_public_url} = ClusterInstall.plan(@params, version: "1")
   end
 
+  test "a public URL the controller would refuse (http, non-loopback) is not rendered" do
+    {:ok, _} = Settings.set_nodes_public_url("http://172.26.0.1:4949")
+
+    assert {:error, {:insecure_public_url, "http://172.26.0.1:4949"}} =
+             ClusterInstall.plan(@params, version: "1")
+
+    {:ok, _} = Settings.set_nodes_public_url("http://127.0.0.1:4949")
+    assert {:ok, _} = ClusterInstall.plan(@params, version: "1")
+  end
+
   test "plan/2 refuses what the renderer would refuse" do
     assert {:error, [error]} =
              ClusterInstall.plan(

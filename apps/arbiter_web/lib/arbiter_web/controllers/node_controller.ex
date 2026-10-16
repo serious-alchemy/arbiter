@@ -97,6 +97,10 @@ defmodule ArbiterWeb.NodeController do
   defp manifest_unavailable(:no_public_url),
     do: "nodes.public_url is not set on the primary; set it first\n"
 
+  defp manifest_unavailable({:insecure_public_url, url}),
+    do:
+      "nodes.public_url #{url} is refused by the cluster controller (only https, or http to loopback)\n"
+
   defp manifest_unavailable(:no_registry),
     do: "nodes.registry is not set on the primary; a cluster node needs an image it can pull\n"
 

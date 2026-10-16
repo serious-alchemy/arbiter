@@ -131,6 +131,10 @@ defmodule ArbiterWeb.Api.NodeController do
 
   defp cluster_unavailable(:no_public_url), do: "nodes.public_url is not set"
 
+  defp cluster_unavailable({:insecure_public_url, url}),
+    do:
+      "nodes.public_url #{url} is refused by the cluster controller (only https, or http to loopback)"
+
   defp cluster_unavailable(:no_release),
     do: "the primary has no deployed release to name an image for"
 
