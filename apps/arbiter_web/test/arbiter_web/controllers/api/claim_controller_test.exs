@@ -366,4 +366,96 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
       assert [%{"outcome" => "created"}] = body["results"]
     end
   end
+
+  describe "POST /api/workspaces/:workspace_id/claim — bulk (Shortcut epic)" do
+    @sc_member "ctrl-sc-member"
+
+    setup do
+      {:ok, sc_ws} =
+        Ash.create(Workspace, %{
+          name: "claim-ctrl-sc",
+          prefix: "ccsc",
+          config: %{
+            "tracker" => %{
+              "type" => "shortcut",
+              "config" => %{"credentials_ref" => "env:#{@env_var}"}
+            }
+          }
+        })
+
+      on_exit(fn -> Arbiter.Trackers.Shortcut.Config.clear() end)
+
+      Req.Test.stub(Arbiter.Trackers.Shortcut.HTTP, fn conn ->
+        story = fn id, owners ->
+          %{
+            "id" => id,
+            "name" => "Story #{id}",
+            "description" => "d",
+            "app_url" => "https://app.shortcut.com/story/#{id}",
+            "owner_ids" => owners,
+            "completed" => false,
+            "started" => false
+          }
+        end
+
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/member"} ->
+            Req.Test.json(conn, %{"id" => @sc_member})
+
+          {"GET", "/api/v3/epics/9/stories"} ->
+            Req.Test.json(conn, [story.(41, [@sc_member]), story.(42, [@sc_member])])
+
+          {"GET", "/api/v3/stories/42"} ->
+            Req.Test.json(conn, story.(42, [@sc_member]))
+
+          {"GET", "/api/v3/stories/42/comments"} ->
+            Req.Test.json(conn, [])
+
+          {_m, "/api/v3/stories/42" <> _} ->
+            Req.Test.json(conn, %{})
+        end
+      end)
+
+      {:ok, sc: sc_ws}
+    end
+
+    test "previews by default, claims with yes, existing stories are not duplicated",
+         %{conn: conn, sc: ws} do
+      {:ok, _} =
+        Ash.create(Issue, %{
+          title: "Story 41",
+          tracker_type: :shortcut,
+          tracker_ref: "41",
+          workspace_id: ws.id
+        })
+
+      preview =
+        conn |> post("/api/workspaces/#{ws.id}/claim", %{"epic" => "9"}) |> json_response(200)
+
+      assert preview["applied"] == false
+
+      assert Map.new(preview["data"], &{&1["ref"], &1["status"]}) ==
+               %{"41" => "existing", "42" => "would_create"}
+
+      done =
+        conn
+        |> post("/api/workspaces/#{ws.id}/claim", %{"epic" => "9", "yes" => true})
+        |> json_response(200)
+
+      assert done["applied"] == true
+
+      assert Map.new(done["data"], &{&1["ref"], &1["status"]}) ==
+               %{"41" => "existing", "42" => "created"}
+    end
+
+    test "epic together with ref is a 400", %{conn: conn, sc: ws} do
+      conn = post(conn, "/api/workspaces/#{ws.id}/claim", %{"epic" => "9", "ref" => "1"})
+      assert json_response(conn, 400)
+    end
+
+    test "tracker without bulk support is a 400", %{conn: conn, none: ws} do
+      conn = post(conn, "/api/workspaces/#{ws.id}/claim", %{"epic" => "9"})
+      assert json_response(conn, 400)
+    end
+  end
 end

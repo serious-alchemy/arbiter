@@ -341,6 +341,64 @@ defmodule Arbiter.Trackers.Shortcut do
     end
   end
 
+  @search_page_limit 10
+
+  @impl true
+  def search_stories({:epic, epic_id}) when is_binary(epic_id) do
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :get, "/epics/#{URI.encode(epic_id)}/stories", []) do
+        {:ok, %Req.Response{status: status_code, body: stories}}
+        when status_code in 200..299 and is_list(stories) ->
+          {:ok, Enum.map(stories, &summarize_story/1)}
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  def search_stories({:query, query}) when is_binary(query) do
+    with {:ok, cfg} <- Config.resolve() do
+      search_pages(cfg, [query: query, page_size: 25], [], @search_page_limit)
+    end
+  end
+
+  defp search_pages(_cfg, _params, acc, 0), do: {:ok, Enum.reverse(acc)}
+
+  defp search_pages(cfg, params, acc, pages_left) do
+    case request(cfg, :get, "/search/stories", params: params) do
+      {:ok, %Req.Response{status: status_code, body: %{"data" => stories} = body}}
+      when status_code in 200..299 and is_list(stories) ->
+        acc = Enum.reduce(stories, acc, &[summarize_story(&1) | &2])
+
+        case next_page_token(body["next"]) do
+          nil -> {:ok, Enum.reverse(acc)}
+          token -> search_pages(cfg, Keyword.put(params, :next, token), acc, pages_left - 1)
+        end
+
+      {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+        {:ok, Enum.reverse(acc)}
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # Shortcut's `next` is a relative URL (`/api/v3/search/stories?...&next=<token>`).
+  defp next_page_token(next) when is_binary(next) do
+    case URI.parse(next) do
+      %URI{query: q} when is_binary(q) -> Map.get(URI.decode_query(q), "next")
+      _ -> nil
+    end
+  end
+
+  defp next_page_token(_), do: nil
   @impl true
   def list_transitions(ref) when is_binary(ref) do
     with {:ok, cfg} <- Config.resolve(),

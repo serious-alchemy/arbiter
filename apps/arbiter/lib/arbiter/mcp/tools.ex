@@ -592,15 +592,40 @@ defmodule Arbiter.MCP.Tools do
   @spec tracker_claim(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def tracker_claim(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args),
-         {:ok, ref} <- require_string(args, "ref"),
          {:ok, force} <- fetch_bool(args, "force", false),
+         {:ok, yes} <- fetch_bool(args, "yes", false),
          {:ok, workspace} <- fetch_workspace(ws_id),
          # P-13 (D-T-24): the same 0..5 pre-check REST makes, before any tracker call.
-         {:ok, opts} <- Claim.claim_opts(args) do
-      case workspace |> Claim.claim(ref, Keyword.put(opts, :force, force)) |> Claim.typed() do
+         {:ok, opts} <- Claim.claim_opts(args),
+         {:ok, selector} <- bulk_selector(args) do
+      case selector do
+        nil -> claim_single(workspace, args, Keyword.put(opts, :force, force))
+        selector -> claim_bulk(workspace, selector, Keyword.merge(opts, force: force, yes: yes))
+      end
+    end
+  end
+
+  defp claim_single(workspace, args, opts) do
+    with {:ok, ref} <- require_string(args, "ref") do
+      case workspace |> Claim.claim(ref, opts) |> Claim.typed() do
         {:ok, status, task} -> {:ok, Claim.serialize_claim(status, task)}
         {:error, reason} -> {:error, claim_error(reason)}
       end
+    end
+  end
+
+  defp claim_bulk(workspace, selector, opts) do
+    case workspace |> Claim.bulk(selector, opts) |> Claim.typed() do
+      {:ok, result} -> {:ok, Claim.serialize_bulk(result)}
+      {:error, reason} -> {:error, claim_error(reason)}
+    end
+  end
+
+  defp bulk_selector(args) do
+    case Claim.bulk_selector(args) do
+      {:ok, selector} -> {:ok, selector}
+      :none -> {:ok, nil}
+      {:error, {:invalid_request, message}} -> {:error, {:invalid_request, message}}
     end
   end
 

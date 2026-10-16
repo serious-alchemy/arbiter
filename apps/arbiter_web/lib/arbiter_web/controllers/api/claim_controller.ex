@@ -12,6 +12,9 @@ defmodule ArbiterWeb.Api.ClaimController do
 
     * `POST /api/workspaces/:workspace_id/claim` — claim one issue by ref.
       Body: `{"ref": "42", "force": false, "difficulty": 3, "repo": "org/repo"}`.
+      Bulk: pass `"epic": "<tracker epic id>"` or `"query": "<tracker search>"`
+      instead of `ref` — a dry-run preview unless `"yes": true`; replies
+      `{applied, data: [{ref, title, url, status, task_id?, reason?}]}`.
       `difficulty` and `repo` are optional and, when given, override whatever
       `Arbiter.Tasks.Claim.claim/3` would otherwise derive from the issue
       (difficulty from labels) or leave unset (repo). Returns the task JSON.
@@ -29,15 +32,34 @@ defmodule ArbiterWeb.Api.ClaimController do
   action_fallback ArbiterWeb.Api.FallbackController
 
   def claim(conn, %{"workspace_id" => workspace_id} = params) do
+    with {:ok, workspace} <- get_workspace(conn, workspace_id),
+         {:ok, claim_opts} <- Claim.claim_opts(params) do
+      case Claim.bulk_selector(params) do
+        {:ok, selector} -> bulk_claim(conn, workspace, selector, claim_opts, params)
+        :none -> single_claim(conn, workspace, claim_opts, params)
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  defp bulk_claim(conn, workspace, selector, claim_opts, params) do
+    opts =
+      claim_opts
+      |> Keyword.put(:force, truthy?(params["force"]))
+      |> Keyword.put(:yes, truthy?(params["yes"]))
+
+    with {:ok, result} <- workspace |> Claim.bulk(selector, opts) |> Claim.typed() do
+      json(conn, Claim.serialize_bulk(result))
+    end
+  end
+
+  defp single_claim(conn, workspace, claim_opts, params) do
     ref = params["ref"]
-    force? = truthy?(params["force"])
 
     with :ok <- require_string(ref, "ref"),
-         {:ok, workspace} <- get_workspace(conn, workspace_id),
-         {:ok, claim_opts} <- Claim.claim_opts(params),
          {:ok, status, task} <-
            workspace
-           |> Claim.claim(ref, Keyword.put(claim_opts, :force, force?))
+           |> Claim.claim(ref, Keyword.put(claim_opts, :force, truthy?(params["force"])))
            |> Claim.typed() do
       conn
       |> put_status(status_code_for(status))
