@@ -21,6 +21,10 @@ case "$tool" in
   kind) tool_cmd=${KIND:-kind} ;;
   k3d) tool_cmd=${K3D:-k3d} ;;
 esac
+# A prefix ending in `--` (mise exec ... --) needs the tool name after it.
+case "$tool_cmd" in
+  *--) tool_cmd="$tool_cmd $tool" ;;
+esac
 for bin in ${tool_cmd%% *} kubectl mix; do
   command -v "$bin" >/dev/null 2>&1 || { echo "k8s-e2e: $bin not found on PATH" >&2; exit 2; }
 done

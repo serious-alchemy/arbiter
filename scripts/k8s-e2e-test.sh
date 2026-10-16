@@ -31,4 +31,19 @@ case "$kc" in "${TMPDIR:-/tmp}"/arb-k8s-e2e.*/kubeconfig) ;; *) fail "KUBECONFIG
 [ "$(grep -c "KC=$kc\$" "$t/log")" = "$(wc -l <"$t/log")" ] || fail "KUBECONFIG differs between calls"
 [ "$(cat "$t/home/.kube/config")" = orig ] || fail "~/.kube/config modified"
 [ "$(ls -A "$t/home/.kube")" = config ] || fail "~/.kube gained files"
+
+# Prefix override ending in `--`: the tool name must follow the separator.
+cat >"$t/bin/wrapper" <<'EOF'
+#!/bin/sh
+[ "$1" = "--" ] && shift
+[ "$1" = k3d ] || { echo "wrapper: expected k3d, got $1" >&2; exit 1; }
+shift
+echo "$* KC=$KUBECONFIG" >>"$FAKELOG"
+[ "$1" = kubeconfig ] && echo "apiVersion: v1"
+exit 0
+EOF
+chmod +x "$t/bin/wrapper"
+: >"$t/log"
+FAKELOG="$t/log" HOME="$t/home" PATH="$t/bin:/usr/bin:/bin" K3D="wrapper --" sh "$here/k8s-e2e.sh" k3d
+grep -q '^cluster create ' "$t/log" || fail "prefix override did not append k3d"
 echo "ok"
