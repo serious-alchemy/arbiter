@@ -176,7 +176,9 @@ defmodule Arbiter.Worker.EgressTest do
       Process.exit(listener, :kill)
       assert_receive {:DOWN, ^ref, :process, ^sup, _}
 
-      assert {:error, _} =
+      # The killed listener never ran terminate/2 and the VM defers the fd
+      # close, so only the supervisor's socket cleanup makes this certain.
+      assert {:error, :enoent} =
                :gen_tcp.connect(
                  {:local, String.to_charlist(path)},
                  0,
