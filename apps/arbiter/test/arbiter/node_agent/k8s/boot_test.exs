@@ -146,8 +146,18 @@ defmodule Arbiter.NodeAgent.K8s.BootTest do
     end
   end
 
-  # The connection is the tree's last child: once it is up, everything before it is.
-  defp booted?, do: is_pid(Process.whereis(Arbiter.NodeAgent.Connection))
+  # The connection is the tree's last child: once it is up, everything before it is. A
+  # GenServer's name is registered *before* `init/1` runs, and `Connection.init/1` is what
+  # writes `node_id` into status.json, so a registered pid alone is not "up": `info/0` is a
+  # call, which is only served once `init/1` has returned.
+  defp booted? do
+    case Process.whereis(Arbiter.NodeAgent.Connection) do
+      nil -> false
+      _pid -> match?(%{}, Arbiter.NodeAgent.Connection.info())
+    end
+  catch
+    :exit, _ -> false
+  end
 
   defp stored(api, secret, key) do
     case FakeK8sApi.secret(api, secret)["data"] do
