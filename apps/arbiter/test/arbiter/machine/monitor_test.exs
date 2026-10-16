@@ -52,7 +52,11 @@ defmodule Arbiter.Machine.MonitorTest do
   end
 
   test "enters soft derate at the threshold and announces the transition once" do
-    {name, script, _clock} = start_monitor(readings(60.0))
+    {name, script, _clock} =
+      start_monitor(readings(60.0),
+        config: Config.build(%{"recover_s" => 60, "thermal_entry_samples" => 1})
+      )
+
     Monitor.sample(name)
     Agent.update(script, fn _ -> readings(91.0) end)
     snap = Monitor.sample(name)

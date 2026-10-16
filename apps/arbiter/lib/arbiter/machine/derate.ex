@@ -19,7 +19,15 @@ defmodule Arbiter.Machine.Derate do
 
   ## Hysteresis
 
-  Entering (or going up a level) is immediate. Lifting needs the readings below
+  Hard entry is immediate: one sample at `thermal_hard_c` is the runaway stop
+  and is never smoothed. Soft entry is smoothed, because AMD `Tctl` is an
+  instantaneous hotspot reading and one spike would otherwise bench the node
+  for `recover_s`: the thermal reading is the median of the last
+  `thermal_entry_samples` samples (default 3, ~30 s), and soft needs a full
+  window whose median is at or above `thermal_soft_c`. The release test below
+  reads the same median, so a single cool sample cannot start the recovery
+  clock either. An unknown reading clears the window. PSI and memory are
+  already averaged or slow-moving and are used as sampled. Lifting needs the readings below
   the *release* thresholds (`threshold - delta`) continuously for `recover_s`;
   a reading back inside the band `release..threshold` holds the level and
   restarts the clock. A hard derate steps down to soft (or none) on the same
@@ -41,7 +49,8 @@ defmodule Arbiter.Machine.Derate do
   @type state :: %{
           level: level(),
           reason: reason(),
-          recover_since: integer() | nil
+          recover_since: integer() | nil,
+          temps: [number()]
         }
   @type input :: %{
           required(:cap) => non_neg_integer(),
@@ -60,7 +69,7 @@ defmodule Arbiter.Machine.Derate do
 
   @doc "The state of a machine that has never been derated."
   @spec initial() :: state()
-  def initial, do: %{level: :none, reason: nil, recover_since: nil}
+  def initial, do: %{level: :none, reason: nil, recover_since: nil, temps: []}
 
   @doc "See the moduledoc. `now_ms` is any monotonic millisecond clock."
   @spec evaluate(input(), Config.t(), state(), integer()) :: {result(), state()}
@@ -110,6 +119,8 @@ defmodule Arbiter.Machine.Derate do
   end
 
   defp step(readings, config, prior, now_ms) do
+    temps = window(readings, config, prior)
+    readings = Map.put(readings, :temps, temps)
     {enter_level, enter_reason} = assess(readings, config, :enter)
     {release_level, release_reason} = assess(readings, config, :release)
     held = prior.level
@@ -117,25 +128,49 @@ defmodule Arbiter.Machine.Derate do
 
     cond do
       @rank[enter_level] > @rank[held] ->
-        %{level: enter_level, reason: enter_reason, recover_since: nil}
+        %{level: enter_level, reason: enter_reason, recover_since: nil, temps: temps}
 
       held == :none ->
-        initial()
+        %{initial() | temps: temps}
 
       @rank[release_level] < @rank[held] ->
         since = prior.recover_since || now_ms
 
         if now_ms - since >= recover_ms do
-          lifted = %{level: release_level, reason: release_reason, recover_since: nil}
-          if release_level == :none, do: initial(), else: %{lifted | recover_since: now_ms}
+          if release_level == :none,
+            do: %{initial() | temps: temps},
+            else: %{
+              level: release_level,
+              reason: release_reason,
+              recover_since: now_ms,
+              temps: temps
+            }
         else
-          %{prior | recover_since: since}
+          %{prior | recover_since: since, temps: temps}
         end
 
       true ->
         # Still inside the hysteresis band of the level held: hold, restart the clock.
-        %{level: held, reason: release_reason || prior.reason, recover_since: nil}
+        %{level: held, reason: release_reason || prior.reason, recover_since: nil, temps: temps}
     end
+  end
+
+  # The last `thermal_entry_samples` temperatures, newest first; an unknown
+  # reading empties it.
+  defp window(%{temp_c: temp}, config, prior) when is_number(temp) do
+    Enum.take([temp | Map.get(prior, :temps, [])], config.thermal_entry_samples)
+  end
+
+  defp window(_readings, _config, _prior), do: []
+
+  defp median(temps) do
+    sorted = Enum.sort(temps)
+    n = length(sorted)
+    mid = div(n, 2)
+
+    if rem(n, 2) == 1,
+      do: Enum.at(sorted, mid),
+      else: (Enum.at(sorted, mid - 1) + Enum.at(sorted, mid)) / 2
   end
 
   # The level the readings call for against the enter thresholds, or against
@@ -145,12 +180,24 @@ defmodule Arbiter.Machine.Derate do
     |> Enum.max_by(fn {level, _} -> @rank[level] end)
   end
 
-  defp thermal(%{temp_c: temp}, config, mode) when is_number(temp) do
-    margin = if mode == :enter, do: 0.0, else: config.thermal_delta_c
+  # Entering: hard on the raw sample (immediate), soft on the median of a full
+  # window. Releasing: both on the median of what the window holds.
+  defp thermal(%{temp_c: temp, temps: temps}, config, :enter) when is_number(temp) do
+    smoothed = if length(temps) >= config.thermal_entry_samples, do: median(temps)
 
     cond do
-      temp >= config.thermal_hard_c - margin -> {:hard, {:thermal, temp}}
-      temp >= config.thermal_soft_c - margin -> {:soft, {:thermal, temp}}
+      temp >= config.thermal_hard_c -> {:hard, {:thermal, temp}}
+      is_number(smoothed) and smoothed >= config.thermal_soft_c -> {:soft, {:thermal, smoothed}}
+      true -> {:none, nil}
+    end
+  end
+
+  defp thermal(%{temps: [_ | _] = temps}, config, :release) do
+    smoothed = median(temps)
+
+    cond do
+      smoothed >= config.thermal_hard_c - config.thermal_delta_c -> {:hard, {:thermal, smoothed}}
+      smoothed >= config.thermal_soft_c - config.thermal_delta_c -> {:soft, {:thermal, smoothed}}
       true -> {:none, nil}
     end
   end

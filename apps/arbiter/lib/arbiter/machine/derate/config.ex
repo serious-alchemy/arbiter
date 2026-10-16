@@ -8,6 +8,7 @@ defmodule Arbiter.Machine.Derate.Config do
   | `thermal_soft_c`  | `90`    | at or above: offer no new slots (offered = live)                |
   | `thermal_hard_c`  | `95`    | at or above: also hold new resumes and fix passes               |
   | `thermal_delta_c` | `5`     | hysteresis: recover only below `soft - delta` / `hard - delta`  |
+  | `thermal_entry_samples` | `3` | soft thermal entry needs the *median* of the last N samples (~30 s at the 10 s sample period) at or above `thermal_soft_c`, so one `Tctl` spike cannot derate; recovery is judged on the same median. Hard stays immediate (one sample at `thermal_hard_c`) as the runaway stop. `1` = react to a single sample |
   | `psi_some_avg10`  | `25`    | memory PSI `some avg10` (%) at or above: offer no new slots     |
   | `psi_delta`       | `10`    | hysteresis for PSI                                              |
   | `mem_floor_gib`   | `4`     | `MemAvailable` below this: offer no new slots (one worker's worth) |
@@ -26,6 +27,7 @@ defmodule Arbiter.Machine.Derate.Config do
             thermal_soft_c: 90.0,
             thermal_hard_c: 95.0,
             thermal_delta_c: 5.0,
+            thermal_entry_samples: 3,
             psi_some_avg10: 25.0,
             psi_delta: 10.0,
             mem_floor_bytes: 4 * @gib,
@@ -37,6 +39,7 @@ defmodule Arbiter.Machine.Derate.Config do
           thermal_soft_c: float(),
           thermal_hard_c: float(),
           thermal_delta_c: float(),
+          thermal_entry_samples: pos_integer(),
           psi_some_avg10: float(),
           psi_delta: float(),
           mem_floor_bytes: non_neg_integer(),
@@ -50,6 +53,7 @@ defmodule Arbiter.Machine.Derate.Config do
     "thermal_soft_c" => {:thermal_soft_c, :float},
     "thermal_hard_c" => {:thermal_hard_c, :float},
     "thermal_delta_c" => {:thermal_delta_c, :float},
+    "thermal_entry_samples" => {:thermal_entry_samples, :count},
     "psi_some_avg10" => {:psi_some_avg10, :float},
     "psi_delta" => {:psi_delta, :float},
     "mem_floor_gib" => {:mem_floor_bytes, :gib},
@@ -63,6 +67,7 @@ defmodule Arbiter.Machine.Derate.Config do
     "ARB_NODE_THERMAL_SOFT_C" => "thermal_soft_c",
     "ARB_NODE_THERMAL_HARD_C" => "thermal_hard_c",
     "ARB_NODE_THERMAL_DELTA_C" => "thermal_delta_c",
+    "ARB_NODE_THERMAL_ENTRY_SAMPLES" => "thermal_entry_samples",
     "ARB_NODE_MEM_PSI_SOME" => "psi_some_avg10",
     "ARB_NODE_MEM_PSI_DELTA" => "psi_delta",
     "ARB_NODE_MEM_FLOOR_GIB" => "mem_floor_gib",
@@ -88,6 +93,7 @@ defmodule Arbiter.Machine.Derate.Config do
       "thermal_soft_c" => d.thermal_soft_c,
       "thermal_hard_c" => d.thermal_hard_c,
       "thermal_delta_c" => d.thermal_delta_c,
+      "thermal_entry_samples" => d.thermal_entry_samples,
       "psi_some_avg10" => d.psi_some_avg10,
       "psi_delta" => d.psi_delta,
       "mem_floor_gib" => d.mem_floor_bytes / @gib,
@@ -190,6 +196,8 @@ defmodule Arbiter.Machine.Derate.Config do
       _ -> :error
     end
   end
+
+  defp cast(:count, v), do: cast(:seconds, v)
 
   defp cast(:seconds, v) do
     case number(v) do
