@@ -196,6 +196,13 @@ defmodule Arbiter.Trackers.Tracker do
   @callback extract_description(map()) :: String.t()
 
   @doc """
+  Extracts the tracker-native task/checklist item texts from a raw issue map
+  (e.g. Shortcut story tasks). Optional; adapters without one fall back to
+  Markdown checkboxes in the description.
+  """
+  @callback extract_checklist(map()) :: [String.t()]
+
+  @doc """
   Extracts the Arbiter priority (0..4, where 0 = P0 / highest) from a raw
   issue map returned by `fetch/1`.
 
@@ -397,7 +404,8 @@ defmodule Arbiter.Trackers.Tracker do
   """
   @callback links_for(raw_issue :: map()) :: [issue_link()]
 
-  @optional_callbacks links_for: 1,
+  @optional_callbacks extract_checklist: 1,
+                      links_for: 1,
                       prepare: 2,
                       add_remote_link: 3,
                       add_comment: 2,

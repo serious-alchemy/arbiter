@@ -155,6 +155,7 @@ defmodule Arbiter.Tasks.Issue do
         :title,
         :description,
         :acceptance,
+        :acceptance_waived,
         :notes,
         :qa_notes,
         :deployment_notes,
@@ -2231,6 +2232,16 @@ defmodule Arbiter.Tasks.Issue do
   never open a PR, so ReviewGate's criteria guards never score them.
   """
   def gated_issue_types, do: @gated_issue_types
+
+  @tracker_spec_waiver "tracker story description is the spec"
+
+  @doc """
+  The `acceptance_waived` reason `Arbiter.Tasks.Claim` records when a tracker
+  issue yields no checklist or acceptance section: the tracker description is
+  the spec, and ReviewGate reviews against it.
+  """
+  @spec tracker_spec_waiver() :: String.t()
+  def tracker_spec_waiver, do: @tracker_spec_waiver
 
   @doc "Whether `issue_type` is subject to the acceptance-criteria-before-Ready rule."
   def gated_type?(issue_type), do: issue_type in @gated_issue_types
