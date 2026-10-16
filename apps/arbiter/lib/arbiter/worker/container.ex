@@ -610,7 +610,7 @@ defmodule Arbiter.Worker.Container do
 
   def teardown(_), do: :ok
 
-  @git_secret_re ~r/\A(arb-[a-zA-Z0-9_.-]+)-git-(?:key|token)\z/
+  @git_secret_re ~r/\A(arb-[a-zA-Z0-9_.-]+)-git-(?:key|token|api-token)\z/
 
   @doc """
   Creates the podman secret `secret` (`%{name:, value:, ...}`; bd-9cygoo). The
@@ -664,7 +664,8 @@ defmodule Arbiter.Worker.Container do
   end
 
   @doc """
-  Removes the git-credential secrets (`<container>-git-key`, `<container>-git-token`)
+  Removes the git-credential secrets (`<container>-git-key`, `<container>-git-token`,
+  `<container>-git-api-token`)
   whose container no longer exists: what a crashed server leaves behind. Returns
   the names removed.
   """

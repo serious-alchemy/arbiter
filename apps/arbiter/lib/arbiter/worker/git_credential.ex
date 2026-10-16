@@ -29,6 +29,13 @@ defmodule Arbiter.Worker.GitCredential do
       repo with only the permissions a worker needs.
     * `token` — a fine-grained / project access token for one repo (GitHub or
       GitLab). A classic GitHub PAT is refused: it cannot be limited to a repo.
+    * `gitlab_project_token` — GitLab, bd-3llb3y. A long-lived *parent* credential
+      (a personal access token, `api` scope, of a Maintainer/Owner of the project)
+      that never leaves the primary. At each spawn Arbiter uses it to mint a
+      project access token for that one project (`read_api` + `write_repository`,
+      role Developer, expiring in days), revokes it when the worker exits, and
+      hands the worker only the minted token: git push over https and the GitLab
+      API (`GITLAB_TOKEN`, so `glab` and `curl` work without the operator's session).
 
   ## When it is required
 
@@ -57,12 +64,13 @@ defmodule Arbiter.Worker.GitCredential do
     * **Tracker** — `GH_TOKEN` for a `tracker_write` projection is the repo-scoped
       token (a second, narrower App installation token, or the `token` kind's
       own), not a binding's broad one.
-    * **A run on a remote node** (bd-akp9ae) — only a GitHub App's short-lived
-      token goes, as a secret of the run spec the node keeps on tmpfs
-      (`remote_delivery/1`), and it is revoked when the run's worker exits
-      (`revoke/2`, `revoke_when_down/3`). A deploy key or a static token never
-      leaves the primary, nor does any long-lived value the block names, even one
-      also exposed as a worker env var (`withheld_values/1`).
+    * **A run on a remote node** (bd-akp9ae) — only a GitHub App's or a
+      `gitlab_project_token`'s short-lived token goes, as a secret of the run spec
+      the node keeps on tmpfs (`remote_delivery/1`), and it is revoked when the
+      run's worker exits (`revoke/2`, `revoke_when_down/3`). A deploy key or a
+      static token never leaves the primary, nor does any long-lived value the
+      block names (a GitLab parent credential included), even one also exposed as a
+      worker env var (`withheld_values/1`).
     * An ssh agent socket is never delivered (`SSH_AUTH_SOCK` stays unset).
   """
 
@@ -73,18 +81,32 @@ defmodule Arbiter.Worker.GitCredential do
 
   require Logger
 
-  @kinds ~w(deploy_key token github_app)
+  @kinds ~w(deploy_key token github_app gitlab_project_token)
   @remote_re ~r/\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.\/-]+\z/
   @host_re ~r/\A[A-Za-z0-9.-]+\z/
   @name_re ~r/\A[A-Za-z0-9_.:-]+\z/
 
-  @entry_keys ~w(kind key_secret token_secret private_key_secret app_id installation_id host
-                 username remote api_url legacy_operator)
+  @entry_keys ~w(kind key_secret token_secret private_key_secret parent_token_secret app_id
+                 installation_id host username remote api_url expires_in_days legacy_operator)
+
+  # GitLab project access tokens expire on a date (midnight UTC), so a token minted
+  # now with `expires_at` tomorrow could die within minutes. The default of 2 days
+  # guarantees more than 24h; the worker's exit revokes it long before.
+  @gitlab_default_days 2
+  @gitlab_max_days 7
+  # The role (30 = Developer) and scopes a worker's GitLab token is minted with:
+  # `read_api` reads pipelines, jobs and artifacts but cannot approve or merge (that
+  # is `api`), `write_repository` is git push/pull over https.
+  @gitlab_access_level 30
+  @gitlab_scopes ~w(read_api write_repository)
+  # Kinds whose credential a container holds even when the host pushes for it
+  # (`plan/3`'s `:host_pushes?`): the token is also the worker's GitLab API access.
+  @container_kinds [:gitlab_project_token]
   @block_keys ~w(legacy_operator repos)
 
   defstruct mode: :unenforced, repo: nil, entry: nil
 
-  @type kind :: :deploy_key | :token | :github_app
+  @type kind :: :deploy_key | :token | :github_app | :gitlab_project_token
   @type entry :: %{
           required(:kind) => kind(),
           optional(atom()) => term()
@@ -142,7 +164,8 @@ defmodule Arbiter.Worker.GitCredential do
     entry = repo_entry(block, repo)
 
     cond do
-      role == :reviewer or Keyword.get(opts, :host_pushes?, false) ->
+      role == :reviewer or
+          (Keyword.get(opts, :host_pushes?, false) and not container_credential?(entry)) ->
         {:ok, %__MODULE__{mode: :not_needed, repo: repo}}
 
       scoped?(entry) ->
@@ -177,6 +200,11 @@ defmodule Arbiter.Worker.GitCredential do
   defp scoped?(%{"kind" => kind}) when kind in @kinds, do: true
   defp scoped?(_), do: false
 
+  defp container_credential?(%{"kind" => kind}) when is_binary(kind),
+    do: Enum.any?(@container_kinds, &(Atom.to_string(&1) == kind))
+
+  defp container_credential?(_), do: false
+
   # A repo entry's own `legacy_operator` (true or false) wins over the workspace's.
   defp legacy?(_block, %{"legacy_operator" => value}) when is_boolean(value), do: value
   defp legacy?(block, _entry), do: Map.get(block, "legacy_operator") == true
@@ -192,17 +220,21 @@ defmodule Arbiter.Worker.GitCredential do
   end
 
   defp parse_entry(entry) do
+    gitlab? = entry["kind"] == "gitlab_project_token"
+
     %{
       kind: String.to_existing_atom(entry["kind"]),
       key_secret: entry["key_secret"],
       token_secret: entry["token_secret"],
       private_key_secret: entry["private_key_secret"],
+      parent_token_secret: entry["parent_token_secret"],
       app_id: stringify_id(entry["app_id"]),
       installation_id: stringify_id(entry["installation_id"]),
-      host: entry["host"] || "github.com",
-      username: entry["username"] || "x-access-token",
+      host: entry["host"] || if(gitlab?, do: "gitlab.com", else: "github.com"),
+      username: entry["username"] || if(gitlab?, do: "oauth2", else: "x-access-token"),
       remote: entry["remote"],
-      api_url: entry["api_url"]
+      api_url: entry["api_url"],
+      expires_in_days: entry["expires_in_days"] || @gitlab_default_days
     }
   end
 
@@ -245,6 +277,7 @@ defmodule Arbiter.Worker.GitCredential do
          :ok <- validate_kind(entry, where),
          :ok <- optional_match(entry, "host", @host_re, where),
          :ok <- optional_match(entry, "remote", @remote_re, where),
+         :ok <- optional_days(entry, where),
          do: optional_match(entry, "username", @name_re, where)
   end
 
@@ -265,6 +298,9 @@ defmodule Arbiter.Worker.GitCredential do
 
       "github_app" ->
         require_names(entry, ["app_id", "installation_id", "private_key_secret"], where)
+
+      "gitlab_project_token" ->
+        require_names(entry, ["parent_token_secret"], where)
 
       other ->
         {:error, "#{where}.kind #{inspect(other)} must be one of #{Enum.join(@kinds, ", ")}"}
@@ -304,6 +340,20 @@ defmodule Arbiter.Worker.GitCredential do
   end
 
   defp bad(where, key), do: {:error, "#{where}.#{key} is not valid"}
+
+  defp optional_days(entry, where) do
+    case Map.get(entry, "expires_in_days") do
+      nil ->
+        :ok
+
+      days when is_integer(days) and days >= 1 and days <= @gitlab_max_days ->
+        :ok
+
+      _ ->
+        {:error,
+         "#{where}.expires_in_days must be a whole number of days, 1 to #{@gitlab_max_days}"}
+    end
+  end
 
   # ---- remotes ------------------------------------------------------------------
 
@@ -382,6 +432,7 @@ defmodule Arbiter.Worker.GitCredential do
       :deploy_key -> materialize_key(entry, workspace)
       :token -> materialize_token(entry, workspace, opts)
       :github_app -> materialize_app(entry, workspace, opts)
+      :gitlab_project_token -> materialize_gitlab(entry, workspace, opts)
     end
   end
 
@@ -422,6 +473,26 @@ defmodule Arbiter.Worker.GitCredential do
          tracker_token: tracker,
          host: entry.host,
          username: "x-access-token",
+         remote: remote,
+         api_url: entry.api_url
+       }}
+    end
+  end
+
+  # The parent credential mints a project access token for this one project and
+  # stays here: the material keeps it only so the primary can revoke the token.
+  defp materialize_gitlab(entry, workspace, opts) do
+    with {:ok, parent} <- secret(workspace, entry.parent_token_secret),
+         {:ok, remote} <- remote(entry, opts),
+         {:ok, %{id: id, token: token}} <- gitlab_mint(entry, parent, remote, opts) do
+      {:ok,
+       %Material{
+         kind: :gitlab_project_token,
+         token: token,
+         token_id: id,
+         parent_token: parent,
+         host: entry.host,
+         username: entry.username,
          remote: remote,
          api_url: entry.api_url
        }}
@@ -518,7 +589,101 @@ defmodule Arbiter.Worker.GitCredential do
   end
 
   defp message_of(%{"message" => message}) when is_binary(message), do: message
+  defp message_of(%{"error" => message}) when is_binary(message), do: message
   defp message_of(_), do: "no message"
+
+  # ---- GitLab project access token ---------------------------------------------------
+
+  # `POST /projects/:id/access_tokens`, authenticated by the parent personal access
+  # token (GitLab refuses a project access token here). The project id is the
+  # URL-encoded path. What comes back is checked against what was asked: a token
+  # with more scopes or a higher role than a worker's is revoked at once and the
+  # spawn refused, so a forge that widens a request never hands a worker more.
+  defp gitlab_mint(entry, parent, remote, opts) do
+    today = Date.utc_today()
+    days = entry.expires_in_days
+
+    request =
+      Keyword.merge(
+        [
+          url: "#{gitlab_api(entry)}/projects/#{gitlab_project(remote)}/access_tokens",
+          json: %{
+            "name" => "arbiter-run-#{System.unique_integer([:positive])}",
+            "scopes" => @gitlab_scopes,
+            "access_level" => @gitlab_access_level,
+            "expires_at" => today |> Date.add(days) |> Date.to_iso8601()
+          },
+          headers: [{"private-token", parent}],
+          retry: false,
+          receive_timeout: 15_000
+        ],
+        forge_req_options(opts)
+      )
+
+    case Req.post(request) do
+      {:ok, %Req.Response{status: 201, body: %{"token" => token, "id" => id} = body}}
+      when is_binary(token) and is_integer(id) ->
+        if gitlab_grant_ok?(body) do
+          {:ok, %{id: id, token: token}}
+        else
+          _ = gitlab_revoke_token(gitlab_api(entry), remote, id, parent, opts)
+
+          {:error,
+           {:git_credential_mint_failed, :too_broad,
+            "GitLab granted scopes #{inspect(body["scopes"])} at role #{inspect(body["access_level"])}, " <>
+              "not #{inspect(@gitlab_scopes)} at #{@gitlab_access_level}"}}
+        end
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, {:git_credential_mint_failed, status, message_of(body)}}
+
+      {:error, exception} ->
+        message = String.replace(Exception.message(exception), parent, "[redacted]")
+        {:error, {:git_credential_mint_failed, :transport, message}}
+    end
+  end
+
+  defp gitlab_grant_ok?(%{"scopes" => scopes, "access_level" => @gitlab_access_level})
+       when is_list(scopes),
+       do: Enum.sort(scopes) == Enum.sort(@gitlab_scopes)
+
+  defp gitlab_grant_ok?(_), do: false
+
+  defp gitlab_project(remote), do: URI.encode_www_form(remote)
+
+  # `api_url` is the REST base (`https://gitlab.example.com/api/v4`); the default
+  # follows `host`.
+  defp gitlab_api(%{api_url: url}) when is_binary(url) and url != "",
+    do: String.trim_trailing(url, "/")
+
+  defp gitlab_api(%{host: host}), do: "https://#{host}/api/v4"
+
+  # `DELETE /projects/:id/access_tokens/:token_id`, with the parent credential. A
+  # token already gone (404) is revoked.
+  defp gitlab_revoke_token(api, remote, id, parent, opts) do
+    request =
+      Keyword.merge(
+        [
+          url: "#{api}/projects/#{gitlab_project(remote)}/access_tokens/#{id}",
+          headers: [{"private-token", parent}],
+          retry: false,
+          receive_timeout: 15_000
+        ],
+        forge_req_options(opts)
+      )
+
+    case Req.delete(request) do
+      {:ok, %Req.Response{status: status}} when status in [204, 404] ->
+        :ok
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:git_credential_revoke_failed, status}}
+
+      {:error, exception} ->
+        message = String.replace(Exception.message(exception), parent, "[redacted]")
+        {:error, {:git_credential_revoke_failed, {:transport, message}}}
+    end
+  end
 
   defp app_jwt(app_id, pem) do
     now = System.system_time(:second)
@@ -578,6 +743,10 @@ defmodule Arbiter.Worker.GitCredential do
     |> Enum.find(:ok, &(&1 != :ok))
   end
 
+  def revoke(%Material{kind: :gitlab_project_token, token_id: id, parent_token: parent} = m, opts)
+      when is_integer(id) and is_binary(parent),
+      do: gitlab_revoke_token(gitlab_api(m), m.remote, id, parent, opts)
+
   def revoke(_material, _opts), do: :ok
 
   defp app_tokens(%Material{token: token, tracker_token: tracker}),
@@ -614,19 +783,27 @@ defmodule Arbiter.Worker.GitCredential do
 
   @doc """
   `revoke/2` once `owner` exits, however it exits: the hook a spawn arms when it
-  takes an App token off the primary (bd-akp9ae), so the token dies with the run.
-  A revoke that fails is logged (never the token); the token then still expires
-  within its hour. Any other material arms nothing.
+  takes an App token off the primary (bd-akp9ae) or mints a GitLab project token
+  (bd-3llb3y), so the token dies with the run. A revoke that fails is logged (never
+  the token); the token then still expires (an App's within the hour, a GitLab
+  project token on its `expires_at` date). Any other material arms nothing.
+
+  `:max_ms` also revokes that long after arming even if `owner` lives on: for a
+  token only a short step needs (the host's push).
   """
   @spec revoke_when_down(pid(), Material.t() | nil, keyword()) :: :ok
-  def revoke_when_down(owner, %Material{kind: :github_app} = material, opts)
-      when is_pid(owner) do
+  def revoke_when_down(owner, %Material{kind: kind} = material, opts)
+      when is_pid(owner) and kind in [:github_app, :gitlab_project_token] do
+    max_ms = Keyword.get(opts, :max_ms, :infinity)
+
     {:ok, _pid} =
       Task.start(fn ->
         ref = Process.monitor(owner)
 
         receive do
           {:DOWN, ^ref, :process, _, _} -> log_revoke(revoke(material, opts), material)
+        after
+          max_ms -> log_revoke(revoke(material, opts), material)
         end
       end)
 
@@ -639,10 +816,13 @@ defmodule Arbiter.Worker.GitCredential do
 
   defp log_revoke({:error, reason}, material) do
     Logger.warning(
-      "GitCredential: could not revoke the GitHub App token for #{material.remote}: " <>
-        "#{inspect(reason)}; it expires within the hour"
+      "GitCredential: could not revoke the #{kind_name(material)} token for #{material.remote}: " <>
+        "#{inspect(reason)}; it expires on its own"
     )
   end
+
+  defp kind_name(%Material{kind: :gitlab_project_token}), do: "GitLab project access"
+  defp kind_name(%Material{}), do: "GitHub App"
 
   # ---- static-token scope check ---------------------------------------------------
 
@@ -709,8 +889,11 @@ defmodule Arbiter.Worker.GitCredential do
       "cannot tell which repo the scoped git credential is for (no github/gitlab origin remote and " <>
         "no git_credentials.repos.<repo>.remote); refusing to issue an unpinned token"
 
+  def format_error({:git_credential_mint_failed, :too_broad, message}),
+    do: "the GitLab project access token was refused (and revoked): #{message}"
+
   def format_error({:git_credential_mint_failed, status, message}),
-    do: "minting the repo-scoped GitHub App token failed (#{status}): #{message}"
+    do: "minting the repo-scoped git token failed (#{status}): #{message}"
 
   def format_error({:git_credential_token_too_broad, scopes}),
     do:
@@ -918,6 +1101,16 @@ defmodule Arbiter.Worker.GitCredential do
   def podman_secrets(%Material{kind: :deploy_key, key: key}, prefix),
     do: [%{name: prefix <> "-git-key", type: :mount, target: @podman_key_name, value: key}]
 
+  # A GitLab project token is also the worker's API credential: a second secret of
+  # the same value, under the name `glab` and `curl` scripts read.
+  def podman_secrets(%Material{kind: :gitlab_project_token, token: token}, prefix)
+      when is_binary(token) do
+    [
+      %{name: prefix <> "-git-token", type: :env, target: "ARB_GIT_TOKEN", value: token},
+      %{name: prefix <> "-git-api-token", type: :env, target: "GITLAB_TOKEN", value: token}
+    ]
+  end
+
   def podman_secrets(%Material{token: token}, prefix) when is_binary(token),
     do: [%{name: prefix <> "-git-token", type: :env, target: "ARB_GIT_TOKEN", value: token}]
 
@@ -936,7 +1129,10 @@ defmodule Arbiter.Worker.GitCredential do
   def container_env(%Material{kind: :deploy_key}), do: []
 
   def container_env(%Material{} = material),
-    do: material |> Material.env(nil) |> Enum.reject(fn {name, _} -> name == "ARB_GIT_TOKEN" end)
+    do:
+      material
+      |> Material.env(nil)
+      |> Enum.reject(fn {name, _} -> name in Material.secret_env_names() end)
 
   @doc """
   What a run placed on a **node** takes of `material` (bd-akp9ae): `env`, the git
@@ -958,6 +1154,15 @@ defmodule Arbiter.Worker.GitCredential do
       when is_binary(token) and token != "",
       do: {:ok, %{env: container_env(material), secrets: %{"ARB_GIT_TOKEN" => token}}}
 
+  def remote_delivery(%Material{kind: :gitlab_project_token, token: token} = material)
+      when is_binary(token) and token != "",
+      do:
+        {:ok,
+         %{
+           env: container_env(material),
+           secrets: %{"ARB_GIT_TOKEN" => token, "GITLAB_TOKEN" => token}
+         }}
+
   def remote_delivery(%Material{}), do: {:error, {:git_credential_unsupported, :remote_node}}
 
   @doc """
@@ -974,7 +1179,11 @@ defmodule Arbiter.Worker.GitCredential do
         store = secret_store(workspace)
 
         for {_repo, %{} = entry} <- repos,
-            name <- Enum.map(~w(private_key_secret key_secret token_secret), &entry[&1]),
+            name <-
+              Enum.map(
+                ~w(private_key_secret key_secret token_secret parent_token_secret),
+                &entry[&1]
+              ),
             is_binary(name),
             {:ok, value} <- [stored(store, name)],
             value = String.trim(value),
@@ -1023,6 +1232,7 @@ defmodule Arbiter.Worker.GitCredential do
       ] ++ Keyword.take(opts, [:req_options])
 
     with {:ok, material} <- materialize(plan || %__MODULE__{}, workspace, materialize_opts),
+         :ok <- arm_gitlab_revoke(owner, material, opts),
          {:ok, staged} <- stage_unless_container(material, owner, opts) do
       {:ok,
        %{
@@ -1034,6 +1244,14 @@ defmodule Arbiter.Worker.GitCredential do
        }}
     end
   end
+
+  # A GitLab project token outlives the hour a GitHub App token does (it expires on
+  # a date), so it is revoked when the spawn's worker exits wherever the run is
+  # (local, podman or a node): the revoke is armed here, before anything carries it.
+  defp arm_gitlab_revoke(owner, %Material{kind: :gitlab_project_token} = material, opts),
+    do: revoke_when_down(owner, material, Keyword.take(opts, [:req_options]))
+
+  defp arm_gitlab_revoke(_owner, _material, _opts), do: :ok
 
   defp stage_unless_container(material, owner, opts) do
     if Keyword.get(opts, :container?, false),
@@ -1106,8 +1324,12 @@ defmodule Arbiter.Worker.GitCredential do
   @spec redact_values(Material.t() | nil) :: [String.t()]
   def redact_values(nil), do: []
 
-  def redact_values(%Material{key: key, token: token, tracker_token: tracker}) do
+  def redact_values(%Material{key: key, token: token, tracker_token: tracker} = material) do
     key_value = if is_binary(key), do: String.trim(key)
-    Enum.filter([key_value, token, tracker], &(is_binary(&1) and &1 != ""))
+
+    Enum.filter(
+      [key_value, token, tracker, material.parent_token],
+      &(is_binary(&1) and &1 != "")
+    )
   end
 end

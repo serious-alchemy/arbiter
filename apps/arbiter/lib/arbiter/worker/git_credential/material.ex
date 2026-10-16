@@ -6,32 +6,42 @@ defmodule Arbiter.Worker.GitCredential.Material do
   output scrubber must mask.
 
     * `:deploy_key` — `key` is the private key text.
-    * `:token` / `:github_app` — `token` is the push credential; `remote` is the
+    * `:token` / `:github_app` / `:gitlab_project_token` — `token` is the push credential; `remote` is the
       `owner/repo` it is pinned to, `host` the forge host it is offered to and
       `username` the HTTP basic user. `tracker_token` is the narrower token for
       `tracker_write` (when one was asked for). `api_url` is a `github_app`
       entry's API base (GitHub Enterprise; `nil` is api.github.com), which its
       tokens are revoked at (`Arbiter.Worker.GitCredential.revoke/2`).
+    * `:gitlab_project_token` — `token` is a project access token minted for the
+      run (`token_id` is its id, which a revoke names); `parent_token` is the
+      long-lived credential that minted it and revokes it. The parent never leaves
+      the primary: no delivery function (`env/2`, `podman_secrets/2`,
+      `remote_delivery/1`) reads it, and `Inspect` hides it with the other secrets.
   """
 
   @remote_re ~r/\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.\/-]+\z/
   @host_re ~r/\A[A-Za-z0-9.-]+\z/
   @user_re ~r/\A[A-Za-z0-9_.:-]+\z/
 
+  @derive {Inspect, except: [:key, :token, :tracker_token, :parent_token]}
   defstruct kind: nil,
             key: nil,
             token: nil,
             tracker_token: nil,
+            token_id: nil,
+            parent_token: nil,
             host: "github.com",
             username: "x-access-token",
             remote: nil,
             api_url: nil
 
   @type t :: %__MODULE__{
-          kind: :deploy_key | :token | :github_app | nil,
+          kind: :deploy_key | :token | :github_app | :gitlab_project_token | nil,
           key: String.t() | nil,
           token: String.t() | nil,
           tracker_token: String.t() | nil,
+          token_id: integer() | nil,
+          parent_token: String.t() | nil,
           host: String.t(),
           username: String.t(),
           remote: String.t() | nil,
@@ -76,10 +86,21 @@ defmodule Arbiter.Worker.GitCredential.Material do
       {"ARB_GIT_TOKEN", token},
       {"GIT_TERMINAL_PROMPT", "0"},
       {"GIT_CONFIG_PARAMETERS", parameters}
-    ]
+    ] ++ api_env(m)
   end
 
   def env(%__MODULE__{}, _key_path), do: []
+
+  # The same run token authenticates the GitLab API (`glab`, `curl`): a worker
+  # reads its pipelines, jobs and artifacts without the operator's glab session.
+  defp api_env(%__MODULE__{kind: :gitlab_project_token, token: token, host: host}),
+    do: [{"GITLAB_TOKEN", token}, {"GITLAB_HOST", host}]
+
+  defp api_env(%__MODULE__{}), do: []
+
+  @doc "The env names that carry a token's value (delivered as secrets, never as container env)."
+  @spec secret_env_names() :: [String.t()]
+  def secret_env_names, do: ["ARB_GIT_TOKEN", "GITLAB_TOKEN"]
 
   # Answers `get` for the pinned path only (compared case-insensitively, as the
   # forges do). The token itself is read from the env, never written into config.

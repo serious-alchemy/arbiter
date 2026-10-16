@@ -40,6 +40,10 @@ defmodule Arbiter.Worker.HostCredential do
   alias Arbiter.Worker.GitCredential.Material
   alias Arbiter.Worker.HostCredential.Cache
 
+  # How long a host-minted GitLab project token lives: the push follows `for_repo/3`
+  # at once, and the token is revoked this long after (or when the owner exits).
+  @push_window_ms 10 * 60_000
+
   @type t :: %{
           material: Material.t(),
           env: [{String.t(), String.t() | nil}],
@@ -55,7 +59,8 @@ defmodule Arbiter.Worker.HostCredential do
   Options: `:worktree_path` (whose `origin` pins a token to its repo), `:remote`
   (`owner/repo`; the entry's own `remote` wins), `:owner` (the pid a staged deploy
   key lives as long as; default `self()`), `:root` (where a key is staged),
-  `:req_options` (merged into the mint request).
+  `:req_options` (merged into the mint request), `:revoke_after_ms` (a
+  `gitlab_project_token`'s revoke deadline, default ten minutes).
   """
   @spec for_repo(map() | nil, String.t() | nil, keyword()) ::
           {:ok, t() | nil} | {:error, term()}
@@ -137,8 +142,29 @@ defmodule Arbiter.Worker.HostCredential do
     compute = fn -> GitCredential.materialize(plan, workspace, materialize_opts) end
 
     case entry.kind do
-      :github_app -> Cache.fetch(cache_key(entry, remote), compute)
-      _ -> compute.()
+      :github_app ->
+        Cache.fetch(cache_key(entry, remote), compute)
+
+      # Minted for this push, not memoized: it is revoked once the push window
+      # closes (or the owner exits), so a cached token would go stale under a caller.
+      :gitlab_project_token ->
+        with {:ok, material} <- compute.() do
+          revoke_opts =
+            Keyword.take(opts, [:req_options]) ++
+              [max_ms: Keyword.get(opts, :revoke_after_ms, @push_window_ms)]
+
+          :ok =
+            GitCredential.revoke_when_down(
+              Keyword.get(opts, :owner, self()),
+              material,
+              revoke_opts
+            )
+
+          {:ok, material}
+        end
+
+      _ ->
+        compute.()
     end
   end
 

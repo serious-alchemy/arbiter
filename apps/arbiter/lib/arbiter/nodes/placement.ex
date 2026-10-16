@@ -154,8 +154,11 @@ defmodule Arbiter.Nodes.Placement do
   # App's is a short-lived installation token minted on the primary for the run,
   # restricted to the one repo, delivered through the node's per-run secret channel
   # and revoked when the run ends (`ContainerSpawn.prepare_remote/1`). A deploy key
-  # or a static token is a long-lived secret that stays on the primary.
-  @remote_git_credential_kinds [:github_app]
+  # or a static token is a long-lived secret that stays on the primary. A GitLab
+  # project token (bd-3llb3y) is the same shape: minted per run by a primary-only parent
+  # credential, one project, revoked when the run's worker exits. It is also the
+  # worker's GitLab API credential, so the container of *every* run kind holds it.
+  @remote_git_credential_kinds [:github_app, :gitlab_project_token]
 
   @type mode :: :local_only | :prefer_remote | :remote_only
   @type reason ::
@@ -252,7 +255,8 @@ defmodule Arbiter.Nodes.Placement do
 
   @doc """
   The scoped git credential kinds a run that pushes from its container may take to
-  a node (`[:github_app]`: a short-lived, repo-restricted installation token).
+  a node (`[:github_app, :gitlab_project_token]`: a short-lived token minted per run on
+  the primary, restricted to one repo).
   """
   @spec remote_git_credential_kinds() :: [GitCredential.kind()]
   def remote_git_credential_kinds, do: @remote_git_credential_kinds
@@ -305,7 +309,7 @@ defmodule Arbiter.Nodes.Placement do
   def reason_phrase(:scoped_git_credential, _),
     do:
       "it pushes with its repo's scoped git credential, a deploy key or token that cannot " <>
-        "be carried to a node (only a GitHub App's short-lived token can)"
+        "be carried to a node (only a GitHub App's or GitLab project token, minted per run, can)"
 
   @doc """
   True when placement may return a node (`Executor.Node` exists since RW9, so the
@@ -348,7 +352,7 @@ defmodule Arbiter.Nodes.Placement do
     phrase =
       "held — #{request.task_id} pushes with a scoped git credential " <>
         "(#{Map.get(request, :git_credential)}), which cannot be carried to a node " <>
-        "(only a GitHub App's short-lived token can)"
+        "(only a GitHub App's or GitLab project token, minted per run, can)"
 
     %{
       task_id: request.task_id,
@@ -358,7 +362,7 @@ defmodule Arbiter.Nodes.Placement do
       message:
         phrase <>
           ", and worker.placement is remote_only. Run it under prefer_remote, give the repo " <>
-          "a github_app credential, or put the repo on legacy_operator."
+          "a github_app or gitlab_project_token credential, or put the repo on legacy_operator."
     }
   end
 

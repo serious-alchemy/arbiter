@@ -1122,6 +1122,42 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert Enum.any?(wrapped.argv, &(&1 =~ "GIT_CONFIG_PARAMETERS"))
     end
 
+    # bd-3llb3y: the run's GitLab project token is the worker's git credential and
+    # its API credential (`GITLAB_TOKEN`); neither value is argv or container env, and
+    # the parent credential that minted it is nowhere in the request.
+    test "a GitLab project token is two --secret env vars; the parent credential is absent",
+         ctx do
+      material = %Material{
+        kind: :gitlab_project_token,
+        token: "glpat-run-123",
+        token_id: 5,
+        parent_token: "glpat-parent-456",
+        host: "gitlab.com",
+        username: "oauth2",
+        remote: "acme/tonic"
+      }
+
+      assert {:ok, request} = ContainerSpawn.prepare([git_material: material] ++ ctx.opts)
+
+      assert_received {:secret_created, git_secret, "glpat-run-123"}
+      assert_received {:secret_created, api_secret, "glpat-run-123"}
+
+      assert Enum.sort([git_secret, api_secret]) ==
+               Enum.sort([request.name <> "-git-token", request.name <> "-git-api-token"])
+
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request))
+
+      assert Enum.any?(wrapped.argv, &(&1 == "#{git_secret},type=env,target=ARB_GIT_TOKEN"))
+      assert Enum.any?(wrapped.argv, &(&1 == "#{api_secret},type=env,target=GITLAB_TOKEN"))
+      assert {"GITLAB_HOST", "gitlab.com"} in wrapped.env
+
+      for forbidden <- ["glpat-run-123", "glpat-parent-456"] do
+        refute Enum.any?(wrapped.argv, &(&1 =~ forbidden))
+        refute Enum.any?(wrapped.env, fn {_, v} -> to_string(v) =~ forbidden end)
+        refute inspect(request) =~ forbidden
+      end
+    end
+
     test "teardown removes the secrets with the container", ctx do
       material = %Material{kind: :deploy_key, key: "PRIVATE-KEY\n"}
       {:ok, request} = ContainerSpawn.prepare([git_material: material] ++ ctx.opts)

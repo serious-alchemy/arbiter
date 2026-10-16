@@ -148,6 +148,50 @@ defmodule Arbiter.Worker.ContainerSpawnRemoteSpecTest do
     assert spec["secrets"]["KEEP_ME"] == "plain"
   end
 
+  # bd-3llb3y: a GitLab run's spec carries the minted token (git push and
+  # GITLAB_TOKEN) as secrets, and never the parent credential, even when the
+  # workspace also exposes the parent as a worker env var.
+  test "a GitLab run's spec holds the minted token as secrets and never the parent", %{
+    request: request
+  } do
+    alias Arbiter.Worker.GitCredential
+    alias Arbiter.Worker.GitCredential.Material
+
+    parent = "glpat-parent-0123456789abcdef"
+
+    material = %Material{
+      kind: :gitlab_project_token,
+      token: "glpat-run-token",
+      token_id: 3,
+      parent_token: parent,
+      host: "gitlab.com",
+      username: "oauth2",
+      remote: "acme/tonic"
+    }
+
+    {:ok, git} = GitCredential.remote_delivery(material)
+    request = Map.merge(request, %{git_secrets: git.secrets, env: git.env, withheld: [parent]})
+
+    port_args = %{
+      argv: ["claude"],
+      env: [{"GITLAB_PARENT_PAT", parent}, {"KEEP_ME", "plain"}]
+    }
+
+    assert {:ok, spec} = ContainerSpawn.remote_spec(request, port_args, "run-1")
+
+    assert spec["secrets"]["ARB_GIT_TOKEN"] == "glpat-run-token"
+    assert spec["secrets"]["GITLAB_TOKEN"] == "glpat-run-token"
+    assert spec["secrets"]["KEEP_ME"] == "plain"
+    # Every non-client env name rides the secrets file, not the spec env.
+    assert spec["secrets"]["GITLAB_HOST"] == "gitlab.com"
+
+    sent = inspect(spec, limit: :infinity, printable_limit: :infinity)
+    refute sent =~ "0123456789abcdef"
+    refute Map.has_key?(spec["secrets"], "GITLAB_PARENT_PAT")
+    refute inspect(spec["env"]) =~ "glpat-run-token"
+    refute inspect(spec["command"]) =~ "glpat-run-token"
+  end
+
   test "no ref, no ref key: a build node's spec is unchanged", %{request: request} do
     assert {:ok, spec} =
              ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")

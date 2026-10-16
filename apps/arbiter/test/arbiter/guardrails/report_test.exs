@@ -275,4 +275,18 @@ defmodule Arbiter.Guardrails.ReportGitCredentialTest do
     assert Enum.any?(missing, &(&1 =~ "NOPE" and &1 =~ "tonic"))
     assert Enum.any?(missing, &(&1 =~ "ALSO_NOPE" and &1 =~ "vstim"))
   end
+
+  test "a gitlab_project_token naming a parent secret the workspace lacks is flagged" do
+    ws =
+      workspace!(%{
+        "git_credentials" => %{
+          "repos" => %{
+            "tonic" => %{"kind" => "gitlab_project_token", "parent_token_secret" => "GL_NOPE"}
+          }
+        }
+      })
+
+    missing = messages(Report.build([ws], rules: []), :git_credential_secret_missing)
+    assert Enum.any?(missing, &(&1 =~ "GL_NOPE" and &1 =~ "tonic"))
+  end
 end
