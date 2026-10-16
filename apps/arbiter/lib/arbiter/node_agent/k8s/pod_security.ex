@@ -12,7 +12,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
       `hostUsers: false` Pod Security stops enforcing non-root, so this group
       asserts it itself (a pod-level non-zero uid with `runAsNonRoot`, and no
       container overriding either); it also pins the §8 fields that are the
-      builder's alone: `hostUsers: false`, a read-only root everywhere, **no
+      builder's alone: `hostUsers: false` (except under a runsc-handled `RuntimeClass` named in
+      `:sandbox_classes`, where runsc rejects it and gVisor's sandbox replaces the user
+      namespace: KH1), a read-only root everywhere, **no
       `appArmorProfile` and no `seLinuxOptions` at all** (K1-A2, §8.1), exactly
       `drop: [ALL]` with no `add`, the service account and no token, only
       `emptyDir` and the `arbiter-ca` ConfigMap as volumes, no network (DNS
@@ -117,7 +119,12 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
         "K1-A1: non-root asserted here, PSA relaxes it under hostUsers: false",
         &non_root/2
       ),
-      rule(:host_users, :arbiter, "hostUsers is false", &host_users/2),
+      rule(
+        :host_users,
+        :arbiter,
+        "hostUsers is false (absent under a runsc-handled RuntimeClass)",
+        &host_users/2
+      ),
       rule(
         :read_only_root,
         :arbiter,
@@ -161,7 +168,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
 
   Options: `levels:` (a subset of `[:baseline, :restricted, :arbiter]`), `registry:`
   (the image prefix; without it `:image` is skipped) and `image_prefixes:` (extra
-  allowed prefixes for service images; `docker.io/library/` is always allowed).
+  allowed prefixes for service images; `docker.io/library/` is always allowed) and
+  `sandbox_classes:` (the runsc-handled `RuntimeClass` names under which `hostUsers` may be
+  absent, default none).
   """
   @spec violations(map(), keyword()) :: [violation()]
   def violations(pod, opts \\ []) do
@@ -413,8 +422,18 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurity do
           do: path <> ".securityContext"
   end
 
-  defp host_users(pod, _),
-    do: if(dig(spec(pod), ["hostUsers"]) == false, do: [], else: ["spec.hostUsers"])
+  defp host_users(pod, opts) do
+    cond do
+      dig(spec(pod), ["hostUsers"]) == false -> []
+      sandboxed?(pod, opts) and not Map.has_key?(spec(pod), "hostUsers") -> []
+      true -> ["spec.hostUsers"]
+    end
+  end
+
+  defp sandboxed?(pod, opts) do
+    class = dig(spec(pod), ["runtimeClassName"])
+    is_binary(class) and class in Keyword.get(opts, :sandbox_classes, [])
+  end
 
   defp read_only_root(pod, _),
     do:

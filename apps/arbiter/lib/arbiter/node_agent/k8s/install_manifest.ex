@@ -50,6 +50,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     AdmissionPolicy,
     ControllerConfig,
     ControllerManifest,
+    PodConfig,
     Quantity,
     Quota
   }
@@ -104,6 +105,8 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
           cpu: String.t(),
           memory: String.t(),
           node_selector: %{optional(String.t()) => String.t()},
+          runtime_class: String.t(),
+          runtime_handler: String.t(),
           pull_secret: String.t() | nil,
           reach: ControllerManifest.reach(),
           admission: boolean(),
@@ -126,7 +129,9 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
 
   @doc """
   Parse the query / form values (string keys): `name` (required), `namespace`, `max`,
-  `cpu`, `memory`, `node_selector` (`k=v,k=v`), `pull_secret`, `reach`
+  `cpu`, `memory`, `node_selector` (`k=v,k=v`), `runtime_class` and `runtime_handler`
+  (`placement.runtime_class` / `placement.runtime_handler`; a `runsc*` handler marks a kernel
+  sandbox and relaxes the admission policy's `hostUsers` rule for that class), `pull_secret`, `reach`
   (`direct|tailscale|proxy`), `primary_cidrs` (required for `direct`), `proxy_url` and
   `proxy_cidrs` (required for `proxy`), `admission` (`policy` or none), `self_upgrade`
   (`on|off`), `api_cidrs` (the API server's node addresses, added to the ClusterIP),
@@ -142,6 +147,8 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       cpu: field(params, "cpu", &cpu/1, @default_cpu),
       memory: field(params, "memory", &memory/1, @default_memory),
       node_selector: field(params, "node_selector", &selector/1, %{}),
+      runtime_class: field(params, "runtime_class", &subdomain/1, ""),
+      runtime_handler: field(params, "runtime_handler", &subdomain/1, ""),
       pull_secret: field(params, "pull_secret", &subdomain/1, nil),
       reach: field(params, "reach", &reach/1, :direct),
       admission: field(params, "admission", &admission/1, false),
@@ -173,6 +180,8 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       cpu: v.cpu,
       memory: v.memory,
       node_selector: v.node_selector,
+      runtime_class: v.runtime_class,
+      runtime_handler: v.runtime_handler,
       pull_secret: v.pull_secret,
       reach: v.reach,
       admission: v.admission,
@@ -651,8 +660,18 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     do:
       AdmissionPolicy.manifests(
         registry: Keyword.fetch!(server, :registry),
-        namespace: spec.namespace
+        namespace: spec.namespace,
+        sandbox_classes: sandbox_classes(spec)
       )
+
+  defp sandbox_classes(spec) do
+    if PodConfig.kernel_sandboxed?(%{
+         "runtime_class" => spec.runtime_class,
+         "runtime_handler" => spec.runtime_handler
+       }),
+       do: [spec.runtime_class],
+       else: []
+  end
 
   # ---- node documents -------------------------------------------------------------
 
@@ -678,6 +697,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       "rules" => [
         rule([""], ["pods"], ["create", "get", "list", "watch", "delete"]),
         rule([""], ["pods/log"], ["get"]),
+        rule([""], ["events"], ["get", "list"]),
         rule([""], ["resourcequotas"], ["get", "list", "watch"]),
         rule([""], ["services"], ["get"], ["arbiter-controller"]),
         rule([""], ["secrets"], ["get", "update"], [
@@ -767,10 +787,20 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
 
     base
     |> put_unless_empty("placement", %{"node_selector" => spec.node_selector}, spec.node_selector)
+    |> put_runtime(spec)
     |> put_unless_empty("image_pull_secrets", List.wrap(spec.pull_secret), spec.pull_secret)
   end
 
-  defp put_unless_empty(map, _key, _value, empty) when empty in [nil, %{}], do: map
+  defp put_runtime(config, %{runtime_class: ""}), do: config
+
+  defp put_runtime(config, spec) do
+    runtime = %{"runtime_class" => spec.runtime_class, "runtime_handler" => spec.runtime_handler}
+    Map.update(config, "placement", runtime, &Map.merge(&1, runtime))
+  end
+
+  defp put_unless_empty(map, _key, _value, empty)
+       when empty in [nil, %{}], do: map
+
   defp put_unless_empty(map, key, value, _), do: Map.put(map, key, value)
 
   defp lease(namespace) do
