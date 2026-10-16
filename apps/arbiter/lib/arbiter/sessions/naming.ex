@@ -163,7 +163,7 @@ defmodule Arbiter.Sessions.Naming do
   @spec heartbeat_path() :: {:ok, String.t()} | {:error, :no_runtime_dir}
   def heartbeat_path do
     case socket_dir() do
-      {:ok, dir} -> {:ok, Path.join(dir, "heartbeat")}
+      {:ok, dir} -> {:ok, Path.join(dir, heartbeat_basename())}
       error -> error
     end
   end
@@ -199,6 +199,18 @@ defmodule Arbiter.Sessions.Naming do
     do: login_name(account, id)
 
   def tmux_session(_session), do: @tmux_session
+
+  # Keyed by the deploy data home so a second server on the same host (another
+  # port, scratch HOME/DB) never touches — or masks — the live server's file.
+  defp heartbeat_basename do
+    key =
+      :sha256
+      |> :crypto.hash(Arbiter.Nodes.Agent.data_home())
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, 12)
+
+    "heartbeat-" <> key
+  end
 
   # `XDG_RUNTIME_DIR` is set for every systemd user session, which is the only
   # environment a session can launch in (`systemd-run --user` needs the user
