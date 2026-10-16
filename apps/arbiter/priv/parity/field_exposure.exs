@@ -26,6 +26,8 @@
     "title" => %{mcp: :same, cli: "positional", rest: :same},
     "description" => :same,
     "acceptance" => :same,
+    "acceptance_waived" =>
+      {:internal, "recorded by Claim when a tracker story's description is the spec"},
     "notes" => :same,
     "qa_notes" => :same,
     "deployment_notes" => :same,
