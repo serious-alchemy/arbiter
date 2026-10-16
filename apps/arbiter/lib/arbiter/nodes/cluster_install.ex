@@ -27,7 +27,9 @@ defmodule Arbiter.Nodes.ClusterInstall do
 
   @form_keys ~w(name namespace max cpu memory node_selector pull_secret registries reach admission self_upgrade api_cidrs cluster_cidrs primary_cidrs proxy_url proxy_cidrs)
 
-  @default_chart "oci://ghcr.io/ryanrborn/charts/arbiter-node"
+  @default_chart "oci://ghcr.io/serious-alchemy/charts/arbiter-node"
+  # Where release CI publishes the controller image (`.github/workflows/release.yml`).
+  @default_controller_image "ghcr.io/serious-alchemy/arbiter-controller"
 
   @type helm_command :: %{values_url: String.t(), install_command: String.t()}
 
@@ -73,7 +75,14 @@ defmodule Arbiter.Nodes.ClusterInstall do
   def values_server do
     with {:ok, url} <- present(Settings.nodes_public_url(), :no_public_url),
          :ok <- controller_accepts(url) do
-      {:ok, [primary_url: url, registry: Settings.nodes_registry(), chart_ref: chart_ref()]}
+      {:ok,
+       [
+         primary_url: url,
+         registry: Settings.nodes_registry(),
+         chart_ref: chart_ref(),
+         image_repository: @default_controller_image,
+         image_tag: Agent.release_tag()
+       ]}
     end
   end
 
