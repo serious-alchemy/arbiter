@@ -606,9 +606,11 @@ defmodule ArbiterWeb.MCP.PlugTest do
       refute conn.resp_body =~ "data: /mcp"
     end
 
-    test "a worker token is rejected on GET (401) — workspace isolation holds", ctx do
+    test "a worker token gets 405 (no SSE stream) on GET, never 401 — workspace isolation holds",
+         ctx do
       conn = sse(ctx.conn, ctx.worker_token)
-      assert json_response(conn, 401)["error"]["type"] == "unauthorized"
+      assert json_response(conn, 405)["error"]["type"] == "method_not_allowed"
+      assert get_resp_header(conn, "allow") == ["POST"]
     end
 
     test "an unauthenticated GET is 401", ctx do
