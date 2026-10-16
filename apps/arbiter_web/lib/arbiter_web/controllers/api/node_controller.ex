@@ -118,8 +118,9 @@ defmodule ArbiterWeb.Api.NodeController do
   defp form_value("node_selector", %{} = map),
     do: Enum.map_join(map, ",", fn {k, v} -> "#{k}=#{v}" end)
 
-  defp form_value(key, list) when key in ["primary_cidrs", "proxy_cidrs"] and is_list(list),
-    do: Enum.join(list, ",")
+  defp form_value(key, list)
+       when key in ["primary_cidrs", "proxy_cidrs", "api_cidrs"] and is_list(list),
+       do: Enum.join(list, ",")
 
   defp form_value(_key, value) when is_integer(value), do: Integer.to_string(value)
   defp form_value(_key, value), do: value

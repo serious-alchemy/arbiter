@@ -257,6 +257,21 @@ defmodule ArbiterWeb.NodeClusterJoinTest do
       assert node.kind == "cluster" and node.name == "mesaana-k3s"
     end
 
+    test "api_cidrs (a list or a string) are carried into the manifest URL" do
+      for value <- [["192.168.5.10/32", "192.168.5.11/32"], "192.168.5.10/32,192.168.5.11/32"] do
+        conn =
+          post(operator_conn(), "/api/nodes/join-tokens", %{
+            kind: "cluster",
+            name: "mesaana-k3s",
+            primary_cidrs: "100.64.0.10/32",
+            api_cidrs: value
+          })
+
+        url = json_response(conn, 201)["cluster"]["manifest_url"]
+        assert url =~ "api_cidrs=192.168.5.10%2F32%2C192.168.5.11%2F32"
+      end
+    end
+
     test "a cluster token needs a name (the manifest and the node must agree on it)" do
       conn = post(operator_conn(), "/api/nodes/join-tokens", %{kind: "cluster"})
       assert json_response(conn, 422)["error"]["message"] =~ "name"

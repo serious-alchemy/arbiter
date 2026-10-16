@@ -50,6 +50,7 @@ defmodule Arbiter.NodeAgent.K8s.Boot do
   alias Arbiter.NodeAgent.Backoff
   alias Arbiter.NodeAgent.Bridge
   alias Arbiter.NodeAgent.Config
+  alias Arbiter.NodeAgent.K8s.ApiReach
   alias Arbiter.NodeAgent.K8s.Client
   alias Arbiter.NodeAgent.K8s.Credential
   alias Arbiter.NodeAgent.K8s.Identity
@@ -312,7 +313,15 @@ defmodule Arbiter.NodeAgent.K8s.Boot do
   defp describe(:primary_facts, {:primary, status, message}),
     do: "the primary answered #{status} to GET /nodes/cluster: #{message}"
 
-  defp describe(step, reason), do: "#{step}: #{inspect(reason, limit: 8, printable_limit: 300)}"
+  defp describe(step, reason) when step in [:credential, :store_credential, :identity] do
+    if ApiReach.unreachable?(reason),
+      do: ApiReach.message(reason),
+      else: generic(step, reason)
+  end
+
+  defp describe(step, reason), do: generic(step, reason)
+
+  defp generic(step, reason), do: "#{step}: #{inspect(reason, limit: 8, printable_limit: 300)}"
 
   defp put_status(changes) do
     Status.put(changes)
