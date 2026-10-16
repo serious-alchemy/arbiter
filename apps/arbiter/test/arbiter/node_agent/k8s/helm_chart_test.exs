@@ -90,9 +90,8 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartTest do
 
       config = find!(docs, "ConfigMap", "arbiter-controller-config")
       assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
-      placement = parsed |> Map.from_struct() |> inspect()
-      assert placement =~ "gvisor"
-      assert placement =~ "runsc"
+      assert parsed.placement["runtime_class"] == "gvisor"
+      assert parsed.placement["runtime_handler"] == "runsc"
     end
 
     test "mode node holds no guardrail and mode bootstrap no controller" do
