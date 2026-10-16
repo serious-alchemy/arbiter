@@ -445,6 +445,7 @@ defmodule ArbiterCli.Cmd.Loop do
     cond do
       row["kind"] in @operator_only_kinds -> "#{row["state"]} (operator-only)"
       row["needs_authoring"] -> "#{row["state"]} (needs authoring)"
+      row["stale"] -> "#{row["state"]} (stale)"
       true -> to_string(row["state"])
     end
   end

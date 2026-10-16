@@ -324,6 +324,31 @@ defmodule Arbiter.Loop.PendingWriteTest do
     end
   end
 
+  describe "stale_reason/2 config drift" do
+    test "flags a :config_set once its workspace config changed after creation", %{ws: ws} do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :config_set,
+            scope: :workspace,
+            target: "routing.rules.D1",
+            payload: %{"patch" => %{"routing" => %{"rules" => %{"D1" => "sonnet"}}}}
+          })
+        )
+
+      refute Loop.stale_reason(row)
+
+      {:ok, _} =
+        Ash.update(ws, %{patch: %{"routing" => %{"rules" => %{"D3" => "opus"}}}, unset_paths: []},
+          action: :patch_config,
+          actor: "test"
+        )
+
+      assert Loop.stale_reason(row) =~ "target config changed"
+    end
+  end
+
   describe "propose_repo_doc_patch/1" do
     test "hand-authors a :repo_doc_patch proposal that lands :proposed at n=1", %{ws: ws} do
       assert {:ok, row} =

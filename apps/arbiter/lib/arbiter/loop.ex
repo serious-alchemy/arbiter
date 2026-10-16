@@ -946,7 +946,9 @@ defmodule Arbiter.Loop do
   (workspace config, default #{@default_stale_after_days}) ago: its evidence
   window predates whatever the routing/config looks like now, so an operator
   should re-check it (or let the next `loop.analyze` re-propose) rather than
-  apply it blindly. Flag only — it never changes `applicable?/1`.
+  apply it blindly. A `:config_set` is also stale once its
+  workspace has been written to after the proposal was created. Flag only — it
+  never changes `applicable?/1`.
   """
   @spec stale_reason(PendingWrite.t(), DateTime.t()) :: String.t() | nil
   def stale_reason(row, now \\ DateTime.utc_now())
@@ -956,13 +958,37 @@ defmodule Arbiter.Loop do
     days = stale_after_days(row.workspace_id)
     age = DateTime.diff(now, created, :day)
 
-    if age > days do
-      "stale: created #{age} day(s) ago, older than the #{days}-day window; " <>
-        "re-check against current config"
+    cond do
+      age > days ->
+        "stale: created #{age} day(s) ago, older than the #{days}-day window; " <>
+          "re-check against current config"
+
+      config_changed_since?(row, created) ->
+        "stale: target config changed since this proposal was created; " <>
+          "re-check against current config"
+
+      true ->
+        nil
     end
   end
 
   def stale_reason(_row, _now), do: nil
+
+  # A `:config_set` targets its workspace's config, so a later write to that
+  # workspace (routing edits included) means the proposal was authored against
+  # a config that no longer exists.
+  defp config_changed_since?(%PendingWrite{kind: :config_set, workspace_id: ws_id}, created)
+       when is_binary(ws_id) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, %Workspace{updated_at: %DateTime{} = updated}} ->
+        DateTime.compare(updated, created) == :gt
+
+      _ ->
+        false
+    end
+  end
+
+  defp config_changed_since?(_row, _created), do: false
 
   defp stale_after_days(workspace_id) when is_binary(workspace_id) do
     with {:ok, %Workspace{config: %{"loop" => %{"stale_after_days" => n}}}} <-
