@@ -16,7 +16,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       and `arbiter-ca` ConfigMap the controller fills in, the controller's config
       `ConfigMap`, the `Lease`, the `Service` and the `Deployment`
       (`Arbiter.NodeAgent.K8s.ControllerManifest`, with the tailscale sidecar when
-      `?reach=tailscale`).
+      `?reach=tailscale`, or pointed at the operator's HTTP proxy with `?reach=proxy`).
 
   **It contains no secret.** There is no option that takes a token, a credential or a
   key, so a request that offers one (`?token=…`) is ignored rather than echoed; the
@@ -29,6 +29,16 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   `patch` the controller's own Deployment (and only that one, by `resourceNames`);
   the Deployment's `ARB_K8S_SELF_UPGRADE` tells the controller which. Off, the node
   shows `outdated` with the `kubectl set image` command instead.
+
+  **Controller egress is an allowlist** (`docs/design/remote-workers.md` §20.4, KH3).
+  Workers get no egress but the controller (an allowlist on workers would bypass the
+  primary's `Egress` policy and audit). The controller gets the API server, cluster DNS
+  and exactly one more destination, by `reach`: `direct` the `primary_cidrs` on the port
+  of the primary URL; `proxy` the `proxy_cidrs` on the port of `proxy_url`. Neither takes
+  a catch-all CIDR, and both refuse to render without theirs. `tailscale` keeps the wide
+  `0.0.0.0/0` rule (443, UDP 41641 and 3478): the tailnet control plane and DERP relays
+  are hostnames with changing addresses, which a plain `NetworkPolicy` cannot name. That
+  residual is the price of the sidecar; `reach=proxy` is the narrow alternative.
 
   Everything is built as JSON-shaped string-keyed maps and emitted with `Ymlr`, so
   quoting is the emitter's job and no request value is ever spliced into text.
@@ -76,6 +86,9 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
           self_upgrade: boolean(),
           api_cidrs: [String.t()],
           cluster_cidrs: [String.t()],
+          primary_cidrs: [String.t()],
+          proxy_url: String.t() | nil,
+          proxy_cidrs: [String.t()],
           part: :all | :bootstrap | :node
         }
 
@@ -90,8 +103,9 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   @doc """
   Parse the query / form values (string keys): `name` (required), `namespace`, `max`,
   `cpu`, `memory`, `node_selector` (`k=v,k=v`), `pull_secret`, `reach`
-  (`direct|tailscale`), `admission` (`policy` or none), `self_upgrade` (`on|off`),
-  `api_cidrs`, `cluster_cidrs` (comma separated) and `part`. Unknown keys are
+  (`direct|tailscale|proxy`), `primary_cidrs` (required for `direct`), `proxy_url` and
+  `proxy_cidrs` (required for `proxy`), `admission` (`policy` or none), `self_upgrade`
+  (`on|off`), `api_cidrs`, `cluster_cidrs` (comma separated) and `part`. Unknown keys are
   ignored. Every refusal is one string starting with the field name.
   """
   @spec parse(map()) :: {:ok, spec()} | {:error, [String.t()]}
@@ -109,10 +123,14 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       self_upgrade: field(params, "self_upgrade", &self_upgrade/1, true),
       api_cidrs: field(params, "api_cidrs", &cidrs/1, @default_api_cidrs),
       cluster_cidrs: field(params, "cluster_cidrs", &cidrs/1, @default_cluster_cidrs),
+      primary_cidrs: field(params, "primary_cidrs", &bounded_cidrs/1, []),
+      proxy_url: field(params, "proxy_url", &proxy_url/1, nil),
+      proxy_cidrs: field(params, "proxy_cidrs", &bounded_cidrs/1, []),
       part: field(params, "part", &part/1, :all)
     ]
 
-    case Enum.flat_map(fields, fn {key, result} -> error_for(key, result) end) do
+    case Enum.flat_map(fields, fn {key, result} -> error_for(key, result) end) ++
+           missing_for_reach(fields) do
       [] -> checked(fields)
       errors -> {:error, errors}
     end
@@ -136,6 +154,9 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       self_upgrade: v.self_upgrade,
       api_cidrs: v.api_cidrs,
       cluster_cidrs: v.cluster_cidrs,
+      primary_cidrs: v.primary_cidrs,
+      proxy_url: v.proxy_url,
+      proxy_cidrs: v.proxy_cidrs,
       part: v.part
     }
 
@@ -161,6 +182,22 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
 
   defp error_for(key, {:error, message}), do: ["#{key} #{message}"]
   defp error_for(_key, _ok), do: []
+
+  # The controller's one egress destination is named by the operator: `direct` needs the
+  # primary's CIDRs, `proxy` the proxy's URL and CIDRs. Nothing is guessed (a hostname
+  # resolved here would not be what the cluster resolves) and nothing defaults to wide.
+  defp missing_for_reach(fields) do
+    needed =
+      case fields[:reach] do
+        {:ok, :direct} -> [primary_cidrs: []]
+        {:ok, :proxy} -> [proxy_url: nil, proxy_cidrs: []]
+        _ -> []
+      end
+
+    for {key, empty} <- needed, fields[key] == {:ok, empty} do
+      "#{key} is required for reach=#{elem(fields[:reach], 1)}"
+    end
+  end
 
   defp name(value) do
     if Nodes.valid_name?(value),
@@ -211,7 +248,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   defp reach(value) do
     case ControllerManifest.parse_reach(value) do
       {:ok, reach} -> {:ok, reach}
-      {:error, _} -> {:error, "must be direct or tailscale"}
+      {:error, _} -> {:error, "must be direct, tailscale or proxy"}
     end
   end
 
@@ -234,6 +271,31 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     if list != [] and Enum.all?(list, &cidr?/1),
       do: {:ok, list},
       else: {:error, "must be comma separated CIDRs such as 10.43.0.1/32"}
+  end
+
+  # An egress allowlist entry: a CIDR, and never the catch-all (`0.0.0.0/0`, `::/0`).
+  defp bounded_cidrs(value) do
+    with {:ok, list} <- cidrs(value) do
+      if Enum.any?(list, &String.ends_with?(&1, "/0")),
+        do: {:error, "must not contain a /0 (a catch-all is not an allowlist)"},
+        else: {:ok, list}
+    end
+  end
+
+  # The proxy as the controller dials it (`ARB_NODE_PROXY`): scheme, host and an optional
+  # port, nothing else. Credentials would put a secret in a manifest that holds none.
+  defp proxy_url(value) do
+    case URI.new(value) do
+      {:ok,
+       %URI{scheme: scheme, host: host, userinfo: nil, query: nil, fragment: nil, path: path}}
+      when scheme in ["http", "https"] and is_binary(host) and host != "" and
+             path in [nil, "", "/"] ->
+        {:ok, value}
+
+      _ ->
+        {:error,
+         "must be a bare http(s) URL without credentials, such as http://proxy.example:3128"}
+    end
   end
 
   defp cidr?(text) do
@@ -262,13 +324,14 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
         node_name: spec.node_name,
         namespace: spec.namespace,
         reach: spec.reach,
+        proxy_url: spec.proxy_url,
         self_upgrade: spec.self_upgrade
       )
 
     %{
       bootstrap:
         [namespace(spec), priority_class(), quota(spec), limit_range(spec)] ++
-          network_policies(spec) ++ admission(spec, server),
+          network_policies(spec, server) ++ admission(spec, server),
       node: [
         service_account("arbiter-controller", spec.namespace, true),
         service_account("arbiter-worker", spec.namespace, false),
@@ -408,9 +471,10 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   end
 
   # K§9.1. Workers get no DNS and one destination (the controller's bridge and boot
-  # ports); the controller gets the API server, DNS and outbound 443 / tailscale
-  # but never the pod or service network.
-  defp network_policies(spec) do
+  # ports); the controller gets the API server, DNS and its `reach` destination (the
+  # primary's CIDRs, the proxy's, or the tailscale control plane; KH3) but never the
+  # pod or service network.
+  defp network_policies(spec, server) do
     controller = %{"app.kubernetes.io/component" => "controller"}
     worker = %{"app.kubernetes.io/component" => "worker"}
 
@@ -454,18 +518,43 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
               %{"protocol" => "TCP", "port" => 53}
             ]
           },
-          %{
-            "to" => [%{"ipBlock" => %{"cidr" => "0.0.0.0/0", "except" => spec.cluster_cidrs}}],
-            "ports" => [
-              %{"protocol" => "TCP", "port" => 443},
-              %{"protocol" => "UDP", "port" => 41_641},
-              %{"protocol" => "UDP", "port" => 3478}
-            ]
-          }
+          reach_rule(spec, server)
         ]
       })
     ]
   end
+
+  # The controller's last egress rule: how it reaches the primary (KH3).
+  defp reach_rule(%{reach: :direct} = spec, server) do
+    %{
+      "to" => Enum.map(spec.primary_cidrs, &%{"ipBlock" => %{"cidr" => &1}}),
+      "ports" => [
+        %{"protocol" => "TCP", "port" => url_port(Keyword.fetch!(server, :primary_url))}
+      ]
+    }
+  end
+
+  defp reach_rule(%{reach: :proxy} = spec, _server) do
+    %{
+      "to" => Enum.map(spec.proxy_cidrs, &%{"ipBlock" => %{"cidr" => &1}}),
+      "ports" => [%{"protocol" => "TCP", "port" => url_port(spec.proxy_url)}]
+    }
+  end
+
+  # The tailnet control plane and DERP relays have no stable addresses: see the moduledoc.
+  defp reach_rule(%{reach: :tailscale} = spec, _server) do
+    %{
+      "to" => [%{"ipBlock" => %{"cidr" => "0.0.0.0/0", "except" => spec.cluster_cidrs}}],
+      "ports" => [
+        %{"protocol" => "TCP", "port" => 443},
+        %{"protocol" => "UDP", "port" => 41_641},
+        %{"protocol" => "UDP", "port" => 3478}
+      ]
+    }
+  end
+
+  # `URI.parse/1` knows the scheme defaults (https 443, http 80).
+  defp url_port(url), do: URI.parse(url).port || 443
 
   defp network_policy(spec, name, match_labels, types, rules) do
     selector = if match_labels == %{}, do: %{}, else: %{"matchLabels" => match_labels}

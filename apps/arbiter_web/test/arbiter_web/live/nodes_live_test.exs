@@ -411,6 +411,7 @@ defmodule ArbiterWeb.NodesLiveTest do
       name: "mesaana-k3s",
       namespace: "ci-workers",
       max_workers: "3",
+      primary_cidrs: "100.64.0.10/32",
       ttl_minutes: "30"
     }
 

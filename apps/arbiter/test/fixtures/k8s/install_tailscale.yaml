@@ -420,7 +420,7 @@ spec:
                 secretKeyRef:
                   key: authkey
                   name: arbiter-tailscale
-          image: ghcr.io/tailscale/tailscale:stable
+          image: ghcr.io/tailscale/tailscale:v1.104.1@sha256:87c55d6be56ad85b3d8bceca5f87f73de288c609131460dd1be1874c250cc41d
           name: tailscale
           readinessProbe:
             exec:

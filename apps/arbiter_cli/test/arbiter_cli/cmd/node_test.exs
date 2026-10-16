@@ -204,6 +204,27 @@ defmodule ArbiterCli.Cmd.NodeTest do
 
     @cluster_argv ~w(add --kind cluster --name mesaana-k3s --namespace ci-workers --max-workers 3)
 
+    test "sends the egress allowlist flags (primary CIDRs, proxy URL and CIDRs)" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
+
+      {_out, _err, 0} =
+        capture(fn ->
+          Node.run(
+            @cluster_argv ++
+              ~w(--reach proxy --proxy-url http://proxy:3128 --proxy-cidrs 10.9.0.5/32) ++
+              ~w(--primary-cidrs 100.64.0.10/32)
+          )
+        end)
+
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+      body = Jason.decode!(raw)
+      assert body["reach"] == "proxy"
+      assert body["proxy_url"] == "http://proxy:3128"
+      assert body["proxy_cidrs"] == "10.9.0.5/32"
+      assert body["primary_cidrs"] == "100.64.0.10/32"
+    end
+
     test "sends the cluster form and prints the apply command, the join-Secret command and the token" do
       tty(true)
       capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
