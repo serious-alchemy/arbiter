@@ -2179,13 +2179,34 @@ defmodule Arbiter.MCP.Catalog do
           "where the adapter supports it (currently GitHub); `difficulty` and `repo` below " <>
           "override whatever would otherwise be derived or left unset (`difficulty` is checked " <>
           "against 0..5 before the tracker is called). Returns `{status: created | existing, " <>
-          "task}` — the REST shape; refusals are typed `already_claimed` (409) / `not_assigned` (403).",
+          "task}` — the REST shape; refusals are typed `already_claimed` (409) / `not_assigned` (403). " <>
+          "Bulk: pass `epic` (a tracker epic id) or `query` (a tracker search) instead of `ref` to claim " <>
+          "every match — a dry-run preview unless `yes: true`; already-claimed stories are reported " <>
+          "`existing`, never duplicated; returns `{applied, data: [{ref, title, url, status: " <>
+          "would_create | would_refuse | created | existing | refused, task_id?, reason?}]}`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "ref" => %{
             "type" => "string",
-            "description" => "Tracker issue ref / number (required)."
+            "description" =>
+              "Tracker issue ref / number (required unless `epic` or `query` is given)."
+          },
+          "epic" => %{
+            "type" => "string",
+            "description" =>
+              "Bulk: a tracker epic id (Shortcut). Claims every story in it. A dry-run preview " <>
+                "unless `yes: true`. Use instead of `ref`."
+          },
+          "query" => %{
+            "type" => "string",
+            "description" =>
+              "Bulk: a tracker search query (Shortcut search syntax). Claims every match. A " <>
+                "dry-run preview unless `yes: true`. Use instead of `ref`."
+          },
+          "yes" => %{
+            "type" => "boolean",
+            "description" => "Bulk only: actually claim the matches (default false = preview)."
           },
           "force" => %{
             "type" => "boolean",
@@ -2205,7 +2226,6 @@ defmodule Arbiter.MCP.Catalog do
                 "where dispatch otherwise can't tell which checkout the claimed issue is for."
           }
         },
-        "required" => ["ref"],
         "additionalProperties" => false
       },
       handler: &Tools.tracker_claim/2

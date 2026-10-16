@@ -2367,6 +2367,21 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:invalid, _}} = Tools.tracker_claim(ctx.coordinator, %{})
     end
 
+    test "claim with epic or query on an unsupported tracker is a typed refusal", ctx do
+      assert {:error, {:invalid_request, _}} =
+               Tools.tracker_claim(ctx.coordinator, %{"epic" => "9"})
+
+      assert {:error, {:invalid_request, _}} =
+               Tools.tracker_claim(ctx.coordinator, %{"query" => "x"})
+    end
+
+    test "claim rejects ref combined with epic", ctx do
+      assert {:error, {:invalid_request, msg}} =
+               Tools.tracker_claim(ctx.coordinator, %{"ref" => "1", "epic" => "9"})
+
+      assert msg =~ "exactly one"
+    end
+
     test "sync (dry) returns an empty plan for a none-tracker workspace", ctx do
       assert {:ok, %{applied: false, actions: [], count: 0}} =
                Tools.tracker_sync(ctx.coordinator, %{"dry" => true})

@@ -1489,4 +1489,102 @@ defmodule Arbiter.Tasks.ClaimTest do
       assert task.tracker_ref == "43"
     end
   end
+
+  describe "bulk/3 — Shortcut epic and query" do
+    defp epic_stub do
+      stub_sc(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/member"} ->
+            Req.Test.json(conn, %{"id" => @sc_member_id})
+
+          {"GET", "/api/v3/epics/9/stories"} ->
+            Req.Test.json(conn, [
+              sc_story_payload(%{"id" => 41, "name" => "Already claimed"}),
+              sc_story_payload(%{"id" => 42, "name" => "Fresh one"}),
+              sc_story_payload(%{"id" => 43, "name" => "Someone elses", "owner_ids" => ["other"]})
+            ])
+
+          {"GET", "/api/v3/search/stories"} ->
+            Req.Test.json(conn, %{
+              "data" => [sc_story_payload(%{"id" => 42, "name" => "Fresh one"})],
+              "next" => nil
+            })
+
+          {"GET", "/api/v3/stories/" <> rest} ->
+            if String.ends_with?(rest, "/comments") do
+              Req.Test.json(conn, [])
+            else
+              owners = if rest == "43", do: ["other"], else: [@sc_member_id]
+
+              Req.Test.json(
+                conn,
+                sc_story_payload(%{
+                  "id" => String.to_integer(rest),
+                  "name" => "S#{rest}",
+                  "owner_ids" => owners
+                })
+              )
+            end
+
+          {_m, "/api/v3/stories/" <> _} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+    end
+
+    defp precreate_41(ws) do
+      {:ok, _} =
+        Ash.create(Issue, %{
+          title: "Already claimed",
+          tracker_type: :shortcut,
+          tracker_ref: "41",
+          workspace_id: ws.id
+        })
+    end
+
+    defp task_for(ref) do
+      {:ok, tasks} = Ash.read(Issue)
+      Enum.find(tasks, &(&1.tracker_ref == ref))
+    end
+
+    test "preview lists matches, marks claimed as existing, creates nothing", %{sc_ws: ws} do
+      precreate_41(ws)
+      epic_stub()
+
+      assert {:ok, %{applied: false, results: results}} = Claim.bulk(ws, {:epic, "9"}, [])
+      by_ref = Map.new(results, &{&1.ref, &1.status})
+      assert by_ref == %{"41" => "existing", "42" => "would_create", "43" => "would_refuse"}
+      assert task_for("42") == nil
+    end
+
+    test "yes claims the rest, reports created/existing/refused, and is idempotent", %{sc_ws: ws} do
+      precreate_41(ws)
+      epic_stub()
+
+      assert {:ok, %{applied: true, results: results}} =
+               Claim.bulk(ws, {:epic, "9"}, yes: true, difficulty: 3)
+
+      by_ref = Map.new(results, &{&1.ref, &1})
+      assert by_ref["41"].status == "existing"
+      assert by_ref["42"].status == "created"
+      assert by_ref["42"].task_id
+      assert by_ref["43"].status == "refused"
+      assert by_ref["43"].reason =~ "not assigned"
+      assert task_for("42").difficulty == 3
+
+      assert {:ok, %{results: again}} = Claim.bulk(ws, {:epic, "9"}, yes: true)
+      assert Map.new(again, &{&1.ref, &1.status})["42"] == "existing"
+    end
+
+    test "query selector searches and previews", %{sc_ws: ws} do
+      epic_stub()
+
+      assert {:ok, %{applied: false, results: [%{ref: "42", status: "would_create"}]}} =
+               Claim.bulk(ws, {:query, "label:foo"}, [])
+    end
+
+    test "tracker without search support is refused", %{none_ws: ws} do
+      assert {:error, :not_supported} = Claim.bulk(ws, {:epic, "9"}, [])
+    end
+  end
 end

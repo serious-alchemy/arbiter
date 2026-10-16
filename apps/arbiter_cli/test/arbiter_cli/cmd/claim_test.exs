@@ -136,6 +136,97 @@ defmodule ArbiterCli.Cmd.ClaimTest do
     assert decoded["status"] == "created"
   end
 
+  describe "--json purity" do
+    test "`arb issue claim --json` keeps stdout to one JSON document; the notice is on stderr" do
+      stub_routes([
+        @workspace_lookup,
+        {{"post", "/api/workspaces/ws-1/claim"},
+         {%{"status" => "created", "task" => %{"id" => "bd-abc", "tracker_ref" => "43"}}, 201}}
+      ])
+
+      {out, err, code} =
+        capture(fn -> ArbiterCli.Main.main(["issue", "claim", "43", "--json"]) end)
+
+      assert code == 0
+      assert err =~ "deprecated"
+      refute out =~ "deprecated"
+      assert {:ok, %{"status" => "created"}} = Jason.decode(out)
+      assert String.split(String.trim_trailing(out), "\n") |> length() == 1
+    end
+  end
+
+  describe "bulk (--epic / --query)" do
+    @bulk_resp %{
+      "applied" => false,
+      "data" => [
+        %{"ref" => "41", "title" => "Done already", "status" => "existing", "task_id" => "bd-1"},
+        %{"ref" => "42", "title" => "Fresh", "status" => "would_create"}
+      ]
+    }
+
+    defp bulk_stub(resp) do
+      parent = self()
+
+      stub_routes([
+        @workspace_lookup,
+        {{"post", "/api/workspaces/ws-1/claim"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(parent, {:posted, Jason.decode!(body)})
+           Req.Test.json(conn, resp)
+         end}
+      ])
+    end
+
+    test "--epic previews by default and says how to proceed" do
+      bulk_stub(@bulk_resp)
+      {out, _err, code} = capture(fn -> Claim.run(["--epic", "9"]) end)
+      assert code == 0
+      assert_received {:posted, body}
+      assert body["epic"] == "9"
+      refute body["yes"]
+      assert out =~ "Preview"
+      assert out =~ "would_create"
+      assert out =~ "existing"
+      assert out =~ "--yes"
+    end
+
+    test "--query --yes --repo forwards options and prints a summary" do
+      bulk_stub(%{
+        "applied" => true,
+        "data" => [
+          %{"ref" => "42", "title" => "Fresh", "status" => "created", "task_id" => "bd-2"},
+          %{"ref" => "43", "title" => "Nope", "status" => "refused", "reason" => "not assigned"}
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> Claim.run(["--query", "label:x", "--yes", "--repo", "r", "--force"]) end)
+
+      assert code == 0
+      assert_received {:posted, body}
+      assert body["query"] == "label:x"
+      assert body["yes"] == true
+      assert body["repo"] == "r"
+      assert body["force"] == true
+      assert out =~ "1 created"
+      assert out =~ "1 refused"
+      assert out =~ "not assigned"
+    end
+
+    test "--json emits the response verbatim" do
+      bulk_stub(@bulk_resp)
+      {out, _err, 0} = capture(fn -> Claim.run(["--epic", "9", "--json"]) end)
+      assert {:ok, %{"applied" => false}} = Jason.decode(out)
+    end
+
+    test "ref together with --epic is rejected" do
+      {_out, err, code} = capture(fn -> Claim.run(["43", "--epic", "9"]) end)
+      assert code != 0
+      assert err =~ "exactly one"
+    end
+  end
+
   test "403 not_assigned propagates as die" do
     stub_routes([
       @workspace_lookup,

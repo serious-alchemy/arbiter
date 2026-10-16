@@ -3,6 +3,12 @@ defmodule ArbiterCli.Cmd.Claim do
   `arb claim <ref> [--force] [--difficulty N] [--repo <repo>] [--json]` — create a task
   linked to a tracker issue assigned to the workspace user.
 
+  Bulk: `arb ticket claim --epic <tracker-epic-id>` or `--query <tracker search>`
+  (instead of `<ref>`) lists every matching story, flagging those already
+  claimed, and stops — a dry-run preview. Add `--yes` to claim the rest with the
+  same `--repo` / `--difficulty` / `--force`. Already-claimed stories are
+  reported `existing`, never duplicated, so re-running is safe.
+
   POSTs to `/api/workspaces/:workspace_id/claim`. The server dispatches
   through the workspace's configured tracker adapter — GitHub, Jira,
   Shortcut, etc. — so `<ref>` is whatever that tracker uses: a GitHub issue
@@ -30,6 +36,9 @@ defmodule ArbiterCli.Cmd.Claim do
                    only repo, else its `default_repo`. A multi-repo
                    workspace with no `default_repo` REFUSES the claim until
                    you pass one of its configured keys.
+    --epic <id>    Bulk: claim every story in this tracker epic (Shortcut).
+    --query <q>    Bulk: claim every story matching this tracker search.
+    --yes          Bulk: actually claim; without it the run is a preview.
     --json         Emit JSON instead of human-readable text.
   """
 
@@ -39,6 +48,9 @@ defmodule ArbiterCli.Cmd.Claim do
     force: :boolean,
     difficulty: :string,
     repo: :string,
+    epic: :string,
+    query: :string,
+    yes: :boolean,
     json: :boolean
   ]
 
@@ -52,34 +64,91 @@ defmodule ArbiterCli.Cmd.Claim do
       opts = ArgParser.coerce_difficulty(opts)
       mode = if opts[:json], do: :json, else: :text
 
-      ref =
-        case rest do
-          [r] ->
-            r
-
-          [] ->
-            Output.die(
-              "claim requires a tracker ref (e.g. `arb claim 43` for GitHub, `arb claim AX-1234` for Jira)"
-            )
-
-          _ ->
-            Output.die("claim takes a single positional argument: <ref>")
-        end
-
-      workspace_id = Workspace.id_or_halt()
-
-      body =
-        %{"ref" => ref}
-        |> maybe_put("force", opts[:force])
-        |> maybe_put("difficulty", opts[:difficulty])
-        |> maybe_put("repo", opts[:repo])
-
-      case Client.post("/api/workspaces/#{workspace_id}/claim", body) do
-        {:ok, payload} -> emit(payload, opts[:repo], mode)
-        {:error, err} -> Output.die(err)
-      end
+      if opts[:epic] || opts[:query],
+        do: bulk(opts, rest, mode),
+        else: single(opts, rest, mode)
     end
   end
+
+  defp single(opts, rest, mode) do
+    ref =
+      case rest do
+        [r] ->
+          r
+
+        [] ->
+          Output.die(
+            "claim requires a tracker ref (e.g. `arb claim 43` for GitHub, `arb claim AX-1234` for Jira)"
+          )
+
+        _ ->
+          Output.die("claim takes a single positional argument: <ref>")
+      end
+
+    workspace_id = Workspace.id_or_halt()
+
+    body =
+      %{"ref" => ref}
+      |> maybe_put("force", opts[:force])
+      |> maybe_put("difficulty", opts[:difficulty])
+      |> maybe_put("repo", opts[:repo])
+
+    case Client.post("/api/workspaces/#{workspace_id}/claim", body) do
+      {:ok, payload} -> emit(payload, opts[:repo], mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp bulk(opts, rest, mode) do
+    if rest != [] or (opts[:epic] && opts[:query]) do
+      Output.die("pass exactly one of <ref>, --epic or --query")
+    end
+
+    workspace_id = Workspace.id_or_halt()
+
+    body =
+      %{}
+      |> maybe_put("epic", opts[:epic])
+      |> maybe_put("query", opts[:query])
+      |> maybe_put("yes", opts[:yes])
+      |> maybe_put("force", opts[:force])
+      |> maybe_put("difficulty", opts[:difficulty])
+      |> maybe_put("repo", opts[:repo])
+
+    case Client.post("/api/workspaces/#{workspace_id}/claim", body) do
+      {:ok, payload} -> emit_bulk(payload, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp emit_bulk(payload, :json), do: IO.puts(Jason.encode!(payload))
+
+  defp emit_bulk(%{"applied" => applied, "data" => rows}, :text) do
+    IO.puts(
+      if applied,
+        do: "Bulk claim — #{length(rows)} stories:",
+        else: "Preview — #{length(rows)} stories (nothing claimed):"
+    )
+
+    for row <- rows do
+      detail = row["reason"] || row["task_id"] || ""
+
+      IO.puts(
+        "  #{String.pad_trailing(row["ref"] || "", 10)} #{String.pad_trailing(row["status"] || "", 13)} #{row["title"]}#{if detail != "", do: " (#{detail})"}"
+      )
+    end
+
+    counts =
+      rows
+      |> Enum.frequencies_by(& &1["status"])
+      |> Enum.map_join(", ", fn {k, n} -> "#{n} #{k}" end)
+
+    IO.puts("Summary: #{if counts == "", do: "no matches", else: counts}")
+
+    unless applied, do: IO.puts("Re-run with --yes to claim the unclaimed stories.")
+  end
+
+  defp emit_bulk(payload, :text), do: IO.puts(Jason.encode!(payload))
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, false), do: map

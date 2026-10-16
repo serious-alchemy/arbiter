@@ -341,6 +341,17 @@ defmodule Arbiter.Trackers.Tracker do
   @callback search_by_title(title :: String.t()) :: {:ok, [summary()]} | {:error, term()}
 
   @doc """
+  List the upstream items a bulk claim should consider: every story in a
+  tracker epic (`{:epic, id}`) or matching a tracker search (`{:query, q}`).
+  Returns `t:summary/0` maps (the `list_open/1` shape).
+
+  Optional — adapters without an epic/search notion don't implement it and
+  `Arbiter.Trackers.search_for_workspace/2` reports `{:error, :not_supported}`.
+  """
+  @callback search_stories({:epic, String.t()} | {:query, String.t()}) ::
+              {:ok, [summary()]} | {:error, term()}
+
+  @doc """
   Prepare the current process to make adapter calls for `workspace`.
 
   Seeds the adapter's per-process config so subsequent adapter calls in this
@@ -362,6 +373,7 @@ defmodule Arbiter.Trackers.Tracker do
                       signal_claim: 3,
                       gating_fields: 2,
                       search_by_title: 1,
+                      search_stories: 1,
                       extract_priority: 1,
                       extract_difficulty: 1,
                       extract_issue_type: 1

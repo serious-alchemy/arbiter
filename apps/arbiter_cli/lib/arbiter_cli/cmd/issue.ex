@@ -39,6 +39,7 @@ defmodule ArbiterCli.Cmd.Issue do
       arb ticket handoff  <id> --note "<what the operator has to do>"
       arb ticket handback <id> [--note "<what changed>"]
       arb ticket claim    <issue#> [--force] [--repo <repo>]
+      arb ticket claim    (--epic <id> | --query <q>) [--yes] [--force] [--repo <repo>]
       arb ticket sync     [--dry]
       arb ticket sync-upstream-close <id>
       arb ticket ready
