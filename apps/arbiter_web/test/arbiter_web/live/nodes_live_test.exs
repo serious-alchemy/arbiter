@@ -431,6 +431,9 @@ defmodule ArbiterWeb.NodesLiveTest do
     defp pick_cluster(view),
       do: view |> form("#add-node-form", %{kind: "cluster"}) |> render_change()
 
+    defp show_manifests(view),
+      do: view |> element("#cluster-tab-manifests") |> render_click()
+
     defp text_of(view, selector) do
       view
       |> element(selector)
@@ -473,20 +476,77 @@ defmodule ArbiterWeb.NodesLiveTest do
       |> form("#add-node-form", Map.put(@cluster_form, :api_cidrs, "192.168.5.10/32"))
       |> render_submit()
 
+      assert text_of(view, "#helm-install-command") =~ "api_cidrs=192.168.5.10%2F32"
+      show_manifests(view)
       assert text_of(view, "#cluster-apply-command") =~ "api_cidrs=192.168.5.10%2F32"
     end
 
-    test "it refuses to continue without nodes.registry and says why", %{conn: conn} do
+    test "without nodes.registry it warns but does not block: Helm needs no worker registry",
+         %{conn: conn} do
       {:ok, _} = Settings.set_nodes_registry(nil)
       view = open_add(conn)
       pick_cluster(view)
 
       assert has_element?(view, "#add-node-registry-missing")
-      assert has_element?(view, "#add-node-submit[disabled]")
+      refute has_element?(view, "#add-node-submit[disabled]")
 
       view |> form("#add-node-form", @cluster_form) |> render_submit()
-      refute has_element?(view, "#join-token")
-      assert Nodes.events(kind: :token_minted) == []
+      assert has_element?(view, "#join-token")
+      assert has_element?(view, "#helm-install-command")
+      assert [%{kind: :token_minted}] = Nodes.events(kind: :token_minted)
+
+      show_manifests(view)
+      refute has_element?(view, "#cluster-apply-command")
+      assert has_element?(view, "#cluster-manifests-unavailable")
+    end
+
+    test "the Helm tab is the default and shows the namespace, Secret, token and install",
+         %{conn: conn} do
+      view = open_add(conn)
+      pick_cluster(view)
+      view |> form("#add-node-form", @cluster_form) |> render_submit()
+
+      assert has_element?(view, "#cluster-tab-helm[aria-selected=true]")
+      refute has_element?(view, "#cluster-apply-command")
+
+      assert text_of(view, "#helm-namespace-command") =~ "kubectl create namespace ci-workers"
+
+      assert text_of(view, "#helm-secret-command") =~
+               "-n ci-workers create secret generic arbiter-join"
+
+      install = text_of(view, "#helm-install-command")
+      token = text_of(view, "#join-token")
+
+      assert install =~ ~s|curl -fsSL "#{@url}/nodes/join/values.yaml?name=mesaana-k3s|
+      assert install =~ "namespace=ci-workers"
+      assert install =~ "| helm install mesaana-k3s oci://"
+      assert install =~ "--namespace ci-workers -f -"
+      refute install =~ token
+
+      assert has_element?(
+               view,
+               "#helm-values-download[href*='/nodes/join/values.yaml?name=mesaana-k3s']"
+             )
+
+      assert has_element?(view, "#copy-helm-install-command")
+      refute has_element?(view, "#helm-bootstrap-command")
+    end
+
+    test "the cluster-admin split prints a bootstrap release and a node release",
+         %{conn: conn} do
+      view = open_add(conn)
+      pick_cluster(view)
+      view |> form("#add-node-form", @cluster_form) |> render_submit()
+
+      view |> element("#helm-split-toggle") |> render_click()
+
+      assert text_of(view, "#helm-bootstrap-command") =~ "part=bootstrap"
+      assert text_of(view, "#helm-bootstrap-command") =~ "helm install mesaana-k3s-bootstrap "
+      assert text_of(view, "#helm-install-command") =~ "part=node"
+      assert text_of(view, "#helm-install-command") =~ "helm install mesaana-k3s "
+
+      view |> element("#helm-split-toggle") |> render_click()
+      refute has_element?(view, "#helm-bootstrap-command")
     end
 
     test "issues a cluster token and shows the apply command, the join-Secret command and the token",
@@ -501,6 +561,7 @@ defmodule ArbiterWeb.NodesLiveTest do
       )
       |> render_submit()
 
+      show_manifests(view)
       apply_command = text_of(view, "#cluster-apply-command")
       secret_command = text_of(view, "#cluster-secret-command")
       token = text_of(view, "#join-token")
@@ -575,7 +636,7 @@ defmodule ArbiterWeb.NodesLiveTest do
       view = open_add(conn)
       pick_cluster(view)
       view |> form("#add-node-form", @cluster_form) |> render_submit()
-      assert has_element?(view, "#cluster-apply-command")
+      assert has_element?(view, "#helm-install-command")
 
       view |> element("#add-node-close") |> render_click()
       refute has_element?(view, "#add-node-modal")
@@ -588,6 +649,7 @@ defmodule ArbiterWeb.NodesLiveTest do
 
       assert has_element?(view, "#join-command", "#{@url}/nodes/join")
       refute has_element?(view, "#cluster-apply-command")
+      refute has_element?(view, "#helm-install-command")
     end
   end
 

@@ -55,7 +55,6 @@ defmodule Arbiter.Nodes.Overview do
   alias Arbiter.Workers.{Run, RunState}
 
   @default_helm_release "arbiter-node"
-  @default_chart "oci://ghcr.io/ryanrborn/charts/arbiter-node"
 
   @type row :: map()
 
@@ -248,7 +247,7 @@ defmodule Arbiter.Nodes.Overview do
     with version when is_binary(version) <- Agent.release_tag() do
       ClusterInstall.helm_upgrade_command(
         install["release"] || @default_helm_release,
-        Settings.nodes_chart_ref() || install["chart"] || @default_chart,
+        Settings.nodes_chart_ref() || install["chart"] || ClusterInstall.chart_ref(),
         String.trim_leading(version, "v"),
         namespace(caps)
       )

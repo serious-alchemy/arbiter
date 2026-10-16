@@ -14,12 +14,19 @@ defmodule ArbiterCli.Cmd.Node do
                       [--primary-cidrs CIDR,CIDR] [--proxy-url URL]
                       [--proxy-cidrs CIDR,CIDR] [--api-cidrs CIDR,CIDR]
                       [--admission policy] [--self-upgrade on|off] [--ttl 15m]
-                      [-o manifests.yaml] [--token-file PATH] [--json]
+                      [--format manifests|helm|values] [-o FILE]
+                      [--token-file PATH] [--json]
                       add a Kubernetes cluster as a node. Prints the `kubectl
                       apply` for the install manifests (they carry no secret; -o
                       saves them to a file instead) and the command that creates
                       the join Secret with the token read from the terminal
                       (`read -rs`), so it is never in shell history or argv.
+                      --format helm prints the namespace, Secret and `helm
+                      install` commands for the arbiter-node chart instead (-o
+                      saves its values file and installs from it). --format
+                      values prints that values file to stdout (needs
+                      --token-file or -o). Without --format: the manifests, or
+                      Helm while the primary has no nodes.registry.
       arb node pending [--json]                         (device-code pairing requests waiting)
       arb node approve <code> [--name N] [--max-workers N] [--yes] [--json]
                       approve the pairing request showing <code> (XXXX-XXXX) on
@@ -81,9 +88,10 @@ defmodule ArbiterCli.Cmd.Node do
     proxy_cidrs: :string,
     admission: :string,
     self_upgrade: :string,
-    output: :string
+    output: :string,
+    format: :string
   ]
-  @cluster_only ~w(namespace cpu memory node_selector pull_secret reach primary_cidrs api_cidrs proxy_url proxy_cidrs admission self_upgrade output)a
+  @cluster_only ~w(namespace cpu memory node_selector pull_secret reach primary_cidrs api_cidrs proxy_url proxy_cidrs admission self_upgrade output format)a
   @set_switches [
     name: :string,
     label: [:string, :keep],
@@ -176,7 +184,9 @@ defmodule ArbiterCli.Cmd.Node do
     end
   end
 
-  # ---- add --kind cluster (K9) ----------------------------------------------------
+  # ---- add --kind cluster (K9, KH9) -----------------------------------------------
+
+  @formats ~w(manifests helm values)
 
   defp add_cluster(opts, mode) do
     name =
@@ -186,8 +196,17 @@ defmodule ArbiterCli.Cmd.Node do
           "the install manifests and the join token are bound to the node's name"
         )
 
+    format = format!(opts[:format])
+
+    if format == "values" and is_nil(opts[:output]) and is_nil(opts[:token_file]) do
+      Output.die(
+        "--format values prints the values file to stdout, which the token must not share",
+        "pass --token-file PATH (written mode 0600) or -o values.yaml"
+      )
+    end
+
     # Decide where the token and the manifests go before minting anything.
-    output = manifests_sink!(opts[:output])
+    output = file_sink!(opts[:output])
     sink = token_sink!(opts[:token_file])
 
     body =
@@ -208,22 +227,31 @@ defmodule ArbiterCli.Cmd.Node do
       |> put(:ttl_seconds, ttl(opts[:ttl]))
 
     case Client.post("/api/nodes/join-tokens", stringify(body)) do
-      {:ok, resp} -> deliver_cluster(resp, sink, output, mode)
+      {:ok, resp} -> deliver_cluster(resp, sink, output, format, mode)
       {:error, err} -> Output.die(err)
     end
   end
 
-  defp manifests_sink!(nil), do: nil
+  # `nil` leaves the choice to the primary's answer: raw manifests while it can render them
+  # (today's output), Helm when `nodes.registry` is unset.
+  defp format!(nil), do: nil
+  defp format!(format) when format in @formats, do: format
 
-  defp manifests_sink!(path) do
+  defp format!(other),
+    do: Output.die("--format must be #{Enum.join(@formats, ", ")}, not #{inspect(other)}")
+
+  defp file_sink!(nil), do: nil
+
+  defp file_sink!(path) do
     if File.exists?(path), do: Output.die("-o #{path} already exists; not overwriting")
     path
   end
 
-  defp deliver_cluster(resp, sink, output, mode) do
+  defp deliver_cluster(resp, sink, output, format, mode) do
     cluster = resp["cluster"] || %{}
     token = resp["token"]
     expires = get_in(resp, ["join_token", "expires_at"])
+    format = effective_format(format, cluster)
 
     token_file =
       case sink do
@@ -231,29 +259,76 @@ defmodule ArbiterCli.Cmd.Node do
         :tty -> nil
       end
 
-    manifests = save_manifests(cluster, output)
+    saved = save_output(format, cluster, output)
 
     if mode == :json do
-      out =
-        %{"expires_at" => expires, "join_token" => resp["join_token"], "cluster" => cluster}
-        |> put_json("manifests_file", manifests)
-
-      Output.emit_json(
-        if token_file,
-          do: Map.put(out, "token_file", token_file),
-          else: Map.put(out, "token", token)
-      )
+      emit_cluster_json(resp, format, saved, token_file)
     else
-      print_cluster(cluster, expires, token, token_file, manifests)
+      print_cluster_result(format, cluster, expires, {token, token_file}, {output, saved})
     end
   end
 
-  # The manifests hold no secret, so they are fetched from the primary like `kubectl apply -f
-  # <(curl ...)` would. A failed fetch does not waste the token: the apply command still works.
-  defp save_manifests(_cluster, nil), do: nil
+  defp emit_cluster_json(resp, format, saved, token_file) do
+    out =
+      %{
+        "expires_at" => get_in(resp, ["join_token", "expires_at"]),
+        "join_token" => resp["join_token"],
+        "cluster" => resp["cluster"] || %{}
+      }
+      |> put_json("manifests_file", if(format == "manifests", do: saved))
+      |> put_json("values_file", if(format != "manifests", do: saved))
 
-  defp save_manifests(cluster, path) do
-    with url when is_binary(url) <- cluster["manifest_url"],
+    Output.emit_json(
+      if token_file,
+        do: Map.put(out, "token_file", token_file),
+        else: Map.put(out, "token", resp["token"])
+    )
+  end
+
+  defp print_cluster_result("values", cluster, expires, {_token, token_file}, {nil, _saved}),
+    do: print_values(cluster, expires, token_file)
+
+  defp print_cluster_result("manifests", cluster, expires, {token, token_file}, {_output, saved}),
+    do: print_cluster(cluster, expires, token, token_file, saved)
+
+  defp print_cluster_result(_helm, cluster, expires, {token, token_file}, {_output, saved}),
+    do: print_helm(cluster, expires, token, token_file, saved)
+
+  defp effective_format(nil, %{"manifest_url" => url}) when is_binary(url), do: "manifests"
+  defp effective_format(nil, _cluster), do: "helm"
+
+  defp effective_format("manifests", %{"manifest_url" => url} = cluster)
+       when not is_binary(url) do
+    IO.puts(
+      :stderr,
+      "arb: the primary has no nodes.registry, so it cannot render the raw manifests; " <>
+        "showing the Helm install"
+    )
+
+    effective_format(nil, cluster)
+  end
+
+  defp effective_format(format, _cluster), do: format
+
+  # The manifests and the values hold no secret, so they are fetched from the primary like
+  # `kubectl apply -f <(curl ...)` would. A failed fetch does not waste the token: the
+  # command that reads the URL itself still works.
+  defp save_output(_format, _cluster, nil), do: nil
+
+  defp save_output("manifests", cluster, path),
+    do: fetch_to_file(cluster["manifest_url"], path, "manifests", "the apply command")
+
+  defp save_output(_helm_or_values, cluster, path),
+    do:
+      fetch_to_file(
+        get_in(cluster, ["helm", "values_url"]),
+        path,
+        "values",
+        "the install command"
+      )
+
+  defp fetch_to_file(url, path, what, instead) do
+    with url when is_binary(url) <- url,
          {:ok, yaml} when is_binary(yaml) <- Client.probe_url(url, decode_body: false),
          :ok <- File.write(path, yaml, [:exclusive]) do
       path
@@ -261,8 +336,8 @@ defmodule ArbiterCli.Cmd.Node do
       other ->
         IO.puts(
           :stderr,
-          "arb: could not save the manifests to #{path} (#{inspect(other)}); " <>
-            "use the apply command below instead"
+          "arb: could not save the #{what} to #{path} (#{inspect(other)}); " <>
+            "use #{instead} below instead"
         )
 
         nil
@@ -271,6 +346,56 @@ defmodule ArbiterCli.Cmd.Node do
 
   defp put_json(map, _key, nil), do: map
   defp put_json(map, key, value), do: Map.put(map, key, value)
+
+  # `--format values` without `-o`: the values file and nothing else on stdout, so
+  # `arb node add ... --format values --token-file t > values.yaml` is a file `helm -f` reads.
+  defp print_values(cluster, expires, token_file) do
+    case Client.probe_url(get_in(cluster, ["helm", "values_url"]) || "", decode_body: false) do
+      {:ok, yaml} when is_binary(yaml) ->
+        IO.write(yaml)
+
+        IO.puts(
+          :stderr,
+          "Join token minted (expires #{expires || "soon"}), written to #{token_file}. " <>
+            "Create the join Secret from it:\n  kubectl -n #{cluster["namespace"]} create secret " <>
+            "generic arbiter-join --from-file=token=#{token_file}"
+        )
+
+      other ->
+        Output.die(
+          "could not fetch the values (#{inspect(other)}); the join token was minted",
+          "install from the URL instead: #{get_in(cluster, ["helm", "values_url"])}"
+        )
+    end
+  end
+
+  defp print_helm(cluster, expires, token, token_file, values_file) do
+    helm = cluster["helm"] || %{}
+    IO.puts("Join token minted (expires #{expires || "soon"}). It works once.")
+    IO.puts("")
+    IO.puts("1. Create the namespace and label it for Pod Security (cluster-admin, once):")
+    IO.puts("")
+    IO.puts("  #{helm["namespace_command"]}")
+    IO.puts("")
+    next = print_secret_steps(cluster, token, token_file, 2)
+    IO.puts("")
+    IO.puts("#{next}. Install the chart. The values hold no secret:")
+    IO.puts("")
+    IO.puts("  #{helm_install(helm, cluster["namespace"], values_file)}")
+    IO.puts("")
+    IO.puts("Once the controller is up, `arb node list` shows it. The Secret is spent after")
+
+    IO.puts(
+      "first boot: delete it with `kubectl -n #{cluster["namespace"]} delete secret arbiter-join`."
+    )
+  end
+
+  defp helm_install(helm, _namespace, nil), do: helm["install_command"]
+
+  defp helm_install(helm, namespace, values_file) do
+    "helm install #{helm["release"]} #{helm["chart_ref"]} --version #{helm["chart_version"]} " <>
+      "--namespace #{namespace} -f #{values_file}"
+  end
 
   defp print_cluster(cluster, expires, token, token_file, manifests) do
     IO.puts("Join token minted (expires #{expires || "soon"}). It works once.")
@@ -283,32 +408,41 @@ defmodule ArbiterCli.Cmd.Node do
     )
 
     IO.puts("")
-
-    if token_file do
-      IO.puts("2. Create the join Secret from the token file (#{token_file}, mode 0600):")
-      IO.puts("")
-
-      IO.puts(
-        "  kubectl -n #{cluster["namespace"]} create secret generic arbiter-join " <>
-          "--from-file=token=#{token_file}"
-      )
-    else
-      IO.puts("2. Create the join Secret. The command asks for the token without echoing it,")
-      IO.puts("   so it is never in your shell history or a process list:")
-      IO.puts("")
-      IO.puts("  #{cluster["secret_command"]}")
-      IO.puts("")
-      IO.puts("3. When it asks, enter this token (shown once):")
-      IO.puts("")
-      IO.puts("  #{token}")
-    end
-
+    print_secret_steps(cluster, token, token_file, 2)
     IO.puts("")
     IO.puts("Once the controller is up, `arb node list` shows it. The Secret is spent after")
 
     IO.puts(
       "first boot: delete it with `kubectl -n #{cluster["namespace"]} delete secret arbiter-join`."
     )
+  end
+
+  # The join Secret and, to a terminal, the token. Returns the next step number.
+  defp print_secret_steps(cluster, token, token_file, step) do
+    if token_file do
+      IO.puts("#{step}. Create the join Secret from the token file (#{token_file}, mode 0600):")
+      IO.puts("")
+
+      IO.puts(
+        "  kubectl -n #{cluster["namespace"]} create secret generic arbiter-join " <>
+          "--from-file=token=#{token_file}"
+      )
+
+      step + 1
+    else
+      IO.puts(
+        "#{step}. Create the join Secret. The command asks for the token without echoing it,"
+      )
+
+      IO.puts("   so it is never in your shell history or a process list:")
+      IO.puts("")
+      IO.puts("  #{cluster["secret_command"]}")
+      IO.puts("")
+      IO.puts("#{step + 1}. When it asks, enter this token (shown once):")
+      IO.puts("")
+      IO.puts("  #{token}")
+      step + 2
+    end
   end
 
   defp token_sink!(path) when is_binary(path) do
