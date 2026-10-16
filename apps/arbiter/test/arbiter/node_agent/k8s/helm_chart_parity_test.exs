@@ -57,7 +57,11 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartParityTest do
        "reach.proxy.cidrs={10.9.0.5/32}"
      ]},
     {"admission policy and a registry pull secret",
-     %{"admission" => "policy", "pull_secret" => "arbiter-registry", "self_upgrade" => "off"},
+     %{
+       "admission" => "policy",
+       "registries" => "#{@registry}/=arbiter-registry",
+       "self_upgrade" => "off"
+     },
      [
        "admissionPolicy.enabled=true",
        "registries[0].prefix=#{@registry}",
@@ -200,7 +204,7 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartParityTest do
            "workers.limits.cpu=1",
            "workers.limits.memory=2Gi"
          ]},
-        {%{"node_selector" => "pool=ci", "pull_secret" => "regcred"},
+        {%{"node_selector" => "pool=ci", "registries" => "#{@registry}/=regcred"},
          [
            "placement.nodeSelector.pool=ci",
            "registries[0].prefix=#{@registry}",
