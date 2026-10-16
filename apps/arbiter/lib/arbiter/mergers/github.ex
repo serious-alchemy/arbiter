@@ -814,18 +814,21 @@ defmodule Arbiter.Mergers.Github do
         |> List.first()
         |> case do
           nil ->
-            in_flight =
-              if Enum.any?(matching, &in_flight_run?/1), do: " (a run is still running)", else: ""
-
-            {:error,
-             %Error{
-               kind: :not_found,
-               status: nil,
-               message:
-                 "cannot re-run CI: no failed workflow run on head SHA #{sha}" <>
-                   if(workflow, do: " matching #{inspect(workflow)}", else: "") <> in_flight,
-               raw: nil
-             }}
+            # A run still going has no verdict yet: a distinct result so callers
+            # wait for CI rather than read the refusal as a real failure.
+            if Enum.any?(matching, &in_flight_run?/1) do
+              {:error, :ci_in_progress}
+            else
+              {:error,
+               %Error{
+                 kind: :not_found,
+                 status: nil,
+                 message:
+                   "cannot re-run CI: no failed workflow run on head SHA #{sha}" <>
+                     if(workflow, do: " matching #{inspect(workflow)}", else: ""),
+                 raw: nil
+               }}
+            end
 
           run ->
             {:ok, run}

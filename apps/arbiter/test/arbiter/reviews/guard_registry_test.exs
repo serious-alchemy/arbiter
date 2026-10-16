@@ -41,10 +41,19 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.Watchdog, :park_ci_cancelled, 1,
      "#360: cancelled CI checks still cancelled after the re-run cap park the watcher and page " <>
        "the coordinator once as CI infrastructure — nothing is refused, no fix round is dispatched"},
+    {Arbiter.Worker.Watchdog, :rerun_cancelled, 2,
+     "bd-8o35da: `{:error, :ci_in_progress}` means the head's latest run/pipeline is still " <>
+       "going; the watcher waits for it (no verdict, no fix round, no escalation) — a wait, not a refusal"},
     {Arbiter.Worker.Watchdog, :spawn_conflict_resolver, 1,
      "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
        "until the operator lifts the pause — an operator safety stop, not a guard"},
     # --- review_gate.ex ---
+    {Arbiter.Worker.ReviewGate, :ci_act, 4,
+     "bd-8o35da: `{:error, :ci_in_progress}` from the CI re-run means the head's latest " <>
+       "run/pipeline is unfinished; the gate keeps waiting (no verdict, no fix round, no escalation)"},
+    {Arbiter.Worker.ReviewGate, :ci_rerun, 1,
+     "bd-8o35da: passes the adapter's `{:error, :ci_in_progress}` through as a wait signal — " <>
+       "nothing is refused"},
     {Arbiter.Worker.ReviewGate, :ci_infra, 2,
      "#360: cancelled CI checks re-run, then page the coordinator once as CI infrastructure " <>
        "and fall back to a reviewer-run suite — nothing is refused, no fix round is dispatched"},

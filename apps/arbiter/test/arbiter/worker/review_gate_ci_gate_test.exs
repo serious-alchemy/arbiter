@@ -247,6 +247,33 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] != "request_changes"
     end
 
+    # bd-8o35da (emr-7f0ljf): a red earlier pipeline, then the head's newest
+    # pipeline is still running. The re-run is refused as :ci_in_progress; that is
+    # "wait for CI", never a real failure — no fix round, no park.
+    test "a first re-run refused as ci_in_progress waits for CI instead of dispatching a fix round",
+         ctx do
+      rig = rig(ctx, "feature/ci-inprogress")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      StubMerger.queue_rerun_results([
+        {:error, :ci_in_progress},
+        {:ok, %{mode: :auto, run_id: 1, workflow: "CI"}}
+      ])
+
+      # red, (rerun refused: pipeline still going), still red once, rerun ok, green
+      start_forge(ctx, rig, [:failed, :failed, :running, :success])
+
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      assert remote_head(ctx, rig) == rig.head
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] != "request_changes"
+    end
+
     test "red then red dispatches the existing fix path, then waits for CI on the fix", ctx do
       rig = rig(ctx, "feature/ci-4")
 
@@ -315,15 +342,7 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
         %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
       ])
 
-      in_flight =
-        {:error,
-         %Arbiter.Mergers.Github.Error{
-           kind: :not_found,
-           status: nil,
-           message:
-             "cannot re-run CI: no failed workflow run on head SHA #{rig.head} (a run is still running)",
-           raw: nil
-         }}
+      in_flight = {:error, :ci_in_progress}
 
       # 1st rerun ok, 2nd (the gate's own after the no-diff round) refused while
       # in flight, 3rd ok.
