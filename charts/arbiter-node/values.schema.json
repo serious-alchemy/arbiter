@@ -1,0 +1,336 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "arbiter-node values",
+  "description": "Unknown keys are rejected at every level: a typo is an install error, not a silent default. Nothing here carries a secret.",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "quantity": {
+      "description": "A Kubernetes quantity such as 500m, 2 or 4Gi.",
+      "type": ["string", "integer", "number"],
+      "pattern": "^[0-9]+(\\.[0-9]+)?(m|k|Ki|M|Mi|G|Gi|T|Ti|P|Pi|E|Ei)?$"
+    },
+    "quantities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {"$ref": "#/definitions/quantity"},
+        "memory": {"$ref": "#/definitions/quantity"},
+        "ephemeral-storage": {"$ref": "#/definitions/quantity"}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {"$ref": "#/definitions/quantities"},
+        "limits": {"$ref": "#/definitions/quantities"}
+      }
+    },
+    "cidr": {
+      "description": "An IPv4 or IPv6 CIDR; a catch-all (/0) is not an allowlist entry.",
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f:.]+/(?:[1-9][0-9]?|1[01][0-9]|12[0-8])$"
+    },
+    "dnsName": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^(sha256:[0-9a-f]{64})?$"
+    }
+  },
+  "properties": {
+    "mode": {
+      "description": "all: guardrails + controller. bootstrap: guardrails only (cluster-admin). node: controller only (namespace admin).",
+      "type": "string",
+      "enum": ["all", "bootstrap", "node"]
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The node name on the primary. Empty means the release name.",
+          "type": "string",
+          "pattern": "^([A-Za-z0-9._=:/@-]{1,128})?$",
+          "not": {"const": "local"}
+        }
+      }
+    },
+    "primary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "description": "ARB_PRIMARY_URL, an http(s) URL.",
+          "type": "string",
+          "pattern": "^(https?://[^/@\\s]+/?)?$"
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "digest": {"$ref": "#/definitions/digest"},
+        "pullPolicy": {"type": "string", "enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/dnsName"}
+    },
+    "chartRef": {"type": "string"},
+    "join": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {"$ref": "#/definitions/dnsName"},
+        "token": {
+          "description": "Automation fallback, via --set-file only. Lands in Helm's release record.",
+          "type": "string"
+        }
+      }
+    },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requests": {"type": "object", "additionalProperties": false, "properties": {"cpu": {"$ref": "#/definitions/quantity"}, "memory": {"$ref": "#/definitions/quantity"}}},
+            "limits": {"type": "object", "additionalProperties": false, "properties": {"cpu": {"$ref": "#/definitions/quantity"}, "memory": {"$ref": "#/definitions/quantity"}}}
+          }
+        }
+      }
+    },
+    "concurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max": {"type": "integer", "minimum": 1, "maximum": 64}
+      }
+    },
+    "workers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {"$ref": "#/definitions/quantities"},
+        "limits": {"$ref": "#/definitions/quantities"},
+        "workSizeLimit": {"type": "string"},
+        "tmpSizeLimit": {"type": "string"},
+        "servicesResources": {"$ref": "#/definitions/resources"},
+        "timeouts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schedule_s": {"type": "integer", "minimum": 0, "maximum": 86400},
+            "pull_s": {"type": "integer", "minimum": 0, "maximum": 86400},
+            "boot_s": {"type": "integer", "minimum": 0, "maximum": 86400},
+            "grace_s": {"type": "integer", "minimum": 0, "maximum": 86400},
+            "retain_failed_s": {"type": "integer", "minimum": 0, "maximum": 86400},
+            "gate_timeout_s": {"type": "integer", "minimum": 0, "maximum": 86400}
+          }
+        },
+        "snapshotIntervalS": {"type": ["integer", "null"], "minimum": 10, "maximum": 3600}
+      }
+    },
+    "placement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "key": {"type": "string"},
+              "operator": {"type": "string", "enum": ["Exists", "Equal"]},
+              "value": {"type": "string"},
+              "effect": {"type": "string", "enum": ["NoSchedule", "PreferNoSchedule", "NoExecute"]},
+              "tolerationSeconds": {"type": "integer"}
+            }
+          }
+        },
+        "spread": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "topologyKeys": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+            "maxSkew": {"type": "integer", "minimum": 1},
+            "whenUnsatisfiable": {"type": "string", "enum": ["ScheduleAnyway", "DoNotSchedule"]}
+          }
+        },
+        "runtimeClassName": {"type": "string"},
+        "priorityClass": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "create": {"type": "boolean"},
+            "name": {"$ref": "#/definitions/dnsName"},
+            "value": {"type": "integer", "maximum": 1000000000}
+          }
+        }
+      }
+    },
+    "runtimeClass": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {"type": "boolean"},
+        "handler": {"type": "string"}
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apiServerCIDRs": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/cidr"}},
+        "clusterCIDRs": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[0-9A-Fa-f:.]+/[0-9]{1,3}$"}},
+        "controllerEgress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "primaryCIDRs": {"type": "array", "items": {"$ref": "#/definitions/cidr"}},
+            "extra": {"type": "array", "items": {"type": "object"}}
+          }
+        },
+        "flavor": {"type": "string", "enum": ["kubernetes"]}
+      }
+    },
+    "reach": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"type": "string", "enum": ["direct", "tailscale", "proxy"]},
+        "tailscale": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "authKeySecret": {"$ref": "#/definitions/dnsName"},
+            "image": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "repository": {"type": "string", "minLength": 1},
+                "tag": {"type": "string", "minLength": 1},
+                "digest": {"$ref": "#/definitions/digest"}
+              }
+            }
+          }
+        },
+        "proxy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": {"type": "string", "pattern": "^(https?://[^/@\\s]+/?)?$"},
+            "cidrs": {"type": "array", "items": {"$ref": "#/definitions/cidr"}}
+          }
+        }
+      }
+    },
+    "admissionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"}
+      }
+    },
+    "registries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["prefix"],
+        "properties": {
+          "prefix": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]*(:[0-9]{1,5})?(/[a-z0-9][a-z0-9._-]*)*$"},
+          "pullSecret": {"$ref": "#/definitions/dnsName"}
+        }
+      }
+    },
+    "quota": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hard": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pods": {"type": ["string", "integer"]},
+            "requests.cpu": {"$ref": "#/definitions/quantity"},
+            "requests.memory": {"$ref": "#/definitions/quantity"},
+            "requests.ephemeral-storage": {"$ref": "#/definitions/quantity"},
+            "limits.cpu": {"$ref": "#/definitions/quantity"},
+            "limits.memory": {"$ref": "#/definitions/quantity"},
+            "limits.ephemeral-storage": {"$ref": "#/definitions/quantity"}
+          }
+        }
+      }
+    },
+    "limitRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "container": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "defaultRequest": {"$ref": "#/definitions/quantities"},
+            "default": {"$ref": "#/definitions/quantities"},
+            "max": {"$ref": "#/definitions/quantities"},
+            "maxLimitRequestRatio": {"type": "object", "additionalProperties": false, "properties": {"cpu": {"$ref": "#/definitions/quantity"}, "memory": {"$ref": "#/definitions/quantity"}}}
+          }
+        },
+        "pod": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max": {"$ref": "#/definitions/quantities"}
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "The controller dials the primary: the release that renders it needs its URL.",
+      "if": {"properties": {"mode": {"enum": ["all", "node"]}}},
+      "then": {"properties": {"primary": {"properties": {"url": {"minLength": 1}}}}}
+    },
+    {
+      "description": "reach=direct: the controller's one egress destination is the primary's address, never a catch-all.",
+      "if": {
+        "properties": {"mode": {"enum": ["all", "bootstrap"]}, "reach": {"properties": {"mode": {"const": "direct"}}}}
+      },
+      "then": {
+        "properties": {
+          "primary": {"properties": {"url": {"minLength": 1}}},
+          "networkPolicy": {"properties": {"controllerEgress": {"properties": {"primaryCIDRs": {"minItems": 1}}}}}
+        }
+      }
+    },
+    {
+      "description": "reach=proxy: egress is the proxy and nothing else.",
+      "if": {"properties": {"reach": {"properties": {"mode": {"const": "proxy"}}}}},
+      "then": {
+        "properties": {
+          "reach": {"properties": {"proxy": {"properties": {"url": {"minLength": 1}, "cidrs": {"minItems": 1}}}}}
+        }
+      }
+    },
+    {
+      "description": "The admission policy's image allow-list is registries[].",
+      "if": {"properties": {"admissionPolicy": {"properties": {"enabled": {"const": true}}}}},
+      "then": {"properties": {"registries": {"minItems": 1}}}
+    }
+  ]
+}

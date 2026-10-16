@@ -1,0 +1,60 @@
+# arbiter-node
+
+One Arbiter cluster node as a Helm chart (`docs/design/remote-workers.md` §20.5-§20.7). The raw
+manifests (`GET /nodes/join/k8s.yaml`) remain the fallback for clusters without Helm.
+
+```sh
+# 1. cluster-admin, once: the namespace and its Pod Security labels (the chart does not template it)
+kubectl create namespace arbiter-workers
+kubectl label namespace arbiter-workers \
+  pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest \
+  pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+
+# 2. the join token, read from your terminal (never argv, history or Helm's release record)
+read -rs T && printf %s "$T" | kubectl -n arbiter-workers create secret generic arbiter-join --from-file=token=/dev/stdin
+
+# 3. install; the release name is the node name
+helm install mesaana ./charts/arbiter-node -n arbiter-workers \
+  --set primary.url=https://arbiter.example.ts.net \
+  --set 'networkPolicy.controllerEgress.primaryCIDRs={100.64.0.10/32}'
+```
+
+## `mode`
+
+| mode | renders | who |
+|---|---|---|
+| `all` (default) | everything below | a cluster-admin, one release |
+| `bootstrap` | `PriorityClass`, `ResourceQuota`, `LimitRange`, four `NetworkPolicy`, optional `RuntimeClass` and `ValidatingAdmissionPolicy` | a cluster-admin, once |
+| `node` | two `ServiceAccount`s, `Role`, `RoleBinding`, placeholder `Secret`s, `ConfigMap`s, `Lease`, `Service`, `Deployment` | a namespace admin |
+
+`bootstrap` and `node` are two releases (`helm install mesaana-bootstrap ... --set mode=bootstrap`,
+`helm install mesaana ... --set mode=node`). This is the same split as `?part=` of the raw manifests.
+
+## Rules the chart keeps
+
+- **Object names are fixed** (`arbiter-controller`, `arbiter-worker`, ...): the Role's `resourceNames`, the
+  Service, the Lease, every worker pod's ownerReference and the NetworkPolicy selectors name them. One
+  release per namespace.
+- **No `Namespace`** is templated: Helm stores its release record in the namespace, so it must exist first.
+- **Helm owns the controller image.** The Role has no write verb on the Deployment and
+  `ARB_K8S_SELF_UPGRADE=false`; the Deployment carries `ARB_INSTALL_METHOD=helm`, `ARB_HELM_RELEASE` and
+  `ARB_CHART_REF` so the node can report `helm upgrade <release> <chartRef> --version <v> -n <ns> --reset-then-reuse-values`.
+- **No secret in values.** The join token is a pre-created Secret (`--set-file join.token=` is the
+  automation fallback and lands in Helm's release record); the tailscale auth key and pull secrets are names.
+- **`values.schema.json` rejects unknown keys** at every level, a `direct` install without `primaryCIDRs`,
+  a `/0` allowlist entry, and an admission policy without `registries`.
+- **No `checksum/config` annotation**: the controller re-reads `controller.yaml` every 30 s and a
+  config-only `helm upgrade` must not roll the pod.
+- The pod spec of a worker is not in the chart (the controller builds it at runtime), so nothing about its
+  security context, volumes or `hostUsers` is a value.
+
+## Checks
+
+```sh
+scripts/helm-chart-check.sh          # helm lint --strict + helm template | kubeconform for every mode/reach
+cd apps/arbiter && mix test test/arbiter/node_agent/k8s/helm_chart_test.exs   # renders need helm on PATH
+```
+
+`quota.hard` and `limitRange` are explicit figures for `concurrency.max=2` and the default worker size:
+Helm templates cannot parse Kubernetes quantities. For another shape take the numbers from the primary's
+`InstallManifest` or edit them by hand.

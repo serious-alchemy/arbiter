@@ -266,3 +266,37 @@ jobs:
         run: |
           echo "test-shard result: $RESULT"
           [ "$RESULT" = "success" ]
+
+  # The arbiter-node Helm chart (bd-2u4lpp, docs/design/remote-workers.md §20.5):
+  # `helm lint --strict`, `helm template` for every mode and reach variant piped through
+  # kubeconform, and the renders the schema must refuse. No Elixir toolchain needed.
+  # helm_chart_test.exs also renders the chart wherever `helm` is on PATH (the test shards use
+  # the runner image's); where it is absent those tests skip and this job is the gate.
+  helm-chart:
+    name: helm lint + kubeconform (charts/arbiter-node)
+    runs-on: ubuntu-latest
+    env:
+      HELM_VERSION: v3.17.3
+      KUBECONFORM_VERSION: v0.6.7
+      # sha256 of kubeconform-linux-amd64.tar.gz, from the release's CHECKSUMS file.
+      KUBECONFORM_SHA256: 95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL -o kubeconform.tgz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf kubeconform.tgz -C "$RUNNER_TEMP/bin" kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Lint and validate the chart
+        run: scripts/helm-chart-check.sh

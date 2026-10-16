@@ -1,0 +1,22 @@
+{{- if include "arbiter-node.node" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: arbiter-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arbiter-node.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: arbiter-controller
+  ports:
+    - name: bridge
+      port: 9443
+      targetPort: 9443
+      protocol: TCP
+    - name: boot
+      port: 9444
+      targetPort: 9444
+      protocol: TCP
+{{- end }}

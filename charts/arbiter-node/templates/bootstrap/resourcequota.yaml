@@ -1,0 +1,12 @@
+{{- if include "arbiter-node.bootstrap" . }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: arbiter-workers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arbiter-node.labels" . | nindent 4 }}
+spec:
+  hard:
+    {{- include "arbiter-node.quantities" .Values.quota.hard | trim | nindent 4 }}
+{{- end }}

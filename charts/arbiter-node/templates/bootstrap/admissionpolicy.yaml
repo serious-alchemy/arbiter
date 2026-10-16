@@ -1,0 +1,72 @@
+{{- /*
+The optional ValidatingAdmissionPolicy of docs/design/remote-workers.md §7: with it a
+compromised controller can only create pods shaped like the ones the builder makes. The
+CEL is Arbiter.NodeAgent.K8s.AdmissionPolicy.validations/2, verbatim (the chart-vs-raw
+parity test, KH6, keeps the two from drifting). Cluster-scoped, Kubernetes >= 1.30, and
+one per namespace: it matches on the controller's service-account name.
+*/ -}}
+{{- if and (include "arbiter-node.bootstrap" .) .Values.admissionPolicy.enabled }}
+{{- $images := list }}
+{{- range (required "admissionPolicy.enabled needs registries[] (the worker image allow-list)" .Values.registries) }}
+{{- $images = append $images (printf "c.image.startsWith('%s/')" (trimSuffix "/" .prefix)) }}
+{{- end }}
+{{- $images = append $images "c.image.startsWith('docker.io/library/')" }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: arbiter-worker-pods
+  labels:
+    {{- include "arbiter-node.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  variables:
+    - name: all
+      expression: |-
+        object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])
+  matchConditions:
+    - name: from-controller
+      expression: |-
+        request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:arbiter-controller'
+  validations:
+    - message: pods run as arbiter-worker with no token
+      expression: |-
+        object.spec.serviceAccountName == 'arbiter-worker' && object.spec.automountServiceAccountToken == false
+    - message: no host namespaces
+      expression: |-
+        !has(object.spec.hostNetwork) && !has(object.spec.hostPID) && !has(object.spec.hostIPC)
+    - message: "only emptyDir and the arbiter-ca ConfigMap: no Secret, hostPath or PVC"
+      expression: |-
+        object.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && v.configMap.name == 'arbiter-ca'))
+    - message: every container is hardened
+      expression: |-
+        (object.spec.containers + object.spec.initContainers).all(c, has(c.securityContext) && c.securityContext.allowPrivilegeEscalation == false && c.securityContext.capabilities.drop == ['ALL'] && c.securityContext.readOnlyRootFilesystem == true)
+    - message: images come from the registry or docker.io/library
+      expression: |-
+        (object.spec.containers + object.spec.initContainers).all(c, {{ join " || " $images }})
+    - message: hostUsers must be false
+      expression: |-
+        has(object.spec.hostUsers) && object.spec.hostUsers == false
+    - message: "K1-A1: non-root is ours to enforce once hostUsers is false"
+      expression: |-
+        has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) && object.spec.securityContext.runAsNonRoot && (!has(object.spec.securityContext.runAsUser) || object.spec.securityContext.runAsUser != 0) && variables.all.all(c, !has(c.securityContext) || ((!has(c.securityContext.runAsUser) || c.securityContext.runAsUser != 0) && (!has(c.securityContext.runAsNonRoot) || c.securityContext.runAsNonRoot)))
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: arbiter-worker-pods
+  labels:
+    {{- include "arbiter-node.labels" . | nindent 4 }}
+spec:
+  policyName: arbiter-worker-pods
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Release.Namespace }}
+{{- end }}

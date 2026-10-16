@@ -1,0 +1,49 @@
+{{- /*
+controller.yaml is the controller's CLOSED config schema (K§4.1): it re-reads it every 30 s
+and refuses an unknown key. Only what the operator set is emitted; the controller fills
+the rest. There is deliberately no checksum annotation on the Deployment: a config-only
+`helm upgrade` must not roll the pod.
+*/ -}}
+{{- if include "arbiter-node.node" . }}
+{{- $w := .Values.workers }}
+{{- $worker := dict "requests" (include "arbiter-node.quantities" $w.requests | fromYaml) "limits" (include "arbiter-node.quantities" $w.limits | fromYaml) }}
+{{- if $w.workSizeLimit }}{{ $_ := set $worker "work_size_limit" (toString $w.workSizeLimit) }}{{ end }}
+{{- if $w.tmpSizeLimit }}{{ $_ := set $worker "tmp_size_limit" (toString $w.tmpSizeLimit) }}{{ end }}
+{{- $p := .Values.placement }}
+{{- $spread := dict "enabled" $p.spread.enabled "topology_keys" $p.spread.topologyKeys "max_skew" (int $p.spread.maxSkew) "when_unsatisfiable" $p.spread.whenUnsatisfiable }}
+{{- $placement := dict "priority_class" $p.priorityClass.name "runtime_class" $p.runtimeClassName "spread" $spread }}
+{{- if $p.nodeSelector }}{{ $_ := set $placement "node_selector" $p.nodeSelector }}{{ end }}
+{{- if $p.tolerations }}{{ $_ := set $placement "tolerations" $p.tolerations }}{{ end }}
+{{- $config := dict "max_concurrent" (int .Values.concurrency.max) "namespace" .Release.Namespace "worker" $worker "placement" $placement }}
+{{- if $w.servicesResources }}
+{{- $res := dict }}
+{{- range $kind := list "requests" "limits" }}
+{{- if hasKey $w.servicesResources $kind }}{{ $_ := set $res $kind (include "arbiter-node.quantities" (get $w.servicesResources $kind) | fromYaml) }}{{ end }}
+{{- end }}
+{{- $_ := set $config "services_resources" $res }}
+{{- end }}
+{{- if $w.timeouts }}{{ $_ := set $config "timeouts" $w.timeouts }}{{ end }}
+{{- if $w.snapshotIntervalS }}{{ $_ := set $config "snapshot_interval_s" (int $w.snapshotIntervalS) }}{{ end }}
+{{- $pull := list }}
+{{- range .Values.registries }}{{ if .pullSecret }}{{ $pull = append $pull .pullSecret }}{{ end }}{{ end }}
+{{- if $pull }}{{ $_ := set $config "image_pull_secrets" (uniq $pull) }}{{ end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbiter-controller-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arbiter-node.labels" . | nindent 4 }}
+data:
+  controller.yaml: |
+    {{- toYaml $config | nindent 4 }}
+---
+# Filled in by the controller (the CA certificate it mints at first boot).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbiter-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arbiter-node.labels" . | nindent 4 }}
+{{- end }}

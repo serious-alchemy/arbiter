@@ -1,0 +1,42 @@
+{{- if include "arbiter-node.bootstrap" . }}
+Arbiter node guardrails installed in namespace {{ .Release.Namespace }}:
+PriorityClass, ResourceQuota, LimitRange and the four NetworkPolicies.
+{{- if eq .Values.mode "bootstrap" }}
+
+Now have a namespace admin install the controller into the same namespace:
+  helm install <NODE-NAME> {{ .Chart.Name }} -n {{ .Release.Namespace }} --set mode=node --set primary.url=... -f values.yaml
+{{- end }}
+{{- end }}
+{{- if include "arbiter-node.node" . }}
+
+Arbiter node {{ include "arbiter-node.nodeName" . }}: controller installed in namespace {{ .Release.Namespace }}.
+
+ONE RELEASE PER NAMESPACE: every object name is fixed. The node name is the release name
+({{ .Release.Name }}) unless node.name is set.
+
+This chart does not create the Namespace. It must exist and carry the Pod Security labels,
+or the node reports `degraded: psa_unenforced`:
+  kubectl label namespace {{ .Release.Namespace }} \
+    pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest \
+    pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+
+Next steps:
+  1. The join token (read from your terminal, never in argv, history or Helm's release record):
+       read -rs T && printf %s "$T" | kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.join.existingSecret }} --from-file=token=/dev/stdin
+     {{- if .Values.join.token }}
+     (join.token was set: the token is now in this release's record until you delete it.)
+     {{- end }}
+{{- if eq .Values.reach.mode "tailscale" }}
+  2. The tailscale auth key (ephemeral, pre-authorised, tag:arbiter-node), also from your terminal:
+       read -rs K && printf %s "$K" | kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.reach.tailscale.authKeySecret }} --from-file=authkey=/dev/stdin
+{{- end }}
+  Then watch it join:
+       kubectl -n {{ .Release.Namespace }} logs deploy/arbiter-controller
+       arb node show {{ include "arbiter-node.nodeName" . }}
+
+Helm owns the controller image: upgrade with
+  helm upgrade {{ .Release.Name }} {{ .Values.chartRef }} --version <VERSION> -n {{ .Release.Namespace }} --reset-then-reuse-values
+
+`helm uninstall` removes the node's credential Secret. Revoke the node on the primary
+(`arb node revoke {{ include "arbiter-node.nodeName" . }}`) so no credential row is left behind.
+{{- end }}
