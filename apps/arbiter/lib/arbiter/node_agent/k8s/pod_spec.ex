@@ -577,7 +577,6 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
           "serviceAccountName" => @service_account,
           "automountServiceAccountToken" => false,
           "enableServiceLinks" => false,
-          "hostUsers" => false,
           "dnsPolicy" => "None",
           "dnsConfig" => %{"nameservers" => ["127.0.0.1"]},
           "priorityClassName" => cfg.placement["priority_class"],
@@ -600,8 +599,18 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
         |> put_unless_empty("nodeSelector", cfg.placement["node_selector"])
         |> put_unless_empty("tolerations", cfg.placement["tolerations"])
         |> put_unless_empty("runtimeClassName", cfg.placement["runtime_class"])
+        |> put_host_users(cfg)
         |> put_unless_empty("topologySpreadConstraints", spread(cfg, run))
     }
+  end
+
+  # K1-A1: `hostUsers: false` everywhere, except under a runsc-handled RuntimeClass (KH1, bd-27o4ls):
+  # runsc rejects it ("RuntimeClass handler \"runsc\" does not support user namespaces") and every
+  # pod hangs in ContainerCreating. gVisor's sandbox replaces the user namespace there.
+  defp put_host_users(spec, cfg) do
+    if PodConfig.kernel_sandboxed?(cfg.placement),
+      do: spec,
+      else: Map.put(spec, "hostUsers", false)
   end
 
   # §20.2: a soft spread over the cluster, so a shared cluster's workers do not pile on

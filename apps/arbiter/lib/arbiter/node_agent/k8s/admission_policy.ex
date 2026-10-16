@@ -54,9 +54,17 @@ defmodule Arbiter.NodeAgent.K8s.AdmissionPolicy do
     ]
   end
 
-  @doc "The seven validations, in the design's order."
-  @spec validations(String.t(), [String.t()]) :: [validation()]
-  def validations(registry, extra_image_prefixes \\ []) when is_binary(registry) do
+  @doc """
+  The seven validations, in the design's order.
+
+  `sandbox_classes` names the `RuntimeClass`es whose handler sandboxes the kernel (gVisor's
+  `runsc`, KH1): runsc rejects `hostUsers: false`, so for pods under exactly those classes
+  `host-users` also admits an absent `hostUsers`. With none (the default) the rule is the
+  design's, verbatim. Every other rule is unchanged, non-root included.
+  """
+  @spec validations(String.t(), [String.t()], [String.t()]) :: [validation()]
+  def validations(registry, extra_image_prefixes \\ [], sandbox_classes \\ [])
+      when is_binary(registry) do
     images =
       Enum.map_join(
         ["#{registry}/", "docker.io/library/" | extra_image_prefixes],
@@ -97,7 +105,7 @@ defmodule Arbiter.NodeAgent.K8s.AdmissionPolicy do
       %{
         name: "host-users",
         message: "hostUsers must be false",
-        expression: "has(object.spec.hostUsers) && object.spec.hostUsers == false"
+        expression: host_users_expression(sandbox_classes)
       },
       %{
         name: "non-root",
@@ -108,15 +116,27 @@ defmodule Arbiter.NodeAgent.K8s.AdmissionPolicy do
     ]
   end
 
+  @host_users "has(object.spec.hostUsers) && object.spec.hostUsers == false"
+
+  defp host_users_expression([]), do: @host_users
+
+  defp host_users_expression(classes) do
+    named = Enum.map_join(classes, " || ", &"object.spec.runtimeClassName == '#{&1}'")
+
+    "(#{@host_users}) || (!has(object.spec.hostUsers) && has(object.spec.runtimeClassName) && (#{named}))"
+  end
+
   @doc """
   The policy and its binding as two string-keyed manifests. Options: `registry:`
-  (required), `namespace:` (default `arbiter-workers`), `image_prefixes:`.
+  (required), `namespace:` (default `arbiter-workers`), `image_prefixes:`,
+  `sandbox_classes:` (see `validations/3`).
   """
   @spec manifests(keyword()) :: [map()]
   def manifests(opts) do
     registry = Keyword.fetch!(opts, :registry)
     namespace = Keyword.get(opts, :namespace, "arbiter-workers")
     prefixes = Keyword.get(opts, :image_prefixes, [])
+    sandbox_classes = Keyword.get(opts, :sandbox_classes, [])
 
     [
       %{
@@ -144,7 +164,7 @@ defmodule Arbiter.NodeAgent.K8s.AdmissionPolicy do
             ),
           "validations" =>
             for(
-              v <- validations(registry, prefixes),
+              v <- validations(registry, prefixes, sandbox_classes),
               do: %{"expression" => v.expression, "message" => v.message}
             )
         }

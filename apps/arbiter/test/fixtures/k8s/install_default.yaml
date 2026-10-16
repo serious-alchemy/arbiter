@@ -211,6 +211,13 @@ rules:
   - apiGroups:
       - ""
     resources:
+      - events
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
       - resourcequotas
     verbs:
       - get

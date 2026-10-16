@@ -39,11 +39,12 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessTest do
     )
   end
 
-  defp run(client, canary \\ canary()) do
+  defp run(client, canary \\ canary(), config \\ Fx.config(), opts \\ []) do
     client
-    |> Readiness.run(Fx.config(), canary,
-      image: "#{Fx.registry()}/beam@sha256:#{Fx.digest()}",
-      now_fun: fn -> @now end
+    |> Readiness.run(
+      config,
+      canary,
+      [image: "#{Fx.registry()}/beam@sha256:#{Fx.digest()}", now_fun: fn -> @now end] ++ opts
     )
     |> Map.new(&{&1["id"], &1})
   end
@@ -140,6 +141,153 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessTest do
       check = run(client)["runtime_class"]
       assert check["status"] == "fail"
       assert check["detail"] =~ "gvisor"
+    end
+  end
+
+  describe "runtime_class: a real pod under the class (KH1, bd-27o4ls)" do
+    @sandbox_error ~s(Failed to create pod sandbox: can't set spec.hostUsers: false, RuntimeClass handler "runsc" does not support user namespaces)
+
+    defp gvisor,
+      do: Fx.config(%{placement: %{runtime_class: "gvisor", runtime_handler: "runsc"}})
+
+    defp probe_opts, do: [sandbox_timeout_ms: 200, poll_ms: 5]
+
+    defp real_creates(api) do
+      for %{method: "POST", params: params} = req <- FakeK8sApi.requests(api),
+          params["dryRun"] != "All",
+          do: Jason.decode!(req.body)
+    end
+
+    defp kubelet(status) do
+      fn pod -> {Map.put(pod, "status", status), []} end
+    end
+
+    defp creating do
+      kubelet(%{
+        "phase" => "Pending",
+        "initContainerStatuses" => [
+          %{"name" => "seed", "state" => %{"waiting" => %{"reason" => "PodInitializing"}}}
+        ],
+        "containerStatuses" => [
+          %{"name" => "worker", "state" => %{"waiting" => %{"reason" => "ContainerCreating"}}}
+        ]
+      })
+    end
+
+    test "no class configured creates no real pod", %{client: client, api: api} do
+      assert run(client)["runtime_class"]["status"] == "ok"
+      assert real_creates(api) == []
+    end
+
+    test "a started pod is ok, runs under the class without hostUsers, and is deleted", %{
+      client: client,
+      api: api
+    } do
+      FakeK8sApi.on_create(
+        api,
+        kubelet(%{
+          "phase" => "Running",
+          "initContainerStatuses" => [
+            %{
+              "name" => "seed",
+              "state" => %{"running" => %{"startedAt" => "2026-10-10T12:00:00Z"}}
+            }
+          ]
+        })
+      )
+
+      check = run(client, canary(), gvisor(), probe_opts())["runtime_class"]
+      assert check["status"] == "ok"
+      assert check["detail"] =~ "gvisor"
+      assert check["detail"] =~ "started"
+      assert check["runtime_class"] == "gvisor"
+
+      assert [pod] = real_creates(api)
+      assert pod["spec"]["runtimeClassName"] == "gvisor"
+      refute Map.has_key?(pod["spec"], "hostUsers")
+
+      assert {:ok, %{items: []}} = Arbiter.NodeAgent.K8s.Client.list_pods(client)
+    end
+
+    test "a sandbox that cannot be created is an explicit failure naming the kubelet's error", %{
+      client: client,
+      api: api
+    } do
+      FakeK8sApi.on_create(api, creating())
+
+      FakeK8sApi.put_event(api, %{
+        "type" => "Warning",
+        "reason" => "FailedCreatePodSandBox",
+        "message" => @sandbox_error
+      })
+
+      check = run(client, canary(), gvisor(), probe_opts())["runtime_class"]
+      assert check["status"] == "fail"
+      assert check["detail"] =~ "sandbox"
+      assert check["detail"] =~ "does not support user namespaces"
+      assert check["hint"] =~ "RuntimeClass handler"
+      assert check["runtime_class"] == "gvisor"
+
+      # the probe pod is deleted whatever happened
+      assert {:ok, %{items: []}} = Arbiter.NodeAgent.K8s.Client.list_pods(client)
+    end
+
+    test "a class whose handler refuses hostUsers, with no handler named, hints at runtime_handler",
+         %{
+           client: client,
+           api: api
+         } do
+      FakeK8sApi.on_create(api, creating())
+
+      FakeK8sApi.put_event(api, %{
+        "reason" => "FailedCreatePodSandBox",
+        "message" => @sandbox_error
+      })
+
+      config = Fx.config(%{placement: %{runtime_class: "gvisor"}})
+      check = run(client, canary(), config, probe_opts())["runtime_class"]
+      assert check["status"] == "fail"
+      assert check["hint"] =~ "placement.runtime_handler: runsc"
+
+      # and the pod it created carried hostUsers: false, which is what runsc refused
+      assert [%{"spec" => %{"hostUsers" => false}}] = real_creates(api)
+    end
+
+    test "a pod that neither starts nor says why is a warning, not a pass", %{
+      client: client,
+      api: api
+    } do
+      FakeK8sApi.on_create(api, creating())
+
+      check = run(client, canary(), gvisor(), probe_opts())["runtime_class"]
+      assert check["status"] == "warn"
+      assert check["detail"] =~ "did not start"
+      assert {:ok, %{items: []}} = Arbiter.NodeAgent.K8s.Client.list_pods(client)
+    end
+
+    test "events the Role cannot read leave the failure unnamed but still a warning", %{
+      client: client,
+      api: api
+    } do
+      FakeK8sApi.on_create(api, creating())
+      FakeK8sApi.fail_next(api, :events, 403, 100)
+
+      check = run(client, canary(), gvisor(), probe_opts())["runtime_class"]
+      assert check["status"] == "warn"
+    end
+
+    test "a RuntimeClass the dry run refused is not probed with a real pod", %{
+      client: client,
+      api: api
+    } do
+      FakeK8sApi.fail_next(
+        api,
+        :create,
+        {403, ~s(pods "x" is forbidden: pod rejected: RuntimeClass "gvisor" not found)}
+      )
+
+      assert run(client, canary(), gvisor(), probe_opts())["runtime_class"]["status"] == "fail"
+      assert real_creates(api) == []
     end
   end
 
