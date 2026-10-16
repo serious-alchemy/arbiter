@@ -73,11 +73,34 @@ defmodule Arbiter.Trackers.Shortcut do
 
   @impl true
   def fetch(ref) when is_binary(ref) do
-    with {:ok, cfg} <- Config.resolve() do
-      request(cfg, :get, "/stories/#{ref}", [])
-      |> handle_json()
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, story} <- request(cfg, :get, "/stories/#{ref}", []) |> handle_json() do
+      {:ok, annotate_priority_field(cfg, story)}
     end
   end
+
+  # A story's `custom_fields` carry only `field_id` + `value`; the field's
+  # name lives on `/custom-fields`, and ids differ per org. Resolve the field
+  # named "Priority" and stash its id on the story (`arbiter_priority_field_id`)
+  # so the pure `extract_priority/1` can find the entry. Best-effort: a failed
+  # lookup leaves the story untouched (priority then falls back to default).
+  defp annotate_priority_field(cfg, %{"custom_fields" => [_ | _]} = story) do
+    with {:ok, %Req.Response{status: status, body: fields}} when status in 200..299 <-
+           request(cfg, :get, "/custom-fields", []),
+         true <- is_list(fields),
+         %{"id" => id} <- Enum.find(fields, &priority_field?/1) do
+      Map.put(story, "arbiter_priority_field_id", id)
+    else
+      _ -> story
+    end
+  end
+
+  defp annotate_priority_field(_cfg, story), do: story
+
+  defp priority_field?(%{"name" => name}) when is_binary(name),
+    do: name |> String.trim() |> String.downcase() == "priority"
+
+  defp priority_field?(_), do: false
 
   @impl true
   def transition(ref, status) when is_binary(ref) and is_atom(status) do
@@ -429,12 +452,38 @@ defmodule Arbiter.Trackers.Shortcut do
 
   def extract_description(_), do: ""
 
-  # Shortcut has no native priority field in its standard schema. Returns nil
-  # so the claim path preserves the schema default (P2). Workspaces that
-  # encode priority via a custom field or label can override this behaviour by
-  # implementing a custom adapter — the best-effort documented limitation.
+  # Priority is the org's "Priority" custom field (Highest/High/Medium/Low →
+  # 0/1/2/3), located by name in `fetch/1` (field ids differ per workspace).
+  # Unset or unrecognised returns nil so the schema default applies.
   @impl true
+  def extract_priority(%{"arbiter_priority_field_id" => field_id, "custom_fields" => fields})
+      when is_list(fields) do
+    fields
+    |> Enum.find(&(is_map(&1) and &1["field_id"] == field_id))
+    |> case do
+      %{"value" => value} when is_binary(value) -> priority_from_value(value)
+      _ -> nil
+    end
+  end
+
   def extract_priority(_), do: nil
+
+  defp priority_from_value(value) do
+    case value |> String.trim() |> String.downcase() do
+      "highest" -> {:ok, 0}
+      "high" -> {:ok, 1}
+      "medium" -> {:ok, 2}
+      "low" -> {:ok, 3}
+      _ -> nil
+    end
+  end
+
+  # Shortcut's `story_type` is bug | feature | chore, which are Arbiter issue types.
+  @impl true
+  def extract_issue_type(%{"story_type" => "bug"}), do: {:ok, :bug}
+  def extract_issue_type(%{"story_type" => "feature"}), do: {:ok, :feature}
+  def extract_issue_type(%{"story_type" => "chore"}), do: {:ok, :chore}
+  def extract_issue_type(_), do: nil
 
   # Shortcut stories expose an `estimate` integer when story-point estimation
   # is enabled for the workflow. Difficulty extraction is off by default; it
