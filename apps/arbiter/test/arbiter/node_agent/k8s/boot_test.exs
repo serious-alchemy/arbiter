@@ -310,6 +310,22 @@ defmodule Arbiter.NodeAgent.K8s.BootTest do
     wait_until(&booted?/0)
   end
 
+  test "an API server the controller cannot reach is named, with the policy fix, not a raw transport error",
+       ctx do
+    # Nothing listens on port 1: the connection is refused, as kube-router does for an
+    # egress rule that only names the Service address (the policy is applied post-DNAT).
+    client = %{ctx.client | base_url: "http://127.0.0.1:1"}
+    boot!(%{ctx | client: client})
+
+    wait_until(fn -> (status(ctx)["last_error"] || "") =~ "cannot reach the Kubernetes API" end)
+
+    assert status(ctx)["state"] == "booting"
+    assert status(ctx)["boot_step"] == "credential"
+    assert status(ctx)["last_error"] =~ "--api-cidrs"
+    refute status(ctx)["last_error"] =~ "%Req.TransportError"
+    refute booted?()
+  end
+
   test "a credential the primary refuses keeps the controller down, retrying", ctx do
     FakeK8sApi.put_secret(ctx.api, %{
       "metadata" => %{"name" => "arbiter-node-credential"},

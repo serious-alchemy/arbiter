@@ -256,6 +256,41 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
       refute Jason.encode!(rules) =~ "except"
     end
 
+    test "api_cidrs add the API server's node address to the ClusterIP; they never replace it" do
+      # k3s's kube-router evaluates egress after DNAT, so the policy must name the
+      # endpoint (node IP:6443) as well as the `kubernetes` Service.
+      [api | _] = egress_rules(render!(%{"name" => "n", "api_cidrs" => "192.168.5.10/32"}))
+
+      assert cidrs_of(api) == ["10.43.0.1/32", "192.168.5.10/32"]
+      assert Enum.map(api["ports"], & &1["port"]) == [6443, 443]
+    end
+
+    test "api_cidrs that repeat the ClusterIP or each other are listed once" do
+      [api | _] =
+        egress_rules(
+          render!(%{
+            "name" => "n",
+            "api_cidrs" => "10.43.0.1/32, 192.168.5.10/32,192.168.5.10/32"
+          })
+        )
+
+      assert cidrs_of(api) == ["10.43.0.1/32", "192.168.5.10/32"]
+    end
+
+    test "api_cidrs refuses a catch-all: it would open 443 and 6443 to the world" do
+      assert {:error, [message]} =
+               InstallManifest.parse(with_primary(%{"name" => "n", "api_cidrs" => "0.0.0.0/0"}))
+
+      assert message =~ "api_cidrs"
+    end
+
+    test "the spec keeps api_cidrs as given; the ClusterIP is the renderer's, not the operator's" do
+      assert parse!(%{"name" => "n"}).api_cidrs == []
+
+      assert parse!(%{"name" => "n", "api_cidrs" => "192.168.5.10/32"}).api_cidrs ==
+               ["192.168.5.10/32"]
+    end
+
     test "reach=direct: the primary's rule follows the port of the primary URL" do
       {:ok, docs} =
         InstallManifest.render(

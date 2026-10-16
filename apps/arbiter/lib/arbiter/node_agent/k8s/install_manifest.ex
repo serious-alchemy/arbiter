@@ -32,7 +32,9 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
 
   **Controller egress is an allowlist** (`docs/design/remote-workers.md` §20.4, KH3).
   Workers get no egress but the controller (an allowlist on workers would bypass the
-  primary's `Egress` policy and audit). The controller gets the API server, cluster DNS
+  primary's `Egress` policy and audit). The controller gets the API server (the
+  `kubernetes` ClusterIP **and** the `api_cidrs` endpoint addresses: a post-DNAT CNI such
+  as k3s's kube-router matches only the latter), cluster DNS
   and exactly one more destination, by `reach`: `direct` the `primary_cidrs` on the port
   of the primary URL; `proxy` the `proxy_cidrs` on the port of `proxy_url`. Neither takes
   a catch-all CIDR, and both refuse to render without theirs. `tailscale` keeps the wide
@@ -44,7 +46,14 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   quoting is the emitter's job and no request value is ever spliced into text.
   """
 
-  alias Arbiter.NodeAgent.K8s.{AdmissionPolicy, ControllerConfig, ControllerManifest, Quantity}
+  alias Arbiter.NodeAgent.K8s.{
+    AdmissionPolicy,
+    ControllerConfig,
+    ControllerManifest,
+    Quantity,
+    Quota
+  }
+
   alias Arbiter.Nodes
 
   @default_namespace "arbiter-workers"
@@ -53,13 +62,17 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   @default_cpu "1"
   @default_memory "2Gi"
   @worker_storage "4Gi"
-  @default_api_cidrs ["10.43.0.1/32"]
+  # The `kubernetes` Service's ClusterIP on k3s. Always in the controller's API rule.
+  @api_cluster_ip "10.43.0.1/32"
   @default_cluster_cidrs ["10.42.0.0/16", "10.43.0.0/16"]
 
-  # What one worker pod adds to the worker container's own request (`seed` and
-  # `snapshotter` at their default sizes), and what the controller (with room for
-  # the tailscale sidecar) reserves. They size the quota; the quota, not these, is
-  # what the cluster enforces.
+  # Per-worker cpu limits and ephemeral storage come from `Quota.demand/1` (the
+  # effective pod size, `LimitRange` defaults included, so the snapshotter's
+  # defaulted 500m cpu limit counts). The rest is a flat per-pod allowance over the
+  # worker container's own request (a little over the `seed`/`snapshotter` sizes, so
+  # run services have room) and what the controller (with room for the tailscale
+  # sidecar) reserves. They size the quota; the quota, not these, is what the
+  # cluster enforces.
   @pod_overhead_cpu_m 150
   @pod_overhead_mem_mi 320
   @controller_cpu_m 150
@@ -105,7 +118,8 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   `cpu`, `memory`, `node_selector` (`k=v,k=v`), `pull_secret`, `reach`
   (`direct|tailscale|proxy`), `primary_cidrs` (required for `direct`), `proxy_url` and
   `proxy_cidrs` (required for `proxy`), `admission` (`policy` or none), `self_upgrade`
-  (`on|off`), `api_cidrs`, `cluster_cidrs` (comma separated) and `part`. Unknown keys are
+  (`on|off`), `api_cidrs` (the API server's node addresses, added to the ClusterIP),
+  `cluster_cidrs` (comma separated) and `part`. Unknown keys are
   ignored. Every refusal is one string starting with the field name.
   """
   @spec parse(map()) :: {:ok, spec()} | {:error, [String.t()]}
@@ -121,7 +135,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       reach: field(params, "reach", &reach/1, :direct),
       admission: field(params, "admission", &admission/1, false),
       self_upgrade: field(params, "self_upgrade", &self_upgrade/1, true),
-      api_cidrs: field(params, "api_cidrs", &cidrs/1, @default_api_cidrs),
+      api_cidrs: field(params, "api_cidrs", &bounded_cidrs/1, []),
       cluster_cidrs: field(params, "cluster_cidrs", &cidrs/1, @default_cluster_cidrs),
       primary_cidrs: field(params, "primary_cidrs", &bounded_cidrs/1, []),
       proxy_url: field(params, "proxy_url", &proxy_url/1, nil),
@@ -424,16 +438,19 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     n = spec.max_concurrent
     mi = 1_048_576
     {:ok, storage} = Quantity.memory(@worker_storage, :k8s)
+    {:ok, controller_config} = ControllerConfig.parse(Ymlr.document!(config(spec)))
+    pod = Quota.demand(controller_config)
 
     hard = %{
       "pods" => Integer.to_string(n + 2),
       "requests.cpu" => fmt_cpu(n * (cpu_m + @pod_overhead_cpu_m) + @controller_cpu_m),
       "requests.memory" =>
         fmt_mem(n * (mem_b + @pod_overhead_mem_mi * mi) + @controller_mem_mi * mi),
-      "limits.cpu" => fmt_cpu(n * 2 * cpu_m + @controller_limit_cpu_m),
+      "limits.cpu" => fmt_cpu(n * pod["limits.cpu"] + @controller_limit_cpu_m),
       "limits.memory" =>
         fmt_mem(n * (2 * mem_b + @pod_overhead_limit_mem_mi * mi) + @controller_limit_mem_mi * mi),
-      "requests.ephemeral-storage" => fmt_mem((n + 1) * storage)
+      # `storage` once more for the controller (and its sidecar) and the run services.
+      "requests.ephemeral-storage" => fmt_mem(n * pod["requests.ephemeral-storage"] + storage)
     }
 
     %{
@@ -458,12 +475,8 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
             "type" => "Container",
             # The quota counts ephemeral-storage requests, so a container that names none
             # (the controller, the tailscale sidecar) would be refused without a default.
-            "defaultRequest" => %{
-              "cpu" => "100m",
-              "memory" => "128Mi",
-              "ephemeral-storage" => "128Mi"
-            },
-            "default" => %{"cpu" => "500m", "memory" => "512Mi"}
+            "defaultRequest" => Quota.limit_range_default_request(),
+            "default" => Quota.limit_range_default_limit()
           }
         ]
       }
@@ -498,7 +511,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       network_policy(spec, "controller-egress", controller, ["Egress"], %{
         "egress" => [
           %{
-            "to" => Enum.map(spec.api_cidrs, &%{"ipBlock" => %{"cidr" => &1}}),
+            "to" => Enum.map(api_cidrs(spec), &%{"ipBlock" => %{"cidr" => &1}}),
             "ports" => [
               %{"protocol" => "TCP", "port" => 6443},
               %{"protocol" => "TCP", "port" => 443}
@@ -523,6 +536,13 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       })
     ]
   end
+
+  # The controller dials the API server by the `kubernetes` Service's ClusterIP, but whether
+  # a policy sees that address or the endpoint it is DNATed to depends on the CNI:
+  # kube-router (k3s) evaluates egress after DNAT, so only `<node IP>:6443` matches there.
+  # The ClusterIP is therefore always listed and `api_cidrs` adds to it, never replaces it:
+  # one rule that holds under both orderings.
+  defp api_cidrs(spec), do: Enum.uniq([@api_cluster_ip | spec.api_cidrs])
 
   # The controller's last egress rule: how it reaches the primary (KH3).
   defp reach_rule(%{reach: :direct} = spec, server) do

@@ -457,12 +457,23 @@ defmodule ArbiterWeb.NodesLiveTest do
       assert has_element?(view, "#add-node-kind-cluster[checked]")
 
       for id <-
-            ~w(namespace max-workers cpu memory node-selector pull-secret reach admission self-upgrade ttl) do
+            ~w(namespace max-workers cpu memory node-selector pull-secret reach admission self-upgrade ttl api-cidrs) do
         assert has_element?(view, "#add-node-#{id}"), "no #add-node-#{id}"
       end
 
       assert has_element?(view, ~s|#add-node-name[value="typed-already"]|)
       refute has_element?(view, "#add-node-registry-missing")
+    end
+
+    test "api CIDRs typed into the form reach the apply command", %{conn: conn} do
+      view = open_add(conn)
+      pick_cluster(view)
+
+      view
+      |> form("#add-node-form", Map.put(@cluster_form, :api_cidrs, "192.168.5.10/32"))
+      |> render_submit()
+
+      assert text_of(view, "#cluster-apply-command") =~ "api_cidrs=192.168.5.10%2F32"
     end
 
     test "it refuses to continue without nodes.registry and says why", %{conn: conn} do
