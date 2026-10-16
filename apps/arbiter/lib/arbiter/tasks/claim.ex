@@ -515,22 +515,27 @@ defmodule Arbiter.Tasks.Claim do
         :relates_to -> {task.id, other.id, :relates_to}
       end
 
-    if edge_exists?(from, to, edge_type) or
-         (edge_type == :relates_to and edge_exists?(to, from, :relates_to)) do
+    if edge_present?(from, to, edge_type) do
       nil
     else
-      case Dependencies.add(from, to, edge_type, notes: "imported from tracker link") do
-        {:ok, _} ->
-          nil
-
-        {:error, {:cyclic, _}} ->
-          "tracker link: #{link_verb(kind, "")} #{ref} rejected, edge would form a cycle"
-
-        {:error, reason} ->
-          "tracker link: #{link_verb(kind, "")} #{ref} not imported (#{inspect(reason)})"
-      end
+      from
+      |> Dependencies.add(to, edge_type, notes: "imported from tracker link")
+      |> add_outcome_note(link_verb(kind, ""), ref)
     end
   end
+
+  defp add_outcome_note({:ok, _}, _verb, _ref), do: nil
+
+  defp add_outcome_note({:error, {:cyclic, _}}, verb, ref),
+    do: "tracker link: #{verb} #{ref} rejected, edge would form a cycle"
+
+  defp add_outcome_note({:error, reason}, verb, ref),
+    do: "tracker link: #{verb} #{ref} not imported (#{inspect(reason)})"
+
+  defp edge_present?(from, to, :relates_to),
+    do: edge_exists?(from, to, :relates_to) or edge_exists?(to, from, :relates_to)
+
+  defp edge_present?(from, to, type), do: edge_exists?(from, to, type)
 
   defp edge_exists?(from, to, type) do
     Dependency
