@@ -161,6 +161,13 @@ defmodule Arbiter.Test.FakeK8sApi do
   def on_create(api, fun) when is_function(fun, 1), do: GenServer.call(api, {:on_create, fun})
 
   @doc """
+  Adds an `Event` to the namespace. `GET events?fieldSelector=involvedObject.name=<pod>`
+  returns those whose `involvedObject.name` matches; one with no `involvedObject.name` is
+  returned for every pod (a test cannot know the name of a pod it has not created yet).
+  """
+  def put_event(api, event), do: GenServer.call(api, {:put_event, event})
+
+  @doc """
   Makes `POST pods` (dry run or not) refuse any pod with a `privileged` container, as
   a namespace labelled `pod-security.kubernetes.io/enforce: restricted` does.
   """
@@ -206,6 +213,7 @@ defmodule Arbiter.Test.FakeK8sApi do
        leases: %{},
        deployments: %{},
        objects: %{},
+       events: [],
        followers: %{},
        finished: MapSet.new(),
        clock: nil,
@@ -385,6 +393,19 @@ defmodule Arbiter.Test.FakeK8sApi do
         for {from, _} <- ready, do: GenServer.reply(from, :ok)
         {:reply, {:ok, replay}, %{state | waiters: waiting}}
     end
+  end
+
+  def handle_call({:put_event, event}, _from, state),
+    do: {:reply, :ok, %{state | events: state.events ++ [event]}}
+
+  def handle_call({:events, name}, _from, state) do
+    items =
+      Enum.filter(state.events, fn event ->
+        involved = get_in(event, ["involvedObject", "name"])
+        is_nil(involved) or involved == name
+      end)
+
+    {:reply, items, state}
   end
 
   def handle_call({:put_quota, quota}, _from, state) do
@@ -629,6 +650,25 @@ defmodule Arbiter.Test.FakeK8sApi.Plug do
           {:error, code, reason, message} -> status(conn, code, reason, message)
         end
       end
+    end
+  end
+
+  defp route(
+         %{method: "GET", path_info: ["api", "v1", "namespaces", ns, "events"]} = conn,
+         api,
+         ns,
+         _body
+       ) do
+    with :ok <- check_fail(conn, api, :events) do
+      selector = fetch_query_params(conn).query_params["fieldSelector"] || ""
+      name = with "involvedObject.name=" <> n <- selector, do: n, else: (_ -> nil)
+
+      json(conn, 200, %{
+        "kind" => "EventList",
+        "apiVersion" => "v1",
+        "metadata" => %{},
+        "items" => FakeK8sApi.handle(api, {:events, name})
+      })
     end
   end
 

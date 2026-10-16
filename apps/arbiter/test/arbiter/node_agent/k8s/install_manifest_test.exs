@@ -409,6 +409,81 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
       assert secrets["verbs"] == ["get", "update"]
     end
 
+    test "the Role reads events (get, list) so readiness can name a sandbox failure" do
+      role = find(render!(%{"name" => "n"}), "Role")
+      events = Enum.find(role["rules"], &("events" in &1["resources"]))
+      assert events["verbs"] == ["get", "list"]
+      assert events["apiGroups"] == [""]
+      refute Map.has_key?(events, "resourceNames")
+    end
+
+    test "runtime_class and runtime_handler reach the controller config" do
+      cm =
+        find(
+          render!(%{"name" => "n", "runtime_class" => "gvisor", "runtime_handler" => "runsc"}),
+          "ConfigMap",
+          "arbiter-controller-config"
+        )
+
+      assert {:ok, config} = ControllerConfig.parse(cm["data"]["controller.yaml"])
+      assert config.placement["runtime_class"] == "gvisor"
+      assert config.placement["runtime_handler"] == "runsc"
+    end
+
+    test "a runsc-handled class relaxes the admission policy's host-users rule for that class only" do
+      docs =
+        render!(%{
+          "name" => "n",
+          "admission" => "policy",
+          "runtime_class" => "gvisor",
+          "runtime_handler" => "runsc"
+        })
+
+      expressions =
+        docs
+        |> find("ValidatingAdmissionPolicy")
+        |> get_in(["spec", "validations"])
+        |> Enum.map(& &1["expression"])
+
+      assert expressions ==
+               AdmissionPolicy.validations(@server[:registry], [], ["gvisor"])
+               |> Enum.map(& &1.expression)
+
+      assert Enum.any?(expressions, &(&1 =~ "runtimeClassName == 'gvisor'"))
+    end
+
+    test "a class with another handler, or no class, leaves the policy as the design has it" do
+      plain = AdmissionPolicy.validations(@server[:registry]) |> Enum.map(& &1.expression)
+
+      for params <- [
+            %{"runtime_class" => "kata", "runtime_handler" => "kata-qemu"},
+            %{"runtime_class" => "gvisor"},
+            %{"runtime_handler" => "runsc"},
+            %{}
+          ] do
+        docs = render!(Map.merge(%{"name" => "n", "admission" => "policy"}, params))
+
+        assert docs
+               |> find("ValidatingAdmissionPolicy")
+               |> get_in(["spec", "validations"])
+               |> Enum.map(& &1["expression"]) ==
+                 plain
+      end
+    end
+
+    test "bad runtime_class and runtime_handler values are refused" do
+      assert {:error, errors} =
+               InstallManifest.parse(%{
+                 "name" => "n",
+                 "primary_cidrs" => @primary_cidrs,
+                 "runtime_class" => "Bad Class",
+                 "runtime_handler" => "runsc; rm"
+               })
+
+      for field <- ~w(runtime_class runtime_handler),
+          do: assert(Enum.any?(errors, &String.starts_with?(&1, field)), "no error for #{field}")
+    end
+
     test "the worker service account is powerless and token-less" do
       sa = find(render!(%{"name" => "n"}), "ServiceAccount", "arbiter-worker")
       assert sa["automountServiceAccountToken"] == false

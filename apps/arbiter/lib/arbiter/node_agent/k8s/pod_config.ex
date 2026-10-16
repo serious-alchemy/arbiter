@@ -25,7 +25,7 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   | `namespace` | default `arbiter-workers` |
   | `worker` | `requests`, `limits`, `work_size_limit`, `tmp_size_limit`. An `ephemeral-storage` limit left unset is `work_size_limit + tmp_size_limit` (§20.2) |
   | `services_resources` | `requests` / `limits` for the `seed`, `snapshotter` and service containers |
-  | `placement` | `node_selector`, `tolerations`, `priority_class`, `runtime_class`, `spread` (`enabled`, `topology_keys`, `max_skew`, `when_unsatisfiable`: §20.2, a soft hostname spread by default) |
+  | `placement` | `node_selector`, `tolerations`, `priority_class`, `runtime_class`, `runtime_handler` (the class's handler, which the Role cannot read: `runsc*` marks a kernel sandbox, see `kernel_sandboxed?/1`), `spread` (`enabled`, `topology_keys`, `max_skew`, `when_unsatisfiable`: §20.2, a soft hostname spread by default) |
   | `image_pull_secrets` | names |
   | `timeouts` | `grace_s` (pod grace), `gate_timeout_s`; the others belong to the controller |
   | `snapshot_interval_s` | default 300 |
@@ -71,6 +71,7 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
       "tolerations" => [],
       "priority_class" => "arbiter-worker",
       "runtime_class" => "",
+      "runtime_handler" => "",
       "spread" => %{
         "enabled" => true,
         "topology_keys" => ["kubernetes.io/hostname"],
@@ -85,6 +86,23 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   }
 
   @type t :: %{required(atom()) => term()}
+
+  @doc """
+  Whether the worker pods run under a `RuntimeClass` whose handler sandboxes the kernel
+  (gVisor's `runsc`, also `runsc-*` variants). `placement` is a normalized placement map.
+
+  Such a handler rejects `spec.hostUsers: false` (the sandbox is the isolation the user
+  namespace would give), so the builder omits `hostUsers` and the admission policy and the
+  Pod Security check accept that for this case only. The handler is named in config
+  (`placement.runtime_handler`) because the cluster-scoped `RuntimeClass` is not readable
+  by the controller's Role; a class with no handler named is treated as a plain runtime.
+  """
+  @spec kernel_sandboxed?(map()) :: boolean()
+  def kernel_sandboxed?(%{"runtime_class" => class, "runtime_handler" => handler})
+      when is_binary(class) and class != "" and is_binary(handler),
+      do: handler == "runsc" or String.starts_with?(handler, "runsc-")
+
+  def kernel_sandboxed?(_placement), do: false
 
   @doc "Validate `config` (a map or keyword list) and fill the defaults."
   @spec normalize(map() | keyword()) :: {:ok, t()} | {:error, {:bad_config, term()}}
@@ -299,20 +317,22 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
     with :ok <-
            only_keys(
              map,
-             ~w(node_selector tolerations priority_class runtime_class spread),
+             ~w(node_selector tolerations priority_class runtime_class runtime_handler spread),
              :placement
            ),
          {:ok, selector} <- node_selector(Map.get(map, "node_selector", %{})),
          {:ok, tolerations} <- tolerations(Map.get(map, "tolerations", [])),
          {:ok, priority} <- name_or_empty(Map.get(map, "priority_class", "arbiter-worker")),
          {:ok, runtime} <- name_or_empty(Map.get(map, "runtime_class", "")),
+         {:ok, handler} <- name_or_empty(Map.get(map, "runtime_handler", "")),
          {:ok, spread} <- spread(Map.get(map, "spread", %{})) do
       {:ok,
        %{
          "node_selector" => selector,
          "tolerations" => tolerations,
          "priority_class" => priority,
-         "runtime_class" => runtime
+         "runtime_class" => runtime,
+         "runtime_handler" => handler
        }
        |> put_spread(spread)}
     end
