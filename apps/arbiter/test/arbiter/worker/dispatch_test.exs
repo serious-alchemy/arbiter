@@ -6042,8 +6042,11 @@ defmodule Arbiter.Worker.DispatchTest do
         Ash.create(Issue, %{title: "stale repo", workspace_id: ws.id, repo: "org/alpha"})
 
       # The repo went away *after* the issue was filed — bd-9dwbvt refuses an
-      # unconfigured repo at create time, so this is the only way in.
-      {:ok, task} = Ash.update(task, %{repo: "org/gone"})
+      # unconfigured repo on create and update, so write the column directly.
+      %{num_rows: 1} =
+        Arbiter.Repo.query!("UPDATE issues SET repo = 'org/gone' WHERE id = $1", [task.id])
+
+      task = Ash.get!(Issue, task.id)
 
       assert {:error, {:repo_not_found, "org/gone"}} =
                Dispatch.dispatch(task.id,
