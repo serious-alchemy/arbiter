@@ -56,7 +56,11 @@ defmodule Arbiter.Workers.PrepushStepsTest do
   end
 
   test "a run with no id records nothing and does not raise" do
-    assert :ok = PrepushSteps.record(nil, "bd-1", 1, [result("format", :passed)])
+    assert :ok =
+             PrepushSteps.record(nil, "bd-1", 1, [
+               result("format", :passed, %{full_output: "full log"})
+             ])
+
     assert PrepushSteps.list(nil) == []
   end
 

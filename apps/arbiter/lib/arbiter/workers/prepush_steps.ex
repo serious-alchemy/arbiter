@@ -85,7 +85,8 @@ defmodule Arbiter.Workers.PrepushSteps do
     Path.join([OutputLog.root(), run_id <> ".prepush", "#{attempt}-#{position}-#{safe}.log"])
   end
 
-  defp save_log(run_id, attempt, position, %{full_output: full} = step) when is_binary(full) do
+  defp save_log(run_id, attempt, position, %{full_output: full} = step)
+       when is_binary(run_id) and run_id != "" and is_binary(full) do
     path = log_path(run_id, attempt, position, step.name)
 
     with :ok <- File.mkdir_p(Path.dirname(path)),
