@@ -224,10 +224,15 @@ it". Each step has a pass criterion; stop at the first that fails.
    render with `arb node add --kind cluster --api-cidrs <ip>/32,...` (the dashboard's Add
    node form has the same "API server CIDRs" field). **Pass:** `kubectl -n arbiter-workers
    get networkpolicy controller-egress -o yaml` lists both `10.43.0.1/32` and the node IP.
-6. **Pin to `mesanna`.** Set `placement.node_selector: {kubernetes.io/hostname:
-   mesanna}` in `arbiter-controller-config`, and pre-pull the worker image there
-   (843 MB over `aginor`'s Wi-Fi is a non-starter). **Pass:** the ConfigMap loads
-   (no `bad_config` degradation) and `crictl images` on `mesanna` lists the image.
+6. **Placement: spread, do not pin.** Leave `placement.node_selector` empty and add no
+   taints or tolerations: workers spread across every schedulable node (the default
+   `topologySpreadConstraints` on `kubernetes.io/hostname`, `ScheduleAnyway`). No node is
+   dedicated to Arbiter. Make the worker image pullable from every node that may run a
+   pod (a registry the nodes reach, plus `registries[].pullSecret` if it is private, see
+   §4a); do not pre-pull it on one machine. A node that is a poor fit (a Wi-Fi link, the CI
+   runner) is excluded by a node selector or `nodeAffinity` the operator chooses
+   deliberately, never by default. **Pass:** the ConfigMap loads (no `bad_config`
+   degradation) and a first worker pod schedules (`kubectl -n arbiter-workers get pods -o wide`).
 7. **Install the controller** from the primary ("Add node", kind `cluster`, or
    `arb node add --kind cluster`), with `max_concurrent: 2`. The cluster is not on the
    tailnet, so use the install's reachability path A (a tagged tailscale auth key).
@@ -239,11 +244,12 @@ it". Each step has a pass criterion; stop at the first that fails.
    `placement` row. If the canary fails, go to §3; do not set
    `allow_unenforced_network` on this cluster.
 9. **The operator accepts shared tenancy, in writing.** Untrusted LLM-driven code runs
-   in pods that share a kernel (runc, no gVisor/Kata) with vstim prod and the CI runner;
-   the PriorityClass, quota and namespace ring-fence them but do not remove that. The
-   operator records the acceptance (in the ticket) before any real run goes there. A
-   dedicated spare machine with a tainted `arbiter-workers` pool removes this step and is
-   the better first *production* cluster.
+   in pods that share a kernel and nodes (runc, no gVisor/Kata) with vstim prod and the CI
+   runner; the PriorityClass (low, non-preempting), quota, LimitRange, NetworkPolicies and
+   namespace ring-fence them but do not remove that. The operator records the acceptance
+   (in the ticket) before any real run goes there. A sandboxed `RuntimeClass`
+   (`placement.runtimeClassName`, e.g. gvisor) narrows the shared-kernel risk without
+   dedicating nodes; it is optional and off by default.
 10. **Placement stays `local_only` for sensitive workspaces.** The `worker.placement`
     default is `local_only`; opt a workspace in deliberately, and only non-sensitive
     ones, for the test bed. Start with one workspace and `max_concurrent: 2`.
@@ -252,9 +258,77 @@ it". Each step has a pass criterion; stop at the first that fails.
     again after 10 minutes.
 
 **Back-out:** `arb node drain <name>` then `arb node revoke <name>`, then delete the
-namespace `arbiter-workers` (this removes the controller, its Secrets and any worker
-pod) and the `arbiter-worker` PriorityClass. Nothing else in the cluster was changed by
+install (§4a for a Helm install; for the raw manifests delete the namespace
+`arbiter-workers`, which removes the controller, its Secrets and any worker pod) and the
+cluster-scoped `arbiter-worker` PriorityClass. Nothing else in the cluster was changed by
 this checklist.
+
+### 4a. Installing with Helm (`charts/arbiter-node`)
+
+The chart (`charts/arbiter-node/README.md`) replaces the raw manifests
+(`GET /nodes/join/k8s.yaml`), which remain the fallback for clusters without Helm. The
+dashboard's "Add node" Helm tab and `arb node add --kind cluster --format helm|values`
+print the commands below with this node's values (`GET /nodes/join/values.yaml`).
+
+**Admin split.** Two roles, selected by the chart's `mode`:
+
+| who | does | release |
+|---|---|---|
+| cluster-admin, once | creates the namespace with Pod Security `restricted` labels; installs the guardrails (PriorityClass, ResourceQuota, LimitRange, NetworkPolicies, optional RuntimeClass / admission policy) | `helm install <node>-bootstrap charts/arbiter-node -n arbiter-workers --set mode=bootstrap ...` |
+| namespace admin | creates the join Secret and installs the controller (ServiceAccounts, Role, RoleBinding, config, Lease, Service, Deployment) | `helm install <node> charts/arbiter-node -n arbiter-workers --set mode=node ...` |
+| one cluster-admin | both in one release | `mode=all` (the default); the release name is the node name |
+
+The chart never templates the Namespace (Helm stores its release record there), so the
+cluster-admin creates and labels it first: `kubectl create namespace arbiter-workers`, then
+`kubectl label namespace arbiter-workers pod-security.kubernetes.io/enforce=restricted
+pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted
+pod-security.kubernetes.io/warn=restricted`. One release per namespace; object names are
+fixed. `values.schema.json` rejects unknown keys, a `direct` install without `primaryCIDRs`
+and a `/0` entry.
+
+Never template the Namespace into a release: Helm 3 refuses an existing unlabelled
+namespace, and Helm 4.3 adopts it, so `helm uninstall` would delete the namespace and any
+worker pods with it. Test your chart commands on both Helm 3 and 4.
+
+**Join token.** Never in values, argv or shell history:
+`read -rs T && printf %s "$T" | kubectl -n arbiter-workers create secret generic arbiter-join --from-file=token=/dev/stdin`.
+The token is single-use and expires in 15 minutes. `--set-file join.token=` is the
+automation fallback only: the token then lands in Helm's release record.
+
+**Install.** `helm install <node> oci://ghcr.io/ryanrborn/charts/arbiter-node -n
+arbiter-workers -f values.yaml`, with the values the primary prints. On k3s add the API
+server's node IP to `networkPolicy.apiServerCIDRs` (step 5). A join Secret created after
+the pod started reaches it after about 90 s (the kubelet sync period), so expect that wait
+before the node shows `online`. Then steps 7-8.
+
+**Upgrade.** Helm owns the controller image: the Role has no write verb on the Deployment
+and `ARB_K8S_SELF_UPGRADE=false`. The node reports the exact command, of the form
+`helm upgrade <release> <chartRef> --version <v> -n arbiter-workers --reset-then-reuse-values`.
+`--reset-then-reuse-values` is upgrade-only; it does not belong in an install command.
+Upgrade the `-bootstrap` release too when the guardrails changed. A config-only upgrade
+does not roll the pod: the controller re-reads `controller.yaml` every 30 s.
+
+**Uninstall.** `arb node drain <name>`, `arb node revoke <name>`, then `helm uninstall
+<node> -n arbiter-workers` (and `<node>-bootstrap` if split). Helm leaves the Secrets you
+created, the namespace, and a PriorityClass another install still uses (set
+`placement.priorityClass.create=false` on every install after the first on a cluster).
+Delete the namespace afterwards if nothing else lives in it.
+
+**Migrating from the raw manifests.** Re-install: remove the raw objects (delete the
+namespace, or `kubectl delete -f` the manifest), then install the chart. Adopting the
+existing objects into a release is possible but optional.
+
+**Pull secrets.** Referenced by name, never held in values:
+
+* Controller image from a private registry or mirror: create a `docker-registry` Secret in
+  the namespace and set `imagePullSecrets: [<name>]`, with `image.repository` (and
+  `image.digest`, which wins over the tag) pointing at the mirror. The default, public
+  GHCR (`ghcr.io/ryanrborn/arbiter-controller`), needs none.
+* Worker image registries: one `registries[]` entry per registry, `prefix:
+  registry.example.test/arbiter` and `pullSecret: <name>`. The prefix is the admission
+  policy's allow-list (`admissionPolicy.enabled`, Kubernetes 1.30+, requires
+  `registries[]`), and every worker pod references the `pullSecret`. The `Image pull`
+  readiness check (§3) confirms it from inside the namespace.
 
 ## 5. Running the end-to-end suite on a disposable cluster
 
