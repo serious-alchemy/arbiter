@@ -186,6 +186,7 @@ defmodule Arbiter.NodeAgent.K8s.CanaryTest do
     probe controller_port closed
     probe foreign closed
     probe internet closed
+    probe metadata closed
     probe node closed
     probe bridge open
     canary done
@@ -196,7 +197,7 @@ defmodule Arbiter.NodeAgent.K8s.CanaryTest do
                @all_closed |> Canary.parse() |> Canary.verdict()
     end
 
-    for probe <- ~w(api controller_port foreign internet node) do
+    for probe <- ~w(api controller_port foreign internet metadata node) do
       test "an open #{probe} probe is unenforced" do
         log =
           String.replace(
@@ -226,11 +227,21 @@ defmodule Arbiter.NodeAgent.K8s.CanaryTest do
       assert {:enforced, %{skipped: ["foreign"]}} = log |> Canary.parse() |> Canary.verdict()
     end
 
-    test "without the always-known api and internet probes it proves nothing" do
+    test "without the always-known api, internet and metadata probes it proves nothing" do
       assert {:inconclusive, {:missing_probes, missing}} =
                "probe node closed\ncanary done\n" |> Canary.parse() |> Canary.verdict()
 
-      assert "api" in missing and "internet" in missing
+      assert "api" in missing and "internet" in missing and "metadata" in missing
+    end
+
+    test "a reachable cloud metadata address is unenforced on its own (KH3)" do
+      log = String.replace(@all_closed, "probe metadata closed", "probe metadata open")
+
+      assert {:unenforced, ["metadata"]} = log |> Canary.parse() |> Canary.verdict()
+    end
+
+    test "the script probes the link-local metadata address on 80" do
+      assert Canary.script() =~ "probe metadata 169.254.169.254:80"
     end
 
     test "a log with no done marker proves nothing" do

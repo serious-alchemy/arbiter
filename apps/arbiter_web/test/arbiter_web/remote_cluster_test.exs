@@ -35,6 +35,7 @@ defmodule ArbiterWeb.RemoteClusterTest do
   probe controller_port closed
   probe foreign closed
   probe internet closed
+  probe metadata closed
   probe node closed
   probe bridge open
   canary done
