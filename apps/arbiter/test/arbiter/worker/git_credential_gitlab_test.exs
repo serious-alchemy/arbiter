@@ -388,6 +388,28 @@ defmodule Arbiter.Worker.GitCredentialGitlabTest do
       send(owner, :stop)
     end
 
+    # The production path of a local (non-container) spawn: dispatch's plan, then
+    # ClaudeSession's prepare and spawn_env. The worker gets the git helper and the
+    # API token, and no operator ssh or glab credential is added.
+    test "plan -> prepare -> spawn_env hands a local worker its push and API env" do
+      stub_gitlab()
+      ws = workspace()
+      {:ok, plan} = GitCredential.plan(ws, "tonic", role: :implementer, host_pushes?: false)
+
+      assert {:ok, git} =
+               GitCredential.prepare(plan, ws, self(), [remote: "acme/tonic"] ++ req_options())
+
+      assert {:ok, env} = GitCredential.spawn_env(git, %{}, [{"PATH", "/usr/bin"}], [])
+
+      assert {"GITLAB_TOKEN", "glpat-run-token"} in env
+      assert {"ARB_GIT_TOKEN", "glpat-run-token"} in env
+      assert {"GITLAB_HOST", "gitlab.com"} in env
+      refute List.keymember?(env, "SSH_AUTH_SOCK", 0)
+      refute inspect(env) =~ @parent
+      assert "glpat-run-token" in git.redact
+      assert @parent in git.redact
+    end
+
     test "prepare/4 arms the revoke for every spawn, not only a remote one" do
       stub_gitlab()
       ws = workspace()
