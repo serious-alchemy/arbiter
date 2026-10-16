@@ -63,6 +63,7 @@ defmodule Arbiter.Mergers.Gitlab do
   alias Arbiter.Http.Client
   alias Arbiter.Http.Error, as: ErrorSpec
   alias Arbiter.Mergers.CILogExcerpt
+  alias Arbiter.Mergers.CIRerun
   alias Arbiter.Mergers.Gitlab.{Config, Error}
 
   @stub_name Arbiter.Mergers.Gitlab.HTTP
@@ -206,6 +207,164 @@ defmodule Arbiter.Mergers.Gitlab do
       fetch_failing_check_logs(cfg, iid)
     end
   end
+
+  @impl true
+  def rerun_ci(mr_ref, opts) when is_binary(mr_ref) and is_map(opts) do
+    inputs = string_inputs(Map.get(opts, :inputs))
+    requested = Map.get(opts, :mode) || :auto
+
+    with :ok <- check_rerun_mode(inputs, requested),
+         {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, mr} <- request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json(),
+         {:ok, pipelines} <- head_pipelines(cfg, iid, Map.get(mr, "sha")),
+         {:ok, pipeline} <- settled_failed_pipeline(pipelines, Map.get(mr, "sha")) do
+      jobs = rerun_jobs(cfg, Map.get(pipeline, "id"))
+
+      decision =
+        CIRerun.choose(%{
+          run_attempt: max(length(pipelines), retry_attempt(jobs)),
+          jobs: Enum.map(latest_jobs(jobs), &Map.put(&1, "conclusion", Map.get(&1, "status"))),
+          inputs: inputs
+        })
+
+      mode =
+        if requested in [:failed_jobs, :all_jobs, :workflow], do: requested, else: decision.mode
+
+      with {:ok, started} <- post_rerun(cfg, pipeline, mode, Map.get(mr, "source_branch"), inputs) do
+        {:ok,
+         %{
+           mode: mode,
+           run_id: Map.get(started, "id"),
+           workflow: nil,
+           run_attempt: decision.run_attempt,
+           reused_jobs: decision.reused_jobs,
+           rationale: decision.rationale,
+           url: Map.get(started, "web_url") || Map.get(pipeline, "web_url")
+         }}
+      end
+    end
+  end
+
+  # Pipeline variables are the only way to carry inputs, and only a new pipeline
+  # takes them; pipeline retry replays the original variables (same contract as
+  # the GitHub adapter).
+  defp check_rerun_mode(inputs, mode)
+       when map_size(inputs) > 0 and mode in [:failed_jobs, :all_jobs],
+       do:
+         {:error,
+          %Error{
+            kind: :validation_failed,
+            status: nil,
+            message:
+              "cannot re-run CI: `inputs` can only be carried by a new pipeline, " <>
+                "but mode is #{inspect(mode)} — use mode `workflow` (or `auto`)",
+            raw: nil
+          }}
+
+  defp check_rerun_mode(_inputs, mode) when mode in [:auto, :failed_jobs, :all_jobs, :workflow],
+    do: :ok
+
+  defp check_rerun_mode(_inputs, mode),
+    do:
+      {:error,
+       %Error{
+         kind: :validation_failed,
+         status: nil,
+         message: "cannot re-run CI: unknown mode #{inspect(mode)}",
+         raw: nil
+       }}
+
+  # Pipelines on the MR's head SHA, newest first (same pick as ReviewCi's read).
+  defp head_pipelines(_cfg, _iid, sha) when sha in [nil, ""],
+    do: {:error, rerun_not_found("the MR has no head SHA")}
+
+  defp head_pipelines(cfg, iid, sha) do
+    case request(cfg, :get, "/merge_requests/#{iid}/pipelines", params: [per_page: 100])
+         |> handle_json() do
+      {:ok, pipelines} when is_list(pipelines) ->
+        {:ok, Enum.filter(pipelines, &(Map.get(&1, "sha") == sha))}
+
+      {:ok, _} ->
+        {:ok, []}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp settled_failed_pipeline([], sha),
+    do: {:error, rerun_not_found("no pipeline on head SHA #{sha}")}
+
+  defp settled_failed_pipeline([latest | _], sha) do
+    case Map.get(latest, "status") do
+      status when status in @failing_job_statuses ->
+        {:ok, latest}
+
+      status ->
+        {:error,
+         rerun_not_found(
+           "the latest pipeline on head SHA #{sha} is #{status}, not a failure" <>
+             if(map_pipeline_status(status) in [:running, :pending],
+               do: " (a pipeline is still running)",
+               else: ""
+             )
+         )}
+    end
+  end
+
+  defp rerun_not_found(detail),
+    do: %Error{kind: :not_found, status: nil, message: "cannot re-run CI: " <> detail, raw: nil}
+
+  # Best-effort: jobs only feed the granularity policy, so an API error degrades
+  # to "no known upstream jobs" (the cheapest re-run).
+  defp rerun_jobs(cfg, pipeline_id) do
+    case request(cfg, :get, "/pipelines/#{pipeline_id}/jobs",
+           params: [per_page: 100, include_retried: true]
+         )
+         |> handle_json() do
+      {:ok, jobs} when is_list(jobs) -> jobs
+      _ -> []
+    end
+  end
+
+  # With `include_retried` a retried job appears once per attempt; keep the newest.
+  defp latest_jobs(jobs) do
+    jobs
+    |> Enum.group_by(&Map.get(&1, "name"))
+    |> Enum.map(fn {_name, attempts} -> Enum.max_by(attempts, &(Map.get(&1, "id") || 0)) end)
+  end
+
+  defp retry_attempt(jobs) do
+    jobs
+    |> Enum.frequencies_by(&Map.get(&1, "name"))
+    |> Map.values()
+    |> Enum.max(fn -> 1 end)
+  end
+
+  defp post_rerun(cfg, pipeline, :failed_jobs, _ref, _inputs) do
+    request(cfg, :post, "/pipelines/#{Map.get(pipeline, "id")}/retry", json: %{})
+    |> handle_json()
+  end
+
+  defp post_rerun(_cfg, _pipeline, _mode, ref, _inputs) when ref in [nil, ""],
+    do: {:error, rerun_not_found("the MR has no source branch")}
+
+  # `:all_jobs` and `:workflow`: GitLab retry reuses succeeded jobs, so only a
+  # fresh pipeline rebuilds upstream artifacts or carries variables.
+  defp post_rerun(cfg, _pipeline, _mode, ref, inputs) do
+    variables =
+      for {key, value} <- Enum.sort(inputs),
+          do: %{key: key, value: value, variable_type: "env_var"}
+
+    body = if variables == [], do: %{ref: ref}, else: %{ref: ref, variables: variables}
+    request(cfg, :post, "/pipeline", json: body) |> handle_json()
+  end
+
+  defp string_inputs(inputs) when is_map(inputs) and map_size(inputs) > 0,
+    do: Map.new(inputs, fn {k, v} -> {to_string(k), to_string(v)} end)
+
+  defp string_inputs(_), do: %{}
 
   @impl true
   def merge(mr_ref, expected_sha)

@@ -87,15 +87,27 @@ defmodule Arbiter.Trackers.Shortcut do
   defp annotate_priority_field(cfg, %{"custom_fields" => [_ | _]} = story) do
     with {:ok, %Req.Response{status: status, body: fields}} when status in 200..299 <-
            request(cfg, :get, "/custom-fields", []),
-         true <- is_list(fields),
-         %{"id" => id} <- Enum.find(fields, &priority_field?/1) do
-      Map.put(story, "arbiter_priority_field_id", id)
+         true <- is_list(fields) do
+      story
+      |> Map.put("arbiter_custom_field_names", field_names(fields))
+      |> put_priority_field_id(fields)
     else
       _ -> story
     end
   end
 
   defp annotate_priority_field(_cfg, story), do: story
+
+  defp put_priority_field_id(story, fields) do
+    case Enum.find(fields, &priority_field?/1) do
+      %{"id" => id} -> Map.put(story, "arbiter_priority_field_id", id)
+      _ -> story
+    end
+  end
+
+  defp field_names(fields) do
+    for %{"id" => id, "name" => name} <- fields, is_binary(name), into: %{}, do: {id, name}
+  end
 
   defp priority_field?(%{"name" => name}) when is_binary(name),
     do: name |> String.trim() |> String.downcase() == "priority"
@@ -437,17 +449,22 @@ defmodule Arbiter.Trackers.Shortcut do
   end
 
   @impl true
-  def signal_claim(ref, task_id, %{
-        workspace_name: name,
-        workspace_prefix: prefix,
-        current_user: member_id,
-        host: host
-      }) do
+  def signal_claim(
+        ref,
+        task_id,
+        %{
+          workspace_name: name,
+          workspace_prefix: prefix,
+          current_user: member_id,
+          host: host
+        } = ctx
+      ) do
     body =
       "Claimed as #{task_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
 
     post_comment(ref, body)
-    assign_user(ref, member_id)
+    # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
+    if Map.get(ctx, :assign, false), do: assign_user(ref, member_id)
     :ok
   end
 
@@ -502,6 +519,34 @@ defmodule Arbiter.Trackers.Shortcut do
 
   def epic_for(_), do: nil
 
+  # Shortcut story links are directional `subject --verb--> object`; "blocks"
+  # means the subject blocks the object. Re-expressed relative to this story.
+  @impl true
+  def links_for(%{"id" => id, "story_links" => links}) when is_list(links) do
+    self_id = to_string(id)
+
+    Enum.flat_map(links, fn
+      %{"subject_id" => s, "object_id" => o, "verb" => verb} ->
+        {subject, object} = {to_string(s), to_string(o)}
+
+        cond do
+          subject == self_id -> [%{kind: link_kind(verb, :subject), ref: object, verb: verb}]
+          object == self_id -> [%{kind: link_kind(verb, :object), ref: subject, verb: verb}]
+          true -> []
+        end
+
+      _ ->
+        []
+    end)
+  end
+
+  def links_for(_), do: []
+
+  defp link_kind("blocks", :subject), do: :blocks
+  defp link_kind("blocks", :object), do: :blocked_by
+  defp link_kind("relates to", _), do: :relates_to
+  defp link_kind(_, _), do: :other
+
   @impl true
   def extract_description(%{
         "description" => desc
@@ -509,6 +554,13 @@ defmodule Arbiter.Trackers.Shortcut do
       when is_binary(desc), do: desc
 
   def extract_description(_), do: ""
+
+  @impl true
+  def extract_checklist(%{"tasks" => [_ | _] = tasks}) do
+    for %{"description" => d} when is_binary(d) <- tasks, do: d
+  end
+
+  def extract_checklist(_), do: []
 
   # Priority is the org's "Priority" custom field (Highest/High/Medium/Low →
   # 0/1/2/3), located by name in `fetch/1` (field ids differ per workspace).
@@ -535,6 +587,29 @@ defmodule Arbiter.Trackers.Shortcut do
       _ -> nil
     end
   end
+
+  # The value of the story's custom field named `name` (case-insensitive), e.g.
+  # "Technical Area". Field names are resolved in `fetch/1`.
+  @impl true
+  def extract_field(%{"arbiter_custom_field_names" => names, "custom_fields" => fields}, name)
+      when is_list(fields) and is_binary(name) do
+    wanted = name |> String.trim() |> String.downcase()
+
+    Enum.find_value(fields, fn
+      %{"field_id" => id, "value" => value} when is_binary(value) ->
+        field = Map.get(names, id)
+        if is_binary(field) and String.downcase(String.trim(field)) == wanted, do: value
+
+      _ ->
+        nil
+    end)
+  end
+
+  def extract_field(_, _), do: nil
+
+  @impl true
+  def extract_estimate(%{"estimate" => pts}) when is_number(pts), do: pts
+  def extract_estimate(_), do: nil
 
   # Shortcut's `story_type` is bug | feature | chore, which are Arbiter issue types.
   @impl true

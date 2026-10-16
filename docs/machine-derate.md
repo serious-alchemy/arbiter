@@ -35,7 +35,7 @@ the slots `offered` (always ≤ the cap):
 | `soft` | CPU ≥ `thermal_soft_c`, **or** memory PSI `some avg10` ≥ `psi_some_avg10`, **or** `MemAvailable` < `mem_floor_gib` | **no new slots**: `offered = min(cap, live)`. On the primary, new implementers and resumes of a ticket's own run are held; review-side follow-ups (reviewers, fix and conflict passes, review fix rounds) still run, because holding them could deadlock a ticket waiting for its own review. On a node, `offered = live` leaves no room for any new run |
 | `hard` | CPU ≥ `thermal_hard_c` | as soft, **and** new resumes and fix passes are held too: on the primary the follow-up kinds are held, on a node nothing is placed. Memory pressure alone is never hard |
 
-Entering a level is immediate. **Hysteresis**: a derate lifts only after the
+Entering a hard level is immediate; soft thermal entry is smoothed (`thermal_entry_samples`). **Hysteresis**: a derate lifts only after the
 readings have stayed below the *release* thresholds (`threshold − delta`) for
 `recover_s` seconds continuously; a reading back inside the band
 (`release … threshold`) holds the level and restarts the clock. A hard derate
@@ -49,6 +49,7 @@ steps down to soft (then none) one window at a time.
 | `thermal_soft_c` | `90` | °C at or above which no new slots are offered |
 | `thermal_hard_c` | `95` | °C at or above which resumes and fix passes are held too (never below soft) |
 | `thermal_delta_c` | `5` | hysteresis: recover only below `soft − delta` (and `hard − delta`) |
+| `thermal_entry_samples` | `3` | soft thermal entry needs the median of this many samples (~30 s at the 10 s period) at or above `thermal_soft_c`, and recovery reads the same median, so one `Tctl` spike cannot bench the node. Hard stays immediate (one sample at `thermal_hard_c`). `1` = react to a single sample |
 | `psi_some_avg10` | `25` | memory PSI `some avg10` (%) at or above which no new slots are offered |
 | `psi_delta` | `10` | hysteresis for PSI |
 | `mem_floor_gib` | `4` | `MemAvailable` below this (one worker's worth) offers no new slots |

@@ -9,6 +9,11 @@ System.delete_env("ARBITER_MEMORY_ROOT")
 # so they run by default and are skipped only where node is absent.
 node_exclude = if System.find_executable("node"), do: [], else: [:node]
 
+# bd-510881: `:tmux` tests (the login flows) drive a real tmux server on a
+# scratch socket. Remote-node and gate containers ship no tmux, so there they
+# are skipped rather than crashing with `:enoent`. Same rule as apps/arbiter.
+tmux_exclude = if System.find_executable("tmux"), do: [], else: [:tmux]
+
 # bd-c76fu9: `:browser` tests bundle the real terminal hook with esbuild and
 # run it inside a headless Chromium over the DevTools Protocol, because the
 # canvas renderer and the §6.3 key bindings cannot be checked anywhere else.
@@ -49,7 +54,7 @@ ExUnit.start(
   [
     exclude:
       [:podman, :spike_rw, :spike_serve, :spike_k8s, :node_agent] ++
-        node_exclude ++ browser_exclude
+        node_exclude ++ browser_exclude ++ tmux_exclude
   ] ++
     max_cases_opts
 )

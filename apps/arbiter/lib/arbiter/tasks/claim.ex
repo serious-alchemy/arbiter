@@ -19,7 +19,16 @@ defmodule Arbiter.Tasks.Claim do
       against open tasks, in both directions.
   """
 
-  alias Arbiter.Tasks.{Dependencies, Issue, IssueSerializer, Workspace}
+  alias Arbiter.Tasks.{
+    Dependencies,
+    Dependency,
+    Issue,
+    IssueRepo,
+    IssueSerializer,
+    TrackerAcceptance,
+    Workspace
+  }
+
   alias Arbiter.Trackers
 
   require Ash.Query
@@ -97,13 +106,26 @@ defmodule Arbiter.Tasks.Claim do
   """
   @spec claim(Workspace.t(), String.t(), keyword()) :: claim_result
   def claim(%Workspace{} = workspace, ref, opts \\ []) when is_binary(ref) do
+    case claim_with_owner(workspace, ref, opts) do
+      {:ok, status, task, _owner} -> {:ok, status, task}
+      other -> other
+    end
+  end
+
+  @doc """
+  Like `claim/3`, returning `{:ok, status, task, owner_changed}` where
+  `owner_changed` is `%{changed: boolean, old: [owner], new: [owner]}`. The
+  tracker owner is left alone unless `assign: true` is passed (D1).
+  """
+  def claim_with_owner(%Workspace{} = workspace, ref, opts \\ []) when is_binary(ref) do
     type = Trackers.workspace_type(workspace)
     adapter = Trackers.for_type(type)
     force? = Keyword.get(opts, :force, false)
+    assign? = Keyword.get(opts, :assign, false)
     overrides = Keyword.take(opts, [:difficulty, :repo, :priority, :issue_type])
 
     Trackers.with_workspace(type, workspace, fn ->
-      do_claim(adapter, type, workspace, ref, force?, overrides)
+      do_claim(adapter, type, workspace, ref, force?, assign?, overrides)
     end)
   end
 
@@ -258,7 +280,9 @@ defmodule Arbiter.Tasks.Claim do
          {:ok, repo} <- optional_repo(Map.get(params, "repo")),
          {:ok, priority} <- optional_priority(Map.get(params, "priority")),
          {:ok, issue_type} <- optional_issue_type(Map.get(params, "issue_type")) do
-      {:ok, [difficulty: difficulty, repo: repo, priority: priority, issue_type: issue_type]}
+      {:ok,
+       [difficulty: difficulty, repo: repo, priority: priority, issue_type: issue_type] ++
+         [assign: params["assign"] in [true, "true", "1", 1]]}
     end
   end
 
@@ -361,7 +385,14 @@ defmodule Arbiter.Tasks.Claim do
   @doc "The claim response: `%{status: status, task: <ticket record>}`, status `created` or `existing`."
   @spec serialize_claim(:created | :existing, Issue.t()) :: map()
   def serialize_claim(status, %Issue{} = task),
+    do: serialize_claim(status, task, nil)
+
+  @doc "As `serialize_claim/2`, plus `owner_changed: %{changed, old, new}` (the tracker owner before/after)."
+  def serialize_claim(status, %Issue{} = task, nil),
     do: %{status: Atom.to_string(status), task: IssueSerializer.data(task)}
+
+  def serialize_claim(status, %Issue{} = task, owner),
+    do: status |> serialize_claim(task, nil) |> Map.put(:owner_changed, owner)
 
   @doc """
   The bulk selector in a claim request's string-keyed params: `{:ok,
@@ -432,21 +463,26 @@ defmodule Arbiter.Tasks.Claim do
 
   # ---- internals: claim ----------------------------------------------------
 
-  defp do_claim(adapter, type, workspace, ref, force?, overrides) do
+  defp do_claim(adapter, type, workspace, ref, force?, assign?, overrides) do
     with {:ok, current_user_id} <- get_current_user(adapter, workspace),
          {:ok, ref} <- normalize_ref(adapter, ref),
          {:ok, issue_map} <- adapter.fetch(ref),
          :ok <- check_assignment(adapter, issue_map, current_user_id, force?) do
+      old_owners = adapter.assignees(issue_map)
+      unchanged = %{changed: false, old: old_owners, new: old_owners}
+
       case find_existing(workspace, type, ref) do
         {:ok, task} ->
           case maybe_apply_overrides(task, overrides) do
             {:ok, updated_task} ->
               mirror_epic(adapter, workspace, issue_map, updated_task)
-              {:ok, :existing, updated_task}
+              import_links(adapter, type, workspace, issue_map, updated_task)
+              {:ok, :existing, updated_task, unchanged}
 
             :no_changes ->
               mirror_epic(adapter, workspace, issue_map, task)
-              {:ok, :existing, task}
+              import_links(adapter, type, workspace, issue_map, task)
+              {:ok, :existing, task, unchanged}
 
             {:error, err} ->
               {:error, err}
@@ -459,10 +495,12 @@ defmodule Arbiter.Tasks.Claim do
             # code is held to it; see the note in .credo.exs.
             # credo:disable-for-next-line Credo.Check.Refactor.Nesting
             case create_task(workspace, type, ref, issue_map, adapter, overrides) do
-              {:ok, :created, task} = result ->
-                maybe_signal_claim(adapter, ref, task, workspace, current_user_id)
+              {:ok, :created, task} ->
+                maybe_signal_claim(adapter, ref, task, workspace, current_user_id, assign?)
+                owner = owner_change(old_owners, current_user_id, assign?)
                 mirror_epic(adapter, workspace, issue_map, task)
-                result
+                import_links(adapter, type, workspace, issue_map, task)
+                {:ok, :created, task, owner}
 
               error ->
                 error
@@ -470,6 +508,93 @@ defmodule Arbiter.Tasks.Claim do
           end
       end
     end
+  end
+
+  # Translate the issue's tracker links into edges. `blocks` / `blocked-by`
+  # become `blocks` edges and `relates to` a `relates_to` edge, but only when the
+  # other end is a claimed task in this workspace; anything else (unclaimed
+  # story, other verb, a would-be cycle) is recorded in `notes` so nothing is
+  # dropped silently. Runs inside the claim, before the caller can promote the
+  # ticket. Idempotent, and re-run on the other end's claim, so the edge forms
+  # whichever order the two are claimed in. Best effort like `mirror_epic/4`.
+  defp import_links(adapter, type, workspace, issue_map, task) do
+    if function_exported?(adapter, :links_for, 1) do
+      notes =
+        for link <- adapter.links_for(issue_map),
+            note = import_link(workspace, type, task, link),
+            do: note
+
+      append_link_notes(task, notes)
+    end
+
+    :ok
+  rescue
+    e -> Logger.warning("claim: link import failed: #{Exception.message(e)}")
+  end
+
+  defp import_link(workspace, type, task, %{kind: kind, ref: ref, verb: verb}) do
+    case find_existing(workspace, type, ref) do
+      {:ok, other} when kind in [:blocks, :blocked_by, :relates_to] ->
+        link_edge(task, other, kind, ref)
+
+      _ ->
+        "tracker link: #{link_verb(kind, verb)} #{ref} (not a claimed ticket, no edge)"
+    end
+  end
+
+  defp link_edge(task, other, kind, ref) do
+    {from, to, edge_type} =
+      case kind do
+        :blocks -> {task.id, other.id, :blocks}
+        :blocked_by -> {other.id, task.id, :blocks}
+        :relates_to -> {task.id, other.id, :relates_to}
+      end
+
+    if edge_present?(from, to, edge_type) do
+      nil
+    else
+      from
+      |> Dependencies.add(to, edge_type, notes: "imported from tracker link")
+      |> add_outcome_note(link_verb(kind, ""), ref)
+    end
+  end
+
+  defp add_outcome_note({:ok, _}, _verb, _ref), do: nil
+
+  defp add_outcome_note({:error, {:cyclic, _}}, verb, ref),
+    do: "tracker link: #{verb} #{ref} rejected, edge would form a cycle"
+
+  defp add_outcome_note({:error, reason}, verb, ref),
+    do: "tracker link: #{verb} #{ref} not imported (#{inspect(reason)})"
+
+  defp edge_present?(from, to, :relates_to),
+    do: edge_exists?(from, to, :relates_to) or edge_exists?(to, from, :relates_to)
+
+  defp edge_present?(from, to, type), do: edge_exists?(from, to, type)
+
+  defp edge_exists?(from, to, type) do
+    Dependency
+    |> Ash.Query.filter(from_issue_id == ^from and to_issue_id == ^to and type == ^type)
+    |> Ash.read!()
+    |> Enum.any?()
+  end
+
+  defp link_verb(:blocked_by, _verb), do: "blocked by"
+  defp link_verb(:blocks, _verb), do: "blocks"
+  defp link_verb(:relates_to, _verb), do: "relates to"
+  defp link_verb(:other, verb), do: verb
+
+  defp append_link_notes(_task, []), do: :ok
+
+  defp append_link_notes(task, notes) do
+    current = Ash.get!(Issue, task.id).notes || ""
+    fresh = Enum.reject(Enum.uniq(notes), &String.contains?(current, &1))
+
+    if fresh != [] do
+      Ash.update!(task, %{append_notes: Enum.join(fresh, "\n")})
+    end
+
+    :ok
   end
 
   # Mirror the issue's tracker epic (Shortcut epic, GitHub milestone) as one
@@ -534,17 +659,85 @@ defmodule Arbiter.Tasks.Claim do
         tracker_ref: ref,
         workspace_id: workspace.id
       }
+      |> put_acceptance(adapter, issue_map)
       |> maybe_put_extracted(:priority, adapter, :extract_priority, issue_map)
       |> maybe_put_extracted(:difficulty, adapter, :extract_difficulty, issue_map)
       |> maybe_put_extracted(:issue_type, adapter, :extract_issue_type, issue_map)
+      |> maybe_seed_difficulty(workspace, adapter, issue_map)
       |> maybe_put_override(:difficulty, overrides)
       |> maybe_put_override(:repo, overrides)
       |> maybe_put_override(:priority, overrides)
       |> maybe_put_override(:issue_type, overrides)
 
+    {attrs, route_notes} = route_repo(attrs, workspace, adapter, issue_map, overrides)
+
     case Ash.create(Issue, attrs) do
-      {:ok, task} -> {:ok, :created, task}
-      {:error, err} -> {:error, err}
+      {:ok, task} ->
+        append_link_notes(task, route_notes)
+        {:ok, :created, if(route_notes == [], do: task, else: Ash.get!(Issue, task.id))}
+
+      {:error, err} ->
+        {:error, err}
+    end
+  end
+
+  # `tracker.claim.repo_from`: %{"field" => name, "map" => %{value => repo}}.
+  # Only in a multi-repo workspace, and never over an explicit `repo`. A value
+  # that is unmapped (or maps to a repo that isn't configured) leaves the repo
+  # to `default_repo` and records why in the task notes.
+  defp route_repo(attrs, workspace, adapter, issue_map, overrides) do
+    with %{"field" => field, "map" => map} <- claim_config(workspace, "repo_from"),
+         nil <- Keyword.get(overrides, :repo),
+         true <- length(IssueRepo.configured_repos(workspace.id)) > 1,
+         true <- function_exported?(adapter, :extract_field, 2) do
+      value = adapter.extract_field(issue_map, field)
+      target = Map.get(map, value)
+
+      case IssueRepo.configured_key(workspace.id, target) do
+        nil -> {attrs, [route_fallback_note(field, value, target)]}
+        repo -> {Map.put(attrs, :repo, repo), []}
+      end
+    else
+      _ -> {attrs, []}
+    end
+  end
+
+  defp route_fallback_note(field, nil, _),
+    do: "repo_from: story has no #{field} value; using default_repo."
+
+  defp route_fallback_note(field, value, nil),
+    do: "repo_from: #{field} #{inspect(value)} is not in the repo map; using default_repo."
+
+  defp route_fallback_note(field, value, repo),
+    do:
+      "repo_from: #{field} #{inspect(value)} maps to #{inspect(repo)}, which is not a " <>
+        "configured repo; using default_repo."
+
+  # `tracker.claim.difficulty_from_estimate`: %{"points" => difficulty}.
+  # Advisory seed only: an unmapped/missing estimate leaves difficulty to the
+  # adapter's own extraction (or unset), and explicit overrides still win.
+  defp maybe_seed_difficulty(attrs, workspace, adapter, issue_map) do
+    with map when is_map(map) <- claim_config(workspace, "difficulty_from_estimate"),
+         true <- function_exported?(adapter, :extract_estimate, 1),
+         pts when is_number(pts) <- adapter.extract_estimate(issue_map),
+         d when is_integer(d) <- Map.get(map, to_string(trunc(pts))) do
+      Map.put(attrs, :difficulty, d)
+    else
+      _ -> attrs
+    end
+  end
+
+  defp claim_config(workspace, key) do
+    case workspace.config do
+      %{"tracker" => %{"claim" => %{^key => value}}} -> value
+      _ -> nil
+    end
+  end
+
+  defp put_acceptance(attrs, adapter, issue_map) do
+    case TrackerAcceptance.derive(adapter, issue_map) do
+      {:acceptance, text} -> Map.put(attrs, :acceptance, text)
+      {:waived, reason} -> Map.put(attrs, :acceptance_waived, reason)
     end
   end
 
@@ -638,7 +831,16 @@ defmodule Arbiter.Tasks.Claim do
     end
   end
 
-  defp maybe_signal_claim(adapter, ref, task, workspace, current_user_id) do
+  # Only an explicit `assign: true` moves the tracker owner (D1); an owner already
+  # on the issue is kept, the viewer is added alongside.
+  defp owner_change(old, _viewer, false), do: %{changed: false, old: old, new: old}
+
+  defp owner_change(old, viewer, true) do
+    new = Enum.uniq(old ++ [viewer])
+    %{changed: new != old, old: old, new: new}
+  end
+
+  defp maybe_signal_claim(adapter, ref, task, workspace, current_user_id, assign?) do
     if function_exported?(adapter, :signal_claim, 3) do
       host = System.get_env("ARB_HOST") || local_hostname()
 
@@ -647,6 +849,7 @@ defmodule Arbiter.Tasks.Claim do
         workspace_name: workspace.name,
         workspace_prefix: workspace.prefix,
         current_user: current_user_id,
+        assign: assign?,
         host: host
       }
 

@@ -104,7 +104,7 @@ defmodule Arbiter.Settings.Registry do
       type: "derate_config",
       description:
         "The primary's self-derate thresholds (bd-6w7usy, docs/machine-derate.md), a JSON " <>
-          "object over thermal_soft_c (90), thermal_hard_c (95), thermal_delta_c (5), " <>
+          "object over thermal_soft_c (90), thermal_hard_c (95), thermal_delta_c (5), thermal_entry_samples (3), " <>
           "psi_some_avg10 (25), psi_delta (10), mem_floor_gib (4), mem_delta_gib (1), " <>
           "recover_s (180) and enabled (true); keys left out keep their default, null = all " <>
           "defaults. Operator-only. Takes effect within ~10 s."

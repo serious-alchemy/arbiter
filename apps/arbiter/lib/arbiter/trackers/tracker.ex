@@ -196,6 +196,13 @@ defmodule Arbiter.Trackers.Tracker do
   @callback extract_description(map()) :: String.t()
 
   @doc """
+  Extracts the tracker-native task/checklist item texts from a raw issue map
+  (e.g. Shortcut story tasks). Optional; adapters without one fall back to
+  Markdown checkboxes in the description.
+  """
+  @callback extract_checklist(map()) :: [String.t()]
+
+  @doc """
   Extracts the Arbiter priority (0..4, where 0 = P0 / highest) from a raw
   issue map returned by `fetch/1`.
 
@@ -233,6 +240,19 @@ defmodule Arbiter.Trackers.Tracker do
   Optional — adapters without an estimate signal simply don't implement it.
   """
   @callback extract_difficulty(map()) :: {:ok, 0..5} | nil
+
+  @doc """
+  The string value of the tracker field named `name` (e.g. Shortcut's
+  "Technical Area" custom field) on the raw issue, or `nil`. Feeds
+  `tracker.claim.repo_from`.
+  """
+  @callback extract_field(map(), String.t()) :: String.t() | nil
+
+  @doc """
+  The raw issue's estimate points, or `nil`. Feeds
+  `tracker.claim.difficulty_from_estimate`.
+  """
+  @callback extract_estimate(map()) :: number() | nil
 
   @doc """
   Derives the Arbiter `issue_type` (`:task | :research | :bug | :feature | :epic |
@@ -383,7 +403,23 @@ defmodule Arbiter.Trackers.Tracker do
   @callback prepare(workspace :: Arbiter.Tasks.Workspace.t() | map() | nil, opts :: keyword()) ::
               :ok
 
-  @optional_callbacks prepare: 2,
+  @typedoc "A dependency link on an issue, relative to that issue."
+  @type issue_link :: %{
+          kind: :blocks | :blocked_by | :relates_to | :other,
+          ref: String.t(),
+          verb: String.t()
+        }
+
+  @doc """
+  The tracker-side links on a fetched issue (Shortcut story links), each
+  relative to that issue: `:blocks` (it blocks `ref`), `:blocked_by`,
+  `:relates_to`, or `:other` (kept only as a note).
+  """
+  @callback links_for(raw_issue :: map()) :: [issue_link()]
+
+  @optional_callbacks extract_checklist: 1,
+                      links_for: 1,
+                      prepare: 2,
                       add_remote_link: 3,
                       add_comment: 2,
                       check_prior_claim: 1,
@@ -394,5 +430,7 @@ defmodule Arbiter.Trackers.Tracker do
                       epic_for: 1,
                       extract_priority: 1,
                       extract_difficulty: 1,
+                      extract_field: 2,
+                      extract_estimate: 1,
                       extract_issue_type: 1
 end

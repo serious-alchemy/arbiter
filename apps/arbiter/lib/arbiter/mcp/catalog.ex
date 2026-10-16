@@ -2213,6 +2213,12 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "boolean",
             "description" => "Skip the assignment-as-claim check (default false)."
           },
+          "assign" => %{
+            "type" => "boolean",
+            "description" =>
+              "Also take ownership of the tracker issue (default false: the tracker owner is " <>
+                "never changed). The result reports `owner_changed: {changed, old, new}`."
+          },
           "difficulty" => %{
             "type" => "integer",
             "description" =>

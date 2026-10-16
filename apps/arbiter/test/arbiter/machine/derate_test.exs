@@ -5,7 +5,11 @@ defmodule Arbiter.Machine.DerateTest do
   alias Arbiter.Machine.Derate.Config
 
   @gib 1_073_741_824
-  @cfg Config.build(%{})
+  # Window of 1: the smoothed value is the raw sample, so the threshold and
+  # hysteresis tests below read in plain readings. `@smooth` is the default
+  # (3-sample) entry window.
+  @cfg Config.build(%{"thermal_entry_samples" => 1})
+  @smooth Config.build(%{})
   @healthy %{temp_c: 60.0, psi: %{some_avg10: 0.5}, mem_available: 20 * @gib}
 
   defp step(readings, prior, now_s, opts \\ []) do
@@ -15,6 +19,15 @@ defmodule Arbiter.Machine.DerateTest do
       prior,
       now_s * 1000
     )
+  end
+
+  # Feed temps (one per 10 s from `start_s`) through the default config.
+  defp feed(temps, prior \\ Derate.initial(), start_s \\ 0, config \\ @smooth) do
+    temps
+    |> Enum.with_index()
+    |> Enum.reduce({nil, prior}, fn {t, i}, {_, st} ->
+      step(hot(t), st, start_s + i * 10, config: config)
+    end)
   end
 
   defp hot(temp), do: %{@healthy | temp_c: temp}
@@ -63,6 +76,21 @@ defmodule Arbiter.Machine.DerateTest do
       assert cfg.thermal_soft_c == 80.0
       assert cfg.mem_floor_bytes == 8 * @gib
       assert cfg.psi_some_avg10 == Config.build(%{}).psi_some_avg10
+    end
+  end
+
+  describe "Config thermal_entry_samples" do
+    test "defaults to 3 (~30 s at the 10 s sample period); garbage falls back" do
+      assert Config.build(%{}).thermal_entry_samples == 3
+      assert Config.build(%{"thermal_entry_samples" => 5}).thermal_entry_samples == 5
+      assert Config.build(%{"thermal_entry_samples" => 0}).thermal_entry_samples == 3
+      assert Config.defaults()["thermal_entry_samples"] == 3
+      assert {:error, _} = Config.validate(%{"thermal_entry_samples" => 0})
+    end
+
+    test "node env var" do
+      cfg = Config.from_env(%{"ARB_NODE_THERMAL_ENTRY_SAMPLES" => "6"})
+      assert cfg.thermal_entry_samples == 6
     end
   end
 
@@ -117,6 +145,84 @@ defmodule Arbiter.Machine.DerateTest do
       {_, s1} = step(hot(91.0), Derate.initial(), 0)
       {r, _} = step(hot(96.0), s1, 10)
       assert r.level == :hard
+    end
+  end
+
+  describe "thermal entry smoothing" do
+    test "a single sample at soft, surrounded by cooler ones, does not enter" do
+      {r, s} = feed([70.0, 70.0, 92.0, 70.0, 70.0])
+      assert r.level == :none
+      assert s.level == :none
+    end
+
+    test "the spike itself (latest sample) does not enter either" do
+      {r, _} = feed([70.0, 70.0, 92.0])
+      assert r.level == :none
+    end
+
+    test "a first-ever hot sample does not enter before the window is full" do
+      {r, _} = feed([92.0])
+      assert r.level == :none
+      {r2, _} = feed([92.0, 92.0])
+      assert r2.level == :none
+    end
+
+    test "a sustained reading across the entry window enters soft" do
+      {r, _} = feed([92.0, 92.0, 92.0])
+      assert %{level: :soft, offered: 2} = r
+      assert r.reason_text =~ "thermal 92"
+    end
+
+    test "a sustained reading enters soft after cool samples roll out of the window" do
+      {r, _} = feed([70.0, 92.0, 92.0])
+      assert r.level == :soft
+    end
+
+    test "hard is immediate: one sample at hard_c enters hard" do
+      {r, s} = feed([70.0, 70.0, 96.0])
+      assert r.level == :hard
+      assert s.level == :hard
+      {r1, _} = feed([96.0])
+      assert r1.level == :hard
+    end
+
+    test "unknown readings clear the window" do
+      unknown = %{temp_c: nil, psi: nil, mem_available: nil}
+      {_, s} = feed([92.0, 92.0])
+      {_, s1} = step(unknown, s, 20, config: @smooth)
+      {r, _} = step(hot(92.0), s1, 30, config: @smooth)
+      assert r.level == :none
+    end
+
+    test "exit: one cool sample cannot start the recovery clock" do
+      {_, s} = feed([92.0, 92.0, 92.0])
+      # median of [80, 92, 92] is 92: still hot, no clock.
+      {r1, s1} = step(hot(80.0), s, 30, config: @smooth)
+      assert r1.level == :soft
+      assert s1.recover_since == nil
+    end
+
+    test "exit: the clock starts once the smoothed value is below soft - delta, and runs recover_s" do
+      recover = @smooth.recover_s
+      {_, s} = feed([92.0, 92.0, 92.0])
+      {_, s1} = step(hot(80.0), s, 30, config: @smooth)
+      # median [80, 80, 92] = 80 < 85: clock starts.
+      {r2, s2} = step(hot(80.0), s1, 40, config: @smooth)
+      assert r2.level == :soft
+      assert s2.recover_since == 40_000
+      {r3, _} = step(hot(80.0), s2, 40 + recover - 1, config: @smooth)
+      assert r3.level == :soft
+      {r4, _} = step(hot(80.0), s2, 40 + recover, config: @smooth)
+      assert r4.level == :none
+    end
+
+    test "exit: a lone hot sample amid cool ones neither holds the level nor resets the clock" do
+      {_, s} = feed([92.0, 92.0, 92.0])
+      {_, s1} = step(hot(80.0), s, 30, config: @smooth)
+      {_, s2} = step(hot(80.0), s1, 40, config: @smooth)
+      {r3, s3} = step(hot(91.0), s2, 50, config: @smooth)
+      assert r3.level == :soft
+      assert s3.recover_since == s2.recover_since
     end
   end
 

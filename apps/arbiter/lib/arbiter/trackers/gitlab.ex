@@ -325,17 +325,22 @@ defmodule Arbiter.Trackers.Gitlab do
   end
 
   @impl true
-  def signal_claim(ref, task_id, %{
-        workspace_name: name,
-        workspace_prefix: prefix,
-        current_user: username,
-        host: host
-      }) do
+  def signal_claim(
+        ref,
+        task_id,
+        %{
+          workspace_name: name,
+          workspace_prefix: prefix,
+          current_user: username,
+          host: host
+        } = ctx
+      ) do
     body =
       "Claimed as #{task_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
 
     post_comment(ref, body)
-    assign_user(ref, username)
+    # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
+    if Map.get(ctx, :assign, false), do: assign_user(ref, username)
     :ok
   end
 
