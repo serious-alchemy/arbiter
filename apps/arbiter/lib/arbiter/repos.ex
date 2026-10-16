@@ -6,7 +6,8 @@ defmodule Arbiter.Repos do
     * each workspace's `config["repo_paths"]` map,
     * the application-env fallback `:arbiter, :repo_paths` (`source: "(app)"`),
     * any repo name a live worker is running against that isn't configured
-      anywhere (`source: "(unconfigured)"`).
+      anywhere, or that an open ticket carries (bd-7u1b6n) — `source:
+      "(unconfigured)"`.
 
   Repo listing is workspace-aware and does not collapse same-named repos
   across workspaces (parity audit P-24, D-C-31).
@@ -66,7 +67,8 @@ defmodule Arbiter.Repos do
       if scoped? do
         []
       else
-        repos_from_workers(workers_by_repo, configured_names)
+        repos_from_workers(workers_by_repo, configured_names) ++
+          repos_from_open_tickets(configured_names, workers_by_repo)
       end
 
     (ws_entries ++ app_entries ++ worker_entries)
@@ -197,6 +199,24 @@ defmodule Arbiter.Repos do
         workspace_id: nil
       }
     end)
+  end
+
+  # bd-7u1b6n: open tickets whose `repo` is not a configured key. They dispatch
+  # (or fail to resume) against a repo nothing can resolve; surfacing them here
+  # puts them in `arb repo list` and in `arb server doctor`.
+  defp repos_from_open_tickets(configured_names, workers_by_repo) do
+    Arbiter.Tasks.Issue
+    |> Ash.Query.filter(state != :closed and not is_nil(repo))
+    |> Ash.Query.select([:repo])
+    |> Ash.read!()
+    |> Enum.map(& &1.repo)
+    |> Enum.uniq()
+    |> Enum.reject(&(MapSet.member?(configured_names, &1) or Map.has_key?(workers_by_repo, &1)))
+    |> Enum.map(fn name ->
+      %{name: name, path: nil, source: "(unconfigured)", workspace_id: nil}
+    end)
+  rescue
+    _ -> []
   end
 
   defp group_workers_by_repo do

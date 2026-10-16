@@ -168,15 +168,41 @@ defmodule Arbiter.Tasks.Issue.Changes.ResolveRepoTest do
   end
 
   describe "update" do
-    test "is left alone: an existing issue's repo can still be cleared or repointed" do
+    test "an existing issue's repo can still be cleared" do
       ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
-      {:ok, issue} = Ash.create(Issue, %{title: "repointable", workspace_id: ws.id})
+      {:ok, issue} = Ash.create(Issue, %{title: "clearable", workspace_id: ws.id})
 
       {:ok, cleared} = Ash.update(issue, %{repo: nil})
       assert cleared.repo == nil
+    end
 
-      {:ok, stale} = Ash.update(cleared, %{repo: "org/gone"})
-      assert stale.repo == "org/gone"
+    test "repointing to another configured key works" do
+      ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"}})
+      {:ok, issue} = Ash.create(Issue, %{title: "repoint", workspace_id: ws.id, repo: "tonic"})
+
+      {:ok, moved} = Ash.update(issue, %{repo: "tonic_device"})
+      assert moved.repo == "tonic_device"
+    end
+
+    test "refuses a repo that is not a configured key, listing the valid keys" do
+      ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"}})
+      {:ok, issue} = Ash.create(Issue, %{title: "stale", workspace_id: ws.id, repo: "tonic"})
+
+      assert {:error, error} = Ash.update(issue, %{repo: "emricare/nope"})
+
+      message = repo_error_message(error)
+      assert message =~ "emricare/nope"
+      assert message =~ "tonic_device"
+      assert Ash.get!(Issue, issue.id).repo == "tonic"
+    end
+
+    test "other updates on an issue holding a stale repo are not blocked" do
+      ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
+      {:ok, issue} = Ash.create(Issue, %{title: "legacy", workspace_id: ws.id})
+      stale = issue |> Ecto.Changeset.change(repo: "emricare/tonic") |> Arbiter.Repo.update!()
+
+      assert {:ok, renamed} = Ash.update(stale, %{title: "renamed"})
+      assert renamed.repo == "emricare/tonic"
     end
   end
 end

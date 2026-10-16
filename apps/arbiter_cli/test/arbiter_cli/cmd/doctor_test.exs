@@ -502,6 +502,26 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "1 repo(s)"
     end
 
+    test "an (unconfigured) repo on open tickets is a warning naming it" do
+      resp = %{
+        "data" => [
+          %{"name" => "tonic", "source" => "emricare"},
+          %{"name" => "emricare/tonic", "source" => "(unconfigured)"}
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[warn] repos resolved"
+      assert out =~ "emricare/tonic"
+    end
+
     test "zero repos with a workspace present is a failing, actionable line" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},

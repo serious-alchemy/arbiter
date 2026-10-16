@@ -14,10 +14,13 @@ defmodule Arbiter.Tasks.Issue.Changes.ResolveRepo do
   ExternalReview engagements — goes through `Ash.create(Issue, …)`, so this
   one hook covers all of them rather than each re-deriving the rule.
 
-  `:update` is deliberately NOT hooked. Clearing or repointing the repo on an
-  existing issue stays possible — it is how an operator fixes a stale
-  assignment — and dispatch already refuses loudly (`{:repo_not_found, _}`)
-  rather than silently picking another repo.
+  `:update` is hooked too, but only when the update *changes* `repo` to a
+  non-blank value: that value is canonicalized onto its configured key or
+  refused with the valid keys (bd-7u1b6n — a hand-set or tool-set
+  `emricare/tonic` used to persist, then dispatch and the reconciler's resume
+  disagreed about it). Clearing the repo stays possible, and an update that
+  leaves `repo` alone never re-validates it, so an issue already holding a
+  stale value can still be edited — and repaired.
   """
 
   use Ash.Resource.Change
@@ -27,7 +30,18 @@ defmodule Arbiter.Tasks.Issue.Changes.ResolveRepo do
 
   @impl true
   def change(changeset, _opts, _context) do
-    Changeset.before_action(changeset, &resolve/1)
+    Changeset.before_action(changeset, fn changeset ->
+      if changeset.action_type == :create or repo_set?(changeset),
+        do: resolve(changeset),
+        else: changeset
+    end)
+  end
+
+  # On :update, only a changed, non-blank repo is validated.
+  defp repo_set?(changeset) do
+    Changeset.changing_attribute?(changeset, :repo) and
+      is_binary(Changeset.get_attribute(changeset, :repo)) and
+      String.trim(Changeset.get_attribute(changeset, :repo)) != ""
   end
 
   defp resolve(changeset) do
