@@ -23,7 +23,12 @@ defmodule Arbiter.NodeAgent.K8s.E2ENamespaceParityTest do
   end
 
   test "quota and LimitRange are the install manifest's, byte for byte" do
-    {:ok, spec} = InstallManifest.parse(%{"name" => "e2e", "namespace" => "arb-e2e-x"})
+    {:ok, spec} =
+      InstallManifest.parse(%{
+        "name" => "e2e",
+        "namespace" => "arb-e2e-x",
+        "primary_cidrs" => "192.0.2.0/24"
+      })
 
     %{bootstrap: bootstrap} =
       InstallManifest.documents(spec,

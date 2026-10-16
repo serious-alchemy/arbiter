@@ -262,7 +262,12 @@ defmodule Arbiter.Test.K8sE2E do
   @doc false
   @spec base_objects(String.t(), String.t(), boolean()) :: [map()]
   def base_objects(ns, priority, policies?) do
-    {:ok, spec} = InstallManifest.parse(%{"name" => "e2e", "namespace" => ns})
+    {:ok, spec} =
+      InstallManifest.parse(%{
+        "name" => "e2e",
+        "namespace" => ns,
+        "primary_cidrs" => "192.0.2.0/24"
+      })
 
     %{bootstrap: bootstrap, node: node} =
       InstallManifest.documents(spec,
