@@ -64,6 +64,11 @@ kind: Service
 metadata: {name: arbiter-controller}
 spec: {selector: {app.kubernetes.io/component: controller}, ports: [{name: boot, port: 9444}, {name: bridge, port: 9443}, {name: other, port: 8080}]}
 YAML
+# the Service routes nowhere until its EndpointSlice has a ready address; probing earlier flakes the baseline
+for _ in $(seq 1 60); do
+  [ -n "$($K get endpointslices -l kubernetes.io/service-name=arbiter-controller -o jsonpath='{.items[*].endpoints[*].addresses[0]}' 2>/dev/null)" ] && break
+  sleep 1
+done
 CTRL_SVC=$($K get svc arbiter-controller -o jsonpath='{.spec.clusterIP}')
 CTRL_POD=$($K get pod controller -o jsonpath='{.status.podIP}'); W1=$($K get pod worker -o jsonpath='{.status.podIP}')
 W2=$($K get pod worker2 -o jsonpath='{.status.podIP}'); BYS=$($KO get pod bystander -o jsonpath='{.status.podIP}')
