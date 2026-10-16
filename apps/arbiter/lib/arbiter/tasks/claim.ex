@@ -19,7 +19,15 @@ defmodule Arbiter.Tasks.Claim do
       against open tasks, in both directions.
   """
 
-  alias Arbiter.Tasks.{Dependencies, Dependency, Issue, IssueSerializer, Workspace}
+  alias Arbiter.Tasks.{
+    Dependencies,
+    Dependency,
+    Issue,
+    IssueSerializer,
+    TrackerAcceptance,
+    Workspace
+  }
+
   alias Arbiter.Trackers
 
   require Ash.Query
@@ -624,6 +632,7 @@ defmodule Arbiter.Tasks.Claim do
         tracker_ref: ref,
         workspace_id: workspace.id
       }
+      |> put_acceptance(adapter, issue_map)
       |> maybe_put_extracted(:priority, adapter, :extract_priority, issue_map)
       |> maybe_put_extracted(:difficulty, adapter, :extract_difficulty, issue_map)
       |> maybe_put_extracted(:issue_type, adapter, :extract_issue_type, issue_map)
@@ -635,6 +644,13 @@ defmodule Arbiter.Tasks.Claim do
     case Ash.create(Issue, attrs) do
       {:ok, task} -> {:ok, :created, task}
       {:error, err} -> {:error, err}
+    end
+  end
+
+  defp put_acceptance(attrs, adapter, issue_map) do
+    case TrackerAcceptance.derive(adapter, issue_map) do
+      {:acceptance, text} -> Map.put(attrs, :acceptance, text)
+      {:waived, reason} -> Map.put(attrs, :acceptance_waived, reason)
     end
   end
 
