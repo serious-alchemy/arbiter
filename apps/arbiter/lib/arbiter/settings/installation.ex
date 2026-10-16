@@ -373,7 +373,7 @@ defmodule Arbiter.Settings.Installation do
       public? true
       allow_nil? true
 
-      description "machine.derate: the primary's self-derate thresholds (bd-6w7usy), a JSON object over thermal_soft_c, thermal_hard_c, thermal_delta_c, psi_some_avg10, psi_delta, mem_floor_gib, mem_delta_gib, recover_s and enabled; nil = every default."
+      description "machine.derate: the primary's self-derate thresholds (bd-6w7usy), a JSON object over thermal_soft_c, thermal_hard_c, thermal_delta_c, thermal_entry_samples, psi_some_avg10, psi_delta, mem_floor_gib, mem_delta_gib, recover_s and enabled; nil = every default."
     end
 
     create_timestamp :created_at
