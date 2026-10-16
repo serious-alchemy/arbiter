@@ -328,7 +328,16 @@ defmodule Arbiter.Test.K8sE2E do
     }
   end
 
-  defp listener_container do
+  # The stand-in's limits; its requests are derived from them so the LimitRange's
+  # `maxLimitRequestRatio` (the install manifest's, whatever it is today) admits it.
+  @listener_limit_cpu_m 100
+  @listener_limit_mem_mi 64
+
+  @doc false
+  @spec listener_container() :: map()
+  def listener_container do
+    ratios = limit_request_ratios()
+
     listeners =
       for port <- [9443, 9444, 9445],
           do: "socat TCP-LISTEN:#{port},fork,reuseaddr EXEC:/bin/true &"
@@ -345,10 +354,40 @@ defmodule Arbiter.Test.K8sE2E do
         "readOnlyRootFilesystem" => true
       },
       "resources" => %{
-        "requests" => %{"cpu" => "10m", "memory" => "16Mi"},
-        "limits" => %{"cpu" => "100m", "memory" => "64Mi"}
+        "requests" => %{
+          "cpu" => "#{ceil_div(@listener_limit_cpu_m, ratios["cpu"])}m",
+          "memory" => "#{ceil_div(@listener_limit_mem_mi, ratios["memory"])}Mi"
+        },
+        "limits" => %{
+          "cpu" => "#{@listener_limit_cpu_m}m",
+          "memory" => "#{@listener_limit_mem_mi}Mi"
+        }
       }
     }
+  end
+
+  defp ceil_div(limit, ratio), do: div(limit + ratio - 1, ratio)
+
+  # The Container `maxLimitRequestRatio` of the LimitRange the install manifest renders,
+  # as integers (`%{"cpu" => 4, "memory" => 2}`).
+  @doc false
+  @spec limit_request_ratios() :: %{String.t() => pos_integer()}
+  def limit_request_ratios do
+    {:ok, spec} = InstallManifest.parse(%{"name" => "e2e", "primary_cidrs" => "192.0.2.0/24"})
+
+    %{bootstrap: bootstrap} =
+      InstallManifest.documents(spec,
+        image: image(),
+        primary_url: "https://primary.invalid",
+        registry: @registry
+      )
+
+    %{"spec" => %{"limits" => limits}} = Enum.find(bootstrap, &(&1["kind"] == "LimitRange"))
+    container = Enum.find(limits, &(&1["type"] == "Container"))
+
+    Map.new(container["maxLimitRequestRatio"], fn {resource, ratio} ->
+      {resource, String.to_integer(ratio)}
+    end)
   end
 
   # -- the Helm chart (KH6) -----------------------------------------------------------------
