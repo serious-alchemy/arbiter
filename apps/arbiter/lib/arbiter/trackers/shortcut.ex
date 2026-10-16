@@ -87,15 +87,27 @@ defmodule Arbiter.Trackers.Shortcut do
   defp annotate_priority_field(cfg, %{"custom_fields" => [_ | _]} = story) do
     with {:ok, %Req.Response{status: status, body: fields}} when status in 200..299 <-
            request(cfg, :get, "/custom-fields", []),
-         true <- is_list(fields),
-         %{"id" => id} <- Enum.find(fields, &priority_field?/1) do
-      Map.put(story, "arbiter_priority_field_id", id)
+         true <- is_list(fields) do
+      story
+      |> Map.put("arbiter_custom_field_names", field_names(fields))
+      |> put_priority_field_id(fields)
     else
       _ -> story
     end
   end
 
   defp annotate_priority_field(_cfg, story), do: story
+
+  defp put_priority_field_id(story, fields) do
+    case Enum.find(fields, &priority_field?/1) do
+      %{"id" => id} -> Map.put(story, "arbiter_priority_field_id", id)
+      _ -> story
+    end
+  end
+
+  defp field_names(fields) do
+    for %{"id" => id, "name" => name} <- fields, is_binary(name), into: %{}, do: {id, name}
+  end
 
   defp priority_field?(%{"name" => name}) when is_binary(name),
     do: name |> String.trim() |> String.downcase() == "priority"
@@ -575,6 +587,29 @@ defmodule Arbiter.Trackers.Shortcut do
       _ -> nil
     end
   end
+
+  # The value of the story's custom field named `name` (case-insensitive), e.g.
+  # "Technical Area". Field names are resolved in `fetch/1`.
+  @impl true
+  def extract_field(%{"arbiter_custom_field_names" => names, "custom_fields" => fields}, name)
+      when is_list(fields) and is_binary(name) do
+    wanted = name |> String.trim() |> String.downcase()
+
+    Enum.find_value(fields, fn
+      %{"field_id" => id, "value" => value} when is_binary(value) ->
+        field = Map.get(names, id)
+        if is_binary(field) and String.downcase(String.trim(field)) == wanted, do: value
+
+      _ ->
+        nil
+    end)
+  end
+
+  def extract_field(_, _), do: nil
+
+  @impl true
+  def extract_estimate(%{"estimate" => pts}) when is_number(pts), do: pts
+  def extract_estimate(_), do: nil
 
   # Shortcut's `story_type` is bug | feature | chore, which are Arbiter issue types.
   @impl true

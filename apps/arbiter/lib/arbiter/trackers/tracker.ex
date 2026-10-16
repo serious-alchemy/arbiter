@@ -242,6 +242,19 @@ defmodule Arbiter.Trackers.Tracker do
   @callback extract_difficulty(map()) :: {:ok, 0..5} | nil
 
   @doc """
+  The string value of the tracker field named `name` (e.g. Shortcut's
+  "Technical Area" custom field) on the raw issue, or `nil`. Feeds
+  `tracker.claim.repo_from`.
+  """
+  @callback extract_field(map(), String.t()) :: String.t() | nil
+
+  @doc """
+  The raw issue's estimate points, or `nil`. Feeds
+  `tracker.claim.difficulty_from_estimate`.
+  """
+  @callback extract_estimate(map()) :: number() | nil
+
+  @doc """
   Derives the Arbiter `issue_type` (`:task | :research | :bug | :feature | :epic |
   :chore | :decision`) from a raw issue map returned by `fetch/1`, typically via the
   tracker's own labels/type field.
@@ -417,5 +430,7 @@ defmodule Arbiter.Trackers.Tracker do
                       epic_for: 1,
                       extract_priority: 1,
                       extract_difficulty: 1,
+                      extract_field: 2,
+                      extract_estimate: 1,
                       extract_issue_type: 1
 end

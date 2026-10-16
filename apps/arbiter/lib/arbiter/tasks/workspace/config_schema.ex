@@ -120,6 +120,16 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       type    one of: #{Enum.join(@tracker_types, ", ")}     (default: none)
       config  map, adapter-specific (host/project_key/owner/repo/…);
               credentials_ref: "env:VAR" | "secret:<key>" (see `arb workspace secret`)
+      claim   map, tracker metadata used when a claim creates a task:
+        repo_from                 {"field": "<tracker field name>", "map": {"<value>": "<repo_paths key>"}}
+                                  e.g. {"field":"Technical Area","map":{"Web app":"web","Server":"api"}}.
+                                  In a multi-repo workspace a claim with no explicit repo
+                                  picks it from the field (Shortcut custom field); an
+                                  unmapped value falls back to default_repo, with a note.
+        difficulty_from_estimate  map, estimate points (string) -> difficulty 0..5,
+                                  e.g. {"1":1,"3":2,"5":3}. Seeds difficulty when none is
+                                  given; unmapped/missing stays unset. Advisory: the
+                                  coordinator still rates.
 
     merge  (map)
       strategy             one of: #{Enum.join(@merger_strategies, ", ")}   (default: direct)
