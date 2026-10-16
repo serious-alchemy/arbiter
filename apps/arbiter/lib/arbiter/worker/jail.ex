@@ -721,7 +721,11 @@ defmodule Arbiter.Worker.Jail do
   spec declares (`ContainerSpawn.remote_spec/3`), and so the names of the leaves a pod is
   given.
   """
-  @spec bridge_names(network()) :: [String.t()]
+  @spec bridge_names(%{
+          required(:bridges) => [{:inet.port_number(), String.t()}],
+          optional(atom()) => term()
+        }) ::
+          [String.t()]
   def bridge_names(%{bridges: bridges}),
     do: ["proxy" | Enum.map(bridges, &to_string(elem(&1, 0)))]
 
