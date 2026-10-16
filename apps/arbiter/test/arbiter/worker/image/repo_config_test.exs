@@ -10,7 +10,14 @@ defmodule Arbiter.Worker.Image.RepoConfigTest do
 
   defp ws(worker), do: %{config: %{"worker" => worker}}
 
-  @defaults %{source: :auto, ref: nil, registry: nil, credentials_ref: nil, seed: :primary}
+  @defaults %{
+    source: :auto,
+    ref: nil,
+    registry: nil,
+    credentials_ref: nil,
+    public_ok: false,
+    seed: :primary
+  }
 
   describe "resolve/2" do
     test "nothing configured is today's behaviour: source auto, seed primary" do
@@ -40,6 +47,7 @@ defmodule Arbiter.Worker.Image.RepoConfigTest do
                ref: "registry.gitlab.com/vstim/app/w:main",
                registry: "registry.gitlab.com/vstim/app",
                credentials_ref: "secret:GITLAB",
+               public_ok: false,
                seed: :image
              }
 

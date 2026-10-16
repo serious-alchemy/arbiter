@@ -183,14 +183,16 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
 
     test "the list reports the image registry: unset by default, never the password (K8)" do
       body = json_response(get(operator_conn(), "/api/nodes"), 200)
-      assert body["registry"] == %{"configured" => false}
+      assert body["registry"] == %{"configured" => false, "registries" => []}
 
       previous = Application.get_env(:arbiter, :image_publisher, [])
 
       Application.put_env(
         :arbiter,
         :image_publisher,
-        Keyword.put(previous, :probe, fn _ -> :ok end)
+        previous
+        |> Keyword.put(:probe, fn _ -> :ok end)
+        |> Keyword.put(:anonymous_probe, fn _cfg, _repository -> :private end)
       )
 
       on_exit(fn -> Application.put_env(:arbiter, :image_publisher, previous) end)
@@ -207,7 +209,15 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
                "registry" => "registry.example.com/arb",
                "username" => "bot",
                "password_set" => true,
-               "reachable" => true
+               "reachable" => true,
+               "registries" => [
+                 %{
+                   "registry" => "registry.example.com/arb",
+                   "origin" => "install",
+                   "anonymous" => %{"controller" => "private"},
+                   "public" => []
+                 }
+               ]
              } = Jason.decode!(raw)["registry"]
     end
 

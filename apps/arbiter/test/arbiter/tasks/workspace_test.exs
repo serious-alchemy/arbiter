@@ -846,6 +846,17 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       end
     end
 
+    test "public_ok is a boolean" do
+      assert {:ok, _} = image_ws(%{"public_ok" => true})
+
+      for bad <- ["yes", 1, nil] do
+        assert {:error, %Ash.Error.Invalid{} = err} = image_ws(%{"public_ok" => bad})
+
+        assert Exception.message(err) =~
+                 "worker.repos.vstim.image.public_ok must be true or false"
+      end
+    end
+
     test "ref is per repo, required for prebuilt and refused for any other source" do
       assert {:error, %Ash.Error.Invalid{} = err} = image_ws(%{"source" => "prebuilt"})
       assert Exception.message(err) =~ "worker.repos.vstim.image.ref is required"

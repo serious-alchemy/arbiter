@@ -421,13 +421,21 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                         registry         host[:port][/path] Arbiter pushes this repo's
                                          images to
                         credentials_ref  "secret:<key>" — workspace secret holding the
-                                         push credential
+                                         push credential, as "user:password" (the
+                                         token is the password); none = anonymous
+                                         push. Belongs to the registry it is set
+                                         beside: a repo with its own registry does
+                                         not inherit the workspace's.
+                        public_ok        true to push to a registry that answers
+                                         anonymous reads (default false: the
+                                         publisher refuses it, images carry the
+                                         real provider CLI)
                         seed             "primary" (default), "image" or "none"
                       Images always go to <registry>/<repo>/worker, one repository per
                       repo; there is no shared <registry>/worker.
-                      Only source is acted on today; registry, credentials_ref and seed
-                      are validated and stored, and read once registry resolution
-                      and prebuilt images land (KH12, KH14).
+                      Registry resolves repo -> workspace -> the install-wide
+                      nodes.registry setting (KH12). seed and ref are validated and
+                      stored, and read once prebuilt images land (KH14).
       repos           map, repo name -> {seed_paths, image, prepush_check,
                       prepush_check_timeout_seconds, prepush_check_on_timeout,
                       pre_push_checks, pre_push_budget_seconds,
