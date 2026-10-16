@@ -67,7 +67,7 @@ defmodule Arbiter.NodeAgent.K8s.AdmissionPolicy do
       when is_binary(registry) do
     images =
       Enum.map_join(
-        ["#{registry}/", "docker.io/library/" | extra_image_prefixes],
+        Enum.uniq(["#{registry}/", "docker.io/library/" | extra_image_prefixes]),
         " || ",
         &"c.image.startsWith('#{&1}')"
       )
