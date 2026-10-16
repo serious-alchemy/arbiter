@@ -135,6 +135,17 @@ not `netpol_unenforced`.
 * *rejects the builder's own pod*: a builder/controller version mismatch or a stricter
   profile. The message names the field. Workers cannot start.
 
+Any `psa` check that is not ok makes the node `degraded: psa_unenforced` (KH4): no work is
+placed on it until the namespace is labelled, or the operator sets the same audited
+`allow_unenforced_network` override used for `netpol_unenforced`
+(`arb node update <node> --allow-unenforced-network`).
+
+### `RuntimeClass`
+
+With no `placement.runtime_class` the row is ok and `arb server doctor` prints a
+`shared kernel` line: worker pods share the node's kernel with every other pod. A configured
+class the cluster lacks is a `fail` (`RuntimeClass … not found`).
+
 ### `PriorityClass`, `ResourceQuota`, `Image pull`, `Clock`
 
 * PriorityClass: create the one in the install manifest (`value: -100`,

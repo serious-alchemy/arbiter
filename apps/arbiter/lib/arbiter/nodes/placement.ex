@@ -80,7 +80,9 @@ defmodule Arbiter.Nodes.Placement do
   takes the constrained node as a last resort. A node reporting `degraded:
   netpol_unenforced` (A7: the cluster does not enforce NetworkPolicy, so the pod's
   deny-all is not real) is **not a candidate** unless the operator set that node's
-  `allow_unenforced_network` override (`Arbiter.Nodes.update_node/3`, audited). The cap is
+  `allow_unenforced_network` override (`Arbiter.Nodes.update_node/3`, audited). Likewise
+  `psa_unenforced` (KH4: Pod Security `restricted` is not enforced on the namespace), under the
+  same override. The cap is
   `Hello.effective_max_workers/2`:
   the operator's override or the node's own suggestion, bounded by a ceiling the
   node's owner set.
@@ -421,12 +423,15 @@ defmodule Arbiter.Nodes.Placement do
   end
 
   @doc """
-  A7: false for a row reporting `degraded: netpol_unenforced` whose operator has not set
-  `allow_unenforced_network`. Every other row (machine nodes, healthy clusters) is true.
+  A7/KH4: false for a row reporting `degraded: netpol_unenforced` or `psa_unenforced` whose
+  operator has not set `allow_unenforced_network`. Every other row (machine nodes, healthy clusters) is true.
   """
   @spec network_enforced?(map()) :: boolean()
   def network_enforced?(row) do
-    "netpol_unenforced" not in List.wrap(Map.get(row, :degraded)) or
+    Enum.all?(
+      ~w(netpol_unenforced psa_unenforced),
+      &(&1 not in List.wrap(Map.get(row, :degraded)))
+    ) or
       Map.get(row, :allow_unenforced_network) == true
   end
 

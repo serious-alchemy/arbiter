@@ -52,7 +52,7 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessTest do
     checks = run(client)
 
     assert Map.keys(checks) |> Enum.sort() ==
-             ~w(clock priority_class psa quota registry_pull)
+             ~w(clock priority_class psa quota registry_pull runtime_class)
 
     for {id, check} <- checks, do: assert(check["status"] == "ok", "#{id}: #{inspect(check)}")
     assert Enum.all?(Map.values(checks), &(is_binary(&1["name"]) and is_binary(&1["detail"])))
@@ -97,6 +97,27 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessTest do
       checks = run(client)
       assert checks["psa"]["status"] == "warn"
       assert checks["psa"]["detail"] =~ "ValidatingAdmissionPolicy"
+    end
+  end
+
+  describe "runtime_class" do
+    test "none configured is ok and names the shared kernel", %{client: client} do
+      check = run(client)["runtime_class"]
+      assert check["status"] == "ok"
+      assert check["runtime_class"] == nil
+      assert check["detail"] =~ "kernel"
+    end
+
+    test "a RuntimeClass the cluster does not have is a failure", %{client: client, api: api} do
+      FakeK8sApi.fail_next(
+        api,
+        :create,
+        {403, ~s(pods "x" is forbidden: pod rejected: RuntimeClass "gvisor" not found)}
+      )
+
+      check = run(client)["runtime_class"]
+      assert check["status"] == "fail"
+      assert check["detail"] =~ "gvisor"
     end
   end
 

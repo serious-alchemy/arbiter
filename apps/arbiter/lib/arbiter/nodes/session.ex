@@ -1283,11 +1283,18 @@ defmodule Arbiter.Nodes.Session do
         "detail" => readiness_text(check["detail"]),
         "hint" => readiness_text(check["hint"])
       }
+      |> put_runtime_class(check)
     end
     |> Enum.take(@max_readiness_checks)
   end
 
   defp readiness(_kind, _block), do: []
+
+  # KH4: the runtime_class row names the class (nil: none, a shared kernel) for the doctor.
+  defp put_runtime_class(out, %{"id" => "runtime_class"} = check),
+    do: Map.put(out, "runtime_class", readiness_text(check["runtime_class"]))
+
+  defp put_runtime_class(out, _check), do: out
 
   defp readiness_text(value) when is_binary(value),
     do: String.slice(value, 0, @max_readiness_text)
