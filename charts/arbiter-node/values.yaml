@@ -93,7 +93,9 @@ placement:
     value: -100
 
 # Renders the cluster-scoped RuntimeClass object only (the runtime itself, e.g. runsc,
-# must already be on the nodes). Its name is placement.runtimeClassName.
+# must already be on the nodes). Its name is placement.runtimeClassName. `handler` is also
+# rendered into the controller config as placement.runtime_handler (create or not), which is
+# how the controller recognises a runsc* class as a kernel sandbox: set it for gvisor.
 runtimeClass:
   create: false
   handler: ""

@@ -11,7 +11,7 @@ the rest. There is deliberately no checksum annotation on the Deployment: a conf
 {{- if $w.tmpSizeLimit }}{{ $_ := set $worker "tmp_size_limit" (toString $w.tmpSizeLimit) }}{{ end }}
 {{- $p := .Values.placement }}
 {{- $spread := dict "enabled" $p.spread.enabled "topology_keys" $p.spread.topologyKeys "max_skew" (int $p.spread.maxSkew) "when_unsatisfiable" $p.spread.whenUnsatisfiable }}
-{{- $placement := dict "priority_class" $p.priorityClass.name "runtime_class" $p.runtimeClassName "spread" $spread }}
+{{- $placement := dict "priority_class" $p.priorityClass.name "runtime_class" $p.runtimeClassName "runtime_handler" (.Values.runtimeClass.handler | default "") "spread" $spread }}
 {{- if $p.nodeSelector }}{{ $_ := set $placement "node_selector" $p.nodeSelector }}{{ end }}
 {{- if $p.tolerations }}{{ $_ := set $placement "tolerations" $p.tolerations }}{{ end }}
 {{- $config := dict "max_concurrent" (int .Values.concurrency.max) "namespace" .Release.Namespace "worker" $worker "placement" $placement }}
