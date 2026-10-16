@@ -106,6 +106,7 @@ defmodule ArbiterWeb.RemoteClusterTest do
   # controller fills, its Service, Deployment and Lease, and a ResourceQuota.
   defp cluster! do
     cluster = FakeK8sApi.start!(namespace: "arbiter-workers")
+    FakeK8sApi.enforce_psa(cluster.api)
     api = cluster.api
     FakeK8sApi.set_clock(api, DateTime.utc_now())
 
