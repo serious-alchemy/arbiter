@@ -17,6 +17,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifestTest do
       assert ControllerManifest.parse_reach(nil) == {:ok, :direct}
       assert ControllerManifest.parse_reach("direct") == {:ok, :direct}
       assert ControllerManifest.parse_reach("tailscale") == {:ok, :tailscale}
+      assert ControllerManifest.parse_reach("proxy") == {:ok, :proxy}
       assert ControllerManifest.parse_reach("wireguard") == {:error, {:bad_reach, "wireguard"}}
     end
   end
@@ -26,6 +27,24 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifestTest do
       {:ok, d} = ControllerManifest.deployment(@opts)
       assert [%{"name" => "controller"}] = containers(d)
       refute Enum.any?(container(d, "controller")["env"], &(&1["name"] == "ARB_NODE_PROXY"))
+    end
+  end
+
+  describe "deployment/1 reach: :proxy (KH3)" do
+    test "points the controller at the operator's proxy and adds no sidecar" do
+      {:ok, d} =
+        ControllerManifest.deployment(
+          [reach: :proxy, proxy_url: "http://proxy.corp.example:3128"] ++ @opts
+        )
+
+      assert [%{"name" => "controller"}] = containers(d)
+      env = Map.new(container(d, "controller")["env"], &{&1["name"], &1["value"]})
+      assert env["ARB_NODE_PROXY"] == "http://proxy.corp.example:3128"
+    end
+
+    test "needs the proxy URL" do
+      assert {:error, {:missing, :proxy_url}} =
+               ControllerManifest.deployment([reach: :proxy] ++ @opts)
     end
   end
 
@@ -49,6 +68,11 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifestTest do
       assert ts
       env = Map.new(container(d, "controller")["env"], &{&1["name"], &1["value"]})
       assert env["ARB_NODE_PROXY"] == "http://127.0.0.1:1055"
+    end
+
+    test "the sidecar image is pinned to a version and a digest, not :stable", %{ts: ts} do
+      assert ts["image"] =~ ~r|:v\d+\.\d+\.\d+@sha256:[0-9a-f]{64}\z|
+      refute ts["image"] =~ "stable"
     end
 
     test "runs in userspace networking with an ephemeral tagged key from the Secret", %{ts: ts} do

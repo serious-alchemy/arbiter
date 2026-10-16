@@ -31,8 +31,8 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
 
   ## The probes
 
-  The script tries six TCP connects with a 1-s timeout each (denied traffic is
-  answered with an immediate reject, not a timeout): five **must fail**, one **must
+  The script tries seven TCP connects with a 1-s timeout each (denied traffic is
+  answered with an immediate reject, not a timeout): six **must fail**, one **must
   connect**.
 
   | probe | target | expected |
@@ -41,20 +41,24 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
   | `controller_port` | the controller pod on a port that is not a bridge port | closed |
   | `foreign` | a Service/pod in another namespace (the cluster DNS Service) | closed |
   | `internet` | `1.1.1.1:443` | closed |
+  | `metadata` | `169.254.169.254:80`, the cloud instance-metadata address (KH3) | closed |
   | `node` | the node's own address (the kubelet port) | closed |
   | `bridge` | the controller Service on `9443` | open |
 
   `controller_port` needs something to listen there, or "closed" would prove
   nothing: `Arbiter.NodeAgent.K8s.ReadinessMonitor` opens a listener on it.
+  `metadata` is the credential-theft target of every cloud: a default-deny blocks it,
+  and only this probe proves a worker cannot reach it (link-local, so it is outside the
+  cluster CIDRs and any egress rule that names them).
   `foreign` and `node` depend on what the controller could learn about its cluster
   (`targets_from_env/1`); a target it could not name is `skipped`, listed in the
   result, and never guessed. `api` and `internet` are always known, so a log that
-  lacks them proves nothing.
+  lacks them proves nothing (`metadata` included).
 
   ## The verdict (fail closed)
 
-  `verdict/1` over the parsed log: any probe that **connected** among the five is
-  `{:unenforced, [names]}`; all five closed with the done marker is `{:enforced,
+  `verdict/1` over the parsed log: any probe that **connected** among the six is
+  `{:unenforced, [names]}`; all six closed with the done marker is `{:enforced,
   info}`; everything else (a truncated log, missing mandatory probes) is
   `{:inconclusive, reason}`, never "enforced". A closed `bridge` probe does not
   change the policy verdict but is reported (`bridge: :closed`): the policies are
@@ -79,8 +83,8 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
 
   @bridge_port 9443
   @gate_exit 70
-  @mandatory ~w(api internet)
-  @forbidden ~w(api controller_port foreign internet node)
+  @mandatory ~w(api internet metadata)
+  @forbidden ~w(api controller_port foreign internet metadata node)
   @pull_failures ~w(ErrImagePull ImagePullBackOff InvalidImageName ErrImageNeverPull)
   @default_timeout_ms 120_000
   @default_poll_ms 1_000
@@ -102,6 +106,7 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
   probe controller_port "${ARB_CANARY_CONTROLLER_PORT_ADDR:-}"
   probe foreign "${ARB_CANARY_FOREIGN_ADDR:-}"
   probe internet 1.1.1.1:443
+  probe metadata 169.254.169.254:80
   probe node "${ARB_CANARY_NODE_ADDR:-}"
   probe bridge "${ARB_CANARY_BRIDGE_ADDR:-}"
   echo "canary done"
@@ -277,7 +282,7 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
   @doc """
   The verdict over `parse/1`: `{:unenforced, open}` as soon as any forbidden probe
   connected (also from a truncated log), `{:enforced, %{bridge:, skipped:}}` when all
-  five stayed closed and the log is complete, else `{:inconclusive, reason}`.
+  six stayed closed and the log is complete, else `{:inconclusive, reason}`.
   """
   @spec verdict(%{probes: map(), done?: boolean()}) ::
           {:enforced, %{bridge: :open | :closed | nil, skipped: [String.t()]}}

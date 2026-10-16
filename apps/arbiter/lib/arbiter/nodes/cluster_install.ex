@@ -23,7 +23,7 @@ defmodule Arbiter.Nodes.ClusterInstall do
   alias Arbiter.Settings
   alias Arbiter.Worker.Image.Publisher
 
-  @form_keys ~w(name namespace max cpu memory node_selector pull_secret reach admission self_upgrade api_cidrs cluster_cidrs)
+  @form_keys ~w(name namespace max cpu memory node_selector pull_secret reach admission self_upgrade api_cidrs cluster_cidrs primary_cidrs proxy_url proxy_cidrs)
 
   @type plan :: %{
           manifest_url: String.t(),

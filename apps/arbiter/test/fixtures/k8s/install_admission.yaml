@@ -145,16 +145,11 @@ spec:
     - ports:
         - port: 443
           protocol: TCP
-        - port: 41641
-          protocol: UDP
-        - port: 3478
-          protocol: UDP
       to:
         - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.42.0.0/16
-              - 10.43.0.0/16
+            cidr: 100.64.0.10/32
+        - ipBlock:
+            cidr: 100.64.0.11/32
   podSelector:
     matchLabels:
       app.kubernetes.io/component: controller

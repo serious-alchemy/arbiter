@@ -196,8 +196,18 @@ click **Add node → Kubernetes cluster** on the Nodes page, or:
 
 ```sh
 arb node add --kind cluster --name mesaana-k3s --namespace arbiter-workers --max-workers 2 \
-  [--reach tailscale] [--admission policy] [--self-upgrade on|off] -o manifests.yaml
+  --primary-cidrs 100.64.0.10/32 \
+  [--reach tailscale|proxy] [--admission policy] [--self-upgrade on|off] -o manifests.yaml
 ```
+
+The controller's NetworkPolicy lets it out to the API server, cluster DNS and **one more
+destination, which you name** (no `0.0.0.0/0`; workers get none, their traffic goes through the
+primary's `Egress` policy): `--primary-cidrs` (the primary's address, `reach=direct`, the default;
+required), or `--proxy-url http://proxy:3128 --proxy-cidrs 10.9.0.5/32` with `--reach proxy` (the
+controller dials the proxy and nothing else). `--reach tailscale` keeps a wide 443/UDP rule for the
+tailnet control plane, since those are hostnames; use `proxy` where that is not acceptable. The
+readiness canary also probes the cloud metadata address `169.254.169.254` from a worker-labelled
+pod and degrades the node (`netpol_unenforced`) if it connects.
 
 Both print the same three steps: apply the manifests with a cluster-admin kubeconfig
 (`kubectl apply -f manifests.yaml`; they contain no token, credential or key, so keep or
