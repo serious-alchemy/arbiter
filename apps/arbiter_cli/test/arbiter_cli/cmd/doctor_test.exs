@@ -2684,6 +2684,58 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert detail =~ "allow_unenforced_network"
     end
 
+    test "a psa_unenforced node is called out (KH4)" do
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [cluster_row(%{"degraded" => ["psa_unenforced"]})],
+          "public_url" => @url
+        })
+      )
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(nodes_results(), "cluster k3s: placement")
+
+      assert detail =~ "psa_unenforced"
+      assert hint =~ "pod-security.kubernetes.io/enforce"
+    end
+
+    test "a runtime-class row and a shared-kernel line when no RuntimeClass is set (KH4)" do
+      check = %{
+        "id" => "runtime_class",
+        "name" => "RuntimeClass",
+        "status" => "ok",
+        "detail" => "none configured: worker pods run on the node's own kernel",
+        "hint" => nil,
+        "runtime_class" => nil
+      }
+
+      stub_nodes(
+        nodes_resp(%{"nodes" => [cluster_row(%{"readiness" => [check]})], "public_url" => @url})
+      )
+
+      results = nodes_results()
+      assert %{status: :ok} = named(results, "cluster k3s: RuntimeClass")
+      assert %{status: :warn, detail: detail} = named(results, "cluster k3s: shared kernel")
+      assert detail =~ "share"
+    end
+
+    test "no shared-kernel line when a RuntimeClass is configured (KH4)" do
+      check = %{
+        "id" => "runtime_class",
+        "name" => "RuntimeClass",
+        "status" => "ok",
+        "detail" => "gvisor accepted by the dry run",
+        "hint" => nil,
+        "runtime_class" => "gvisor"
+      }
+
+      stub_nodes(
+        nodes_resp(%{"nodes" => [cluster_row(%{"readiness" => [check]})], "public_url" => @url})
+      )
+
+      refute Enum.any?(nodes_results(), &(&1.name == "cluster k3s: shared kernel"))
+    end
+
     test "a cluster node that has reported no readiness yet says so" do
       stub_nodes(
         nodes_resp(%{"nodes" => [cluster_row(%{"readiness" => []})], "public_url" => @url})

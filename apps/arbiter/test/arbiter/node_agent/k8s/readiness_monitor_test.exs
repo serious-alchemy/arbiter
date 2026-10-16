@@ -18,6 +18,7 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitorTest do
   setup do
     cluster = FakeK8sApi.start!(namespace: "arbiter-workers")
     FakeK8sApi.set_clock(cluster.api, DateTime.utc_now())
+    FakeK8sApi.enforce_psa(cluster.api)
     FakeK8sApi.put_quota(cluster.api, quota())
     clock = start_supervised!({Agent, fn -> 0 end})
     Map.put(cluster, :clock, clock)
@@ -81,7 +82,7 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitorTest do
     assert check(report, "netpol")["status"] == "ok"
 
     assert Enum.map(report.checks, & &1["id"]) |> Enum.sort() ==
-             ~w(clock netpol priority_class psa quota registry_pull)
+             ~w(clock netpol priority_class psa quota registry_pull runtime_class)
 
     assert ReadinessMonitor.report(server).degraded == []
   end
@@ -94,6 +95,17 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessMonitorTest do
     assert report.degraded == ["netpol_unenforced"]
     assert %{"status" => "fail", "detail" => detail} = check(report, "netpol")
     assert detail =~ "internet"
+  end
+
+  test "a namespace without Pod Security enforcement is degraded psa_unenforced (KH4)", ctx do
+    FakeK8sApi.enforce_psa(ctx.api, false)
+    script(ctx.api, @all_closed)
+    server = start!(ctx)
+
+    assert_receive {:k8s_readiness, ^server, report}, 5_000
+    assert report.degraded == ["psa_unenforced"]
+    assert check(report, "psa")["status"] == "warn"
+    assert ReadinessMonitor.report(server).degraded == ["psa_unenforced"]
   end
 
   test "an unenforced verdict replaces an earlier enforced one at once", ctx do

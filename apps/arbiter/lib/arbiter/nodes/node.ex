@@ -150,7 +150,7 @@ defmodule Arbiter.Nodes.Node do
       default false
 
       description "A7: the operator's per-node override that lets Placement use a cluster " <>
-                    "node reporting `degraded: netpol_unenforced` (its NetworkPolicy is not " <>
+                    "node reporting `degraded: netpol_unenforced` or `psa_unenforced` (its NetworkPolicy is not " <>
                     "enforced, so the pod's deny-all is not real). Audited."
     end
 

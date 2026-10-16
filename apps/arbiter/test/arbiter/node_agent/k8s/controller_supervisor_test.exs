@@ -27,6 +27,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerSupervisorTest do
 
   setup %{tmp_dir: dir} do
     env = FakeK8sApi.start!(namespace: "arbiter-workers")
+    FakeK8sApi.enforce_psa(env.api)
     FakeK8sApi.set_clock(env.api, DateTime.utc_now())
 
     hard = %{"pods" => "6", "requests.cpu" => "6", "requests.memory" => "12Gi"}
