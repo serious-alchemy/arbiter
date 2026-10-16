@@ -40,7 +40,8 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   must not: `network: pasta` (the pasta network is only the primary's own
   deps-seed job), a `seLinuxOptions`/`spc_t` anywhere in the structure, an unknown
   mount kind or field, a mount over a path the pod owns, an image that is not a
-  digest-pinned reference under the configured registry, a name or label value
+  digest-pinned reference under a configured registry prefix (KH13: the one
+  pull secret of the longest matching prefix is the pod's only `imagePullSecrets`), a name or label value
   Kubernetes would reject, and a reserved environment variable.
   `{:error, {:bad_config, reason}}` for a config outside the closed schema
   (`Arbiter.NodeAgent.K8s.PodConfig`).
@@ -282,10 +283,15 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
 
   defp extra_labels(_), do: bad_spec({:bad_value, :labels})
 
+  # KH13: a digest-pinned reference under **any** configured prefix (`registries`, and
+  # `registry` as the derived default). One under none is `registry_not_configured`,
+  # which the controller refuses as `image_unavailable`: the node cannot pull it.
   defp image(%{ref: ref}, cfg) when is_binary(ref) do
-    if Regex.match?(@digest_ref_re, ref) and String.starts_with?(ref, cfg.registry <> "/"),
-      do: {:ok, ref},
-      else: bad_spec({:bad_image, ref})
+    cond do
+      not Regex.match?(@digest_ref_re, ref) -> bad_spec({:bad_image, ref})
+      PodConfig.pull_secrets(cfg, ref) == :none -> bad_spec({:registry_not_configured, ref})
+      true -> {:ok, ref}
+    end
   end
 
   defp image(%{}, _cfg), do: bad_spec({:missing, "image.ref"})
@@ -540,7 +546,8 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   end
 
   defp service_images(services, cfg) do
-    prefixes = ["docker.io/library/", cfg.registry <> "/" | cfg.service_image_allowlist]
+    prefixes =
+      ["docker.io/library/" | PodConfig.image_prefixes(cfg)] ++ cfg.service_image_allowlist
 
     case Enum.find(services, fn s ->
            not Enum.any?(prefixes, &String.starts_with?(s.image, &1))
@@ -594,7 +601,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
         }
         |> put_unless_empty(
           "imagePullSecrets",
-          Enum.map(cfg.image_pull_secrets, &%{"name" => &1})
+          Enum.map(PodConfig.pull_secrets(cfg, run.image), &%{"name" => &1})
         )
         |> put_unless_empty("nodeSelector", cfg.placement["node_selector"])
         |> put_unless_empty("tolerations", cfg.placement["tolerations"])

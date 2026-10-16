@@ -34,6 +34,34 @@ defmodule Arbiter.Nodes.ClusterInstallTest do
     assert plan.namespace == "ci-workers"
   end
 
+  test "plan/2 gives one pull-secret command per registry that names a secret (KH13)" do
+    params =
+      Map.put(
+        @params,
+        "registries",
+        "registry.gitlab.com/vstim/=gitlab-vstim,ghcr.io/ryan/=ghcr-arbiter,docker.io/acme/"
+      )
+
+    assert {:ok, plan} = ClusterInstall.plan(params, version: "0.2.43")
+
+    assert [gitlab, ghcr] = plan.pull_secret_commands
+    assert gitlab.registry == "registry.gitlab.com/vstim/"
+    assert gitlab.secret == "gitlab-vstim"
+
+    assert gitlab.command ==
+             "read -r U && read -rs P && printf " <>
+               ~S<'{"auths":{"registry.gitlab.com":{"username":"%s","password":"%s"}}}' "$U" "$P" | > <>
+               "kubectl -n ci-workers create secret generic gitlab-vstim " <>
+               "--type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson=/dev/stdin"
+
+    assert ghcr.command =~ ~S|"ghcr.io":{|
+    # the password is read from the terminal, never an argument
+    refute gitlab.command =~ "--docker-password"
+    assert plan.manifest_url =~ "registries=registry.gitlab.com"
+
+    assert {:ok, %{pull_secret_commands: []}} = ClusterInstall.plan(@params, version: "0.2.43")
+  end
+
   test "no token ever reaches a URL or command: only the known form keys are carried" do
     assert {:ok, plan} =
              ClusterInstall.plan(

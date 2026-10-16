@@ -135,8 +135,12 @@ reach:
 admissionPolicy:
   enabled: false
 
-# Worker image registries. `prefix` is allowed by the admission policy; `pullSecret` (an
-# existing docker-registry Secret) is referenced by every worker pod.
+# Worker image registries (KH13). `prefix` is allowed by the admission policy and by the pod
+# builder; `pullSecret` (an existing docker-registry Secret, made by the operator) is the one
+# a pod references when its image is under that prefix (the longest matching prefix wins; a
+# pod never references another registry's secret). Omit `pullSecret` for an anonymous pull.
+# The node reports the prefixes to the primary (`caps.registries`), which only places a
+# repo's runs on a node that covers the repo's registry.
 registries: []
 # - prefix: registry.example.test/arbiter
 #   pullSecret: arbiter-registry

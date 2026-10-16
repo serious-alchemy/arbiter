@@ -157,7 +157,8 @@ defmodule Arbiter.NodeAgent.Backend.K8sTest do
                "upgrade" => "image",
                "self_upgrade" => true,
                "namespace" => "arbiter-workers",
-               "install" => %{"method" => "manifest"}
+               "install" => %{"method" => "manifest"},
+               "registries" => ["#{Fx.registry()}/"]
              }
 
       assert %{"ceiling" => 2, "pending" => 1, "running" => 0} = hello["capacity"]

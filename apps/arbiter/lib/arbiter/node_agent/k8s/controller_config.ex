@@ -7,7 +7,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfig do
 
   The keys are the operator's knobs only: `max_concurrent` (the node ceiling), and
   the `Arbiter.NodeAgent.K8s.PodConfig` keys `namespace`, `worker`,
-  `services_resources`, `placement`, `image_pull_secrets`, `timeouts` and
+  `services_resources`, `placement`, `image_pull_secrets`, `registries` (KH13: the
+  `{prefix, pull_secret}` list, §20.10), `timeouts` and
   `snapshot_interval_s`. Anything else, including the facts the controller knows
   itself (`registry`, `install_id`, `owner_uid`, …) and everything the builder owns
   (security context, volumes, image), is `{:error, {:bad_config, {:unknown_key,
@@ -42,6 +43,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfig do
     "services_resources" => :services_resources,
     "placement" => :placement,
     "image_pull_secrets" => :image_pull_secrets,
+    "registries" => :registries,
     "timeouts" => :timeouts,
     "snapshot_interval_s" => :snapshot_interval_s
   }

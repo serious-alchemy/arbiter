@@ -9,7 +9,7 @@ defmodule Arbiter.NodeAgent.Backend.K8s do
   What the protocol becomes for a cluster (K§3.2):
 
     * `hello` is `kind: "cluster"` with `caps{backend: k8s, image: registry, limits: pod,
-      bridge_streams: mux, upgrade: image, self_upgrade, namespace}`, the controller's
+      bridge_streams: mux, upgrade: image, self_upgrade, namespace, registries}`, the controller's
       `capacity` (`ceiling` = the ConfigMap's `max_concurrent`) and `degraded` (the
       readiness canary's `netpol_unenforced`, the config loader's `bad_config`), its pods
       as `inventory.runs`, nothing retained, the readiness checks and `k8s_version`. No
@@ -129,7 +129,8 @@ defmodule Arbiter.NodeAgent.Backend.K8s do
         "upgrade" => "image",
         "self_upgrade" => Map.get(cluster, :self_upgrade?, false) == true,
         "namespace" => Map.get(cluster, :namespace),
-        "install" => install_caps(cluster)
+        "install" => install_caps(cluster),
+        "registries" => Map.get(report, :registries, [])
       },
       "capacity" => report.capacity,
       "degraded" => report.degraded,

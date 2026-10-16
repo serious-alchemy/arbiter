@@ -320,7 +320,7 @@ defmodule ArbiterWeb.NodesLive do
 
   # ---- add node --------------------------------------------------------------
 
-  @add_keys ~w(kind name labels max_workers ttl_minutes namespace cpu memory node_selector pull_secret reach admission self_upgrade primary_cidrs api_cidrs proxy_url proxy_cidrs)
+  @add_keys ~w(kind name labels max_workers ttl_minutes namespace cpu memory node_selector pull_secret registries reach admission self_upgrade primary_cidrs api_cidrs proxy_url proxy_cidrs)
 
   defp new_add do
     %{
@@ -1195,6 +1195,7 @@ defmodule ArbiterWeb.NodesLive do
         </p>
         <.token_box token={@token} />
       </div>
+      <.pull_secret_steps cluster={@cluster} />
       <%= if @split do %>
         <div>
           <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
@@ -1312,6 +1313,7 @@ defmodule ArbiterWeb.NodesLive do
         </p>
         <.token_box token={@token} />
       </div>
+      <.pull_secret_steps cluster={@cluster} />
     </div>
     """
   end
@@ -1331,6 +1333,27 @@ defmodule ArbiterWeb.NodesLive do
         {@command}
       </code>
       <Core.copy_id id={@command} dom_id={@copy_id} label={@label} />
+    </div>
+    """
+  end
+
+  attr :cluster, :map, required: true
+
+  # KH13 (§20.10): one pull Secret per registry the operator named.
+  defp pull_secret_steps(assigns) do
+    ~H"""
+    <div :for={{pull, i} <- Enum.with_index(@cluster.pull_secret_commands)}>
+      <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
+        Pull Secret for <code>{pull.registry}</code>: it asks for a read-only deploy token's
+        username and password without echoing the password, so neither is in your shell
+        history or a process list:
+      </p>
+      <.command_block
+        id={"cluster-pull-secret-command-#{i}"}
+        copy_id={"copy-cluster-pull-secret-command-#{i}"}
+        label="Copy the pull Secret command"
+        command={pull.command}
+      />
     </div>
     """
   end
@@ -1490,6 +1513,14 @@ defmodule ArbiterWeb.NodesLive do
           placeholder="gitlab-registry"
         />
         <Forms.input
+          name="registries"
+          id="add-node-registries"
+          label="Registries"
+          hint="optional, prefix=Secret,prefix=Secret: each registry's images use only its own pull Secret"
+          value={@add.form["registries"].value}
+          placeholder="registry.gitlab.com/vstim/=gitlab-vstim,ghcr.io/ryan/=ghcr-arbiter"
+        />
+        <Forms.input
           name="primary_cidrs"
           id="add-node-primary-cidrs"
           label="Primary CIDRs"
@@ -1642,6 +1673,16 @@ defmodule ArbiterWeb.NodesLive do
           <.fact label="primary version" value={@row.server_version} />
           <.fact label="protocol" value={@row.proto || "—"} />
           <.fact label="backend" value={@row.caps["backend"] || "—"} />
+          <.fact
+            :if={is_list(@row.caps["registries"])}
+            label="registries"
+            value={
+              if(@row.caps["registries"] == [],
+                do: "—",
+                else: Enum.join(@row.caps["registries"], ", ")
+              )
+            }
+          />
           <.fact
             label="labels"
             value={if(@row.labels == [], do: "—", else: Enum.join(@row.labels, ", "))}

@@ -138,4 +138,87 @@ defmodule Arbiter.NodeAgent.K8s.PodConfigTest do
       end
     end
   end
+
+  describe "registries (KH13, §20.10)" do
+    @gitlab "registry.gitlab.com/vstim/"
+    @ghcr "ghcr.io/ryan/"
+    @digest String.duplicate("a", 64)
+
+    defp regs,
+      do: [
+        %{prefix: @gitlab, pull_secret: "gitlab-vstim"},
+        %{prefix: @ghcr, pull_secret: "ghcr-arbiter"}
+      ]
+
+    test "default to none; a list is normalised to string keys" do
+      assert {:ok, %{registries: []}} = PodConfig.normalize(config(%{}))
+
+      assert {:ok, %{registries: [first, second]}} =
+               PodConfig.normalize(config(%{registries: regs()}))
+
+      assert first == %{"prefix" => @gitlab, "pull_secret" => "gitlab-vstim"}
+      assert second == %{"prefix" => @ghcr, "pull_secret" => "ghcr-arbiter"}
+    end
+
+    test "an entry may omit the pull secret (anonymous pull)" do
+      assert {:ok, %{registries: [%{"pull_secret" => nil}]}} =
+               PodConfig.normalize(config(%{registries: [%{prefix: "docker.io/acme/"}]}))
+    end
+
+    test "malformed entries are bad_config" do
+      for value <- [
+            "nope",
+            [%{prefix: "no-trailing-slash", pull_secret: "a"}],
+            [%{prefix: @gitlab, pull_secret: "Bad Name"}],
+            [%{prefix: @gitlab, pull_secret: 7}],
+            [%{pull_secret: "a"}],
+            [%{prefix: @gitlab, pull_secret: "a", extra: 1}],
+            [%{prefix: @gitlab, pull_secret: "a"}, %{prefix: @gitlab, pull_secret: "b"}],
+            ["registry.gitlab.com/vstim/"]
+          ] do
+        assert {:error, {:bad_config, _}} = PodConfig.normalize(config(%{registries: value})),
+               inspect(value)
+      end
+    end
+
+    test "image_prefixes/1 is the prefixes plus the derived registry" do
+      {:ok, cfg} = PodConfig.normalize(config(%{registries: regs()}))
+      assert PodConfig.image_prefixes(cfg) == [@gitlab, @ghcr, "registry.example.test/arbiter/"]
+    end
+
+    test "pull_secrets/2: the one secret of the longest matching prefix" do
+      {:ok, cfg} =
+        PodConfig.normalize(
+          config(%{
+            registries:
+              regs() ++ [%{prefix: "ghcr.io/ryan/private/", pull_secret: "ghcr-private"}]
+          })
+        )
+
+      assert PodConfig.pull_secrets(cfg, "#{@gitlab}app/worker@sha256:#{@digest}") == [
+               "gitlab-vstim"
+             ]
+
+      assert PodConfig.pull_secrets(cfg, "#{@ghcr}arbiter/worker@sha256:#{@digest}") == [
+               "ghcr-arbiter"
+             ]
+
+      assert PodConfig.pull_secrets(cfg, "ghcr.io/ryan/private/x@sha256:#{@digest}") == [
+               "ghcr-private"
+             ]
+
+      assert PodConfig.pull_secrets(cfg, "evil.example/x@sha256:#{@digest}") == :none
+      # `ghcr.io/ryan/` must not match `ghcr.io/ryan-evil/`
+      assert PodConfig.pull_secrets(cfg, "ghcr.io/ryan-evil/x@sha256:#{@digest}") == :none
+    end
+
+    test "pull_secrets/2: a ref under `registry` only gets the legacy flat list" do
+      {:ok, cfg} =
+        PodConfig.normalize(config(%{registries: regs(), image_pull_secrets: ["legacy"]}))
+
+      assert PodConfig.pull_secrets(cfg, "registry.example.test/arbiter/x@sha256:#{@digest}") == [
+               "legacy"
+             ]
+    end
+  end
 end

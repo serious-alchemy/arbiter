@@ -34,6 +34,26 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfigTest do
       assert cfg.placement["node_selector"] == %{"kubernetes.io/hostname" => "mesanna"}
     end
 
+    test "registries: the prefix list and its pull secrets load (KH13)" do
+      text = """
+      registries:
+        - {prefix: registry.gitlab.com/vstim/, pull_secret: gitlab-vstim}
+        - {prefix: ghcr.io/ryan/, pull_secret: ghcr-arbiter}
+      """
+
+      assert {:ok, cfg} = ControllerConfig.parse(text)
+
+      assert cfg.registries == [
+               %{"prefix" => "registry.gitlab.com/vstim/", "pull_secret" => "gitlab-vstim"},
+               %{"prefix" => "ghcr.io/ryan/", "pull_secret" => "ghcr-arbiter"}
+             ]
+
+      assert {:ok, %{registries: []}} = ControllerConfig.parse("{}")
+
+      assert {:error, {:bad_config, {:bad_value, {:registries, :prefix}}}} =
+               ControllerConfig.parse("registries: [{prefix: no-slash, pull_secret: a}]")
+    end
+
     test "an empty file is the defaults: ceiling 2, every timeout filled" do
       assert {:ok, cfg} = ControllerConfig.parse("{}")
       assert cfg.max_concurrent == 2

@@ -10,7 +10,8 @@ defmodule ArbiterCli.Cmd.Node do
                       It never prints the token to a pipe or a log.
       arb node add    --kind cluster --name N [--namespace NS] [--max-workers N]
                       [--cpu Q] [--memory Q] [--node-selector k=v,k=v]
-                      [--pull-secret NAME] [--reach direct|tailscale|proxy]
+                      [--pull-secret NAME] [--registries PREFIX=SECRET,...]
+                      [--reach direct|tailscale|proxy]
                       [--primary-cidrs CIDR,CIDR] [--proxy-url URL]
                       [--proxy-cidrs CIDR,CIDR] [--api-cidrs CIDR,CIDR]
                       [--admission policy] [--self-upgrade on|off] [--ttl 15m]
@@ -81,6 +82,7 @@ defmodule ArbiterCli.Cmd.Node do
     memory: :string,
     node_selector: :string,
     pull_secret: :string,
+    registries: :string,
     reach: :string,
     primary_cidrs: :string,
     api_cidrs: :string,
@@ -91,7 +93,7 @@ defmodule ArbiterCli.Cmd.Node do
     output: :string,
     format: :string
   ]
-  @cluster_only ~w(namespace cpu memory node_selector pull_secret reach primary_cidrs api_cidrs proxy_url proxy_cidrs admission self_upgrade output format)a
+  @cluster_only ~w(namespace cpu memory node_selector pull_secret registries reach primary_cidrs api_cidrs proxy_url proxy_cidrs admission self_upgrade output format)a
   @set_switches [
     name: :string,
     label: [:string, :keep],
@@ -217,6 +219,7 @@ defmodule ArbiterCli.Cmd.Node do
       |> put(:memory, opts[:memory])
       |> put(:node_selector, opts[:node_selector])
       |> put(:pull_secret, opts[:pull_secret])
+      |> put(:registries, opts[:registries])
       |> put(:reach, opts[:reach])
       |> put(:primary_cidrs, opts[:primary_cidrs])
       |> put(:api_cidrs, opts[:api_cidrs])
@@ -378,6 +381,7 @@ defmodule ArbiterCli.Cmd.Node do
     IO.puts("  #{helm["namespace_command"]}")
     IO.puts("")
     next = print_secret_steps(cluster, token, token_file, 2)
+    print_pull_secrets(cluster["pull_secret_commands"])
     IO.puts("")
     IO.puts("#{next}. Install the chart. The values hold no secret:")
     IO.puts("")
@@ -409,6 +413,7 @@ defmodule ArbiterCli.Cmd.Node do
 
     IO.puts("")
     print_secret_steps(cluster, token, token_file, 2)
+    print_pull_secrets(cluster["pull_secret_commands"])
     IO.puts("")
     IO.puts("Once the controller is up, `arb node list` shows it. The Secret is spent after")
 
@@ -444,6 +449,22 @@ defmodule ArbiterCli.Cmd.Node do
       step + 2
     end
   end
+
+  # KH13: one pull Secret per registry. Each command reads the read-only deploy token's
+  # username and password from the terminal (`read -rs`), so neither reaches argv.
+  defp print_pull_secrets([_ | _] = commands) do
+    IO.puts("")
+    IO.puts("Create each registry's pull Secret (a read-only deploy token; the command asks for")
+    IO.puts("the username and the password, which is not echoed or put on argv):")
+
+    for %{"registry" => registry, "command" => command} <- commands do
+      IO.puts("")
+      IO.puts("  # #{registry}")
+      IO.puts("  #{command}")
+    end
+  end
+
+  defp print_pull_secrets(_none), do: :ok
 
   defp token_sink!(path) when is_binary(path) do
     if File.exists?(path), do: Output.die("--token-file #{path} already exists; not overwriting")
@@ -904,6 +925,9 @@ defmodule ArbiterCli.Cmd.Node do
   defp print_cluster(%{"kind" => "cluster"} = n) do
     IO.puts("  kind:          cluster")
     if n["k8s_version"], do: IO.puts("  Kubernetes:    #{n["k8s_version"]}")
+
+    if is_list(n["registries"]) and n["registries"] != [],
+      do: IO.puts("  registries:    #{Enum.join(n["registries"], ", ")}")
 
     cond do
       n["upgrade_command"] ->

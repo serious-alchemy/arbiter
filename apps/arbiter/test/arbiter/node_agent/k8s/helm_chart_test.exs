@@ -118,6 +118,29 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartTest do
       assert parsed.placement["node_selector"] == %{"pool" => "ci"}
     end
 
+    test "registries[] render as the controller's per-prefix pull-secret list (KH13)" do
+      docs =
+        render!(
+          @direct ++
+            [
+              "registries[0].prefix=registry.gitlab.com/vstim",
+              "registries[0].pullSecret=gitlab-vstim",
+              "registries[1].prefix=ghcr.io/ryan/",
+              "registries[1].pullSecret=ghcr-arbiter"
+            ]
+        )
+
+      config = find!(docs, "ConfigMap", "arbiter-controller-config")
+      assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
+
+      assert parsed.registries == [
+               %{"prefix" => "registry.gitlab.com/vstim/", "pull_secret" => "gitlab-vstim"},
+               %{"prefix" => "ghcr.io/ryan/", "pull_secret" => "ghcr-arbiter"}
+             ]
+
+      assert parsed.image_pull_secrets == []
+    end
+
     test "the join token is only rendered for --set-file, and no other Secret has data" do
       refute Enum.any?(render!(@direct), &(identity(&1) == {"Secret", "arbiter-join"}))
 

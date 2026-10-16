@@ -559,4 +559,72 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:ok, {:node, %{name: "a"}}} = place(%{}, [row("a")], prefer: "local")
     end
   end
+
+  describe "caps.registries (KH13, §20.10)" do
+    defp cluster(name, registries),
+      do: row(name, caps: %{"image" => "registry", "registries" => registries})
+
+    test "a run whose images live in a registry the node cannot pull from is not placed there" do
+      rows = [cluster("a", ["ghcr.io/ryan/"])]
+
+      assert {:error, {:no_node_capacity, _}} =
+               place(%{mode: :remote_only, registry: "registry.gitlab.com/vstim"}, rows)
+
+      assert {:ok, {:local, :no_node}} = place(%{registry: "registry.gitlab.com/vstim"}, rows)
+    end
+
+    test "the node whose prefixes cover the registry is the candidate" do
+      rows = [
+        cluster("a", ["ghcr.io/ryan/"]),
+        cluster("b", ["registry.gitlab.com/vstim/", "ghcr.io/ryan/"])
+      ]
+
+      assert {:ok, {:node, %{name: "b"}}} =
+               place(%{mode: :remote_only, registry: "registry.gitlab.com/vstim"}, rows)
+
+      assert {:ok, {:node, %{name: "a"}}} =
+               place(%{mode: :remote_only, registry: "ghcr.io/ryan/arbiter-worker"}, rows)
+    end
+
+    test "a prefix does not cover a sibling that merely shares its leading characters" do
+      rows = [cluster("a", ["ghcr.io/ryan/"])]
+
+      assert {:error, {:no_node_capacity, _}} =
+               place(%{mode: :remote_only, registry: "ghcr.io/ryan-evil"}, rows)
+    end
+
+    test "no registry on the request, or no caps.registries on the node, filters nothing" do
+      assert {:ok, {:node, %{name: "a"}}} = place(%{}, [cluster("a", ["ghcr.io/ryan/"])])
+
+      assert {:ok, {:node, %{name: "a"}}} =
+               place(%{registry: "registry.gitlab.com/vstim"}, [row("a")])
+
+      assert {:ok, {:node, %{name: "a"}}} =
+               place(%{registry: "registry.gitlab.com/vstim"}, [
+                 row("a", caps: %{"image" => "registry"})
+               ])
+    end
+
+    test "registry_covered?/2" do
+      assert Placement.registry_covered?(cluster("a", ["r.io/x/"]), "r.io/x")
+      assert Placement.registry_covered?(cluster("a", ["r.io/x/"]), "r.io/x/sub")
+      refute Placement.registry_covered?(cluster("a", ["r.io/x/"]), "r.io/y")
+      refute Placement.registry_covered?(cluster("a", []), "r.io/y")
+      assert Placement.registry_covered?(cluster("a", []), nil)
+    end
+
+    test "image_registry/2 is the repo's, else the workspace's registry" do
+      ws = %{
+        config: %{
+          "worker" => %{
+            "image" => %{"registry" => "ghcr.io/ryan"},
+            "repos" => %{"vstim" => %{"image" => %{"registry" => "registry.gitlab.com/vstim"}}}
+          }
+        }
+      }
+
+      assert Placement.image_registry(ws, "vstim") == "registry.gitlab.com/vstim"
+      assert Placement.image_registry(ws, "other") == "ghcr.io/ryan"
+    end
+  end
 end
