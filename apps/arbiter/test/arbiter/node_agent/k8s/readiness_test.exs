@@ -59,6 +59,28 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessTest do
   end
 
   describe "psa" do
+    test "the probe spec is internally consistent: privileged implies escalation is not false" do
+      pod = %{
+        "spec" => %{
+          "containers" => [
+            %{
+              "name" => "worker",
+              "securityContext" => %{
+                "allowPrivilegeEscalation" => false,
+                "capabilities" => %{"drop" => ["ALL"]}
+              }
+            }
+          ]
+        }
+      }
+
+      [worker] = Readiness.psa_probe_pod(pod)["spec"]["containers"]
+      sc = worker["securityContext"]
+      assert sc["privileged"] == true
+      refute sc["allowPrivilegeEscalation"] == false
+      refute Map.has_key?(sc, "capabilities")
+    end
+
     test "a namespace that accepts a privileged pod does not enforce restricted" do
       cluster = FakeK8sApi.start!(namespace: "arbiter-workers")
       FakeK8sApi.set_clock(cluster.api, @now)
