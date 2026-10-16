@@ -186,7 +186,6 @@ defmodule ArbiterWeb.MCP.Plug do
         :expired -> "Scope token expired"
         :revoked -> "Scope token revoked — its session has ended (RFC §9.3)"
         :missing -> "Missing scope token (Authorization: Bearer <token> or ?token=<token>)"
-        :forbidden -> "Coordinator scope required for the SSE stream"
         :bridge_identity -> "Worker bridge identity unavailable or expired"
         _ -> "Invalid scope token"
       end
