@@ -276,7 +276,12 @@ defmodule Arbiter.Guardrails.Report do
 
   defp git_credential_secrets(entry) do
     Enum.filter(
-      [entry["key_secret"], entry["token_secret"], entry["private_key_secret"]],
+      [
+        entry["key_secret"],
+        entry["token_secret"],
+        entry["private_key_secret"],
+        entry["parent_token_secret"]
+      ],
       &is_binary/1
     )
   end

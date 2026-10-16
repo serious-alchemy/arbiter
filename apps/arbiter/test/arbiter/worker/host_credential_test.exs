@@ -169,6 +169,84 @@ defmodule Arbiter.Worker.HostCredentialTest do
     end
   end
 
+  # bd-3llb3y: the worker that held the run's GitLab token is gone by the time the host
+  # pushes after `arb done` (its token was revoked at exit), so the host mints its own,
+  # for the push, and revokes it again.
+  describe "for_repo/3 with a gitlab_project_token" do
+    defp gitlab_ws do
+      workspace(
+        %{
+          "repos" => %{
+            "tonic" => %{"kind" => "gitlab_project_token", "parent_token_secret" => "GL_PARENT"}
+          }
+        },
+        %{"GL_PARENT" => "glpat-parent-host"}
+      )
+    end
+
+    defp stub_gitlab do
+      test_pid = self()
+
+      Req.Test.stub(@http, fn conn ->
+        send(test_pid, {:gitlab, conn.method, URI.decode(conn.request_path)})
+
+        case conn.method do
+          "POST" ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{
+              "id" => 9,
+              "token" => "glpat-host-run",
+              "scopes" => ["read_api", "write_repository"],
+              "access_level" => 30
+            })
+
+          "DELETE" ->
+            Plug.Conn.send_resp(conn, 204, "")
+        end
+      end)
+    end
+
+    test "mints a project token for the push, served by the path-pinned helper" do
+      stub_gitlab()
+
+      assert {:ok,
+              %{material: %Material{kind: :gitlab_project_token} = material, env: env} = cred} =
+               HostCredential.for_repo(gitlab_ws(), "tonic", opts(owner: self()))
+
+      assert_receive {:gitlab, "POST", "/api/v4/projects/acme/tonic/access_tokens"}
+      assert {"ARB_GIT_TOKEN", "glpat-host-run"} in env
+      assert {"SSH_AUTH_SOCK", nil} in env
+      assert HostCredential.token(cred) == "glpat-host-run"
+      assert material.parent_token == "glpat-parent-host"
+    end
+
+    test "the token is revoked when the host's owner exits" do
+      stub_gitlab()
+      owner = spawn(fn -> receive do: (:stop -> :ok) end)
+
+      assert {:ok, %{}} = HostCredential.for_repo(gitlab_ws(), "tonic", opts(owner: owner))
+      assert_receive {:gitlab, "POST", _}
+      refute_received {:gitlab, "DELETE", _}
+
+      Process.exit(owner, :kill)
+      assert_receive {:gitlab, "DELETE", "/api/v4/projects/acme/tonic/access_tokens/9"}
+    end
+
+    test "the token is revoked after the push window even while the owner lives" do
+      stub_gitlab()
+
+      assert {:ok, %{}} =
+               HostCredential.for_repo(
+                 gitlab_ws(),
+                 "tonic",
+                 opts(owner: self(), revoke_after_ms: 20)
+               )
+
+      assert_receive {:gitlab, "DELETE", "/api/v4/projects/acme/tonic/access_tokens/9"}, 2_000
+    end
+  end
+
   describe "for_repo/3 with a deploy key" do
     test "stages the key and pins ssh to it with no agent, and resets credential helpers",
          %{tmp_dir: tmp} do

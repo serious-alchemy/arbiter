@@ -19,7 +19,7 @@ defmodule Arbiter.Worker.Jail.Hide do
     * **Credential dirs** under the operator's home: `~/.claude`, `~/.codex`,
       `~/.grok` (the canonical grok login, whose refresh token only
       `Arbiter.Grok.CredentialBroker` may hold), `~/.qwen` and `~/.agents` (the operator's qwen config and skills; a worker has its own `Qwen.ConfigDir` HOME), `~/.gemini` (the operator's own agy state; the worker has its isolated
-      HOME), `~/.config/gh`, `~/.config/gcloud`, `~/.ssh`, `~/.aws`,
+      HOME), `~/.config/gh`, `~/.config/glab-cli` (the operator's glab login), `~/.config/gcloud`, `~/.ssh`, `~/.aws`,
       `~/.kube`, `~/.docker`; and the files `~/.netrc`, `~/.pgpass`,
       `~/.git-credentials`. `~/.grok` also holds the grok binary and its
       bundled assets, so `~/.grok/bin`, `downloads` and `bundled` are bound

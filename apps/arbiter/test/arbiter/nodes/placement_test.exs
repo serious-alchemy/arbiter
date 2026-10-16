@@ -166,6 +166,18 @@ defmodule Arbiter.Nodes.PlacementTest do
       refute :token in Placement.remote_git_credential_kinds()
     end
 
+    # bd-3llb3y: a GitLab project token is minted per run, scoped to one project and
+    # revoked when the worker exits, so it is carried like a GitHub App's, by every
+    # run kind (the container holds it as the worker's API credential too).
+    test "a GitLab project token is remote-carryable for every kind that carries a credential" do
+      assert :gitlab_project_token in Placement.remote_git_credential_kinds()
+
+      for kind <- [:implementer, :resume, :fix_pass, :conflict_pass, :review_fix_round] do
+        request = Map.merge(@eligible, %{kind: kind, git_credential: :gitlab_project_token})
+        assert Placement.eligible(request) == :ok, "#{kind}"
+      end
+    end
+
     test "a reviewer and an inspect-only run stay eligible beside a scoped credential" do
       scoped = Map.put(@eligible, :git_credential, :deploy_key)
 
@@ -193,6 +205,15 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert Placement.git_credential(scoped, "tonic") == :deploy_key
       assert Placement.git_credential(scoped, "vstim") == :github_app
       assert Placement.git_credential(scoped, "other") == nil
+
+      gitlab =
+        ws.(%{
+          "repos" => %{
+            "infra" => %{"kind" => "gitlab_project_token", "parent_token_secret" => "P"}
+          }
+        })
+
+      assert Placement.git_credential(gitlab, "infra") == :gitlab_project_token
 
       legacy = ws.(%{"legacy_operator" => true})
       assert Placement.git_credential(legacy, "tonic") == nil
@@ -323,6 +344,26 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert info.reason == :scoped_git_credential
       assert info.message =~ "scoped git credential"
       assert info.message =~ "deploy_key"
+    end
+
+    test "a GitLab project token run lands on a node under prefer_remote and is not held under remote_only" do
+      for kind <- [:implementer, :review_fix_round], mode <- [:prefer_remote, :remote_only] do
+        task_id = "bd-gl-#{kind}-#{mode}"
+
+        assert {:ok, {:node, %{name: "a"}}} =
+                 place(
+                   %{
+                     git_credential: :gitlab_project_token,
+                     kind: kind,
+                     mode: mode,
+                     task_id: task_id
+                   },
+                   [row("a")]
+                 ),
+               "#{kind} #{mode}"
+
+        Placement.release(task_id)
+      end
     end
 
     test "a GitHub App fix round lands on a node" do
