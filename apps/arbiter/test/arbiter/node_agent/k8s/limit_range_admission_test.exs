@@ -11,9 +11,13 @@ defmodule Arbiter.NodeAgent.K8s.LimitRangeAdmissionTest do
 
   import Arbiter.Test.K8sPodFixtures, only: [build!: 2, run_spec: 1]
 
+  alias Arbiter.Test.K8sPodFixtures, as: Fx
+
+  alias Arbiter.NodeAgent.K8s.Canary
   alias Arbiter.NodeAgent.K8s.ControllerConfig
   alias Arbiter.NodeAgent.K8s.InstallManifest
   alias Arbiter.NodeAgent.K8s.Quota
+  alias Arbiter.NodeAgent.K8s.Readiness
 
   @server [image: "img:1", primary_url: "https://arbiter.example.test", registry: "r.test/a"]
 
@@ -148,6 +152,34 @@ defmodule Arbiter.NodeAgent.K8s.LimitRangeAdmissionTest do
         install: i
       } do
         assert_admitted(i.deployment["spec"]["template"], i.limit_range)
+      end
+
+      test "every other pod Arbiter creates is admitted: canary, sandbox probe, dry runs", %{
+        install: i
+      } do
+        opts = [image: "#{Fx.registry()}/beam@sha256:#{Fx.digest()}", targets: %{}]
+        config = Fx.config(i.pod_config)
+
+        {:ok, canary} = Canary.pod(config, opts)
+        {:ok, sandbox} = Canary.sandbox_probe_pod(config, opts)
+        {:ok, dry} = Canary.dry_run_pod(config, opts)
+
+        for {name, pod} <- [
+              canary: canary,
+              sandbox_probe: sandbox,
+              dry_run: dry,
+              psa_probe: Readiness.psa_probe_pod(dry)
+            ] do
+          assert admit(pod, i.limit_range) == [], "LimitRange refuses the #{name} pod"
+        end
+
+        # a probe pod takes at most a worker pod's slot in the quota (`pods` has a spare)
+        worker = Quota.effective_pod(build!(nil, i.pod_config))
+
+        for {name, pod} <- [canary: canary, sandbox_probe: sandbox],
+            {res, used} <- Quota.effective_pod(pod) do
+          assert used <= Map.get(worker, res, 0), "#{name}: #{res} #{used} > a worker pod's"
+        end
       end
 
       test "the pod fits the quota at max_concurrent, controller included", %{install: i} do

@@ -79,6 +79,7 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
   alias Arbiter.NodeAgent.K8s.Client
   alias Arbiter.NodeAgent.K8s.PodScripts
   alias Arbiter.NodeAgent.K8s.PodSpec
+  alias Arbiter.NodeAgent.K8s.Quota
   alias Arbiter.NodeAgent.RunSpec
 
   @bridge_port 9443
@@ -262,10 +263,7 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
     worker
     |> Map.put("command", escape(["sh", "-c", @script]))
     |> Map.put("env", env)
-    |> Map.put("resources", %{
-      "requests" => %{"cpu" => "50m", "memory" => "32Mi"},
-      "limits" => %{"memory" => "64Mi"}
-    })
+    |> Map.put("resources", probe_resources())
     |> Map.update!("volumeMounts", fn mounts ->
       Enum.filter(
         mounts,
@@ -273,6 +271,17 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
       )
     end)
     |> Map.delete("workingDir")
+  end
+
+  # The `LimitRange` defaults, stated: a limit chosen apart from them can break the
+  # `maxLimitRequestRatio` (a bare memory limit gets the default 400m cpu limit: ratio 8).
+  defp probe_resources do
+    keys = ["cpu", "memory"]
+
+    %{
+      "requests" => Map.take(Quota.limit_range_default_request(), keys),
+      "limits" => Map.take(Quota.limit_range_default_limit(), keys)
+    }
   end
 
   # The kubelet expands `$(VAR)` and turns `$$` into `$` in command and args.
