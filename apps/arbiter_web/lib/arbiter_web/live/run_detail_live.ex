@@ -104,6 +104,7 @@ defmodule ArbiterWeb.RunDetailLive do
     ~H"""
     <Layouts.app
       flash={@flash}
+      banner_rev={@banner_rev}
       current_path={@current_path}
       quotas={@quotas}
       quota_on_exhaustion={@quota_on_exhaustion}

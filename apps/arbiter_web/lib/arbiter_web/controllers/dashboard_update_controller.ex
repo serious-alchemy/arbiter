@@ -47,14 +47,7 @@ defmodule ArbiterWeb.DashboardUpdateController do
   version comes from the update check, never the form.
   """
   def dismiss(conn, _params) do
-    case UpdateCheck.state() do
-      %{update_available?: true, latest: latest} when is_binary(latest) ->
-        Settings.set_dismissed_update_version(latest)
-
-      _ ->
-        :ok
-    end
-
+    save_update_dismissal()
     redirect(conn, to: ~p"/")
   end
 
@@ -65,11 +58,26 @@ defmodule ArbiterWeb.DashboardUpdateController do
   the record, never the form.
   """
   def dismiss_deploy(conn, _params) do
+    save_deploy_dismissal()
+    redirect(conn, to: ~p"/")
+  end
+
+  @doc "Saves the update dismissal; shared with the LiveView `dismiss_update` event (`ArbiterWeb.LiveHooks`)."
+  def save_update_dismissal do
+    case UpdateCheck.state() do
+      %{update_available?: true, latest: latest} when is_binary(latest) ->
+        Settings.set_dismissed_update_version(latest)
+
+      _ ->
+        :ok
+    end
+  end
+
+  @doc "Saves the deploy dismissal; shared with the LiveView `dismiss_deploy` event (`ArbiterWeb.LiveHooks`)."
+  def save_deploy_dismissal do
     case DeployStatus.dismiss_key(DeployStatus.read()) do
       nil -> :ok
       key -> Settings.set_dismissed_deploy(key)
     end
-
-    redirect(conn, to: ~p"/")
   end
 end
