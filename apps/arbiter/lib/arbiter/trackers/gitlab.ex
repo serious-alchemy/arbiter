@@ -325,12 +325,16 @@ defmodule Arbiter.Trackers.Gitlab do
   end
 
   @impl true
-  def signal_claim(ref, task_id, %{
-        workspace_name: name,
-        workspace_prefix: prefix,
-        current_user: username,
-        host: host
-      } = ctx) do
+  def signal_claim(
+        ref,
+        task_id,
+        %{
+          workspace_name: name,
+          workspace_prefix: prefix,
+          current_user: username,
+          host: host
+        } = ctx
+      ) do
     body =
       "Claimed as #{task_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
 

@@ -59,7 +59,10 @@ defmodule ArbiterWeb.Api.ClaimController do
     with :ok <- require_string(ref, "ref"),
          {:ok, status, task, owner} <-
            workspace
-           |> Claim.claim_with_owner(ref, Keyword.put(claim_opts, :force, truthy?(params["force"])))
+           |> Claim.claim_with_owner(
+             ref,
+             Keyword.put(claim_opts, :force, truthy?(params["force"]))
+           )
            |> Claim.typed() do
       conn
       |> put_status(status_code_for(status))

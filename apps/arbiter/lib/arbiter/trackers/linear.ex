@@ -447,12 +447,16 @@ defmodule Arbiter.Trackers.Linear do
   end
 
   @impl true
-  def signal_claim(ref, task_id, %{
-        workspace_name: name,
-        workspace_prefix: prefix,
-        current_user: user_id,
-        host: host
-      } = ctx) do
+  def signal_claim(
+        ref,
+        task_id,
+        %{
+          workspace_name: name,
+          workspace_prefix: prefix,
+          current_user: user_id,
+          host: host
+        } = ctx
+      ) do
     body = "Claimed as #{task_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
     add_comment(ref, body)
     # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
