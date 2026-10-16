@@ -13,7 +13,7 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
   | `netpol` | the CNI enforces the deny-all policies | `Canary` (see `netpol/2`) |
   | `psa` | Pod Security `restricted` is enforced on the namespace **and** the builder's own pod passes it | two server-side dry-run creates: the worker pod as the builder emits it must be admitted, the same pod with a `privileged` container must be refused with `violates PodSecurity` |
   | `priority_class` | the configured `priority_class` exists | the dry-run's admission verdict (`no PriorityClass with name …`); the controller's Role cannot read cluster-scoped `PriorityClass` objects, and the dry-run is the check that matches what a real pod meets |
-  | `runtime_class` | the configured `placement.runtime_class` exists (none: worker pods share the node's kernel) | the same dry run's admission verdict (`RuntimeClass … not found`) |
+  | `runtime_class` | the configured `placement.runtime_class` exists (none: worker pods share the node's kernel) | the same dry run's admission verdict (`RuntimeClass … not found`), then a real short-lived pod under the class (`SandboxProbe`): a kubelet that cannot create its sandbox (runsc and `hostUsers: false`, KH1) is a failure naming the error |
   | `quota` | a `ResourceQuota` bounds the namespace and has room for a pod | `resourcequotas` (`Quota.headroom/2`) |
   | `registry_pull` | the kubelet can pull the worker image | the canary pod's own pull (it runs the worker image) |
   | `clock` | the API server and this controller agree on the time to within 30 s | `Date` of `GET /version` |
@@ -29,6 +29,7 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
   alias Arbiter.NodeAgent.K8s.Client
   alias Arbiter.NodeAgent.K8s.PodConfig
   alias Arbiter.NodeAgent.K8s.Quota
+  alias Arbiter.NodeAgent.K8s.SandboxProbe
 
   @max_skew_s 30
 
@@ -130,7 +131,8 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
       {:ok, pod} ->
         case classify(Client.create_pod(client, pod, dry_run: true)) do
           :accepted ->
-            {psa_negative(client, pod), priority_ok(config), nil, runtime_ok(config)}
+            {psa_negative(client, pod), priority_ok(config), nil,
+             runtime_probed(client, config, opts)}
 
           {:quota, msg} ->
             {psa_negative(client, pod), priority_ok(config), msg, runtime_ok(config)}
@@ -297,6 +299,58 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
     end
   end
 
+  # KH1: a dry run never reaches the kubelet, so a class whose handler refuses the pod's
+  # sandbox passes it. With a class configured, a real short-lived pod under it is the proof.
+  defp runtime_probed(client, config, opts) do
+    case runtime_class(config) do
+      nil -> runtime_ok(config)
+      class -> client |> SandboxProbe.run(config, opts) |> runtime_verdict(class, config)
+    end
+  end
+
+  defp runtime_verdict(:started, class, _config) do
+    runtime_check(
+      "ok",
+      "#{class} accepted by the dry run, and a pod under it started its sandbox",
+      nil,
+      class
+    )
+  end
+
+  defp runtime_verdict({:sandbox_failed, msg}, class, config) do
+    runtime_check(
+      "fail",
+      "a pod under RuntimeClass #{class} could not create its sandbox: #{trim(msg)}",
+      sandbox_hint(msg, config),
+      class
+    )
+  end
+
+  defp runtime_verdict({:not_started, reason}, class, _config) do
+    runtime_check(
+      "warn",
+      "the dry run accepted #{class} but a pod under it did not start (#{describe_probe(reason)}): the sandbox is unproven",
+      "Check the RuntimeClass handler on the nodes (kubectl describe pod, events in the worker namespace).",
+      class
+    )
+  end
+
+  defp sandbox_hint(msg, config) do
+    if msg =~ "user namespaces" and not PodConfig.kernel_sandboxed?(placement(config)) do
+      "The handler does not support hostUsers: false. For gVisor (handler runsc) set worker " <>
+        "placement.runtime_handler: runsc so the pod omits hostUsers; otherwise use a handler that supports user namespaces."
+    else
+      "Fix the RuntimeClass handler on the nodes (the kubelet's message is above) or clear worker placement.runtime_class."
+    end
+  end
+
+  defp describe_probe(:timeout),
+    do: "it was still pending at the deadline and no sandbox event said why"
+
+  defp describe_probe(:image_pull), do: "the worker image could not be pulled"
+  defp describe_probe({:create_failed, reason}), do: "creating it failed: #{inspect(reason)}"
+  defp describe_probe({:bad_pod, reason}), do: "the builder refused it: #{inspect(reason)}"
+
   defp runtime_missing(config, msg) do
     runtime_check(
       "fail",
@@ -327,10 +381,12 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
       |> check("RuntimeClass", status, detail, hint)
       |> Map.put("runtime_class", class)
 
-  defp runtime_class(config) do
+  defp runtime_class(config), do: blank_to_nil(placement(config)["runtime_class"])
+
+  defp placement(config) do
     case PodConfig.normalize(config) do
-      {:ok, cfg} -> blank_to_nil(get_in(cfg, [:placement, "runtime_class"]))
-      _ -> nil
+      {:ok, cfg} -> cfg.placement
+      _ -> %{}
     end
   end
 

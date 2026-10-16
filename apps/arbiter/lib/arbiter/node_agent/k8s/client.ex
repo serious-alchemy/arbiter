@@ -253,6 +253,22 @@ defmodule Arbiter.NodeAgent.K8s.Client do
   # --- resourcequotas and the Lease (K5) ----------------------------------------
 
   @doc """
+  The `Event`s about one pod (`get/list` on `events`, the Role's read-only grant): where
+  the kubelet records why a sandbox could not be created (`FailedCreatePodSandBox`), which
+  the pod's own status never carries.
+  """
+  @spec list_pod_events(t(), String.t()) :: {:ok, [map()]} | {:error, error()}
+  def list_pod_events(client, pod) do
+    params = [fieldSelector: "involvedObject.name=#{pod}"]
+
+    case request(client, :get, "/api/v1/namespaces/#{client.namespace}/events", params: params) do
+      {:ok, %{"items" => items}} when is_list(items) -> {:ok, items}
+      {:ok, _} -> {:ok, []}
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
   The namespace's `ResourceQuota` objects (`get/list` on `resourcequotas`, the only
   verb the Role grants there). The headroom the controller reports is computed from
   them, see `Arbiter.NodeAgent.K8s.Quota`.

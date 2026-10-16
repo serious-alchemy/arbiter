@@ -254,6 +254,40 @@ defmodule Arbiter.NodeAgent.K8s.PodSecurityTest do
     end
   end
 
+  describe "a runsc-handled runtime class (KH1, bd-27o4ls)" do
+    defp sandboxed,
+      do: build!(nil, %{placement: %{runtime_class: "gvisor", runtime_handler: "runsc"}})
+
+    defp sandbox_opts, do: [{:sandbox_classes, ["gvisor"]} | opts()]
+
+    test "the pod the builder emits for it passes every level when its class is named" do
+      refute Map.has_key?(sandboxed()["spec"], "hostUsers")
+      assert PodSecurity.check(sandboxed(), sandbox_opts()) == :ok
+    end
+
+    test "without the class named, a missing hostUsers is still a violation" do
+      assert {:error, [%{rule: :host_users, path: "spec.hostUsers"}]} =
+               PodSecurity.check(sandboxed(), opts())
+    end
+
+    test "every other runtime still needs hostUsers: false" do
+      for pod <- [
+            update_in(sandboxed(), ["spec"], &Map.delete(&1, "runtimeClassName")),
+            update_in(sandboxed(), ["spec"], &Map.put(&1, "runtimeClassName", "kata")),
+            update_in(sandboxed(), ["spec"], &Map.put(&1, "hostUsers", true)),
+            update_in(build!(), ["spec"], &Map.delete(&1, "hostUsers"))
+          ] do
+        assert {:error, [%{rule: :host_users}]} = PodSecurity.check(pod, sandbox_opts())
+      end
+    end
+
+    test "the other rules are untouched under the sandbox class" do
+      pod = put_in(sandboxed(), ["spec", "securityContext", "runAsUser"], 0)
+      assert {:error, violations} = PodSecurity.check(pod, sandbox_opts())
+      assert Enum.any?(violations, &(&1.rule == :non_root))
+    end
+  end
+
   describe "levels and options" do
     test "levels: selects which rule groups run" do
       pod = spec(build!(), "hostUsers", true)

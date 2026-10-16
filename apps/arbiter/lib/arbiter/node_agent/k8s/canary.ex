@@ -180,6 +180,21 @@ defmodule Arbiter.NodeAgent.K8s.Canary do
   end
 
   @doc """
+  The pod `Arbiter.NodeAgent.K8s.SandboxProbe` creates: the canary's shape (no run label,
+  gate-only seed, small resources, a deadline) with a worker that exits at once, so the
+  only thing it proves is that the kubelet can start a sandbox for the configured class.
+  """
+  @spec sandbox_probe_pod(map() | keyword(), keyword()) :: {:ok, map()} | {:error, term()}
+  def sandbox_probe_pod(config, opts) do
+    with {:ok, pod} <- pod(config, opts) do
+      {:ok,
+       update_in(pod, ["spec", "containers"], fn containers ->
+         Enum.map(containers, &Map.put(&1, "command", ["sh", "-c", "true"]))
+       end)}
+    end
+  end
+
+  @doc """
   The worker pod exactly as the builder emits it (same options as `pod/2`), unshaped:
   what `Arbiter.NodeAgent.K8s.Readiness` sends in its server-side dry runs.
   """
