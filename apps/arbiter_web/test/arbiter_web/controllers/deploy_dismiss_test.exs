@@ -109,4 +109,21 @@ defmodule ArbiterWeb.DeployDismissTest do
     post(conn, ~p"/release/deploy/dismiss", %{})
     assert Settings.dismissed_deploy() == nil
   end
+
+  test "dismissing in a LiveView hides the deploy banner in place and in other views", %{
+    conn: conn,
+    home: home
+  } do
+    write_status(home, %{"state" => "succeeded", "tag" => "v9.0.0", "finished_at" => finished()})
+
+    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, other, _} = live(build_conn() |> dashboard_login(), ~p"/audit")
+
+    view |> element("#deploy-dismiss-form") |> render_submit()
+
+    refute has_element?(view, "#deploy-status")
+    assert Settings.dismissed_deploy() != nil
+    _ = render(other)
+    refute has_element?(other, "#deploy-status")
+  end
 end

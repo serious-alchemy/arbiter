@@ -81,4 +81,45 @@ defmodule ArbiterWeb.UpdateDismissTest do
     post(conn, ~p"/release/update/dismiss", %{})
     assert Settings.dismissed_update_version() == nil
   end
+
+  describe "in-place dismissal (no page load)" do
+    test "submitting the dismiss form hides the banner without a redirect", %{conn: conn} do
+      start_checker("v99.0.0")
+      {:ok, view, _} = live(conn, ~p"/")
+      assert has_element?(view, "#update-available")
+
+      view |> element("#update-dismiss-form") |> render_submit()
+
+      refute has_element?(view, "#update-available")
+      assert Settings.dismissed_update_version() == "v99.0.0"
+
+      {:ok, reloaded, _} = live(conn, ~p"/")
+      refute has_element?(reloaded, "#update-available")
+      # Let the chrome's mount-time async loads finish before the test exits.
+      render_async(view)
+      render_async(reloaded)
+    end
+
+    test "other connected LiveViews hide the banner over PubSub", %{conn: conn} do
+      start_checker("v99.0.0")
+      {:ok, view, _} = live(conn, ~p"/")
+      {:ok, other, _} = live(build_conn() |> dashboard_login(), ~p"/audit")
+      assert has_element?(other, "#update-available")
+
+      view |> element("#update-dismiss-form") |> render_submit()
+
+      _ = render(other)
+      refute has_element?(other, "#update-available")
+      render_async(view)
+      render_async(other)
+    end
+
+    test "controller-rendered pages keep the POST fallback form", %{conn: conn} do
+      start_checker("v99.0.0")
+      doc = conn |> get(~p"/about") |> html_response(200) |> LazyHTML.from_fragment()
+
+      assert LazyHTML.query(doc, "#update-dismiss-form[action='/release/update/dismiss']")
+             |> Enum.count() == 1
+    end
+  end
 end
