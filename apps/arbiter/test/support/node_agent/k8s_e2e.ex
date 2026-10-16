@@ -33,7 +33,7 @@ defmodule Arbiter.Test.K8sE2E do
   `ARB_K8S_E2E_IMAGE` (a digest-pinned reference under `docker.io/alpine/`).
   """
 
-  alias Arbiter.NodeAgent.K8s.Client
+  alias Arbiter.NodeAgent.K8s.{Client, InstallManifest}
 
   @image "docker.io/alpine/socat@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e"
   @registry "docker.io/alpine"
@@ -255,56 +255,42 @@ defmodule Arbiter.Test.K8sE2E do
 
   # -- objects ------------------------------------------------------------------------------
 
-  defp base_objects(ns, priority, policies?) do
-    [
-      %{
-        "apiVersion" => "v1",
-        "kind" => "Namespace",
-        "metadata" => %{
-          "name" => ns,
-          "labels" => %{
-            "pod-security.kubernetes.io/enforce" => "restricted",
-            "pod-security.kubernetes.io/enforce-version" => "latest"
-          }
-        }
-      },
-      %{
-        "apiVersion" => "scheduling.k8s.io/v1",
-        "kind" => "PriorityClass",
-        "metadata" => %{"name" => priority},
-        "value" => -100,
-        "preemptionPolicy" => "Never",
-        "description" => "arbiter e2e (disposable)"
-      },
-      %{
-        "apiVersion" => "v1",
-        "kind" => "ResourceQuota",
-        "metadata" => %{"name" => "arbiter-workers", "namespace" => ns},
-        "spec" => %{
-          "hard" => %{
-            "pods" => "10",
-            "requests.cpu" => "4",
-            "requests.memory" => "8Gi",
-            "limits.cpu" => "8",
-            "limits.memory" => "16Gi",
-            "requests.ephemeral-storage" => "16Gi"
-          }
-        }
-      },
-      controller_deployment(ns),
-      %{
-        "apiVersion" => "v1",
-        "kind" => "Service",
-        "metadata" => %{"name" => "arbiter-controller", "namespace" => ns},
-        "spec" => %{
-          "selector" => %{"app.kubernetes.io/name" => "arbiter-controller"},
-          "ports" => [
-            %{"name" => "bridge", "port" => 9443, "targetPort" => 9443},
-            %{"name" => "http", "port" => 9444, "targetPort" => 9444}
-          ]
-        }
-      }
-    ] ++ if(policies?, do: policies(ns), else: [])
+  # The namespace-level objects come from the real install manifest, so this helper cannot
+  # drift from what an operator applies (quota, LimitRange, ServiceAccounts, the CA
+  # ConfigMap, the Service, the NetworkPolicies). Only the PriorityClass name (cluster
+  # scoped, per test) and the controller Deployment (a stand-in) differ.
+  @doc false
+  @spec base_objects(String.t(), String.t(), boolean()) :: [map()]
+  def base_objects(ns, priority, policies?) do
+    {:ok, spec} = InstallManifest.parse(%{"name" => "e2e", "namespace" => ns})
+
+    %{bootstrap: bootstrap, node: node} =
+      InstallManifest.documents(spec,
+        image: image(),
+        primary_url: "https://primary.invalid",
+        registry: @registry
+      )
+
+    wanted_node = [
+      {"ServiceAccount", "arbiter-worker"},
+      {"ServiceAccount", "arbiter-controller"},
+      {"ConfigMap", "arbiter-ca"},
+      {"Service", "arbiter-controller"}
+    ]
+
+    bootstrap =
+      Enum.flat_map(bootstrap, fn
+        %{"kind" => "PriorityClass"} = doc -> [put_in(doc, ["metadata", "name"], priority)]
+        %{"kind" => "NetworkPolicy"} = doc -> if(policies?, do: [doc], else: [])
+        doc -> [doc]
+      end)
+
+    # The stand-in controller only listens; it needs no egress.
+    bootstrap = Enum.reject(bootstrap, &(&1["metadata"]["name"] == "controller-egress"))
+
+    bootstrap ++
+      Enum.filter(node, &({&1["kind"], &1["metadata"]["name"]} in wanted_node)) ++
+      [controller_deployment(ns)]
   end
 
   # A listener on the bridge ports and on 9445 (a port that is not a bridge port, the
@@ -348,47 +334,13 @@ defmodule Arbiter.Test.K8sE2E do
                 },
                 "resources" => %{
                   "requests" => %{"cpu" => "10m", "memory" => "16Mi"},
-                  "limits" => %{"memory" => "64Mi"}
+                  "limits" => %{"cpu" => "100m", "memory" => "64Mi"}
                 }
               }
             ]
           }
         }
       }
-    }
-  end
-
-  # Section 9.1 of the design, minus the controller's egress (the stand-in controller
-  # only listens).
-  defp policies(ns) do
-    worker = %{"matchLabels" => %{"app.kubernetes.io/component" => "worker"}}
-    controller = %{"matchLabels" => %{"app.kubernetes.io/component" => "controller"}}
-    ports = [%{"protocol" => "TCP", "port" => 9443}, %{"protocol" => "TCP", "port" => 9444}]
-
-    [
-      policy(ns, "default-deny", %{
-        "podSelector" => %{},
-        "policyTypes" => ["Ingress", "Egress"]
-      }),
-      policy(ns, "worker-to-controller", %{
-        "podSelector" => worker,
-        "policyTypes" => ["Egress"],
-        "egress" => [%{"to" => [%{"podSelector" => controller}], "ports" => ports}]
-      }),
-      policy(ns, "controller-ingress-from-workers", %{
-        "podSelector" => controller,
-        "policyTypes" => ["Ingress"],
-        "ingress" => [%{"from" => [%{"podSelector" => worker}], "ports" => ports}]
-      })
-    ]
-  end
-
-  defp policy(ns, name, spec) do
-    %{
-      "apiVersion" => "networking.k8s.io/v1",
-      "kind" => "NetworkPolicy",
-      "metadata" => %{"name" => name, "namespace" => ns},
-      "spec" => spec
     }
   end
 end
