@@ -404,8 +404,29 @@ defmodule Arbiter.Trackers.Shortcut do
   def extract_title(%{"name" => name}) when is_binary(name) and name != "", do: name
   def extract_title(_), do: "(no title)"
 
+  # A story's `epic_id` points at a Shortcut epic; resolve its name for the
+  # local mirror. The `epic-` prefix keeps the ref out of the story id space.
   @impl true
-  def extract_description(%{"description" => desc}) when is_binary(desc), do: desc
+  def epic_for(%{"epic_id" => epic_id}) when is_integer(epic_id) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, epic} <- request(cfg, :get, "/epics/#{epic_id}", []) |> handle_json() do
+      {:ok,
+       %{
+         ref: "epic-#{epic_id}",
+         title: extract_title(epic),
+         description: extract_description(epic)
+       }}
+    end
+  end
+
+  def epic_for(_), do: nil
+
+  @impl true
+  def extract_description(%{
+        "description" => desc
+      })
+      when is_binary(desc), do: desc
+
   def extract_description(_), do: ""
 
   # Shortcut has no native priority field in its standard schema. Returns nil

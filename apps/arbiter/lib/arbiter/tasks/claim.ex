@@ -19,10 +19,11 @@ defmodule Arbiter.Tasks.Claim do
       against open tasks, in both directions.
   """
 
-  alias Arbiter.Tasks.{Issue, IssueSerializer, Workspace}
+  alias Arbiter.Tasks.{Dependencies, Issue, IssueSerializer, Workspace}
   alias Arbiter.Trackers
 
   require Ash.Query
+  require Logger
 
   @typedoc "Outcome of a single claim attempt."
   # The three tuple-shaped errors are NOT decoration: `refusal/1` matches each one
@@ -300,9 +301,16 @@ defmodule Arbiter.Tasks.Claim do
       case find_existing(workspace, type, ref) do
         {:ok, task} ->
           case maybe_apply_overrides(task, overrides) do
-            {:ok, updated_task} -> {:ok, :existing, updated_task}
-            :no_changes -> {:ok, :existing, task}
-            {:error, err} -> {:error, err}
+            {:ok, updated_task} ->
+              mirror_epic(adapter, workspace, issue_map, updated_task)
+              {:ok, :existing, updated_task}
+
+            :no_changes ->
+              mirror_epic(adapter, workspace, issue_map, task)
+              {:ok, :existing, task}
+
+            {:error, err} ->
+              {:error, err}
           end
 
         :none ->
@@ -314,6 +322,7 @@ defmodule Arbiter.Tasks.Claim do
             case create_task(workspace, type, ref, issue_map, adapter, overrides) do
               {:ok, :created, task} = result ->
                 maybe_signal_claim(adapter, ref, task, workspace, current_user_id)
+                mirror_epic(adapter, workspace, issue_map, task)
                 result
 
               error ->
@@ -321,6 +330,59 @@ defmodule Arbiter.Tasks.Claim do
             end
           end
       end
+    end
+  end
+
+  # Mirror the issue's tracker epic (Shortcut epic, GitHub milestone) as one
+  # local epic ticket per grouping: found by `tracker_ref`, else created with
+  # `auto_close`, then the claimed task is attached with `parent_of`. Best
+  # effort — a failure here never undoes the claim.
+  defp mirror_epic(adapter, workspace, issue_map, task) do
+    with true <- function_exported?(adapter, :epic_for, 1),
+         {:ok, epic_info} <- adapter.epic_for(issue_map),
+         {:ok, epic} <- find_or_create_epic(workspace, epic_info),
+         {:ok, _} <- attach_to_epic(epic, task) do
+      :ok
+    else
+      false -> :ok
+      nil -> :ok
+      {:error, reason} -> Logger.warning("claim: epic mirror failed: #{inspect(reason)}")
+    end
+  end
+
+  # tracker_type stays :none: the epic is a local rollup, so closing it must
+  # not try to transition the upstream grouping as if it were a story.
+  defp find_or_create_epic(workspace, %{ref: ref} = info) do
+    query =
+      Ash.Query.filter(
+        Issue,
+        workspace_id == ^workspace.id and issue_type == :epic and tracker_ref == ^ref
+      )
+
+    case Ash.read(query) do
+      {:ok, [epic | _]} ->
+        {:ok, epic}
+
+      {:ok, []} ->
+        Ash.create(Issue, %{
+          title: info.title,
+          description: info[:description] || "",
+          issue_type: :epic,
+          auto_close: true,
+          tracker_type: :none,
+          tracker_ref: ref,
+          workspace_id: workspace.id
+        })
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp attach_to_epic(epic, task) do
+    case Dependencies.for_issue(task.id) do
+      %{parents: [_ | _]} -> {:ok, :already_parented}
+      _ -> Dependencies.add(epic.id, task.id, :parent_of, notes: "tracker epic mirror")
     end
   end
 

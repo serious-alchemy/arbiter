@@ -399,6 +399,16 @@ defmodule Arbiter.Trackers.GitHub do
   # Parse "type: X" (written by GitHub.create/1 for round-trip stability) or a
   # bare conventional label name (GitHub's own default labels, e.g. "bug",
   # "enhancement"). Explicit "type: X" labels take priority over bare labels.
+  # A GitHub milestone is the closest native grouping on the issue payload;
+  # it carries its own title, so no extra API call is needed.
+  @impl true
+  def epic_for(%{"milestone" => %{"number" => n, "title" => title} = ms})
+      when is_integer(n) and is_binary(title) do
+    {:ok, %{ref: "milestone-#{n}", title: title, description: ms["description"] || ""}}
+  end
+
+  def epic_for(_), do: nil
+
   @impl true
   def extract_issue_type(issue_map) do
     names = label_names(issue_map)
