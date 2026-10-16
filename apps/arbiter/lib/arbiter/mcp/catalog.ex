@@ -2289,8 +2289,12 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Reconcile the workspace's tickets against its external tracker (`arb sync`): open assigned " <>
-          "issues with no ticket get a linked ticket; open tickets whose issue is closed upstream or " <>
-          "reassigned away get closed (unassigned issues are left alone); closed tickets whose close was " <>
+          "issues with no ticket get a linked ticket; open tickets whose issue is reassigned away get " <>
+          "closed (unassigned issues are left alone); claimed tickets also re-sync with their story " <>
+          "(`resync`): an edited priority/title/description is pulled onto a backlog/queued ticket, " <>
+          "never onto one in flight (the coordinator gets an inbox note instead), a field changed " <>
+          "locally wins and is reported as divergent, and a story closed or archived upstream is " <>
+          "flagged to the coordinator inbox — the ticket is never closed for it; closed tickets whose close was " <>
           "meant to propagate upstream — a recorded close intent, or for rows closed before that was " <>
           "recorded a non-blank `pr_ref` — but whose tracker issue is still open are reported as `drift` " <>
           "(a close that never propagated upstream — drift entries are report-only and never mutate the " <>

@@ -26,9 +26,11 @@ defmodule Arbiter.Tasks.Claim do
     IssueRepo,
     IssueSerializer,
     TrackerAcceptance,
+    TrackerResync,
     Workspace
   }
 
+  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Trackers
 
   require Ash.Query
@@ -52,12 +54,14 @@ defmodule Arbiter.Tasks.Claim do
           {:create, ref :: String.t(), summary :: map()}
           | {:close, issue_id :: String.t(), reason :: String.t()}
           | {:drift, issue_id :: String.t(), reason :: String.t()}
+          | {:resync, issue_id :: String.t(), TrackerResync.decision()}
 
   @typedoc "Outcome of applying a single planned action."
   @type action_result ::
           {:created, Issue.t()}
           | {:closed, Issue.t()}
           | {:drifted, Issue.t()}
+          | {:resynced, Issue.t(), TrackerResync.decision()}
           | {:error, action(), term()}
 
   @doc """
@@ -130,13 +134,22 @@ defmodule Arbiter.Tasks.Claim do
   end
 
   @doc """
-  Build a reconcile plan for the workspace. Three kinds of action:
+  Build a reconcile plan for the workspace. Four kinds of action:
 
     * issue assigned to viewer + open + no open task → `{:create, ref, summary}`.
-    * open task whose tracker issue is closed upstream, or is now assigned to
-      somebody other than the viewer → `{:close, task_id, reason}`. An issue
-      that is merely *unassigned*, or that can't be fetched, yields no action
-      (bd-83ojwi): unassigned is a resting state, not abandonment.
+    * open task whose tracker issue is now assigned to somebody other than the
+      viewer → `{:close, task_id, reason}`. An issue that is merely
+      *unassigned*, or that can't be fetched, yields no action (bd-83ojwi):
+      unassigned is a resting state, not abandonment. An issue *closed* upstream
+      no longer proposes a close (bd-evxsrx): it is flagged by the `:resync`
+      action below, because closing a ticket on the tracker's say-so alone can
+      destroy work in flight.
+    * open task whose tracker story changed since the last reconcile (priority,
+      title, description, or closed/archived) → `{:resync, task_id, decision}`,
+      decided by `Arbiter.Tasks.TrackerResync`: backlog/queued tickets take the
+      edit, in-flight tickets are left alone and the coordinator is told, fields
+      the coordinator changed locally win and are reported as divergent, and a
+      closed story is flagged, never closed.
     * task closed locally whose linked tracker issue is still open (the
       bd-2wilou drift case — a close that never propagated upstream) →
       `{:drift, task_id, reason}`. This is report-only: `apply_plan/3` never
@@ -432,6 +445,9 @@ defmodule Arbiter.Tasks.Claim do
   def serialize_action({:drift, task_id, reason}),
     do: %{action: "drift", task_id: task_id, reason: reason}
 
+  def serialize_action({:resync, task_id, decision}),
+    do: Map.merge(%{action: "resync", task_id: task_id}, serialize_decision(decision))
+
   @doc "The outcome of applying one planned action as JSON."
   @spec serialize_result(action_result()) :: map()
   def serialize_result({:created, task}),
@@ -442,6 +458,13 @@ defmodule Arbiter.Tasks.Claim do
 
   def serialize_result({:drifted, task}),
     do: %{outcome: "drifted", task: IssueSerializer.data(task)}
+
+  def serialize_result({:resynced, task, decision}),
+    do: %{
+      outcome: "resynced",
+      task: IssueSerializer.data(task),
+      resync: serialize_decision(decision)
+    }
 
   def serialize_result({:error, action, reason}),
     do: %{outcome: "error", action: serialize_action(action), reason: inspect(reason)}
@@ -461,7 +484,21 @@ defmodule Arbiter.Tasks.Claim do
     }
   end
 
+  # What a re-sync did (or would do) to a ticket: the fields pulled from the
+  # tracker, the fields it left alone, and whether a closed story was flagged.
+  defp serialize_decision(decision) do
+    %{
+      applied: decision.applied,
+      divergent: Enum.map(decision.divergent, &Atom.to_string/1),
+      mid_flight: Enum.map(decision.mid_flight, &Atom.to_string/1),
+      closed_upstream: decision.closed_upstream
+    }
+  end
+
   # ---- internals: claim ----------------------------------------------------
+
+  defp initial_snapshot(adapter, issue_map),
+    do: adapter |> TrackerResync.observe(issue_map) |> TrackerResync.initial_snapshot()
 
   defp do_claim(adapter, type, workspace, ref, force?, assign?, overrides) do
     with {:ok, current_user_id} <- get_current_user(adapter, workspace),
@@ -657,7 +694,8 @@ defmodule Arbiter.Tasks.Claim do
         description: adapter.extract_description(issue_map),
         tracker_type: type,
         tracker_ref: ref,
-        workspace_id: workspace.id
+        workspace_id: workspace.id,
+        tracker_snapshot: initial_snapshot(adapter, issue_map)
       }
       |> put_acceptance(adapter, issue_map)
       |> maybe_put_extracted(:priority, adapter, :extract_priority, issue_map)
@@ -878,6 +916,9 @@ defmodule Arbiter.Tasks.Claim do
            }}
         end
 
+      # One fetch per open task serves both the close check and the re-sync.
+      fetched = fetch_open_issues(adapter, task_by_ref)
+
       closes =
         task_by_ref
         # bd-9so315: a task parked at :verifying is one whose
@@ -889,15 +930,25 @@ defmodule Arbiter.Tasks.Claim do
           Map.has_key?(assigned_by_ref, ref) or task.state == :verifying
         end)
         |> Enum.flat_map(fn {ref, task} ->
-          case close_reason(adapter, ref, current_user_id) do
+          case close_reason(adapter, ref, Map.get(fetched, ref), current_user_id) do
             nil -> []
             reason -> [{:close, task.id, reason}]
           end
         end)
 
+      closing_ids = MapSet.new(closes, fn {:close, id, _} -> id end)
+
+      resyncs =
+        for {ref, task} <- task_by_ref,
+            not MapSet.member?(closing_ids, task.id),
+            issue = Map.get(fetched, ref),
+            decision = TrackerResync.decide(task, TrackerResync.observe(adapter, issue)) do
+          {:resync, task.id, decision}
+        end
+
       drifts = build_drift(adapter, workspace, type)
 
-      {:ok, Enum.sort(creates ++ closes ++ drifts, &action_order/2)}
+      {:ok, Enum.sort(creates ++ closes ++ resyncs ++ drifts, &action_order/2)}
     end
   end
 
@@ -915,28 +966,31 @@ defmodule Arbiter.Tasks.Claim do
   # `nil` and produces no action at all, so neither a quiet board nor a
   # transient API failure can bulk-close live work. Under-closing is visible
   # and cheap to correct by hand; over-closing silently destroys open work.
-  defp close_reason(adapter, ref, current_user_id) do
-    case adapter.fetch(ref) do
-      {:ok, issue} ->
-        # Compare against the viewer explicitly: an issue still assigned to us
-        # that merely failed to show up in `list_open` (paging, index lag) is
-        # not a reassignment.
-        others = adapter.assignees(issue) -- [current_user_id]
+  #
+  # bd-evxsrx: "closed upstream" is deliberately not a close any more — it is
+  # flagged to the coordinator by the re-sync (`TrackerResync`), which leaves the
+  # ticket as it is. `issue` is nil when the fetch failed.
+  defp close_reason(_adapter, _ref, nil, _current_user_id), do: nil
 
-        cond do
-          adapter.issue_status(issue) == :closed ->
-            "tracker issue #{ref} closed"
-
-          others != [] ->
-            "tracker issue #{ref} reassigned to #{Enum.join(others, ", ")}"
-
-          true ->
-            nil
-        end
-
-      {:error, _} ->
-        nil
+  defp close_reason(adapter, ref, issue, current_user_id) do
+    # Compare against the viewer explicitly: an issue still assigned to us
+    # that merely failed to show up in `list_open` (paging, index lag) is
+    # not a reassignment.
+    case adapter.assignees(issue) -- [current_user_id] do
+      [] -> nil
+      others -> "tracker issue #{ref} reassigned to #{Enum.join(others, ", ")}"
     end
+  end
+
+  # ref => fetched issue map, for every open task whose story could be fetched.
+  # A failed fetch drops out (no close, no re-sync) rather than failing the plan.
+  defp fetch_open_issues(adapter, task_by_ref) do
+    Enum.reduce(task_by_ref, %{}, fn {ref, _task}, acc ->
+      case adapter.fetch(ref) do
+        {:ok, issue} -> Map.put(acc, ref, issue)
+        {:error, _} -> acc
+      end
+    end)
   end
 
   # bd-2wilou: a task closed locally whose linked tracker issue is still open
@@ -1037,11 +1091,14 @@ defmodule Arbiter.Tasks.Claim do
 
   defp action_order({:create, a, _}, {:create, b, _}), do: a <= b
   defp action_order({:close, a, _}, {:close, b, _}), do: a <= b
+  defp action_order({:resync, a, _}, {:resync, b, _}), do: a <= b
   defp action_order({:drift, a, _}, {:drift, b, _}), do: a <= b
   defp action_order({:create, _, _}, _), do: true
   defp action_order(_, {:create, _, _}), do: false
-  defp action_order({:close, _, _}, {:drift, _, _}), do: true
-  defp action_order({:drift, _, _}, {:close, _, _}), do: false
+  defp action_order({:close, _, _}, _), do: true
+  defp action_order(_, {:close, _, _}), do: false
+  defp action_order({:resync, _, _}, {:drift, _, _}), do: true
+  defp action_order({:drift, _, _}, {:resync, _, _}), do: false
 
   defp read_open_tracker_tasks(workspace, type) do
     query =
@@ -1077,6 +1134,16 @@ defmodule Arbiter.Tasks.Claim do
     end
   end
 
+  # bd-evxsrx: re-read the ticket and decide again against the tracker values the
+  # plan was built from, so a ticket that went in flight between a dry run and
+  # the apply is still never rewritten.
+  defp apply_action(_workspace, {:resync, task_id, planned} = action) do
+    case Ash.get(Issue, task_id) do
+      {:ok, task} -> resync_task(task, planned, action)
+      {:error, reason} -> {:error, action, reason}
+    end
+  end
+
   # Report-only: a `:drift` action never writes to the local task. Fixing
   # drift means propagating the close upstream (`ticket_sync_upstream_close`),
   # not mutating the task that's already correctly closed locally.
@@ -1084,6 +1151,25 @@ defmodule Arbiter.Tasks.Claim do
     case Ash.get(Issue, task_id) do
       {:ok, task} -> {:drifted, task}
       {:error, reason} -> {:error, action, reason}
+    end
+  end
+
+  defp resync_task(task, planned, action) do
+    case TrackerResync.decide(task, planned.observed) do
+      nil ->
+        {:resynced, task, TrackerResync.settled(planned)}
+
+      decision ->
+        attrs = Map.put(decision.applied, :tracker_snapshot, decision.snapshot)
+
+        case Ash.update(task, attrs, action: :record_tracker_sync) do
+          {:ok, updated} ->
+            CoordinatorNotifier.tracker_resync(updated, decision)
+            {:resynced, updated, decision}
+
+          {:error, reason} ->
+            {:error, action, reason}
+        end
     end
   end
 

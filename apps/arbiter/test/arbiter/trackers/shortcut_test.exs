@@ -1154,6 +1154,18 @@ defmodule Arbiter.Trackers.ShortcutTest do
     end
   end
 
+  describe "issue_status/1" do
+    # bd-evxsrx: an archived story is gone from the board the same as a
+    # completed one, so the claimed-ticket re-sync flags it as closed.
+    test "an archived story reads as closed, a completed one too" do
+      assert Shortcut.issue_status(%{"archived" => true}) == :closed
+      assert Shortcut.issue_status(%{"completed" => true}) == :closed
+      assert Shortcut.issue_status(%{"archived" => true, "started" => true}) == :closed
+      assert Shortcut.issue_status(%{"archived" => false, "started" => true}) == :in_progress
+      assert Shortcut.issue_status(%{}) == :open
+    end
+  end
+
   # ---- extract_difficulty/1 --------------------------------------------------
 
   describe "extract_difficulty/1" do

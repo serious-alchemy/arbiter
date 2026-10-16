@@ -494,6 +494,7 @@ defmodule Arbiter.Trackers.Shortcut do
   def assignees(_), do: []
 
   @impl true
+  def issue_status(%{"archived" => true}), do: :closed
   def issue_status(%{"completed" => true}), do: :closed
   def issue_status(%{"started" => true}), do: :in_progress
   def issue_status(_), do: :open

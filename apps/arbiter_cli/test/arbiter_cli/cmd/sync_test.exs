@@ -90,4 +90,37 @@ defmodule ArbiterCli.Cmd.SyncTest do
     {out, _err, 0} = capture(fn -> Sync.run([]) end)
     assert out =~ "arb ticket sync-upstream-close bd-d"
   end
+
+  test "a resync entry says what was pulled, held back, divergent or flagged" do
+    resync = %{
+      "action" => "resync",
+      "task_id" => "bd-r",
+      "applied" => %{"title" => "New"},
+      "mid_flight" => ["priority"],
+      "divergent" => ["description"],
+      "closed_upstream" => true
+    }
+
+    stub_routes([
+      @workspace_lookup,
+      {{"get", "/api/workspaces/ws-1/sync/plan"}, {%{"data" => [resync]}, 200}},
+      {{"post", "/api/workspaces/ws-1/sync"},
+       {%{
+          "data" => [resync],
+          "results" => [
+            %{"outcome" => "resynced", "task" => %{"id" => "bd-r"}, "resync" => resync}
+          ],
+          "applied" => true
+        }, 200}}
+    ])
+
+    {out, _err, 0} = capture(fn -> Sync.run(["--dry"]) end)
+    assert out =~ "resync bd-r: pulled title"
+    assert out =~ "held back (in flight) priority"
+    assert out =~ "divergent (local wins) description"
+    assert out =~ "flagged, not closed"
+
+    {out, _err, 0} = capture(fn -> Sync.run([]) end)
+    assert out =~ "resynced bd-r: pulled title"
+  end
 end

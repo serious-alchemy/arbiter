@@ -955,7 +955,9 @@ defmodule Arbiter.Tasks.ClaimTest do
         end
       end)
 
-      assert {:ok, []} = Claim.plan(ws)
+      # The ticket predates snapshots, so the plan only adopts the story's values.
+      assert {:ok, [{:resync, _, %{applied: %{}, divergent: [], closed_upstream: false}}]} =
+               Claim.plan(ws)
     end
 
     # bd-9so315: the sync's close arm reads "the upstream issue is gone, so the
@@ -1010,7 +1012,9 @@ defmodule Arbiter.Tasks.ClaimTest do
       assert {:ok, []} = Claim.plan(ws)
     end
 
-    test "an issue genuinely closed upstream still proposes a close", %{github_ws: ws} do
+    # bd-evxsrx: closing a ticket on the tracker's say-so alone can destroy work
+    # in flight, so a closed story is flagged (`:resync`) and never closed.
+    test "an issue closed upstream is flagged, not closed", %{github_ws: ws} do
       task = open_task(ws, "62")
 
       stub_gh(fn conn ->
@@ -1026,9 +1030,8 @@ defmodule Arbiter.Tasks.ClaimTest do
         end
       end)
 
-      assert {:ok, [{:close, task_id, reason}]} = Claim.plan(ws)
+      assert {:ok, [{:resync, task_id, %{closed_upstream: true}}]} = Claim.plan(ws)
       assert task_id == task.id
-      assert reason =~ "closed"
     end
 
     test "an issue reassigned to someone else still proposes a close", %{github_ws: ws} do
