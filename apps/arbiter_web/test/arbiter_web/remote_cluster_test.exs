@@ -337,18 +337,33 @@ defmodule ArbiterWeb.RemoteClusterTest do
       node_id = boot_agent(ctx)
       lease_held!()
 
+      unpinned = %{"tag" => "x", "plan" => nil, "ref" => "docker.io/library/alpine:latest"}
+
+      assert {:error, {:refused, "bad_spec", detail}} =
+               Executor.prepare(%{id: node_id}, spec("run-e2", %{"image" => unpinned}),
+                 owner: self()
+               )
+
+      assert detail =~ "image"
+    end
+
+    test "an image under no configured registry prefix is refused image_unavailable (KH13)",
+         ctx do
+      node_id = boot_agent(ctx)
+      lease_held!()
+
       outside = %{
         "tag" => "x",
         "plan" => nil,
         "ref" => "docker.io/library/alpine@sha256:#{Fx.digest()}"
       }
 
-      assert {:error, {:refused, "bad_spec", detail}} =
+      assert {:error, {:refused, "image_unavailable", detail}} =
                Executor.prepare(%{id: node_id}, spec("run-e2", %{"image" => outside}),
                  owner: self()
                )
 
-      assert detail =~ "image"
+      assert detail =~ "docker.io"
     end
 
     test "no ResourceQuota headroom is refused no_capacity: a hold, not a failure", ctx do
