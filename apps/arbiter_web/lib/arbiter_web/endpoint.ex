@@ -59,6 +59,8 @@ defmodule ArbiterWeb.Endpoint do
     from: :arbiter_web,
     gzip: not code_reloading?,
     only: ArbiterWeb.static_paths(),
+    # phx.digest renames root files to favicon-<md5>.svg; `only` is exact-segment.
+    only_matching: ~w(favicon- robots-),
     raise_on_missing_only: code_reloading?
 
   # Code reloading can be explicitly enabled under the
