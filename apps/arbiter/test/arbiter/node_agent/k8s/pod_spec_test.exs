@@ -386,25 +386,29 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       pod = build!()
       res = worker(pod)["resources"]
 
-      assert res["limits"] == %{"cpu" => "1500m", "memory" => "3Gi"}
+      assert res["limits"] == %{"cpu" => "1500m", "memory" => "3Gi", "ephemeral-storage" => "9Gi"}
       assert res["requests"] == %{"cpu" => "1", "memory" => "2Gi", "ephemeral-storage" => "4Gi"}
       refute inspect(res) =~ "swap"
     end
 
     test "the effective limit is min(spec, config): the in-cluster config is authoritative" do
       pod = build!(run_spec(%{"limits" => %{"memory" => "64g", "cpus" => "32"}}))
-      assert worker(pod)["resources"]["limits"] == %{"cpu" => "2", "memory" => "4Gi"}
+
+      assert worker(pod)["resources"]["limits"] ==
+               %{"cpu" => "2", "memory" => "4Gi", "ephemeral-storage" => "9Gi"}
     end
 
     test "no spec limits: the config limits apply" do
       pod = build!(run_spec(%{"limits" => %{}}))
-      assert worker(pod)["resources"]["limits"] == %{"cpu" => "2", "memory" => "4Gi"}
+
+      assert worker(pod)["resources"]["limits"] ==
+               %{"cpu" => "2", "memory" => "4Gi", "ephemeral-storage" => "9Gi"}
     end
 
     test "requests never exceed the effective limit" do
       pod = build!(run_spec(%{"limits" => %{"memory" => "1g", "cpus" => "0.5"}}))
       res = worker(pod)["resources"]
-      assert res["limits"] == %{"cpu" => "500m", "memory" => "1Gi"}
+      assert res["limits"] == %{"cpu" => "500m", "memory" => "1Gi", "ephemeral-storage" => "9Gi"}
       assert res["requests"]["memory"] == "1Gi"
       assert res["requests"]["cpu"] == "500m"
     end
@@ -870,8 +874,12 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       assert {"POSTGRES_PASSWORD", "postgres"} in env_pairs(svc)
 
       assert svc["resources"] == %{
-               "requests" => %{"cpu" => "100m", "memory" => "256Mi"},
-               "limits" => %{"memory" => "512Mi"}
+               "requests" => %{
+                 "cpu" => "100m",
+                 "memory" => "256Mi",
+                 "ephemeral-storage" => "128Mi"
+               },
+               "limits" => %{"cpu" => "400m", "memory" => "512Mi", "ephemeral-storage" => "1Gi"}
              }
     end
 
@@ -931,6 +939,59 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
                  "effect" => "NoSchedule"
                }
              ] = spec["tolerations"]
+    end
+
+    test "spreads over hostnames by default: soft, honouring taints and node affinity (KH2)" do
+      pod = build!()
+
+      assert [constraint] = pod["spec"]["topologySpreadConstraints"]
+
+      assert constraint == %{
+               "maxSkew" => 1,
+               "topologyKey" => "kubernetes.io/hostname",
+               "whenUnsatisfiable" => "ScheduleAnyway",
+               "nodeTaintsPolicy" => "Honor",
+               "nodeAffinityPolicy" => "Honor",
+               "labelSelector" => %{
+                 "matchLabels" => %{
+                   "app.kubernetes.io/component" => "worker",
+                   "arbiter.dev/node" => "node-1"
+                 }
+               }
+             }
+
+      # the selector must match the pod's own labels, but not the per-run one
+      labels = pod["metadata"]["labels"]
+
+      for {k, v} <- constraint["labelSelector"]["matchLabels"],
+          do: assert(labels[k] == v)
+    end
+
+    test "zone spread is one constraint per topology key; spread can be switched off" do
+      keys = ["kubernetes.io/hostname", "topology.kubernetes.io/zone"]
+
+      pod =
+        build!(nil, %{
+          placement: %{
+            spread: %{topology_keys: keys, max_skew: 2, when_unsatisfiable: "DoNotSchedule"}
+          }
+        })
+
+      assert Enum.map(pod["spec"]["topologySpreadConstraints"], & &1["topologyKey"]) == keys
+
+      assert Enum.all?(
+               pod["spec"]["topologySpreadConstraints"],
+               &(&1["maxSkew"] == 2 and &1["whenUnsatisfiable"] == "DoNotSchedule")
+             )
+
+      off = build!(nil, %{placement: %{spread: %{enabled: false}}})
+      refute Map.has_key?(off["spec"], "topologySpreadConstraints")
+    end
+
+    test "the worker container gets an ephemeral-storage limit of work + tmp (KH2)" do
+      res = worker(build!())["resources"]
+      assert res["limits"]["ephemeral-storage"] == "9Gi"
+      assert res["requests"]["ephemeral-storage"] == "4Gi"
     end
 
     test "an empty runtime class and empty selectors emit no field" do

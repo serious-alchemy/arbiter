@@ -23,9 +23,9 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   | `boot_nonce` | **required**: the single-use 256-bit nonce for this pod |
   | `max_wall_s` | **required**: the run's wall budget; the pod deadline is this plus 1800 |
   | `namespace` | default `arbiter-workers` |
-  | `worker` | `requests`, `limits`, `work_size_limit`, `tmp_size_limit` |
+  | `worker` | `requests`, `limits`, `work_size_limit`, `tmp_size_limit`. An `ephemeral-storage` limit left unset is `work_size_limit + tmp_size_limit` (§20.2) |
   | `services_resources` | `requests` / `limits` for the `seed`, `snapshotter` and service containers |
-  | `placement` | `node_selector`, `tolerations`, `priority_class`, `runtime_class` |
+  | `placement` | `node_selector`, `tolerations`, `priority_class`, `runtime_class`, `spread` (`enabled`, `topology_keys`, `max_skew`, `when_unsatisfiable`: §20.2, a soft hostname spread by default) |
   | `image_pull_secrets` | names |
   | `timeouts` | `grace_s` (pod grace), `gate_timeout_s`; the others belong to the controller |
   | `snapshot_interval_s` | default 300 |
@@ -44,6 +44,7 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   @addr_re ~r/\A[A-Za-z0-9][A-Za-z0-9.-]*(:\d{1,5})?\z/
   @nonce_re ~r/\A[A-Za-z0-9_-]{16,128}\z/
   @uid_re ~r/\A[A-Za-z0-9-]{1,64}\z/
+  @selector_key_re ~r/\A([a-z0-9.-]+\/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?\z/
   @prefix_re ~r/\A[a-z0-9][a-z0-9.:\/_-]*\/\z/
 
   @resource_names ~w(cpu memory ephemeral-storage)
@@ -59,15 +60,23 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
       "work_size_limit" => "8Gi",
       "tmp_size_limit" => "1Gi"
     },
+    # Every figure is stated so the install's `LimitRange` defaults never fill one:
+    # cpu 4x and memory 2x the request are the `maxLimitRequestRatio` (§20.2).
     services_resources: %{
-      "requests" => %{"cpu" => "100m", "memory" => "256Mi"},
-      "limits" => %{"memory" => "512Mi"}
+      "requests" => %{"cpu" => "100m", "memory" => "256Mi", "ephemeral-storage" => "128Mi"},
+      "limits" => %{"cpu" => "400m", "memory" => "512Mi", "ephemeral-storage" => "1Gi"}
     },
     placement: %{
       "node_selector" => %{},
       "tolerations" => [],
       "priority_class" => "arbiter-worker",
-      "runtime_class" => ""
+      "runtime_class" => "",
+      "spread" => %{
+        "enabled" => true,
+        "topology_keys" => ["kubernetes.io/hostname"],
+        "max_skew" => 1,
+        "when_unsatisfiable" => "ScheduleAnyway"
+      }
     },
     image_pull_secrets: [],
     timeouts: %{"grace_s" => 120, "gate_timeout_s" => 30},
@@ -96,6 +105,7 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
          {:ok, max_wall_s} <- fetch(config, :max_wall_s, &int(&1, 1..@max_wall_s//1)),
          {:ok, namespace} <- optional(config, :namespace, &matching(&1, @dns_re)),
          {:ok, worker} <- optional(config, :worker, &worker/1),
+         {:ok, worker} <- storage_limit(worker),
          {:ok, services} <- optional(config, :services_resources, &resources/1),
          {:ok, placement} <- optional(config, :placement, &placement/1),
          {:ok, pull} <- optional(config, :image_pull_secrets, &names/1),
@@ -125,6 +135,20 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   end
 
   def normalize(_other), do: bad({:not_a_map, :config})
+
+  # The container's ephemeral-storage limit bounds the runaway write by the container
+  # and the quota, not only by the kubelet's eviction tick (§20.2): the `work` volume
+  # plus `tmp`, unless the operator named one.
+  defp storage_limit(%{"limits" => %{"ephemeral-storage" => _}} = worker), do: {:ok, worker}
+
+  defp storage_limit(worker) do
+    with {:ok, work} <- Quantity.memory(worker["work_size_limit"], :k8s),
+         {:ok, tmp} <- Quantity.memory(worker["tmp_size_limit"], :k8s) do
+      {:ok, put_in(worker, ["limits", "ephemeral-storage"], Quantity.format_memory(work + tmp))}
+    else
+      _ -> bad({:bad_value, :worker})
+    end
+  end
 
   # -- keys ---------------------------------------------------------------------------
 
@@ -273,22 +297,60 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
     map = stringify(map)
 
     with :ok <-
-           only_keys(map, ~w(node_selector tolerations priority_class runtime_class), :placement),
+           only_keys(
+             map,
+             ~w(node_selector tolerations priority_class runtime_class spread),
+             :placement
+           ),
          {:ok, selector} <- node_selector(Map.get(map, "node_selector", %{})),
          {:ok, tolerations} <- tolerations(Map.get(map, "tolerations", [])),
          {:ok, priority} <- name_or_empty(Map.get(map, "priority_class", "arbiter-worker")),
-         {:ok, runtime} <- name_or_empty(Map.get(map, "runtime_class", "")) do
+         {:ok, runtime} <- name_or_empty(Map.get(map, "runtime_class", "")),
+         {:ok, spread} <- spread(Map.get(map, "spread", %{})) do
       {:ok,
        %{
          "node_selector" => selector,
          "tolerations" => tolerations,
          "priority_class" => priority,
          "runtime_class" => runtime
-       }}
+       }
+       |> put_spread(spread)}
     end
   end
 
   defp placement(_), do: :error
+
+  # Absent keys are filled from the defaults by `merge_default/2`, so only the ones
+  # given are checked (and kept) here.
+  defp put_spread(placement, spread) when spread == %{}, do: placement
+  defp put_spread(placement, spread), do: Map.put(placement, "spread", spread)
+
+  defp spread(%{} = map) do
+    map = stringify(map)
+
+    with :ok <- only_keys(map, ~w(enabled topology_keys max_skew when_unsatisfiable), :spread),
+         :ok <- all_valid(map, &spread_field/1) do
+      {:ok, map}
+    end
+  end
+
+  defp spread(_), do: {:error, {:bad_value, :spread}}
+
+  defp all_valid(map, check) do
+    case Enum.find(map, &(not check.(&1))) do
+      nil -> :ok
+      {key, _} -> {:error, {:bad_value, {:spread, key}}}
+    end
+  end
+
+  defp spread_field({"enabled", v}), do: is_boolean(v)
+  defp spread_field({"max_skew", v}), do: is_integer(v) and v >= 1
+  defp spread_field({"when_unsatisfiable", v}), do: v in ~w(ScheduleAnyway DoNotSchedule)
+
+  defp spread_field({"topology_keys", keys}) do
+    is_list(keys) and keys != [] and keys == Enum.uniq(keys) and
+      Enum.all?(keys, &(is_binary(&1) and Regex.match?(@selector_key_re, &1)))
+  end
 
   defp node_selector(%{} = map) do
     map = stringify(map)

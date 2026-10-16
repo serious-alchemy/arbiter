@@ -224,6 +224,43 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
       assert small["requests.cpu"] != large["requests.cpu"]
     end
 
+    test "the quota bounds ephemeral-storage limits as well as requests (KH2)" do
+      hard = find(render!(%{"name" => "n"}), "ResourceQuota")["spec"]["hard"]
+      assert Map.has_key?(hard, "limits.ephemeral-storage")
+      assert Map.has_key?(hard, "requests.ephemeral-storage")
+    end
+
+    test "the LimitRange bounds a container and a pod, not only their defaults (KH2)" do
+      range = find(render!(%{"name" => "n"}), "LimitRange")["spec"]["limits"]
+      container = Enum.find(range, &(&1["type"] == "Container"))
+      pod = Enum.find(range, &(&1["type"] == "Pod"))
+
+      # worker limit is 2 cpu / 4Gi; cpu max is 2x the limit, memory max the limit,
+      # ephemeral-storage the work + tmp volumes (§20.2)
+      assert container["max"] == %{"cpu" => "4", "memory" => "4Gi", "ephemeral-storage" => "9Gi"}
+      assert container["maxLimitRequestRatio"] == %{"cpu" => "4", "memory" => "2"}
+
+      # an ephemeral-storage default, so the ephemeral max is not every sidecar's limit
+      assert container["default"]["ephemeral-storage"]
+      assert container["default"]["ephemeral-storage"] != container["max"]["ephemeral-storage"]
+
+      # the Pod max is the worker's limit plus the snapshotter and room for services (H14)
+      assert Enum.sort(Map.keys(pod["max"])) == ~w(cpu ephemeral-storage memory)
+      assert pod["max"]["memory"] != container["max"]["memory"]
+      assert pod["max"]["ephemeral-storage"] != container["max"]["ephemeral-storage"]
+    end
+
+    test "the LimitRange follows a larger worker size" do
+      range =
+        find(render!(%{"name" => "n", "cpu" => "2", "memory" => "8Gi"}), "LimitRange")["spec"][
+          "limits"
+        ]
+
+      container = Enum.find(range, &(&1["type"] == "Container"))
+      assert container["max"]["cpu"] == "8"
+      assert container["max"]["memory"] == "16Gi"
+    end
+
     test "workers can reach only the controller; the controller reaches API, DNS and 443" do
       docs = render!(%{"name" => "n"})
       policies = Enum.filter(docs, &(&1["kind"] == "NetworkPolicy"))

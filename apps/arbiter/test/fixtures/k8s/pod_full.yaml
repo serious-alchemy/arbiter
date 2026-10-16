@@ -71,6 +71,7 @@ spec:
       resources:
         limits:
           cpu: 1500m
+          ephemeral-storage: 9Gi
           memory: 3Gi
         requests:
           cpu: '1'
@@ -179,9 +180,12 @@ spec:
       name: seed
       resources:
         limits:
+          cpu: 400m
+          ephemeral-storage: 1Gi
           memory: 512Mi
         requests:
           cpu: 100m
+          ephemeral-storage: 128Mi
           memory: 256Mi
       securityContext:
         allowPrivilegeEscalation: false
@@ -221,9 +225,12 @@ spec:
       name: svc-postgres
       resources:
         limits:
+          cpu: 400m
+          ephemeral-storage: 1Gi
           memory: 512Mi
         requests:
           cpu: 100m
+          ephemeral-storage: 128Mi
           memory: 256Mi
       restartPolicy: Always
       securityContext:
@@ -275,9 +282,12 @@ spec:
       name: svc-s3
       resources:
         limits:
+          cpu: 400m
+          ephemeral-storage: 1Gi
           memory: 512Mi
         requests:
           cpu: 100m
+          ephemeral-storage: 128Mi
           memory: 256Mi
       restartPolicy: Always
       securityContext:
@@ -327,9 +337,12 @@ spec:
       name: snapshotter
       resources:
         limits:
+          cpu: 400m
+          ephemeral-storage: 1Gi
           memory: 512Mi
         requests:
           cpu: 100m
+          ephemeral-storage: 128Mi
           memory: 256Mi
       restartPolicy: Always
       securityContext:
@@ -396,6 +409,16 @@ spec:
       key: dedicated
       operator: Equal
       value: arbiter
+  topologySpreadConstraints:
+    - labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: worker
+          arbiter.dev/node: node-1
+      maxSkew: 1
+      nodeAffinityPolicy: Honor
+      nodeTaintsPolicy: Honor
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
   volumes:
     - emptyDir:
         sizeLimit: 8Gi

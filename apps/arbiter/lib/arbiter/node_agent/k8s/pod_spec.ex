@@ -600,7 +600,35 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
         |> put_unless_empty("nodeSelector", cfg.placement["node_selector"])
         |> put_unless_empty("tolerations", cfg.placement["tolerations"])
         |> put_unless_empty("runtimeClassName", cfg.placement["runtime_class"])
+        |> put_unless_empty("topologySpreadConstraints", spread(cfg, run))
     }
+  end
+
+  # §20.2: a soft spread over the cluster, so a shared cluster's workers do not pile on
+  # one node. The selector names the install's node (two installs in a cluster do not
+  # spread against each other) and not the run (it differs per pod). Tainted or
+  # affinity-excluded nodes are not "domains" the pod could use, so they do not count.
+  defp spread(cfg, run) do
+    spread = cfg.placement["spread"]
+
+    if spread["enabled"] do
+      selector = %{
+        "matchLabels" => Map.take(run.labels, ["app.kubernetes.io/component", "arbiter.dev/node"])
+      }
+
+      for key <- spread["topology_keys"] do
+        %{
+          "maxSkew" => spread["max_skew"],
+          "topologyKey" => key,
+          "whenUnsatisfiable" => spread["when_unsatisfiable"],
+          "nodeTaintsPolicy" => "Honor",
+          "nodeAffinityPolicy" => "Honor",
+          "labelSelector" => selector
+        }
+      end
+    else
+      []
+    end
   end
 
   defp put_unless_empty(map, _key, value) when value in [[], %{}, "", nil], do: map

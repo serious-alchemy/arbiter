@@ -32,12 +32,13 @@ metadata:
   namespace: ci-workers
 spec:
   hard:
-    limits.cpu: '6'
+    limits.cpu: 5700m
+    limits.ephemeral-storage: 35Gi
     limits.memory: 9984Mi
     pods: '5'
-    requests.cpu: 2100m
+    requests.cpu: 2325m
     requests.ephemeral-storage: 16768Mi
-    requests.memory: 4352Mi
+    requests.memory: 4416Mi
 
 ---
 apiVersion: v1
@@ -48,13 +49,26 @@ metadata:
 spec:
   limits:
     - default:
-        cpu: 500m
-        memory: 512Mi
+        cpu: 400m
+        ephemeral-storage: 1Gi
+        memory: 256Mi
       defaultRequest:
         cpu: 100m
         ephemeral-storage: 128Mi
         memory: 128Mi
+      max:
+        cpu: '2'
+        ephemeral-storage: 9Gi
+        memory: 2Gi
+      maxLimitRequestRatio:
+        cpu: '4'
+        memory: '2'
       type: Container
+    - max:
+        cpu: '3'
+        ephemeral-storage: 14Gi
+        memory: 4608Mi
+      type: Pod
 
 ---
 apiVersion: networking.k8s.io/v1
@@ -436,7 +450,7 @@ spec:
               cpu: '1'
               memory: 512Mi
             requests:
-              cpu: 100m
+              cpu: 250m
               memory: 256Mi
           securityContext:
             allowPrivilegeEscalation: false

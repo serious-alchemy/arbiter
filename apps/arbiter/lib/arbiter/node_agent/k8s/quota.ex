@@ -40,7 +40,15 @@ defmodule Arbiter.NodeAgent.K8s.Quota do
     "memory" => "128Mi",
     "ephemeral-storage" => "128Mi"
   }
-  @limit_range_default_limit %{"cpu" => "500m", "memory" => "512Mi"}
+  # The default limit stays within the `LimitRange`'s `maxLimitRequestRatio` (cpu 4,
+  # memory 2) of the default request, so a container that states nothing is admitted;
+  # and the ephemeral-storage default stops the `max` from becoming every sidecar's
+  # limit (a `LimitRange` with a `max` and no `default` defaults the limit to the max).
+  @limit_range_default_limit %{
+    "cpu" => "400m",
+    "memory" => "256Mi",
+    "ephemeral-storage" => "1Gi"
+  }
 
   @doc "The `LimitRange` `defaultRequest`: applied to a container with no request and no limit."
   @spec limit_range_default_request() :: %{String.t() => String.t()}
@@ -100,6 +108,13 @@ defmodule Arbiter.NodeAgent.K8s.Quota do
     steady = sum_demands([sidecars | app])
     Map.put(max_demands(peak, steady), "pods", 1)
   end
+
+  @doc """
+  What one container with `resources` (`requests` / `limits`) is charged, the
+  `LimitRange` defaults applied.
+  """
+  @spec demand_of(map()) :: demand()
+  def demand_of(resources), do: container_demand(%{"resources" => resources})
 
   @doc "A quota quantity as an integer (millicores for cpu, bytes otherwise), or `:error`."
   @spec parse_quantity(String.t(), String.t() | integer()) :: non_neg_integer() | :error
