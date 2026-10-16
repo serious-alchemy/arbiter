@@ -25,6 +25,13 @@ defmodule Arbiter.Worker.OutputLog do
   `run_id` nil) get no durable log — there is no row to anchor retrieval to,
   matching the rest of the best-effort Run write path.
 
+  ## Pre-push step logs
+
+  The commit gate's per-step full output lives beside the transcript, at
+  `<output_log_root>/<run_id>.prepush/<attempt>-<position>-<step>.log`
+  (`Arbiter.Workers.PrepushSteps.log_path/4`); `worker_show` / `arb worker show`
+  list it as `log_path` on each pre-push check.
+
   ## Lifecycle
 
       {:ok, handle} = OutputLog.open(run_id)   # at session start

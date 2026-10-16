@@ -117,6 +117,7 @@ defmodule Arbiter.Worker.PrepushCheck do
           duration_ms: non_neg_integer(),
           limit_s: pos_integer() | nil,
           output: String.t(),
+          full_output: String.t() | nil,
           reason: atom() | nil
         }
 
@@ -263,25 +264,29 @@ defmodule Arbiter.Worker.PrepushCheck do
 
     limit = min(step.timeout_s, max(remaining, 0))
 
-    outcome =
+    {outcome, full} =
       if remaining <= 0 do
-        {:skipped, :budget, "skipped: the total time budget was already spent"}
+        {{:skipped, :budget, "skipped: the total time budget was already spent"}, nil}
       else
         expand_and_run(step, worktree, touched, limit, exec)
       end
 
-    record(step, outcome, System.monotonic_time(:millisecond) - started, limit)
+    record(step, outcome, System.monotonic_time(:millisecond) - started, limit, full)
   end
 
   defp expand_and_run(step, worktree, touched, seconds, exec) do
     case expand(step, worktree, touched) do
       :nothing_touched ->
-        {:skipped, :untouched, "skipped: no touched files for this step"}
+        {{:skipped, :untouched, "skipped: no touched files for this step"}, nil}
 
       {:ok, command} ->
-        command |> safe_exec(exec, seconds) |> classify(worktree)
+        raw = safe_exec(command, exec, seconds)
+        {classify(raw, worktree), full_output(raw)}
     end
   end
+
+  defp full_output({output, _status}) when is_binary(output), do: output
+  defp full_output(_), do: nil
 
   defp safe_exec(command, exec, seconds) do
     exec.(command, seconds)
@@ -344,7 +349,7 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   defp classify({output, status}, worktree) do
     case infra_signature(output, worktree) do
-      nil -> {:failed, status, tail(output)}
+      nil -> {:failed, status, digest(output)}
       label -> {:infra, label, tail(output)}
     end
   end
@@ -420,7 +425,7 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   defp own_app?(worktree, name), do: File.dir?(Path.join([worktree, "apps", name]))
 
-  defp record(step, outcome, duration_ms, limit) do
+  defp record(step, outcome, duration_ms, limit, full \\ nil) do
     {status, exit_status, reason, output} =
       case outcome do
         {:skipped, why, note} -> {:skipped, nil, why, note}
@@ -438,6 +443,7 @@ defmodule Arbiter.Worker.PrepushCheck do
       duration_ms: max(duration_ms, 0),
       limit_s: if(limit > 0, do: limit),
       output: output,
+      full_output: full,
       reason: reason
     }
   end
@@ -474,6 +480,78 @@ defmodule Arbiter.Worker.PrepushCheck do
       [_, label] -> label
       _ -> "infrastructure"
     end
+  end
+
+  @failures_header "ExUnit failures:\n"
+  @tail_separator "\n\n--- output tail ---\n"
+  @max_failure_block_bytes 1_500
+  @max_failures_bytes 6_000
+
+  @doc """
+  What a failed step stores. When the output carries ExUnit's numbered `N) test …`
+  failure blocks they come first (each capped, the section capped), then the
+  `N tests, M failures` summary and `Result:` lines, then the generic tail. The
+  blocks are printed before the summary, so the tail alone loses them whenever a
+  sandbox-kill report or crash dump follows (bd-8e8t72). Any other output is the
+  plain `tail/2`.
+  """
+  @spec digest(String.t()) :: String.t()
+  def digest(output) when is_binary(output) do
+    case failure_section(output) do
+      nil ->
+        tail(output)
+
+      section ->
+        section <> @tail_separator <> tail(output, @max_output_bytes - byte_size(section))
+    end
+  end
+
+  @doc """
+  `text` bounded to `max` bytes. A `digest/1` keeps its failure section whole
+  and trims only the tail behind it; other text is `tail/2`.
+  """
+  @spec fit(String.t(), pos_integer()) :: String.t()
+  def fit(text, max) when is_binary(text) do
+    with @failures_header <> _ <- text,
+         [section, rest] <- String.split(text, @tail_separator, parts: 2) do
+      section = cap(section, max)
+      room = max - byte_size(section)
+      if room > 200, do: section <> @tail_separator <> tail(rest, room), else: section
+    else
+      _ -> tail(text, max)
+    end
+  end
+
+  defp cap(text, max) when byte_size(text) <= max, do: text
+  defp cap(text, max), do: binary_part(text, 0, max) <> "\n[… truncated …]"
+
+  defp failure_section(output) do
+    with [{from, _}] <- Regex.run(~r/^[ \t]+1\) /m, output, return: :index),
+         blocks when blocks != [] <-
+           failure_blocks(binary_part(output, from, byte_size(output) - from)) do
+      summary =
+        ~r/^(?:(?:\d+ (?:doctests?|properties), )*\d+ tests?, \d+ failures?.*|Result:.*)$/m
+        |> Regex.scan(output)
+        |> Enum.map(&hd/1)
+
+      body = Enum.map_join(blocks, "\n", &cap(&1, @max_failure_block_bytes))
+
+      cap(@failures_header <> body, @max_failures_bytes) <>
+        if(summary == [], do: "", else: "\n" <> Enum.join(summary, "\n"))
+    else
+      _ -> nil
+    end
+  end
+
+  # From the first numbered block to ExUnit's `Finished in` line (or the end),
+  # split at each `  N) ` header.
+  defp failure_blocks(from_first) do
+    body = from_first |> String.split(~r/^Finished in /m, parts: 2) |> hd()
+
+    body
+    |> String.split(~r/\n(?=\s+\d+\) )/)
+    |> Enum.map(&String.trim_trailing/1)
+    |> Enum.filter(&Regex.match?(~r/\A\s+\d+\) /, &1))
   end
 
   @doc """
@@ -596,7 +674,7 @@ defmodule Arbiter.Worker.PrepushCheck do
     blocks =
       Enum.map_join(failed, "\n\n", fn step ->
         "Step `#{step.name}` (`#{step.cmd}`): #{step_what_happened(step)}\n\n" <>
-          "Output (last lines):\n\n" <> indent(tail(step.output, per_step))
+          "Output (last lines):\n\n" <> indent(fit(step.output, per_step))
       end)
 
     "Pre-push recipe, run from the repo root of your worktree (a step marked `touched` " <>
@@ -638,7 +716,7 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   defp what_happened(_), do: "It did not pass."
 
-  defp output({_, _, text}, max) when is_binary(text), do: tail(text, max)
+  defp output({_, _, text}, max) when is_binary(text), do: fit(text, max)
   defp output(_, _max), do: "(no output)"
 
   defp indent(text) do

@@ -78,4 +78,40 @@ defmodule Arbiter.Workers.PrepushStepsTest do
 
     assert Map.has_key?(map, :output)
   end
+
+  describe "full step logs" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "pc-logs-#{System.unique_integer([:positive])}")
+      prev = Application.get_env(:arbiter, :output_log_root)
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:arbiter, :output_log_root, prev),
+          else: Application.delete_env(:arbiter, :output_log_root)
+
+        File.rm_rf!(root)
+      end)
+    end
+
+    test "record/4 saves each executed step's full, redacted output under the run id" do
+      run_id = Ash.UUID.generate()
+      big = String.duplicate("line\n", 20_000)
+
+      PrepushSteps.record(run_id, "bd-1", 1, [
+        result("tests", :failed, %{output: "digest", full_output: big}),
+        result("format", :passed, %{full_output: "formatted ok\n"}),
+        result("credo", :skipped, %{exit_status: nil, output: "skipped"})
+      ])
+
+      assert [tests, format, credo] =
+               run_id |> PrepushSteps.list() |> Enum.map(&PrepushSteps.to_map/1)
+
+      assert File.read!(tests.log_path) == big
+      assert File.read!(format.log_path) == "formatted ok\n"
+      assert credo.log_path == nil
+      assert String.starts_with?(tests.log_path, Arbiter.Worker.OutputLog.root())
+      assert tests.log_path =~ run_id
+    end
+  end
 end

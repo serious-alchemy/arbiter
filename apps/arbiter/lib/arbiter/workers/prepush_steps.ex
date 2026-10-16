@@ -12,6 +12,8 @@ defmodule Arbiter.Workers.PrepushSteps do
   require Logger
 
   alias Arbiter.Redaction
+  alias Arbiter.Worker.OutputLog
+  alias Arbiter.Worker.PrepushCheck
   alias Arbiter.Workers.PrepushStep
 
   @max_output_bytes 8_000
@@ -40,11 +42,12 @@ defmodule Arbiter.Workers.PrepushSteps do
         status: step.status,
         exit_status: step.exit_status,
         duration_ms: step.duration_ms,
-        output: step.output |> redact() |> bound(),
+        output: step.output |> redact() |> PrepushCheck.fit(@max_output_bytes),
         # Keep recipe order stable under `occurred_at` sorting.
         occurred_at: DateTime.add(now, position, :microsecond)
       }
 
+      save_log(run_id, attempt, position, step)
       write(attrs)
     end)
   end
@@ -69,11 +72,39 @@ defmodule Arbiter.Workers.PrepushSteps do
   defp redact(text) when is_binary(text), do: Redaction.redact_patterns(text)
   defp redact(_), do: ""
 
-  defp bound(text) do
-    if byte_size(text) <= @max_output_bytes,
-      do: text,
-      else: binary_part(text, byte_size(text) - @max_output_bytes, @max_output_bytes)
+  @doc """
+  Where a step's full output is kept: `<output_log_root>/<run_id>.prepush/
+  <attempt>-<position>-<name>.log` on the primary, beside the run's transcript
+  (`Arbiter.Worker.OutputLog`). Step output comes back to the primary from the
+  executor (host, sandbox or node agent), so local and remote runs both land
+  here. Surfaced as `log_path` in `worker_show` / `arb worker show`.
+  """
+  @spec log_path(String.t(), pos_integer(), non_neg_integer(), String.t()) :: String.t()
+  def log_path(run_id, attempt, position, name) do
+    safe = String.replace(to_string(name), ~r/[^A-Za-z0-9_.-]/, "_")
+    Path.join([OutputLog.root(), run_id <> ".prepush", "#{attempt}-#{position}-#{safe}.log"])
   end
+
+  defp save_log(run_id, attempt, position, %{full_output: full} = step) when is_binary(full) do
+    path = log_path(run_id, attempt, position, step.name)
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(path, redact(full)) do
+      :ok
+    else
+      {:error, reason} ->
+        Logger.warning("PrepushSteps.record could not save #{path}: #{inspect(reason)}")
+    end
+  end
+
+  defp save_log(_run_id, _attempt, _position, _step), do: :ok
+
+  defp existing_log_path(%PrepushStep{run_id: run_id} = s) when is_binary(run_id) do
+    path = log_path(run_id, s.attempt, s.position, s.name)
+    if File.regular?(path), do: path
+  end
+
+  defp existing_log_path(_), do: nil
 
   @doc "A run's recorded steps, oldest attempt first and in recipe order within one."
   @spec list(String.t() | nil) :: [PrepushStep.t()]
@@ -99,7 +130,8 @@ defmodule Arbiter.Workers.PrepushSteps do
       status: to_string(s.status),
       exit_status: s.exit_status,
       duration_ms: s.duration_ms,
-      output: s.output
+      output: s.output,
+      log_path: existing_log_path(s)
     }
   end
 end

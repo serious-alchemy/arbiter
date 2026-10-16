@@ -153,6 +153,82 @@ defmodule Arbiter.Worker.PrepushCheckTest do
     end
   end
 
+  describe "ExUnit failure digest" do
+    defp exunit_output(noise_bytes) do
+      """
+      Compiling 3 files (.ex)
+      ..
+
+        1) test deterministic thing (Arbiter.FooTest)
+           test/arbiter/foo_test.exs:12
+           Assertion with == failed
+           code:  assert foo() == 2
+           left:  1
+           right: 2
+
+        2) test second thing (Arbiter.FooTest)
+           test/arbiter/foo_test.exs:30
+           ** (RuntimeError) boom
+
+      Finished in 3.2 seconds (1.0s async, 2.2s sync)
+      789 tests, 2 failures
+
+      Randomized with seed 1
+      """ <>
+        String.duplicate("SANDBOX CONNECTION KILLED: teardown report\n", div(noise_bytes, 44))
+    end
+
+    defp run_exec(output, status) do
+      spec = %{
+        steps: [%{name: "tests", cmd: "mix test", timeout_s: 30, scope: :all}],
+        timeout_seconds: 60,
+        on_timeout: :proceed
+      }
+
+      dir = Path.join(System.tmp_dir!(), "pc-digest-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      PrepushCheck.run_steps(spec, dir, exec: fn _cmd, _s -> {output, status} end)
+    end
+
+    test "failing test names and assertions survive a huge post-summary dump" do
+      output = exunit_output(40_000)
+      assert %{steps: [step], result: {:failed, 2, stored}} = run_exec(output, 2)
+
+      assert step.output =~ "test deterministic thing (Arbiter.FooTest)"
+      assert step.output =~ "left:  1"
+      assert step.output =~ "** (RuntimeError) boom"
+      assert step.output =~ "789 tests, 2 failures"
+      assert stored == step.output
+      assert step.full_output == output
+    end
+
+    test "fit/2 keeps the failure section whole when bounding" do
+      {:failed, 2, stored} = run_exec(exunit_output(40_000), 2).result
+      fitted = PrepushCheck.fit(stored, 3_000)
+      assert byte_size(fitted) <= 3_200
+      assert fitted =~ "test deterministic thing"
+    end
+
+    test "non-test output is the plain tail and passing steps store nothing" do
+      assert %{steps: [step]} = run_exec("credo: 3 issues\n", 1)
+      assert step.output == "credo: 3 issues"
+      assert step.full_output == "credo: 3 issues\n"
+      assert %{steps: [ok]} = run_exec("fine\n", 0)
+      assert ok.output == ""
+      assert ok.full_output == "fine\n"
+    end
+
+    test "the send-back lists failing test names before the tail" do
+      %{steps: [step]} = run_exec(exunit_output(40_000), 2)
+      meta = %{prepush_steps: [step], prepush_spec: %{command: "x"}}
+      prompt = PrepushCheck.nudge_prompt("bd-1", meta, {:exit, 2, step.output})
+      assert prompt =~ "test deterministic thing"
+      assert prompt =~ "left:  1"
+    end
+  end
+
   describe "tail/2" do
     test "keeps the end of an oversized string on a line boundary" do
       text = Enum.map_join(1..100, "\n", &"line-#{&1}")
