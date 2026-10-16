@@ -115,6 +115,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   alias Arbiter.Tasks.Workspace.ConfigSchema
   alias Arbiter.Worker.Egress.Policy, as: EgressPolicy
+  alias Arbiter.Worker.Image.RepoConfig
   alias Ash.Changeset
 
   @impl true
@@ -181,6 +182,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     changeset
     |> validate_worker_block(worker, "worker")
     |> validate_placement(worker)
+    |> validate_image(Map.get(worker, "image"), "worker.image", :workspace)
     |> validate_worker_repos(Map.get(worker, "repos"))
   end
 
@@ -213,6 +215,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
         cs
         |> validate_worker_block(block, "worker.repos.#{repo}")
         |> validate_repo_cap(block, "worker.repos.#{repo}")
+        |> validate_image(Map.get(block, "image"), "worker.repos.#{repo}.image", :repo)
 
       {repo, _}, cs ->
         Changeset.add_error(cs,
@@ -376,6 +379,130 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       field: :config,
       message: "#{label}.seed_paths must be a list of strings"
     )
+  end
+
+  # KH11 (bd-cexq4j): `worker.image` / `worker.repos.<repo>.image`
+  # (`Arbiter.Worker.Image.RepoConfig`). `ref` is per repo: one workspace-wide ref
+  # would be a catch-all image again.
+  @image_keys ~w(source ref registry credentials_ref seed)
+
+  defp validate_image(changeset, nil, _label, _level), do: changeset
+
+  defp validate_image(changeset, %{} = image, label, level) do
+    changeset
+    |> validate_image_keys(image, label)
+    |> validate_image_enum(image, "source", RepoConfig.sources(), label)
+    |> validate_image_enum(image, "seed", RepoConfig.seeds(), label)
+    |> validate_image_registry(Map.fetch(image, "registry"), label)
+    |> validate_image_credentials_ref(Map.fetch(image, "credentials_ref"), label)
+    |> validate_image_ref(image, label, level)
+  end
+
+  defp validate_image(changeset, _, label, _level),
+    do: Changeset.add_error(changeset, field: :config, message: "#{label} must be a map")
+
+  defp validate_image_keys(changeset, image, label) do
+    case Map.keys(image) -- @image_keys do
+      [] ->
+        changeset
+
+      unknown ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "#{label} has unknown key #{Enum.join(unknown, ", ")} " <>
+              "(allowed: #{Enum.join(@image_keys, ", ")})"
+        )
+    end
+  end
+
+  defp validate_image_enum(changeset, image, key, allowed, label) do
+    case Map.fetch(image, key) do
+      :error ->
+        changeset
+
+      {:ok, value} ->
+        if value in allowed,
+          do: changeset,
+          else:
+            Changeset.add_error(changeset,
+              field: :config,
+              message: "#{label}.#{key} must be one of #{Enum.join(allowed, ", ")}"
+            )
+    end
+  end
+
+  defp validate_image_registry(changeset, :error, _label), do: changeset
+
+  defp validate_image_registry(changeset, {:ok, registry}, label) do
+    if Arbiter.Settings.valid_registry?(registry),
+      do: changeset,
+      else:
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "#{label}.registry must be a registry host[:port][/path] with no scheme, " <>
+              "credentials or spaces (e.g. registry.example.com/arbiter)"
+        )
+  end
+
+  defp validate_image_credentials_ref(changeset, :error, _label), do: changeset
+
+  defp validate_image_credentials_ref(changeset, {:ok, "secret:" <> key = ref}, label)
+       when is_binary(ref) do
+    if String.trim(key) != "" and not String.match?(key, ~r/\s/),
+      do: changeset,
+      else: image_credentials_error(changeset, label)
+  end
+
+  defp validate_image_credentials_ref(changeset, {:ok, _}, label),
+    do: image_credentials_error(changeset, label)
+
+  defp image_credentials_error(changeset, label) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message:
+        ~s(#{label}.credentials_ref must be "secret:<key>" naming a workspace secret ) <>
+          "(see `arb workspace secret`); no credential belongs in the config itself"
+    )
+  end
+
+  defp validate_image_ref(changeset, image, label, :workspace) do
+    if Map.has_key?(image, "ref"),
+      do:
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "#{label}.ref is per repo: set it under worker.repos.<repo>.image"
+        ),
+      else: changeset
+  end
+
+  defp validate_image_ref(changeset, image, label, :repo) do
+    case {Map.get(image, "source"), Map.fetch(image, "ref")} do
+      {"prebuilt", :error} ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "#{label}.ref is required for source prebuilt"
+        )
+
+      {source, {:ok, _ref}} when source != "prebuilt" ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "#{label}.ref is only for source prebuilt"
+        )
+
+      {_, {:ok, ref}} ->
+        if is_binary(ref) and ref != "" and not String.match?(ref, ~r/\s/),
+          do: changeset,
+          else:
+            Changeset.add_error(changeset,
+              field: :config,
+              message: "#{label}.ref must be an image reference with no spaces"
+            )
+
+      _ ->
+        changeset
+    end
   end
 
   # bd-9cygoo (G16): the `git_credentials` block — per-repo scoped push credentials

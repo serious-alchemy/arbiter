@@ -8,7 +8,8 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   ## Layers (§11)
 
   The run image is the last of three, each `FROM` the one before and pushed to
-  `<registry>/worker`:
+  `<registry>/<repo>/worker` (KH11, `RepoConfig.repository_name/1`: one repository
+  per repo, no shared `<registry>/worker`):
 
     1. **toolchain** — `Image.Builder.ensure/3`'s image, tag `<hash12>`;
     2. **CLI** — `claude` and `arb` copied to `/opt/arbiter/cli` (replacing the
@@ -48,6 +49,7 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   alias Arbiter.Worker.Image.Builder
   alias Arbiter.Worker.Image.Pins
   alias Arbiter.Worker.Image.Registry
+  alias Arbiter.Worker.Image.RepoConfig
 
   @cli_dest "/opt/arbiter/cli/"
   @seed_dest "/opt/arbiter/seed"
@@ -85,17 +87,20 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   @spec publish_image(map(), Registry.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def publish_image(%{plan: plan} = ctx, %Registry{} = cfg, opts) do
     builder = Keyword.get(opts, :builder, Builder)
+    repository = worker_repository(ctx)
 
     with {:ok, _} <- Builder.ensure(builder, plan, Keyword.take(opts, [:runner, :scratch])),
-         {:ok, toolchain} <- push(plan.tag, "worker", plan.hash, :toolchain, cfg, opts) do
-      workdir(opts, &upper_layers(ctx, toolchain, &1, cfg, opts))
+         {:ok, toolchain} <- push(plan.tag, repository, plan.hash, :toolchain, cfg, opts) do
+      workdir(opts, &upper_layers(ctx, repository, toolchain, &1, cfg, opts))
     end
   end
 
   # The CLI layer over the toolchain, then the best-effort seed layer over that.
-  defp upper_layers(%{plan: plan} = ctx, toolchain, work, cfg, opts) do
-    with {:ok, cli, cli_suffix} <- cli_layer(plan, work, cfg, opts) do
-      {seed, seed_report} = seed_layer(ctx, plan, cli_suffix, cli.local, work, cfg, opts)
+  defp upper_layers(%{plan: plan} = ctx, repository, toolchain, work, cfg, opts) do
+    with {:ok, cli, cli_suffix} <- cli_layer(plan, repository, work, cfg, opts) do
+      {seed, seed_report} =
+        seed_layer(ctx, plan, repository, cli_suffix, cli.local, work, cfg, opts)
+
       layers = [toolchain, cli] ++ List.wrap(seed)
       cleanup_local(Enum.reverse(for l <- layers, l.layer != :toolchain, do: l.local), opts)
       final = List.last(layers)
@@ -111,7 +116,21 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
     end
   end
 
-  defp cli_layer(plan, work, cfg, opts) do
+  # `<repo-slug>/worker`: the repo the context names, else the checkout's directory.
+  defp worker_repository(ctx) do
+    repo = Map.get(ctx, :repo)
+    path = Map.get(ctx, :repo_path)
+
+    RepoConfig.repository_name(
+      cond do
+        is_binary(repo) and repo != "" -> repo
+        is_binary(path) -> Path.basename(path)
+        true -> nil
+      end
+    )
+  end
+
+  defp cli_layer(plan, repository, work, cfg, opts) do
     with {:ok, files} <- cli_files(opts) do
       context = Path.join(work, "cli-context")
       File.mkdir_p!(Path.join(context, "cli"))
@@ -135,7 +154,7 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
       """
 
       with :ok <- build(local, containerfile, context, work, opts),
-           {:ok, layer} <- push(local, "worker", tag, :cli, cfg, opts) do
+           {:ok, layer} <- push(local, repository, tag, :cli, cfg, opts) do
         {:ok, Map.put(layer, :local, local), "cli" <> sha8}
       end
     end
@@ -158,7 +177,7 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
     end
   end
 
-  defp seed_layer(ctx, plan, cli_suffix, parent, work, cfg, opts) do
+  defp seed_layer(ctx, plan, repository, cli_suffix, parent, work, cfg, opts) do
     {shipped, excluded} = partition_seed_paths(Map.get(ctx, :seed_paths))
 
     case seed_source(ctx, plan, shipped, opts) do
@@ -172,7 +191,7 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
             Enum.map_join(artifacts, "", fn a -> "COPY #{a}/ #{@seed_dest}/#{a}/\n" end)
 
         with :ok <- build(local, containerfile, dir, work, opts),
-             {:ok, layer} <- push(local, "worker", tag, :seed, cfg, opts) do
+             {:ok, layer} <- push(local, repository, tag, :seed, cfg, opts) do
           {Map.put(layer, :local, local), %{status: :pushed, reason: nil, excluded: excluded}}
         else
           {:error, reason} -> skipped(reason, excluded)

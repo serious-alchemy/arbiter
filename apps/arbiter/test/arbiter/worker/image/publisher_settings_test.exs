@@ -15,7 +15,7 @@ defmodule Arbiter.Worker.Image.PublisherSettingsTest do
   @password "settings-path-NEVER-LOGGED"
 
   test "nothing is published while nodes.registry is unset", %{tmp_dir: tmp} do
-    ctx = %{plan: plan(), repo_path: nil, base: "main", seed_paths: []}
+    ctx = %{plan: plan(), repo: "arb-app", repo_path: nil, base: "main", seed_paths: []}
     assert Publisher.ensure_ready(ctx, runner: runner(self()), scratch: tmp) == :disabled
     refute_received {:podman, _}
   end
@@ -26,7 +26,7 @@ defmodule Arbiter.Worker.Image.PublisherSettingsTest do
     {:ok, _} = Settings.put("nodes.registry_username", "bot")
     {:ok, _} = Settings.put("nodes.registry_password", @password)
 
-    ctx = %{plan: plan(), repo_path: nil, base: "main", seed_paths: []}
+    ctx = %{plan: plan(), repo: "arb-app", repo_path: nil, base: "main", seed_paths: []}
     cli = [{write(tmp, "claude"), "/opt/arbiter/cli/claude"}]
 
     assert {:ok, %{ref: ref}} =
@@ -37,7 +37,7 @@ defmodule Arbiter.Worker.Image.PublisherSettingsTest do
                timeout_ms: 10_000
              )
 
-    assert ref =~ ~r|\Aregistry\.example\.com/arb/worker@sha256:[0-9a-f]{64}\z|
+    assert ref =~ ~r|\Aregistry\.example\.com/arb/arb-app/worker@sha256:[0-9a-f]{64}\z|
 
     status = Publisher.status(probe: fn _ -> :ok end)
     assert status.configured and status.password_set and status.reachable

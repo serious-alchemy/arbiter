@@ -61,7 +61,8 @@ defmodule Arbiter.Worker.Image.Publisher do
   end
 
   @doc """
-  The run image for `ctx` (`%{plan:, repo_path:, base:, seed_paths:}`):
+  The run image for `ctx` (`%{plan:, repo:, repo_path:, base:, seed_paths:}`; `repo` names
+  the `<registry>/<repo>/worker` repository it is pushed to):
   `{:ok, result}` with a digest-pinned `ref`, `:disabled` when no registry is
   configured, or `{:error, reason}` (`{:timeout, ms}`, `{:push_failed, …}`, …).
   """
@@ -78,15 +79,16 @@ defmodule Arbiter.Worker.Image.Publisher do
     end
   end
 
-  # What the published image depends on: the toolchain tag, the repo whose
+  # What the published image depends on: the toolchain tag, the repo (its image
+  # repository) whose
   # `DepsCache` seeds it (two repos can share a toolchain tag), the seed rules
   # and base, and a fingerprint of the inputs that change under a running server
   # (the `claude`/`arb` binaries, `mix.lock`), so an update publishes again
   # rather than serving a stale `ref`. An entry for an older fingerprint is
   # dropped when the new one lands (`record_success/4`).
   defp image_key(%{plan: plan} = ctx, cfg, opts) do
-    {:image, cfg.registry, plan.tag, Map.get(ctx, :repo_path), Map.get(ctx, :seed_paths),
-     Map.get(ctx, :base), fingerprint(ctx, opts)}
+    {:image, cfg.registry, plan.tag, Map.get(ctx, :repo), Map.get(ctx, :repo_path),
+     Map.get(ctx, :seed_paths), Map.get(ctx, :base), fingerprint(ctx, opts)}
   end
 
   defp fingerprint(ctx, opts) do

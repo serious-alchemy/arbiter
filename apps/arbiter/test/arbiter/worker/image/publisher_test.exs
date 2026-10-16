@@ -64,7 +64,7 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       resolver: fn _ref -> {:ok, "sha256:" <> String.duplicate("d", 64)} end
     ]
 
-    ctx = %{plan: plan, repo_path: "/repo", base: "main", seed_paths: nil}
+    ctx = %{plan: plan, repo: "vstim", repo_path: "/repo", base: "main", seed_paths: nil}
     {:ok, opts: opts, ctx: ctx, server: server, tmp: tmp, cache: cache}
   end
 
@@ -142,7 +142,7 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       assert {:ok, result} = Publisher.ensure_ready(ctx, opts)
 
       expected_digest = digest_for(result.tag_ref)
-      assert result.ref == "registry.example.com/arbiter/worker@sha256:" <> expected_digest
+      assert result.ref == "registry.example.com/arbiter/vstim/worker@sha256:" <> expected_digest
       assert Arbiter.Worker.Image.Registry.digest_pinned?(result.ref)
 
       assert [:toolchain, :cli, :seed] = Enum.map(result.layers, & &1.layer)
@@ -151,9 +151,9 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       pushes = for {:push, remote} <- drain(), do: remote
 
       assert [
-               "registry.example.com/arbiter/worker:abc123def456",
-               "registry.example.com/arbiter/worker:abc123def456-cli" <> cli_rest,
-               "registry.example.com/arbiter/worker:abc123def456-cli" <> seed_rest
+               "registry.example.com/arbiter/vstim/worker:abc123def456",
+               "registry.example.com/arbiter/vstim/worker:abc123def456-cli" <> cli_rest,
+               "registry.example.com/arbiter/vstim/worker:abc123def456-cli" <> seed_rest
              ] = pushes
 
       assert cli_rest =~ ~r/\A[0-9a-f]{8}\z/
@@ -235,7 +235,7 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       assert {:error, {:push_failed, remote, 1, tail}} =
                Publisher.ensure_ready(ctx, Keyword.put(opts, :runner, failing))
 
-      assert remote =~ "registry.example.com/arbiter/worker:"
+      assert remote =~ "registry.example.com/arbiter/vstim/worker:"
       refute tail =~ @password
       assert tail =~ "unauthorized"
     end
@@ -246,6 +246,36 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       push = Enum.find(drain(), &match?({:podman, ["push" | _]}, &1))
       assert {:podman, args} = push
       assert "--tls-verify=false" in args
+    end
+  end
+
+  describe "ensure_ready/2 repository naming (KH11)" do
+    test "every layer goes to <registry>/<repo-slug>/worker, never a shared worker repository",
+         %{opts: opts, ctx: ctx} do
+      assert {:ok, result} = Publisher.ensure_ready(%{ctx | repo: "Acme/My App"}, opts)
+
+      for remote <- for({:push, remote} <- drain(), do: remote) do
+        assert remote =~ ~r|\Aregistry\.example\.com/arbiter/acme-my-app/worker:|
+      end
+
+      assert result.ref =~ ~r|\Aregistry\.example\.com/arbiter/acme-my-app/worker@sha256:|
+      assert Enum.all?(result.layers, &(&1.ref =~ "/acme-my-app/worker@"))
+    end
+
+    test "two repos on one registry get two repositories", %{opts: opts, ctx: ctx} do
+      assert {:ok, a} = Publisher.ensure_ready(%{ctx | repo: "vstim"}, opts)
+      assert {:ok, b} = Publisher.ensure_ready(%{ctx | repo: "arbiter"}, opts)
+
+      assert a.ref =~ "/arbiter/vstim/worker@"
+      assert b.ref =~ "/arbiter/arbiter/worker@"
+      refute a.ref == b.ref
+    end
+
+    test "with no repo name the repository comes from the checkout's directory name",
+         %{opts: opts, ctx: ctx} do
+      ctx = ctx |> Map.delete(:repo) |> Map.put(:repo_path, "/srv/repos/Billing")
+      assert {:ok, result} = Publisher.ensure_ready(ctx, opts)
+      assert result.ref =~ "/arbiter/billing/worker@"
     end
   end
 
