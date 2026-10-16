@@ -181,7 +181,8 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartParityTest do
       assert config.placement["priority_class"] == "arbiter-ci"
       assert config.placement["spread"]["max_skew"] == 2
       assert config.placement["spread"]["when_unsatisfiable"] == "DoNotSchedule"
-      assert config.image_pull_secrets == ["arbiter-registry"]
+      assert [%{"prefix" => prefix, "pull_secret" => "arbiter-registry"}] = config.registries
+      assert String.starts_with?(prefix, @registry)
     end
 
     test "the shipped defaults parse to the controller's own defaults" do
