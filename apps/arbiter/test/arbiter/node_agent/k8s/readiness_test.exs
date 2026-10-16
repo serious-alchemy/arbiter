@@ -203,6 +203,17 @@ defmodule Arbiter.NodeAgent.K8s.ReadinessTest do
     end
   end
 
+  describe "an unreachable API server" do
+    test "the clock check names the network cause and the policy fix", %{client: client} do
+      client = %{client | base_url: "http://127.0.0.1:1"}
+      check = run(client)["clock"]
+
+      assert check["status"] == "warn"
+      assert check["detail"] =~ "cannot reach the Kubernetes API server"
+      assert check["hint"] =~ "api_cidrs"
+    end
+  end
+
   describe "registry_pull" do
     test "a failed pull is a failure with the kubelet's message", %{client: client} do
       check =

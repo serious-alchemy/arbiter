@@ -24,6 +24,7 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
   reported as not evaluated rather than ok.
   """
 
+  alias Arbiter.NodeAgent.K8s.ApiReach
   alias Arbiter.NodeAgent.K8s.Canary
   alias Arbiter.NodeAgent.K8s.Client
   alias Arbiter.NodeAgent.K8s.PodConfig
@@ -470,13 +471,24 @@ defmodule Arbiter.NodeAgent.K8s.Readiness do
         end
 
       {:error, reason} ->
-        check(
-          "clock",
-          "Clock",
-          "warn",
-          "could not read the API server's clock: #{inspect(reason)}",
-          nil
-        )
+        if ApiReach.unreachable?(reason) do
+          check(
+            "clock",
+            "Clock",
+            "warn",
+            ApiReach.message(reason),
+            "Add the API server's node address to the controller-egress policy (api_cidrs); the " <>
+              "clock could not be read, not found wrong."
+          )
+        else
+          check(
+            "clock",
+            "Clock",
+            "warn",
+            "could not read the API server's clock: #{inspect(reason)}",
+            nil
+          )
+        end
     end
   end
 

@@ -32,7 +32,9 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
 
   **Controller egress is an allowlist** (`docs/design/remote-workers.md` §20.4, KH3).
   Workers get no egress but the controller (an allowlist on workers would bypass the
-  primary's `Egress` policy and audit). The controller gets the API server, cluster DNS
+  primary's `Egress` policy and audit). The controller gets the API server (the
+  `kubernetes` ClusterIP **and** the `api_cidrs` endpoint addresses: a post-DNAT CNI such
+  as k3s's kube-router matches only the latter), cluster DNS
   and exactly one more destination, by `reach`: `direct` the `primary_cidrs` on the port
   of the primary URL; `proxy` the `proxy_cidrs` on the port of `proxy_url`. Neither takes
   a catch-all CIDR, and both refuse to render without theirs. `tailscale` keeps the wide
@@ -53,7 +55,8 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   @default_cpu "1"
   @default_memory "2Gi"
   @worker_storage "4Gi"
-  @default_api_cidrs ["10.43.0.1/32"]
+  # The `kubernetes` Service's ClusterIP on k3s. Always in the controller's API rule.
+  @api_cluster_ip "10.43.0.1/32"
   @default_cluster_cidrs ["10.42.0.0/16", "10.43.0.0/16"]
 
   # What one worker pod adds to the worker container's own request (`seed` and
@@ -105,7 +108,8 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   `cpu`, `memory`, `node_selector` (`k=v,k=v`), `pull_secret`, `reach`
   (`direct|tailscale|proxy`), `primary_cidrs` (required for `direct`), `proxy_url` and
   `proxy_cidrs` (required for `proxy`), `admission` (`policy` or none), `self_upgrade`
-  (`on|off`), `api_cidrs`, `cluster_cidrs` (comma separated) and `part`. Unknown keys are
+  (`on|off`), `api_cidrs` (the API server's node addresses, added to the ClusterIP),
+  `cluster_cidrs` (comma separated) and `part`. Unknown keys are
   ignored. Every refusal is one string starting with the field name.
   """
   @spec parse(map()) :: {:ok, spec()} | {:error, [String.t()]}
@@ -121,7 +125,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       reach: field(params, "reach", &reach/1, :direct),
       admission: field(params, "admission", &admission/1, false),
       self_upgrade: field(params, "self_upgrade", &self_upgrade/1, true),
-      api_cidrs: field(params, "api_cidrs", &cidrs/1, @default_api_cidrs),
+      api_cidrs: field(params, "api_cidrs", &bounded_cidrs/1, []),
       cluster_cidrs: field(params, "cluster_cidrs", &cidrs/1, @default_cluster_cidrs),
       primary_cidrs: field(params, "primary_cidrs", &bounded_cidrs/1, []),
       proxy_url: field(params, "proxy_url", &proxy_url/1, nil),
@@ -498,7 +502,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       network_policy(spec, "controller-egress", controller, ["Egress"], %{
         "egress" => [
           %{
-            "to" => Enum.map(spec.api_cidrs, &%{"ipBlock" => %{"cidr" => &1}}),
+            "to" => Enum.map(api_cidrs(spec), &%{"ipBlock" => %{"cidr" => &1}}),
             "ports" => [
               %{"protocol" => "TCP", "port" => 6443},
               %{"protocol" => "TCP", "port" => 443}
@@ -523,6 +527,13 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       })
     ]
   end
+
+  # The controller dials the API server by the `kubernetes` Service's ClusterIP, but whether
+  # a policy sees that address or the endpoint it is DNATed to depends on the CNI:
+  # kube-router (k3s) evaluates egress after DNAT, so only `<node IP>:6443` matches there.
+  # The ClusterIP is therefore always listed and `api_cidrs` adds to it, never replaces it:
+  # one rule that holds under both orderings.
+  defp api_cidrs(spec), do: Enum.uniq([@api_cluster_ip | spec.api_cidrs])
 
   # The controller's last egress rule: how it reaches the primary (KH3).
   defp reach_rule(%{reach: :direct} = spec, server) do

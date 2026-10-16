@@ -225,6 +225,19 @@ defmodule ArbiterCli.Cmd.NodeTest do
       assert body["primary_cidrs"] == "100.64.0.10/32"
     end
 
+    test "sends --api-cidrs: the API server's node address for post-DNAT CNIs (k3s)" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
+
+      {_out, _err, 0} =
+        capture(fn ->
+          Node.run(@cluster_argv ++ ~w(--api-cidrs 192.168.5.10/32,192.168.5.11/32))
+        end)
+
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+      assert Jason.decode!(raw)["api_cidrs"] == "192.168.5.10/32,192.168.5.11/32"
+    end
+
     test "sends the cluster form and prints the apply command, the join-Secret command and the token" do
       tty(true)
       capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)

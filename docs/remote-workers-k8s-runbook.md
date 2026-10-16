@@ -195,6 +195,16 @@ it". Each step has a pass criterion; stop at the first that fails.
 5. **NetworkPolicies.** Apply `default-deny`, `worker-to-controller`,
    `controller-ingress-from-workers` and `controller-egress` from the install manifest
    (fill the `controller-egress` addresses: the API node IP, the `kubernetes` ClusterIP).
+   **k3s / kube-router needs the node IP.** kube-router evaluates egress *after* DNAT, so
+   a rule that names only the `kubernetes` Service ClusterIP (`10.43.0.1`) never matches:
+   the controller's connection to it is refused and the boot sticks at `credential` (see
+   §7). The rule always includes the ClusterIP; add the API server's node address(es) with
+   `api_cidrs`, which **adds to** the ClusterIP and never replaces it, so the same
+   manifest works under pre-DNAT CNIs too. Find them with
+   `kubectl get endpoints kubernetes -o jsonpath='{.subsets[*].addresses[*].ip}'`, then
+   render with `arb node add --kind cluster --api-cidrs <ip>/32,...` (the dashboard's Add
+   node form has the same "API server CIDRs" field). **Pass:** `kubectl -n arbiter-workers
+   get networkpolicy controller-egress -o yaml` lists both `10.43.0.1/32` and the node IP.
 6. **Pin to `mesanna`.** Set `placement.node_selector: {kubernetes.io/hostname:
    mesanna}` in `arbiter-controller-config`, and pre-pull the worker image there
    (843 MB over `aginor`'s Wi-Fi is a non-starter). **Pass:** the ConfigMap loads
@@ -336,6 +346,7 @@ once the primary has said `hello_ok`).
 |---|---|---|
 | `credential`: no node credential and no join token | first boot, the join Secret is not there yet | create it with the command "Add node" printed (`read -rs T && printf %s "$T" \| kubectl -n arbiter-workers create secret generic arbiter-join --from-file=token=/dev/stdin`). The boot re-reads the file on every try; if the kubelet has not refreshed the optional mount after a few minutes, `kubectl -n arbiter-workers rollout restart deployment/arbiter-controller` |
 | `credential`: the primary refused the join token (401) | spent, expired (15 min) or mistyped | mint a new one (`arb node add --kind cluster`), replace the Secret |
+| `credential` (or `identity`): cannot reach the Kubernetes API server (`econnrefused`) | the `controller-egress` policy does not allow the API server's address as the CNI sees it; on k3s's kube-router that is the node IP:6443, not the ClusterIP | `kubectl get endpoints kubernetes`, then re-render with `--api-cidrs <ip>/32` (step 5 of §4) and re-apply the bootstrap part. A controller that is already up reports the same cause on its `Clock` check |
 | `store_credential` | enrolled, but the Secret could not be written (Role, placeholder missing) | fix the Role / re-apply the node manifest; the boot keeps the credential in memory and stores it on the next try, so **do not restart the pod** (the token is spent) |
 | `primary_facts`: 401 | the node was revoked or deleted on the primary | enrol again: empty `arbiter-node-credential`, new join Secret |
 | `identity`: `:no_registry` | `nodes.registry` is not set on the primary | `arb settings set nodes.registry …` |

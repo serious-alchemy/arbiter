@@ -313,7 +313,7 @@ defmodule ArbiterWeb.NodesLive do
 
   # ---- add node --------------------------------------------------------------
 
-  @add_keys ~w(kind name labels max_workers ttl_minutes namespace cpu memory node_selector pull_secret reach admission self_upgrade primary_cidrs proxy_url proxy_cidrs)
+  @add_keys ~w(kind name labels max_workers ttl_minutes namespace cpu memory node_selector pull_secret reach admission self_upgrade primary_cidrs api_cidrs proxy_url proxy_cidrs)
 
   defp new_add do
     %{
@@ -1335,6 +1335,14 @@ defmodule ArbiterWeb.NodesLive do
           hint="HTTPS endpoint: the primary's address(es); the controller may reach nothing else"
           value={@add.form["primary_cidrs"].value}
           placeholder="100.64.0.10/32"
+        />
+        <Forms.input
+          name="api_cidrs"
+          id="add-node-api-cidrs"
+          label="API server CIDRs"
+          hint="k3s / kube-router: the API server's node address (kubectl get endpoints kubernetes); added to the kubernetes Service address"
+          value={@add.form["api_cidrs"].value}
+          placeholder="192.168.5.10/32"
         />
         <div class="grid grid-cols-2 gap-3">
           <Forms.input
