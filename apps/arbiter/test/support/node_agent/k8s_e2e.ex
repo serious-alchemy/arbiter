@@ -353,11 +353,12 @@ defmodule Arbiter.Test.K8sE2E do
 
   # -- the Helm chart (KH6) -----------------------------------------------------------------
 
-  @chart Path.expand("../../../../../charts/arbiter-node", __DIR__)
-
+  # Resolved at runtime (tests run with the app directory, `apps/arbiter`, as cwd): a
+  # `__DIR__` literal would bake the build machine's checkout path into a module that
+  # spawns processes, which `Arbiter.VersionTest` forbids.
   @doc "The `charts/arbiter-node` directory."
   @spec chart_path() :: String.t()
-  def chart_path, do: @chart
+  def chart_path, do: Path.expand("../../charts/arbiter-node", File.cwd!())
 
   @doc """
   Like `namespace!/2`, but the namespace-level objects come from **installing the
@@ -399,7 +400,7 @@ defmodule Arbiter.Test.K8sE2E do
       [
         "install",
         release,
-        @chart,
+        chart_path(),
         "--namespace",
         ns,
         "--set",
