@@ -234,7 +234,9 @@ defmodule Arbiter.NodeAgent.Config do
     end
   end
 
-  defp validate_url(url) do
+  @doc "The controller's primary-URL rule: https, or http to a loopback host."
+  @spec validate_url(String.t()) :: {:ok, String.t()} | {:error, {:insecure_url, String.t()}}
+  def validate_url(url) do
     case URI.parse(url) do
       %URI{scheme: "https", host: host} when is_binary(host) and host != "" -> {:ok, url}
       %URI{scheme: "http", host: host} when is_binary(host) -> loopback_only(url, host)
