@@ -920,6 +920,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
       {:ok,
        %{
          node_id: node.id,
+         node_kind: Map.get(node, :kind),
          name: name,
          provider: provider,
          image: image,
@@ -1421,7 +1422,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          "limits" => request.limits,
          "network" => "none",
          "services" => request.services,
-         "command" => Jail.network_command(jail, argv)
+         "command" => remote_network_command(request, jail, argv)
        }
        |> put_checkout(request.checkout)}
     end
@@ -1560,11 +1561,24 @@ defmodule Arbiter.Worker.ContainerSpawn do
     end)
   end
 
+  # Named as `Jail.bridge_names/1` names the listeners, so a cluster pod's command and
+  # the leaves minted for the spec agree.
   defp bridges(network) do
-    [%{"name" => "proxy", "path" => network[:proxy_socket]}] ++
-      for {name, path} <- network[:bridges] || [],
-          do: %{"name" => to_string(name), "path" => path}
+    bridges = network[:bridges] || []
+    paths = [network[:proxy_socket] | Enum.map(bridges, &elem(&1, 1))]
+
+    Enum.zip_with(Jail.bridge_names(%{bridges: bridges}), paths, fn name, path ->
+      %{"name" => name, "path" => path}
+    end)
   end
+
+  # bd-8tg3uv: a cluster node's pod has none of the primary's Unix sockets, so its
+  # listeners dial the controller's bridge address (`Jail.pod_network_command/2`). A
+  # machine node's agent keeps the primary's socket paths, which the plain command uses.
+  defp remote_network_command(%{node_kind: "cluster"}, jail, argv),
+    do: Jail.pod_network_command(jail, argv)
+
+  defp remote_network_command(_request, jail, argv), do: Jail.network_command(jail, argv)
 
   # A2: a registry node gets the digest-pinned `ref` the primary pushed.
   defp image_json(image) do

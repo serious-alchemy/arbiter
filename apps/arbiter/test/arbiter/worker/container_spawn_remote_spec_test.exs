@@ -49,6 +49,57 @@ defmodule Arbiter.Worker.ContainerSpawnRemoteSpecTest do
     assert spec["install"] == InstallId.get()
   end
 
+  # bd-8tg3uv (#891): a pod has none of the primary's Unix sockets, so a cluster node's
+  # command forwards each loopback listener over TCP to the controller's bridge address.
+  describe "the network script per node kind (bd-8tg3uv)" do
+    setup %{request: request, tmp_dir: dir} do
+      arb = Path.join(dir, "arb.sock")
+      File.write!(arb, "")
+      network = Keyword.put(request.network, :bridges, [{4848, arb}])
+      %{request: %{request | network: network}, arb: arb}
+    end
+
+    test "a cluster node's command has no UNIX-CONNECT and no primary path", ctx do
+      request = Map.put(ctx.request, :node_kind, "cluster")
+
+      assert {:ok, spec} =
+               ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+      text = Enum.join(spec["command"], "\n")
+      refute text =~ "UNIX-CONNECT"
+      refute text =~ ".sock"
+      refute text =~ Path.dirname(ctx.arb)
+      assert text =~ "OPENSSL:$addr"
+      assert text =~ "ARB_BRIDGE_ADDR"
+      assert Enum.take(spec["command"], -1) == ["claude"]
+    end
+
+    test "every listener the cluster command opens has a declared bridge (a leaf) in the spec",
+         ctx do
+      request = Map.put(ctx.request, :node_kind, "cluster")
+
+      assert {:ok, spec} =
+               ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+      declared = Enum.map(spec["bridges"], & &1["name"])
+      assert declared == ["proxy", "4848"]
+
+      ["sh", "-c", _script, "sh", "socat" | rest] = spec["command"]
+      listeners = rest |> Enum.take_while(&(&1 != "--")) |> Enum.chunk_every(2)
+      assert listeners == [["3128", "proxy"], ["4848", "4848"]]
+    end
+
+    test "a machine node (or no kind) keeps the Unix-socket forwarder", ctx do
+      for request <- [ctx.request, Map.put(ctx.request, :node_kind, "machine")] do
+        assert {:ok, spec} =
+                 ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+        assert Enum.join(spec["command"], "\n") =~ "UNIX-CONNECT:$2"
+        assert ctx.arb in spec["command"]
+      end
+    end
+  end
+
   test "a registry request puts the digest-pinned ref in the spec image (A2)", %{request: request} do
     ref = "registry.example.com/arbiter/worker@sha256:" <> String.duplicate("b", 64)
     request = put_in(request.image, %{tag: "localhost/x:1", plan: nil, ref: ref})

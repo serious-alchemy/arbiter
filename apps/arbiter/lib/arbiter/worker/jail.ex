@@ -656,6 +656,75 @@ defmodule Arbiter.Worker.Jail do
     ["sh", "-c", @network_script, "sh", socat] ++ listeners ++ ["--" | command]
   end
 
+  # A cluster worker pod (bd-8tg3uv): the same loopback listeners, but a pod has none
+  # of the primary's Unix sockets, so each dials the controller's bridge listener
+  # (`$ARB_BRIDGE_ADDR`, `:9443` unless it names a port) over mTLS with the run's leaf
+  # for that bridge. The controller reads the leaf's `OU` (the bridge name) and opens
+  # the bridge on the primary, where the egress policy and `BridgeIdentity` apply
+  # unchanged. The pod's NetworkPolicy allows only that address, so the proxy remains
+  # the one way out. `$2` is the bridge name, the leaf's file stem under `/run/arb/tls`
+  # (`PodScripts`' seed unpacks them, the CA is the `ca` mount). Same start-up
+  # contract as `@network_script`: a listener that doesn't bind aborts with 125.
+  @pod_network_script ~S"""
+  socat=$1; shift
+  case $ARB_BRIDGE_ADDR in
+    '') echo "arbiter pod: ARB_BRIDGE_ADDR is not set" >&2; exit 125 ;;
+    *:*) addr=$ARB_BRIDGE_ADDR ;;
+    *) addr=$ARB_BRIDGE_ADDR:9443 ;;
+  esac
+  pids=; ports=
+  while [ "$1" != "--" ]; do
+    "$socat" "TCP-LISTEN:$1,bind=127.0.0.1,fork,reuseaddr,backlog=1024" \
+      "OPENSSL:$addr,cert=/run/arb/tls/$2.crt,key=/run/arb/tls/$2.key,cafile=/etc/arb/ca/ca.crt,commonname=arbiter-controller,verify=1" &
+    pids="$pids $!"; ports="$ports $1"; shift 2
+  done
+  shift
+  for port in $ports; do
+    hex=$(printf '%04X' "$port"); i=0
+    until grep -qi "^ *[0-9]*: 0100007F:$hex 00000000:0000 0A" /proc/net/tcp; do
+      i=$((i+1))
+      for pid in $pids; do kill -0 "$pid" 2>/dev/null || i=100; done
+      if [ "$i" -ge 50 ]; then
+        echo "arbiter pod: bridge on 127.0.0.1:$port did not come up" >&2
+        exit 125
+      fi
+      sleep 0.1
+    done
+  done
+  for pid in $pids; do
+    kill -0 "$pid" 2>/dev/null || { echo "arbiter pod: a bridge exited at start-up" >&2; exit 125; }
+  done
+  exec "$@"
+  """
+
+  @doc false
+  @spec pod_network_command(network() | nil, [String.t()]) :: [String.t()]
+  def pod_network_command(nil, command), do: command
+
+  def pod_network_command(
+        %{proxy_port: proxy_port, bridges: bridges, socat: socat} = network,
+        command
+      ) do
+    ports = [proxy_port | Enum.map(bridges, &elem(&1, 0))]
+
+    listeners =
+      ports
+      |> Enum.zip(bridge_names(network))
+      |> Enum.flat_map(fn {p, n} -> [to_string(p), n] end)
+
+    ["sh", "-c", @pod_network_script, "sh", socat] ++ listeners ++ ["--" | command]
+  end
+
+  @doc """
+  The bridge name of each listener `pod_network_command/2` opens, in order: `"proxy"`,
+  then the loopback port of each fixed-target bridge. These are the names a remote run
+  spec declares (`ContainerSpawn.remote_spec/3`), and so the names of the leaves a pod is
+  given.
+  """
+  @spec bridge_names(network()) :: [String.t()]
+  def bridge_names(%{bridges: bridges}),
+    do: ["proxy" | Enum.map(bridges, &to_string(elem(&1, 0)))]
+
   @doc """
   The host paths the jail blanks with a `--tmpfs` (bd-7o08mj): the user's
   runtime dir (`/run/user/<uid>`: session bus, `systemd/private`, ssh-agent,
