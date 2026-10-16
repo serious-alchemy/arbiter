@@ -482,6 +482,12 @@ defmodule ArbiterWeb.LiveHooks do
 
   defp maybe_refresh_for(socket, _message), do: refresh_coordinator_inbox(socket)
 
+  defp broadcast_banner_dismissed do
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, @banner_topic, :banner_dismissed)
+  end
+
+  defp bump_banner_rev(socket), do: assign(socket, :banner_rev, socket.assigns.banner_rev + 1)
+
   # Two figures, not one: pending (unread — never seen) and outstanding (seen
   # but not cleared — still owes an action). Reading no longer empties the
   # queue, so "still open" needs its own number.
@@ -490,12 +496,6 @@ defmodule ArbiterWeb.LiveHooks do
   # the mount's async load has subscribed (or on a click), so it lands on an
   # `AsyncResult` either way; a read that raises says so in the drawer rather
   # than showing an empty inbox that isn't.
-
-  defp broadcast_banner_dismissed do
-    Phoenix.PubSub.broadcast(Arbiter.PubSub, @banner_topic, :banner_dismissed)
-  end
-
-  defp bump_banner_rev(socket), do: assign(socket, :banner_rev, socket.assigns.banner_rev + 1)
 
   defp refresh_coordinator_inbox(socket) do
     {inbox, outstanding} = read_coordinator_inbox()

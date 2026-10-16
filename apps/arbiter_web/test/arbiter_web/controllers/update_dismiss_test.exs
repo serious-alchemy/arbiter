@@ -95,6 +95,9 @@ defmodule ArbiterWeb.UpdateDismissTest do
 
       {:ok, reloaded, _} = live(conn, ~p"/")
       refute has_element?(reloaded, "#update-available")
+      # Let the chrome's mount-time async loads finish before the test exits.
+      render_async(view)
+      render_async(reloaded)
     end
 
     test "other connected LiveViews hide the banner over PubSub", %{conn: conn} do
@@ -107,6 +110,8 @@ defmodule ArbiterWeb.UpdateDismissTest do
 
       _ = render(other)
       refute has_element?(other, "#update-available")
+      render_async(view)
+      render_async(other)
     end
 
     test "controller-rendered pages keep the POST fallback form", %{conn: conn} do
