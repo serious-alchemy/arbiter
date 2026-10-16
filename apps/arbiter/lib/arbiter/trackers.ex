@@ -343,6 +343,26 @@ defmodule Arbiter.Trackers do
   end
 
   @doc """
+  The upstream stories a bulk claim covers — `{:epic, id}` or `{:query, q}` —
+  via the workspace tracker's optional `search_stories/1`. `{:error,
+  :not_supported}` for adapters (or workspaces) without it.
+  """
+  @spec search_for_workspace(
+          Arbiter.Tasks.Workspace.t(),
+          {:epic, String.t()} | {:query, String.t()}
+        ) :: {:ok, [map()]} | {:error, term()}
+  def search_for_workspace(%Arbiter.Tasks.Workspace{} = workspace, selector) do
+    type = workspace_tracker_type(workspace)
+    adapter = adapter_for_workspace_type(type, workspace)
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :search_stories, 1) do
+      with_workspace(type, workspace, fn -> adapter.search_stories(selector) end)
+    else
+      {:error, :not_supported}
+    end
+  end
+
+  @doc """
   Returns the adapter module for the workspace's configured tracker.
 
   Falls back to `None` for unknown types (e.g. `:linear` before its adapter

@@ -157,6 +157,88 @@ defmodule Arbiter.Tasks.Claim do
     {:ok, results}
   end
 
+  @doc """
+  Bulk claim: every story in a tracker epic (`{:epic, id}`) or matching a
+  tracker search (`{:query, q}`).
+
+  Without `yes: true` this is a dry-run preview — nothing is created, and each
+  match is reported as `existing` (a task already references it),
+  `would_create` or `would_refuse` (not assigned to the workspace user and no
+  `:force`). With `yes: true` each unclaimed match goes through `claim/3` with
+  the same per-story `:force`, `:difficulty` and `:repo` options and is reported
+  as `created`, `existing` or `refused` (with a `reason`). Already-claimed
+  stories are never re-claimed, so a repeat run is idempotent.
+
+  Returns `{:ok, %{applied: boolean, results: [row]}}`, or `{:error, reason}`
+  (`:not_supported` when the tracker can't search).
+  """
+  @spec bulk(Workspace.t(), {:epic, String.t()} | {:query, String.t()}, keyword()) ::
+          {:ok, %{applied: boolean(), results: [map()]}} | {:error, term()}
+  def bulk(%Workspace{} = workspace, selector, opts \\ []) do
+    yes? = Keyword.get(opts, :yes, false)
+    type = Trackers.workspace_type(workspace)
+
+    with {:ok, summaries} <- Trackers.search_for_workspace(workspace, selector) do
+      viewer = bulk_viewer(workspace)
+
+      results =
+        Enum.map(summaries, fn summary ->
+          bulk_row(workspace, type, summary, viewer, yes?, opts)
+        end)
+
+      {:ok, %{applied: yes?, results: results}}
+    end
+  end
+
+  defp bulk_viewer(workspace) do
+    adapter = Trackers.for_type(Trackers.workspace_type(workspace))
+
+    case Trackers.with_workspace(Trackers.workspace_type(workspace), workspace, fn ->
+           get_current_user(adapter, workspace)
+         end) do
+      {:ok, id} -> id
+      _ -> nil
+    end
+  end
+
+  defp bulk_row(workspace, type, summary, viewer, yes?, opts) do
+    base = %{ref: summary.ref, title: summary.title, url: summary.url}
+
+    case find_existing(workspace, type, summary.ref) do
+      {:ok, task} ->
+        Map.merge(base, %{status: "existing", task_id: task.id})
+
+      _ when not yes? ->
+        preview_row(base, summary, viewer, Keyword.get(opts, :force, false))
+
+      _ ->
+        claim_row(base, workspace, summary.ref, opts)
+    end
+  end
+
+  defp preview_row(base, summary, viewer, force?) do
+    assignees = summary.assignees
+
+    if viewer in assignees or (assignees == [] and force?) do
+      Map.put(base, :status, "would_create")
+    else
+      Map.merge(base, %{status: "would_refuse", reason: "not assigned to workspace user"})
+    end
+  end
+
+  defp claim_row(base, workspace, ref, opts) do
+    case workspace |> claim(ref, Keyword.take(opts, [:force, :difficulty, :repo])) |> typed() do
+      {:ok, status, task} ->
+        Map.merge(base, %{status: Atom.to_string(status), task_id: task.id})
+
+      {:error, {_kind, message, _details}} ->
+        Map.merge(base, %{status: "refused", reason: message})
+
+      {:error, other} ->
+        Map.merge(base, %{status: "refused", reason: inspect(other)})
+    end
+  end
+
   # ---- surface contract: options, errors, shapes ---------------------------
   #
   # REST (`ClaimController`), the MCP `tracker_claim` / `tracker_sync` tools and
@@ -241,6 +323,10 @@ defmodule Arbiter.Tasks.Claim do
      %{}}
   end
 
+  def refusal(:not_supported) do
+    {:invalid_request, "this tracker cannot list an epic or run a search for bulk claim", %{}}
+  end
+
   def refusal({:already_claimed, body}) do
     {:already_claimed, "this issue has already been claimed by another Arbiter installation",
      %{comment: body}}
@@ -276,6 +362,33 @@ defmodule Arbiter.Tasks.Claim do
   @spec serialize_claim(:created | :existing, Issue.t()) :: map()
   def serialize_claim(status, %Issue{} = task),
     do: %{status: Atom.to_string(status), task: IssueSerializer.data(task)}
+
+  @doc """
+  The bulk selector in a claim request's string-keyed params: `{:ok,
+  {:epic, id}}` / `{:ok, {:query, q}}`, `:none` when neither `epic` nor `query`
+  is given (a single-ref claim), or an `invalid_request` when both are, or one
+  is combined with `ref`.
+  """
+  @spec bulk_selector(map()) ::
+          {:ok, {:epic | :query, String.t()}} | :none | {:error, {:invalid_request, String.t()}}
+  def bulk_selector(params) when is_map(params) do
+    present =
+      for {key, kind} <- [{"epic", :epic}, {"query", :query}, {"ref", :ref}],
+          is_binary(v = Map.get(params, key)) and v != "",
+          do: {kind, v}
+
+    case present do
+      [] -> :none
+      [{:ref, _}] -> :none
+      [{kind, v}] when kind in [:epic, :query] -> {:ok, {kind, v}}
+      _ -> {:error, {:invalid_request, "pass exactly one of ref, epic or query"}}
+    end
+  end
+
+  @doc "The bulk-claim response: `%{applied: boolean, data: [row]}`."
+  @spec serialize_bulk(%{applied: boolean(), results: [map()]}) :: map()
+  def serialize_bulk(%{applied: applied, results: results}),
+    do: %{applied: applied, data: results}
 
   @doc "A planned reconcile action as JSON."
   @spec serialize_action(action()) :: map()
