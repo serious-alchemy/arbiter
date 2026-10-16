@@ -654,7 +654,9 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
 
     defp derate!(script, temp) do
       Agent.update(script, fn _ -> readings(temp) end)
-      Monitor.sample(Monitor)
+      # Soft entry is judged on the median of the last thermal_entry_samples
+      # (default 3), so fill the window; hard would trip on the first anyway.
+      for _ <- 1..3, do: Monitor.sample(Monitor)
     end
 
     test "healthy: cap/0 offers the whole cap", %{script: script} do
@@ -717,7 +719,8 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
     test "recovery lifts the hold", %{script: script} do
       derate!(script, 96.0)
       assert {:error, _} = LocalCapacity.admit("bd-x", :implementer, [])
-      Agent.update(script, fn _ -> readings(60.0) end)
+      # Fill the median window with cool readings so recovery is under way.
+      derate!(script, 60.0)
 
       # The monitor's own hysteresis (recover_s) governs when; here: force the lift.
       :sys.replace_state(Process.whereis(Monitor), fn s ->
