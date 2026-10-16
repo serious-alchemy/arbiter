@@ -17,8 +17,14 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
     registry: "registry.example.test/arbiter"
   ]
 
+  # `reach=direct` (the default) needs the primary's CIDRs; every helper supplies them
+  # unless the test passes its own.
+  @primary_cidrs "100.64.0.10/32,100.64.0.11/32"
+
+  defp with_primary(params), do: Map.put_new(params, "primary_cidrs", @primary_cidrs)
+
   defp parse!(params) do
-    {:ok, spec} = InstallManifest.parse(params)
+    {:ok, spec} = InstallManifest.parse(with_primary(params))
     spec
   end
 
@@ -37,8 +43,14 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
   end
 
   describe "parse/1" do
-    test "defaults, with the node name the only required value" do
-      assert {:ok, spec} = InstallManifest.parse(%{"name" => "mesaana-k3s"})
+    test "defaults, with the node name and the primary's CIDRs the only required values" do
+      assert {:ok, spec} =
+               InstallManifest.parse(%{
+                 "name" => "mesaana-k3s",
+                 "primary_cidrs" => "100.64.0.10/32"
+               })
+
+      assert spec.primary_cidrs == ["100.64.0.10/32"]
       assert spec.node_name == "mesaana-k3s"
       assert spec.namespace == "arbiter-workers"
       assert spec.max_concurrent == 2
@@ -89,24 +101,91 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
                  "node_selector" => "novalue",
                  "pull_secret" => "UPPER",
                  "reach" => "wireguard",
+                 "primary_cidrs" => "nope",
                  "admission" => "maybe",
                  "self_upgrade" => "sometimes",
                  "part" => "everything"
                })
 
       for field <-
-            ~w(name namespace max cpu memory node_selector pull_secret reach admission self_upgrade part) do
+            ~w(name namespace max cpu memory node_selector pull_secret reach admission self_upgrade part primary_cidrs) do
         assert Enum.any?(errors, &String.starts_with?(&1, field)), "no error for #{field}"
       end
     end
 
     test "a missing name is an error" do
-      assert {:error, [error]} = InstallManifest.parse(%{})
+      assert {:error, errors} = InstallManifest.parse(%{"primary_cidrs" => @primary_cidrs})
+      assert [error] = errors
       assert error =~ "name"
     end
 
+    test "reach=direct refuses to render without the primary's CIDRs" do
+      assert {:error, [error]} = InstallManifest.parse(%{"name" => "n"})
+      assert error =~ "primary_cidrs is required"
+    end
+
+    test "primary_cidrs refuses a catch-all, in either family, and anything that is not a CIDR" do
+      for bad <- [
+            "0.0.0.0/0",
+            "100.64.0.10/32,::/0",
+            "10.0.0.0/8,0.0.0.0/0",
+            "arbiter.example",
+            ""
+          ] do
+        assert {:error, errors} = InstallManifest.parse(%{"name" => "n", "primary_cidrs" => bad})
+        assert Enum.any?(errors, &String.starts_with?(&1, "primary_cidrs")), bad
+      end
+    end
+
+    test "reach=tailscale needs no primary_cidrs (the sidecar's own control-plane rule stays)" do
+      assert {:ok, spec} = InstallManifest.parse(%{"name" => "n", "reach" => "tailscale"})
+      assert spec.primary_cidrs == []
+    end
+
+    test "reach=proxy needs a proxy URL and the proxy's CIDRs" do
+      assert {:error, errors} = InstallManifest.parse(%{"name" => "n", "reach" => "proxy"})
+      assert Enum.any?(errors, &String.starts_with?(&1, "proxy_url is required"))
+      assert Enum.any?(errors, &String.starts_with?(&1, "proxy_cidrs is required"))
+
+      assert {:ok, spec} =
+               InstallManifest.parse(%{
+                 "name" => "n",
+                 "reach" => "proxy",
+                 "proxy_url" => "http://proxy.corp.example:3128",
+                 "proxy_cidrs" => "10.9.0.5/32"
+               })
+
+      assert spec.reach == :proxy
+      assert spec.proxy_url == "http://proxy.corp.example:3128"
+      assert spec.proxy_cidrs == ["10.9.0.5/32"]
+    end
+
+    test "proxy_url is a bare http(s) URL: no credentials, no path, no catch-all CIDR" do
+      base = %{"name" => "n", "reach" => "proxy", "proxy_cidrs" => "10.9.0.5/32"}
+
+      for bad <- [
+            "ftp://proxy.example:3128",
+            "http://user:pw@proxy.example:3128",
+            "http://proxy.example:3128/path?x=1",
+            "proxy.example:3128",
+            "http://"
+          ] do
+        assert {:error, errors} = InstallManifest.parse(Map.put(base, "proxy_url", bad))
+        assert Enum.any?(errors, &String.starts_with?(&1, "proxy_url")), bad
+      end
+
+      assert {:error, errors} =
+               InstallManifest.parse(
+                 base
+                 |> Map.put("proxy_url", "http://proxy.example:3128")
+                 |> Map.put("proxy_cidrs", "0.0.0.0/0")
+               )
+
+      assert Enum.any?(errors, &String.starts_with?(&1, "proxy_cidrs"))
+    end
+
     test "the reserved name `local` is refused" do
-      assert {:error, [error]} = InstallManifest.parse(%{"name" => "local"})
+      assert {:error, [error]} = InstallManifest.parse(with_primary(%{"name" => "local"}))
       assert error =~ "name"
     end
   end
@@ -155,6 +234,87 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
       worker = Enum.find(policies, &(&1["metadata"]["name"] == "worker-to-controller"))
       [rule] = worker["spec"]["egress"]
       assert Enum.map(rule["ports"], & &1["port"]) == [9443, 9444]
+    end
+
+    defp egress_rules(docs, policy \\ "controller-egress") do
+      find(docs, "NetworkPolicy", policy)["spec"]["egress"]
+    end
+
+    defp cidrs_of(rule), do: for(%{"ipBlock" => %{"cidr" => cidr}} <- rule["to"], do: cidr)
+
+    test "reach=direct: the controller reaches the API server, DNS and the primary's CIDRs, nothing else" do
+      rules = egress_rules(render!(%{"name" => "n"}))
+
+      assert [api, dns, primary] = rules
+      assert cidrs_of(api) == ["10.43.0.1/32"]
+      assert [%{"namespaceSelector" => _, "podSelector" => _}] = dns["to"]
+      assert cidrs_of(primary) == ["100.64.0.10/32", "100.64.0.11/32"]
+      assert primary["ports"] == [%{"protocol" => "TCP", "port" => 443}]
+
+      refute Jason.encode!(rules) =~ "0.0.0.0/0"
+      refute Jason.encode!(rules) =~ "::/0"
+      refute Jason.encode!(rules) =~ "except"
+    end
+
+    test "reach=direct: the primary's rule follows the port of the primary URL" do
+      {:ok, docs} =
+        InstallManifest.render(
+          parse!(%{"name" => "n"}),
+          Keyword.put(@server, :primary_url, "https://arbiter.example.test:8443")
+        )
+
+      assert [_, _, primary] = egress_rules(docs)
+      assert primary["ports"] == [%{"protocol" => "TCP", "port" => 8443}]
+    end
+
+    test "reach=proxy: the controller reaches the proxy's CIDRs on the proxy's port only" do
+      docs =
+        render!(%{
+          "name" => "n",
+          "reach" => "proxy",
+          "proxy_url" => "http://proxy.corp.example:3128",
+          "proxy_cidrs" => "10.9.0.5/32"
+        })
+
+      assert [_api, _dns, proxy] = egress_rules(docs)
+      assert cidrs_of(proxy) == ["10.9.0.5/32"]
+      assert proxy["ports"] == [%{"protocol" => "TCP", "port" => 3128}]
+      refute docs |> egress_rules() |> Jason.encode!() =~ "0.0.0.0/0"
+
+      env =
+        find(docs, "Deployment")["spec"]["template"]["spec"]["containers"]
+        |> hd()
+        |> Map.get("env")
+
+      assert %{"name" => "ARB_NODE_PROXY", "value" => "http://proxy.corp.example:3128"} in env
+
+      assert Enum.map(
+               find(docs, "Deployment")["spec"]["template"]["spec"]["containers"],
+               & &1["name"]
+             ) ==
+               ["controller"]
+    end
+
+    test "reach=tailscale keeps the wide control-plane rule: the documented residual" do
+      assert [_api, _dns, wide] = egress_rules(render!(%{"name" => "n", "reach" => "tailscale"}))
+      assert [%{"ipBlock" => %{"cidr" => "0.0.0.0/0", "except" => except}}] = wide["to"]
+      assert "10.42.0.0/16" in except
+    end
+
+    test "the worker policy never gains an egress rule beyond the controller (no allowlist)" do
+      for params <- [
+            %{"name" => "n"},
+            %{"name" => "n", "reach" => "tailscale"},
+            %{
+              "name" => "n",
+              "reach" => "proxy",
+              "proxy_url" => "http://p.example:3128",
+              "proxy_cidrs" => "10.9.0.5/32"
+            }
+          ] do
+        assert [%{"to" => [%{"podSelector" => _}]}] =
+                 egress_rules(render!(params), "worker-to-controller")
+      end
     end
 
     test "the Role is namespaced, names its resources, and has no exec/attach/portforward" do
@@ -240,6 +400,14 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
   end
 
   describe "variants" do
+    test "the tailscale sidecar is pinned to a release and a digest, never a floating tag" do
+      d = find(render!(%{"name" => "n", "reach" => "tailscale"}), "Deployment")
+      ts = Enum.find(d["spec"]["template"]["spec"]["containers"], &(&1["name"] == "tailscale"))
+
+      assert ts["image"] =~
+               ~r|\Aghcr\.io/tailscale/tailscale:v\d+\.\d+\.\d+@sha256:[0-9a-f]{64}\z|
+    end
+
     test "tailscale adds the sidecar and the Secret reference, but no Secret" do
       docs = render!(%{"name" => "n", "reach" => "tailscale"})
       d = find(docs, "Deployment")
@@ -323,6 +491,12 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
     @variants [
       %{"name" => "plain"},
       %{"name" => "ts", "reach" => "tailscale"},
+      %{
+        "name" => "px",
+        "reach" => "proxy",
+        "proxy_url" => "http://proxy.corp.example:3128",
+        "proxy_cidrs" => "10.9.0.5/32"
+      },
       %{"name" => "adm", "admission" => "policy"},
       %{"name" => "all", "reach" => "tailscale", "admission" => "policy", "self_upgrade" => "off"}
     ]
@@ -352,7 +526,8 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
                InstallManifest.parse(%{
                  "name" => "n",
                  "token" => "arbj_x",
-                 "credential" => "arbn_x"
+                 "credential" => "arbn_x",
+                 "primary_cidrs" => @primary_cidrs
                })
 
       refute Map.has_key?(spec, :token)
@@ -386,6 +561,18 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
       assert_golden(
         "install_tailscale",
         yaml!(%{"name" => "mesaana-k3s", "reach" => "tailscale"})
+      )
+    end
+
+    test "the proxy install" do
+      assert_golden(
+        "install_proxy",
+        yaml!(%{
+          "name" => "mesaana-k3s",
+          "reach" => "proxy",
+          "proxy_url" => "http://proxy.corp.example:3128",
+          "proxy_cidrs" => "10.9.0.5/32"
+        })
       )
     end
 
