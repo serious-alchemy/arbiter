@@ -125,10 +125,6 @@ defmodule ArbiterWeb.Api.NodeController do
   defp form_value(_key, value) when is_integer(value), do: Integer.to_string(value)
   defp form_value(_key, value), do: value
 
-  defp cluster_unavailable(:no_registry),
-    do:
-      "nodes.registry is not set; a cluster node needs an image it can pull (see arb server doctor)"
-
   defp cluster_unavailable(:no_public_url), do: "nodes.public_url is not set"
 
   defp cluster_unavailable({:insecure_public_url, url}),

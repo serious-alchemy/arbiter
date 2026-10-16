@@ -301,12 +301,6 @@ defmodule Arbiter.Test.K8sE2E do
   # A listener on the bridge ports and on 9445 (a port that is not a bridge port, the
   # canary's `controller_port` probe), and nothing else.
   defp controller_deployment(ns) do
-    listeners =
-      for port <- [9443, 9444, 9445],
-          do: "socat TCP-LISTEN:#{port},fork,reuseaddr EXEC:/bin/true &"
-
-    script = Enum.join(listeners, "\n") <> "\nwait\n"
-
     labels = %{
       "app.kubernetes.io/name" => "arbiter-controller",
       "app.kubernetes.io/component" => "controller"
@@ -327,25 +321,245 @@ defmodule Arbiter.Test.K8sE2E do
               "runAsUser" => 10_001,
               "seccompProfile" => %{"type" => "RuntimeDefault"}
             },
-            "containers" => [
-              %{
-                "name" => "listener",
-                "image" => image(),
-                "command" => ["sh", "-c", script],
-                "securityContext" => %{
-                  "allowPrivilegeEscalation" => false,
-                  "capabilities" => %{"drop" => ["ALL"]},
-                  "readOnlyRootFilesystem" => true
-                },
-                "resources" => %{
-                  "requests" => %{"cpu" => "10m", "memory" => "16Mi"},
-                  "limits" => %{"cpu" => "100m", "memory" => "64Mi"}
-                }
-              }
-            ]
+            "containers" => [listener_container()]
           }
         }
       }
     }
+  end
+
+  # The stand-in's limits; its requests are derived from them so the LimitRange's
+  # `maxLimitRequestRatio` (the install manifest's, whatever it is today) admits it.
+  @listener_limit_cpu_m 100
+  @listener_limit_mem_mi 64
+
+  @doc false
+  @spec listener_container() :: map()
+  def listener_container do
+    ratios = limit_request_ratios()
+
+    listeners =
+      for port <- [9443, 9444, 9445],
+          do: "socat TCP-LISTEN:#{port},fork,reuseaddr EXEC:/bin/true &"
+
+    script = Enum.join(listeners, "\n") <> "\nwait\n"
+
+    %{
+      "name" => "listener",
+      "image" => image(),
+      "command" => ["sh", "-c", script],
+      "securityContext" => %{
+        "allowPrivilegeEscalation" => false,
+        "capabilities" => %{"drop" => ["ALL"]},
+        "readOnlyRootFilesystem" => true
+      },
+      "resources" => %{
+        "requests" => %{
+          "cpu" => "#{ceil_div(@listener_limit_cpu_m, ratios["cpu"])}m",
+          "memory" => "#{ceil_div(@listener_limit_mem_mi, ratios["memory"])}Mi"
+        },
+        "limits" => %{
+          "cpu" => "#{@listener_limit_cpu_m}m",
+          "memory" => "#{@listener_limit_mem_mi}Mi"
+        }
+      }
+    }
+  end
+
+  defp ceil_div(limit, ratio), do: div(limit + ratio - 1, ratio)
+
+  # The Container `maxLimitRequestRatio` of the LimitRange the install manifest renders,
+  # as integers (`%{"cpu" => 4, "memory" => 2}`).
+  @doc false
+  @spec limit_request_ratios() :: %{String.t() => pos_integer()}
+  def limit_request_ratios do
+    {:ok, spec} = InstallManifest.parse(%{"name" => "e2e", "primary_cidrs" => "192.0.2.0/24"})
+
+    %{bootstrap: bootstrap} =
+      InstallManifest.documents(spec,
+        image: image(),
+        primary_url: "https://primary.invalid",
+        registry: @registry
+      )
+
+    %{"spec" => %{"limits" => limits}} = Enum.find(bootstrap, &(&1["kind"] == "LimitRange"))
+    container = Enum.find(limits, &(&1["type"] == "Container"))
+
+    Map.new(container["maxLimitRequestRatio"], fn {resource, ratio} ->
+      {resource, String.to_integer(ratio)}
+    end)
+  end
+
+  # -- the Helm chart (KH6) -----------------------------------------------------------------
+
+  # Resolved at runtime (tests run with the app directory, `apps/arbiter`, as cwd): a
+  # `__DIR__` literal would bake the build machine's checkout path into a module that
+  # spawns processes, which `Arbiter.VersionTest` forbids.
+  @doc "The `charts/arbiter-node` directory."
+  @spec chart_path() :: String.t()
+  def chart_path, do: Path.expand("../../charts/arbiter-node", File.cwd!())
+
+  @doc """
+  Like `namespace!/2`, but the namespace-level objects come from **installing the
+  `charts/arbiter-node` chart** (`mode=all`, release `e2e`) instead of from
+  `InstallManifest`: PriorityClass, ResourceQuota, LimitRange, the four NetworkPolicies,
+  ServiceAccounts, Role, ConfigMaps, Lease, Service and the controller Deployment.
+
+  Only the Namespace (the chart does not template it, §20.6) is made here, with Pod
+  Security `restricted` enforced as the install runbook says. The real controller image
+  is not available to a throwaway cluster, so once Helm has applied the chart the
+  controller container is swapped for the same `socat` stand-in `namespace!/2` uses
+  (same pod labels, ports and service account, so the chart's Service and
+  NetworkPolicies select it exactly as they select the real controller). Everything the
+  canary measures, the policies and the quota, is the chart's own.
+
+  Needs `helm` on `PATH`. Cleanup (`helm uninstall` by release and namespace, then the
+  namespace and PriorityClass by exact name) is registered with ExUnit. Returns what
+  `namespace!/2` returns, plus `release:`.
+  """
+  @spec chart_namespace!(t(), keyword()) :: map()
+  def chart_namespace!(env, opts \\ []) do
+    suffix = random()
+    ns = "arb-e2e-" <> suffix
+    priority = "arbiter-e2e-" <> suffix
+    release = "e2e"
+
+    ExUnit.Callbacks.on_exit(fn ->
+      helm(env, ["uninstall", release, "--namespace", ns, "--ignore-not-found"])
+      kubectl(env, ["delete", "namespace", ns, "--wait=false", "--ignore-not-found"])
+      kubectl(env, ["delete", "priorityclass", priority, "--ignore-not-found"])
+    end)
+
+    api_ip = jsonpath(env, ["-n", "default", "get", "service", "kubernetes"], ".spec.clusterIP")
+
+    apply!(env, [namespace_object(ns)])
+
+    helm!(
+      env,
+      [
+        "install",
+        release,
+        chart_path(),
+        "--namespace",
+        ns,
+        "--set",
+        "mode=all",
+        "--set",
+        "primary.url=https://primary.invalid",
+        "--set",
+        "networkPolicy.controllerEgress.primaryCIDRs={192.0.2.0/24}",
+        "--set",
+        "networkPolicy.apiServerCIDRs={#{api_ip}/32}",
+        "--set",
+        "placement.priorityClass.name=#{priority}"
+      ] ++ Keyword.get(opts, :set, [])
+    )
+
+    swap_in_stand_in!(env, ns)
+
+    %{
+      release: release,
+      namespace: ns,
+      priority_class: priority,
+      service_ip:
+        jsonpath(env, ["-n", ns, "get", "service", "arbiter-controller"], ".spec.clusterIP"),
+      controller_uid:
+        jsonpath(env, ["-n", ns, "get", "deployment", "arbiter-controller"], ".metadata.uid"),
+      controller_ip: running_controller_ip!(env, ns)
+    }
+  end
+
+  # The swap leaves the chart's own (never-ready) controller pod terminating beside the
+  # stand-in, so `.items[0]` can be the wrong one: take a Running pod's IP, waiting for one.
+  defp running_controller_ip!(env, ns, attempts \\ 60) do
+    ip =
+      env
+      |> jsonpath(
+        ["-n", ns, "get", "pods", "-l", "app.kubernetes.io/component=controller"],
+        ~s|.items[?(@.status.phase=="Running")].status.podIP|
+      )
+      |> String.split()
+      |> List.first()
+
+    cond do
+      ip not in [nil, ""] ->
+        ip
+
+      attempts > 1 ->
+        Process.sleep(1_000)
+        running_controller_ip!(env, ns, attempts - 1)
+
+      true ->
+        raise "no Running arbiter-controller pod in #{ns} after 60s"
+    end
+  end
+
+  # The Namespace the install runbook asks for, taken from the raw renderer so the labels
+  # cannot drift from it.
+  defp namespace_object(ns) do
+    {:ok, spec} =
+      InstallManifest.parse(%{
+        "name" => "e2e",
+        "namespace" => ns,
+        "primary_cidrs" => "192.0.2.0/24"
+      })
+
+    %{bootstrap: bootstrap} =
+      InstallManifest.documents(spec,
+        image: image(),
+        primary_url: "https://primary.invalid",
+        registry: @registry
+      )
+
+    Enum.find(bootstrap, &(&1["kind"] == "Namespace"))
+  end
+
+  defp swap_in_stand_in!(env, ns) do
+    patch =
+      Jason.encode!([
+        %{
+          "op" => "replace",
+          "path" => "/spec/template/spec/containers",
+          "value" => [listener_container()]
+        }
+      ])
+
+    kubectl!(env, [
+      "-n",
+      ns,
+      "patch",
+      "deployment",
+      "arbiter-controller",
+      "--type=json",
+      "-p",
+      patch
+    ])
+
+    kubectl!(env, [
+      "-n",
+      ns,
+      "rollout",
+      "status",
+      "deployment/arbiter-controller",
+      "--timeout=180s"
+    ])
+  end
+
+  @doc "Run `helm` against the disposable cluster only; raises on a non-zero exit."
+  @spec helm!(t(), [String.t()]) :: String.t()
+  def helm!(env, args) do
+    case helm(env, args) do
+      {out, 0} -> out
+      {out, code} -> raise "helm #{Enum.join(args, " ")} exited #{code}: #{out}"
+    end
+  end
+
+  def helm(%__MODULE__{kubeconfig: path}, args) do
+    helm = System.find_executable("helm") || raise "the chart e2e needs `helm` on PATH"
+
+    System.cmd(helm, ["--kubeconfig", path | args],
+      env: [{"KUBECONFIG", path}],
+      stderr_to_stdout: true
+    )
   end
 end

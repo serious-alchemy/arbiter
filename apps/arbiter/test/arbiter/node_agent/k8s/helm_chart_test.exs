@@ -6,8 +6,8 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartTest do
   The static tests read the chart's files and need nothing installed. The `:helm`
   tests render it with the `helm` binary and are skipped where it is absent (CI's
   `helm-chart` job installs it and runs `scripts/helm-chart-check.sh`, which is the
-  lint + kubeconform half). The full chart-vs-`InstallManifest` document diff is KH6;
-  here the two renderers are only held to the same kinds and names.
+  lint + kubeconform half). The full chart-vs-`InstallManifest` document diff is `helm_chart_parity_test.exs`
+  (KH6); here the two renderers are only held to the same kinds and names.
   """
   use ExUnit.Case, async: true
 
@@ -116,6 +116,29 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartTest do
       assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
       assert parsed.max_concurrent == 3
       assert parsed.placement["node_selector"] == %{"pool" => "ci"}
+    end
+
+    test "registries[] render as the controller's per-prefix pull-secret list (KH13)" do
+      docs =
+        render!(
+          @direct ++
+            [
+              "registries[0].prefix=registry.gitlab.com/vstim",
+              "registries[0].pullSecret=gitlab-vstim",
+              "registries[1].prefix=ghcr.io/ryan/",
+              "registries[1].pullSecret=ghcr-arbiter"
+            ]
+        )
+
+      config = find!(docs, "ConfigMap", "arbiter-controller-config")
+      assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
+
+      assert parsed.registries == [
+               %{"prefix" => "registry.gitlab.com/vstim/", "pull_secret" => "gitlab-vstim"},
+               %{"prefix" => "ghcr.io/ryan/", "pull_secret" => "ghcr-arbiter"}
+             ]
+
+      assert parsed.image_pull_secrets == []
     end
 
     test "the join token is only rendered for --set-file, and no other Secret has data" do

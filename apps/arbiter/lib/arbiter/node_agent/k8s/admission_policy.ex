@@ -14,8 +14,8 @@ defmodule Arbiter.NodeAgent.K8s.AdmissionPolicy do
 
   `<registry>` in the design is the operator's registry prefix, passed in. A
   service image outside `docker.io/library/` and the registry (§6,
-  `service_image_allowlist`) widens the image rule, and only that rule, by one
-  `startsWith` per prefix.
+  `service_image_allowlist`), and every further `registries` prefix (KH13), widen
+  the image rule, and only that rule, by one `startsWith` per prefix.
 
   Failure is closed: `failurePolicy: Fail`, and an expression over a field that is
   absent (a pod with no `volumes` or `initContainers`) errors, which denies. The
@@ -67,7 +67,7 @@ defmodule Arbiter.NodeAgent.K8s.AdmissionPolicy do
       when is_binary(registry) do
     images =
       Enum.map_join(
-        ["#{registry}/", "docker.io/library/" | extra_image_prefixes],
+        Enum.uniq(["#{registry}/", "docker.io/library/" | extra_image_prefixes]),
         " || ",
         &"c.image.startsWith('#{&1}')"
       )
@@ -129,14 +129,18 @@ defmodule Arbiter.NodeAgent.K8s.AdmissionPolicy do
   @doc """
   The policy and its binding as two string-keyed manifests. Options: `registry:`
   (required), `namespace:` (default `arbiter-workers`), `image_prefixes:`,
-  `sandbox_classes:` (see `validations/3`).
+  `sandbox_classes:` (see `validations/3`) and `registries:` (KH13, §20.10: every further
+  registry prefix, each ending in `/`, a pod's images may come from: the same list the
+  controller's `PodConfig` accepts, so the API server and the pod builder agree on what may run).
   """
   @spec manifests(keyword()) :: [map()]
   def manifests(opts) do
     registry = Keyword.fetch!(opts, :registry)
     namespace = Keyword.get(opts, :namespace, "arbiter-workers")
-    prefixes = Keyword.get(opts, :image_prefixes, [])
     sandbox_classes = Keyword.get(opts, :sandbox_classes, [])
+
+    prefixes =
+      Enum.uniq(Keyword.get(opts, :registries, []) ++ Keyword.get(opts, :image_prefixes, []))
 
     [
       %{

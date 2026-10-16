@@ -9,7 +9,7 @@ defmodule Arbiter.NodeAgent.Backend.K8s do
   What the protocol becomes for a cluster (K§3.2):
 
     * `hello` is `kind: "cluster"` with `caps{backend: k8s, image: registry, limits: pod,
-      bridge_streams: mux, upgrade: image, self_upgrade, namespace}`, the controller's
+      bridge_streams: mux, upgrade: image, self_upgrade, namespace, registries}`, the controller's
       `capacity` (`ceiling` = the ConfigMap's `max_concurrent`) and `degraded` (the
       readiness canary's `netpol_unenforced`, the config loader's `bad_config`), its pods
       as `inventory.runs`, nothing retained, the readiness checks and `k8s_version`. No
@@ -128,7 +128,9 @@ defmodule Arbiter.NodeAgent.Backend.K8s do
         "bridge_streams" => "mux",
         "upgrade" => "image",
         "self_upgrade" => Map.get(cluster, :self_upgrade?, false) == true,
-        "namespace" => Map.get(cluster, :namespace)
+        "namespace" => Map.get(cluster, :namespace),
+        "install" => install_caps(cluster),
+        "registries" => Map.get(report, :registries, [])
       },
       "capacity" => report.capacity,
       "degraded" => report.degraded,
@@ -136,6 +138,12 @@ defmodule Arbiter.NodeAgent.Backend.K8s do
       "readiness" => report.readiness || readiness
     }
     |> put_present("k8s_version", Map.get(cluster, :k8s_version))
+  end
+
+  # KH8: `caps.install{method,release,chart}`; a cluster with no word on it is a manifest install.
+  defp install_caps(cluster) do
+    install = Map.get(cluster, :install) || %{method: "manifest"}
+    Map.new(install, fn {k, v} -> {to_string(k), v} end)
   end
 
   @impl true

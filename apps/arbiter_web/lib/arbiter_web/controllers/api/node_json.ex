@@ -73,6 +73,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
     ])
     |> Map.put(:max_workers, row.override)
     |> Map.put(:self_upgrade, Map.get(row, :self_upgrade?, false))
+    |> Map.put(:registries, get_in(row, [:caps, "registries"]) || [])
     |> put_constrained(row)
   end
 

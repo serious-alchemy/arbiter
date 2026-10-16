@@ -1,7 +1,7 @@
 defmodule Arbiter.NodeAgent.K8s.E2ENamespaceParityTest do
   use ExUnit.Case, async: true
 
-  alias Arbiter.NodeAgent.K8s.{InstallManifest, PodSpec}
+  alias Arbiter.NodeAgent.K8s.{InstallManifest, PodSpec, Quantity}
   alias Arbiter.Test.K8sE2E
 
   defp kinds(docs), do: Enum.map(docs, &{&1["kind"], &1["metadata"]["name"]})
@@ -49,6 +49,29 @@ defmodule Arbiter.NodeAgent.K8s.E2ENamespaceParityTest do
     deployment = Enum.find(K8sE2E.base_objects("n", "p", true), &(&1["kind"] == "Deployment"))
     [container] = deployment["spec"]["template"]["spec"]["containers"]
     assert container["resources"]["limits"]["cpu"]
+  end
+
+  test "the stand-in controller passes the rendered LimitRange's ratios and maximum" do
+    objects = K8sE2E.base_objects("arb-e2e-x", "arbiter-e2e-x", true)
+    limit_range = Enum.find(objects, &(&1["kind"] == "LimitRange"))
+    container_rule = Enum.find(limit_range["spec"]["limits"], &(&1["type"] == "Container"))
+
+    deployment = Enum.find(objects, &(&1["kind"] == "Deployment"))
+    [container] = deployment["spec"]["template"]["spec"]["containers"]
+    %{"requests" => requests, "limits" => limits} = container["resources"]
+
+    parse = %{"cpu" => &Quantity.cpu(&1, :k8s), "memory" => &Quantity.memory(&1, :k8s)}
+
+    for {resource, ratio} <- container_rule["maxLimitRequestRatio"] do
+      {:ok, limit} = parse[resource].(limits[resource])
+      {:ok, request} = parse[resource].(requests[resource])
+
+      assert limit <= String.to_integer(ratio) * request,
+             "#{resource}: limit #{limits[resource]} / request #{requests[resource]} exceeds #{ratio}"
+
+      {:ok, max} = parse[resource].(container_rule["max"][resource])
+      assert limit <= max, "#{resource} limit #{limits[resource]} exceeds the Container max"
+    end
   end
 
   test "policies: false drops the NetworkPolicies" do

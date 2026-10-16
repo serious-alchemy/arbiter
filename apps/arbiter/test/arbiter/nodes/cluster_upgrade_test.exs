@@ -167,6 +167,61 @@ defmodule Arbiter.Nodes.ClusterUpgradeTest do
       assert row.upgrade_command == nil
     end
 
+    test "a helm install is shown helm upgrade, never kubectl set image" do
+      node = enroll!("k3s", "cluster")
+
+      attach!(
+        node,
+        hello(%{
+          "self_upgrade" => false,
+          "namespace" => "ci-workers",
+          "install" => %{
+            "method" => "helm",
+            "release" => "arbiter-node",
+            "chart" => "oci://ghcr.io/acme/charts/arbiter-node"
+          }
+        })
+      )
+
+      row = row(node)
+      assert row.health == :outdated
+      assert row.install_method == "helm"
+
+      assert row.upgrade_command ==
+               "helm upgrade arbiter-node oci://ghcr.io/acme/charts/arbiter-node " <>
+                 "--version 9.9.9 -n ci-workers --reset-then-reuse-values"
+    end
+
+    test "nodes.chart_ref wins over the chart the node reports" do
+      {:ok, _} = Settings.set_nodes_chart_ref("oci://registry.example.test/charts/arbiter-node")
+      on_exit(fn -> {:ok, _} = Settings.set_nodes_chart_ref(nil) end)
+
+      node = enroll!("k3s", "cluster")
+
+      attach!(
+        node,
+        hello(%{
+          "install" => %{"method" => "helm", "release" => "r1", "chart" => "oci://other/x"}
+        })
+      )
+
+      assert row(node).upgrade_command =~
+               "helm upgrade r1 oci://registry.example.test/charts/arbiter-node --version 9.9.9"
+    end
+
+    test "a helm install is never told it is on its way, whatever self_upgrade says" do
+      node = enroll!("k3s", "cluster")
+      attach!(node, hello(%{"self_upgrade" => true, "install" => %{"method" => "helm"}}))
+      assert row(node).upgrade_command =~ "helm upgrade "
+      refute row(node).upgrade_command =~ "kubectl"
+    end
+
+    test "a node that reports no install is a manifest install" do
+      node = enroll!("k3s", "cluster")
+      attach!(node, hello())
+      assert row(node).install_method == "manifest"
+    end
+
     test "a current node, a machine and a node with no registry show no command" do
       current = enroll!("k3s", "cluster")
       attach!(current, hello(%{}, %{"agent_version" => "1.2.3"}))

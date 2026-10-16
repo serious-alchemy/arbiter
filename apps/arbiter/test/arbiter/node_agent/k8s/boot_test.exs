@@ -15,6 +15,7 @@ defmodule Arbiter.NodeAgent.K8s.BootTest do
 
   import Plug.Conn
 
+  alias Arbiter.NodeAgent.K8s.Boot
   alias Arbiter.NodeAgent.K8s.Controller
   alias Arbiter.NodeAgent.K8s.ControllerSupervisor
   alias Arbiter.NodeAgent.Supervisor, as: AgentSupervisor
@@ -244,6 +245,25 @@ defmodule Arbiter.NodeAgent.K8s.BootTest do
     assert stored(ctx.api, "arbiter-controller-ca", "ca.key") =~ "PRIVATE KEY"
     cert = stored(ctx.api, "arbiter-controller-ca", "ca.crt")
     assert FakeK8sApi.config_map(ctx.api, "arbiter-ca")["data"] == %{"ca.crt" => cert}
+  end
+
+  # KH8: the chart sets these on the Deployment; the controller reports them in `caps.install`.
+  test "install_from_env reads the chart's ARB_INSTALL_METHOD, release and chart" do
+    assert Boot.install_from_env(%{
+             "ARB_INSTALL_METHOD" => "helm",
+             "ARB_HELM_RELEASE" => "node-a",
+             "ARB_CHART_REF" => "oci://ghcr.io/acme/charts/arbiter-node"
+           }) == %{
+             method: "helm",
+             release: "node-a",
+             chart: "oci://ghcr.io/acme/charts/arbiter-node"
+           }
+
+    assert Boot.install_from_env(%{"ARB_INSTALL_METHOD" => "helm", "ARB_CHART_REF" => ""}) ==
+             %{method: "helm"}
+
+    assert Boot.install_from_env(%{}) == %{method: "manifest"}
+    assert Boot.install_from_env(%{"ARB_INSTALL_METHOD" => "bogus"}) == %{method: "manifest"}
   end
 
   # The self-upgrade switch is read once, from the boot's environment: what `hello` reports

@@ -2,6 +2,10 @@
 
 One Arbiter cluster node as a Helm chart (`docs/design/remote-workers.md` §20.5-§20.7). The raw
 manifests (`GET /nodes/join/k8s.yaml`) remain the fallback for clusters without Helm.
+`GET /nodes/join/values.yaml?name=...` on the primary returns this chart's values for a node
+(quota and LimitRange sized for its `max`, the primary's URL, no secret); the dashboard's
+"Add node" Helm tab and `arb node add --kind cluster --format helm|values` print the
+commands that use it.
 
 ```sh
 # 1. cluster-admin, once: the namespace and its Pod Security labels (the chart does not template it)
