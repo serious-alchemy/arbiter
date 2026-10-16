@@ -7,6 +7,10 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
 
   ## Layers (§11)
 
+  A `prebuilt` plan (KH14, `Arbiter.Worker.Image.Prebuilt`) has no toolchain
+  layer: the repo's CI image is pulled by its digest and layers 2 and 3 are
+  overlaid on it (the seed layer only for `seed: primary`).
+
   The run image is the last of three, each `FROM` the one before and pushed to
   `<registry>/<repo>/worker` (KH11, `RepoConfig.repository_name/1`: one repository
   per repo, no shared `<registry>/worker`):
@@ -85,13 +89,21 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   last layer's.
   """
   @spec publish_image(map(), Registry.t(), keyword()) :: {:ok, result()} | {:error, term()}
+  def publish_image(%{plan: %{source: :prebuilt} = plan} = ctx, %Registry{} = cfg, opts) do
+    repository = worker_repository(ctx)
+
+    with :ok <- pull(plan.tag, cfg, opts) do
+      workdir(opts, &upper_layers(ctx, repository, [], &1, cfg, opts))
+    end
+  end
+
   def publish_image(%{plan: plan} = ctx, %Registry{} = cfg, opts) do
     builder = Keyword.get(opts, :builder, Builder)
     repository = worker_repository(ctx)
 
     with {:ok, _} <- Builder.ensure(builder, plan, Keyword.take(opts, [:runner, :scratch])),
          {:ok, toolchain} <- push(plan.tag, repository, plan.hash, :toolchain, cfg, opts) do
-      workdir(opts, &upper_layers(ctx, repository, toolchain, &1, cfg, opts))
+      workdir(opts, &upper_layers(ctx, repository, [toolchain], &1, cfg, opts))
     end
   end
 
@@ -101,7 +113,7 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
       {seed, seed_report} =
         seed_layer(ctx, plan, repository, cli_suffix, cli.local, work, cfg, opts)
 
-      layers = [toolchain, cli] ++ List.wrap(seed)
+      layers = toolchain ++ [cli] ++ List.wrap(seed)
       cleanup_local(Enum.reverse(for l <- layers, l.layer != :toolchain, do: l.local), opts)
       final = List.last(layers)
 
@@ -182,6 +194,38 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   defp seed_layer(ctx, plan, repository, cli_suffix, parent, work, cfg, opts) do
     {shipped, excluded} = partition_seed_paths(Map.get(ctx, :seed_paths))
 
+    case seed_mode(plan) do
+      :primary ->
+        primary_seed(
+          ctx,
+          plan,
+          repository,
+          cli_suffix,
+          parent,
+          work,
+          cfg,
+          opts,
+          shipped,
+          excluded
+        )
+
+      mode ->
+        skipped("seed: #{mode}, #{seed_skip_reason(mode)}", excluded)
+    end
+  end
+
+  # A prebuilt image says how its deps are seeded (`seed: primary | image | none`);
+  # every other image is seeded by the primary.
+  defp seed_mode(%{prebuilt: %{seed: mode}}) when mode in [:image, :none], do: mode
+  defp seed_mode(_plan), do: :primary
+
+  defp seed_skip_reason(:image), do: "the image already carries /opt/arbiter/seed"
+  defp seed_skip_reason(:none), do: "no deps seed (cold compile)"
+
+  defp seed_note(%{prebuilt: %{seed_note: note}}) when is_binary(note), do: note
+  defp seed_note(_plan), do: nil
+
+  defp primary_seed(ctx, plan, repository, cli_suffix, parent, work, cfg, opts, shipped, excluded) do
     case seed_source(ctx, plan, shipped, opts) do
       {:ok, dir, lock_hash, artifacts} ->
         sp8 = artifacts |> Enum.join(",") |> sha256() |> binary_part(0, 8)
@@ -194,7 +238,8 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
 
         with :ok <- build(local, containerfile, dir, work, opts),
              {:ok, layer} <- push(local, repository, tag, :seed, cfg, opts) do
-          {Map.put(layer, :local, local), %{status: :pushed, reason: nil, excluded: excluded}}
+          {Map.put(layer, :local, local),
+           %{status: :pushed, reason: seed_note(plan), excluded: excluded}}
         else
           {:error, reason} -> skipped(reason, excluded)
         end
@@ -392,6 +437,22 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
             {:error, {:tag_failed, remote, status, tail(Registry.redact(out, cfg))}}
         end
       end)
+    end)
+  end
+
+  # The CI image, into local storage by digest, so the overlay builds and
+  # `DepsCache` runs read it from there. Its host's login (the repo's registry
+  # credential, when the hosts match) is the auth file, never argv.
+  defp pull(ref, cfg, opts) do
+    Registry.with_authfile(cfg, scratch(opts), fn authfile ->
+      args =
+        ["pull", "--quiet"] ++
+          Registry.tls_flags(cfg) ++ if(authfile, do: ["--authfile", authfile], else: []) ++ [ref]
+
+      case podman(args, opts, @push_timeout_ms) do
+        {_, 0} -> :ok
+        {out, status} -> {:error, {:pull_failed, ref, status, tail(Registry.redact(out, cfg))}}
+      end
     end)
   end
 

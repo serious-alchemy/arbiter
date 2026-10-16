@@ -2078,10 +2078,39 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         else: []
 
     installed ++
-      for(%{"origin" => "config"} = entry <- entries, do: config_registry_result(entry))
+      for(%{"origin" => "config"} = entry <- entries, do: config_registry_result(entry)) ++
+      for(%{} = image <- List.wrap(reg["images"]), do: image_result(image))
   end
 
   defp registry_results(_), do: []
+
+  # KH14 (§20.9): one `image <repo>` row per repo whose `image.source` is
+  # `prebuilt`: the primary resolved the tag to a digest and checked the
+  # runtime-contract label and that the image's revision is on the default
+  # branch, without starting a run.
+  defp image_result(%{"status" => "ok"} = image) do
+    nodes_result("image #{image["repo"]}", :ok, image_summary(image))
+  end
+
+  defp image_result(image) do
+    nodes_result(
+      "image #{image["repo"]}",
+      :warn,
+      "#{image["ref"]}: #{image["error"] || "not usable"}",
+      "Runs for #{image["repo"]} cannot get an image until this clears. Check " <>
+        "worker.repos.#{image["repo"]}.image.ref and credentials_ref (`arb workspace config`); " <>
+        "the image must be built by the repo's CI from the default branch, FROM " <>
+        "ghcr.io/<owner>/arbiter-worker-base, with the label arbiter.runtime-contract=1."
+    )
+  end
+
+  defp image_summary(image) do
+    digest = image["digest"] |> to_string() |> String.slice(0, 19)
+
+    "#{image["ref"]} -> #{digest} (revision " <>
+      "#{String.slice(to_string(image["revision"]), 0, 12)}, seed #{image["seed"]})" <>
+      if(image["seed_note"], do: "; #{image["seed_note"]}", else: "")
+  end
 
   defp config_registry_result(entry) do
     name = "worker.image registry #{entry["registry"]}"

@@ -60,7 +60,9 @@ defmodule Arbiter.Worker.Image.RegistryReport do
 
   defp workspaces(opts), do: Keyword.get_lazy(opts, :workspaces, fn -> Ash.read!(Workspace) end)
 
-  defp repos(workspace) do
+  @doc false
+  @spec repos(map()) :: [String.t()]
+  def repos(workspace) do
     config = workspace.config || %{}
     paths = if is_map(config["repo_paths"]), do: Map.keys(config["repo_paths"]), else: []
     worker = config["worker"]

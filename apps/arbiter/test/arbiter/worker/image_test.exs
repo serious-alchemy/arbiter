@@ -94,6 +94,13 @@ defmodule Arbiter.Worker.ImageTest do
       refute base =~ ~r/^USER\b/m
     end
 
+    test "the base carries the runtime-contract label a prebuilt image inherits (KH14)", %{
+      base: base
+    } do
+      assert base =~ ~s(LABEL arbiter.runtime-contract="1")
+      assert Arbiter.Worker.Image.contract_label() == {"arbiter.runtime-contract", "1"}
+    end
+
     test "seed and snapshotter are baked into /opt/arbiter/bin, byte for byte, root-owned", %{
       base: base
     } do
@@ -374,7 +381,7 @@ defmodule Arbiter.Worker.ImageTest do
       end
     end
 
-    test "prebuilt is not planned by the primary's builder yet" do
+    test "prebuilt without an image.ref is unavailable (Prebuilt plans it, KH14)" do
       repo = repo_with(%{"README.md" => "hi\n"})
 
       assert {:error, {:source_unavailable, :prebuilt, _}} =
