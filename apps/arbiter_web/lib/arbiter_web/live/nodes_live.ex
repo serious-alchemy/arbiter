@@ -1221,7 +1221,8 @@ defmodule ArbiterWeb.NodesLive do
       <% else %>
         <div>
           <p class="m-0 mb-1.5 text-[12px] text-[var(--text-secondary)]">
-            4. Install the chart. The values hold no secret and carry the quota for this size:
+            4. Install the chart. The values hold no secret and carry the quota for this size.
+            The pod can take up to ~90 seconds to see a Secret created after it started:
           </p>
           <.command_block
             id="helm-install-command"
