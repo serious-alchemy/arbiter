@@ -158,7 +158,8 @@ defmodule ArbiterWeb.Router do
         {ArbiterWeb.LiveHooks, :loopback},
         {ArbiterWeb.LiveHooks, :open_epics},
         {ArbiterWeb.LiveHooks, :quota},
-        {ArbiterWeb.LiveHooks, :coordinator_inbox}
+        {ArbiterWeb.LiveHooks, :coordinator_inbox},
+        {ArbiterWeb.LiveHooks, :banner_dismiss}
       ] do
       live("/", BoardLive)
       live("/audit", AuditLogLive)

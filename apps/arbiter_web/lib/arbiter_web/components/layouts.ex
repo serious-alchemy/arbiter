@@ -70,6 +70,12 @@ defmodule ArbiterWeb.Layouts do
     doc: "drives the drawer's relative timestamps (ArbiterWeb.LiveHooks)"
   )
 
+  attr(:banner_rev, :integer,
+    default: 0,
+    doc:
+      "bumped by ArbiterWeb.LiveHooks' :banner_dismiss when a banner is dismissed, so the layout re-renders and re-reads the dismissal"
+  )
+
   attr(:open_epic_count, :integer,
     default: nil,
     doc:
@@ -556,6 +562,7 @@ defmodule ArbiterWeb.Layouts do
         as={:update_dismiss}
         id="update-dismiss-form"
         action={~p"/release/update/dismiss"}
+        phx-submit="dismiss_update"
         method="post"
         class="shrink-0 order-last"
       >
@@ -609,6 +616,7 @@ defmodule ArbiterWeb.Layouts do
         as={:deploy_dismiss}
         id="deploy-dismiss-form"
         action={~p"/release/deploy/dismiss"}
+        phx-submit="dismiss_deploy"
         method="post"
         class="shrink-0"
       >

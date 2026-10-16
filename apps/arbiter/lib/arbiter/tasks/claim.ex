@@ -23,6 +23,7 @@ defmodule Arbiter.Tasks.Claim do
     Dependencies,
     Dependency,
     Issue,
+    IssueRepo,
     IssueSerializer,
     TrackerAcceptance,
     Workspace
@@ -662,14 +663,74 @@ defmodule Arbiter.Tasks.Claim do
       |> maybe_put_extracted(:priority, adapter, :extract_priority, issue_map)
       |> maybe_put_extracted(:difficulty, adapter, :extract_difficulty, issue_map)
       |> maybe_put_extracted(:issue_type, adapter, :extract_issue_type, issue_map)
+      |> maybe_seed_difficulty(workspace, adapter, issue_map)
       |> maybe_put_override(:difficulty, overrides)
       |> maybe_put_override(:repo, overrides)
       |> maybe_put_override(:priority, overrides)
       |> maybe_put_override(:issue_type, overrides)
 
+    {attrs, route_notes} = route_repo(attrs, workspace, adapter, issue_map, overrides)
+
     case Ash.create(Issue, attrs) do
-      {:ok, task} -> {:ok, :created, task}
-      {:error, err} -> {:error, err}
+      {:ok, task} ->
+        append_link_notes(task, route_notes)
+        {:ok, :created, if(route_notes == [], do: task, else: Ash.get!(Issue, task.id))}
+
+      {:error, err} ->
+        {:error, err}
+    end
+  end
+
+  # `tracker.claim.repo_from`: %{"field" => name, "map" => %{value => repo}}.
+  # Only in a multi-repo workspace, and never over an explicit `repo`. A value
+  # that is unmapped (or maps to a repo that isn't configured) leaves the repo
+  # to `default_repo` and records why in the task notes.
+  defp route_repo(attrs, workspace, adapter, issue_map, overrides) do
+    with %{"field" => field, "map" => map} <- claim_config(workspace, "repo_from"),
+         nil <- Keyword.get(overrides, :repo),
+         true <- length(IssueRepo.configured_repos(workspace.id)) > 1,
+         true <- function_exported?(adapter, :extract_field, 2) do
+      value = adapter.extract_field(issue_map, field)
+      target = Map.get(map, value)
+
+      case IssueRepo.configured_key(workspace.id, target) do
+        nil -> {attrs, [route_fallback_note(field, value, target)]}
+        repo -> {Map.put(attrs, :repo, repo), []}
+      end
+    else
+      _ -> {attrs, []}
+    end
+  end
+
+  defp route_fallback_note(field, nil, _),
+    do: "repo_from: story has no #{field} value; using default_repo."
+
+  defp route_fallback_note(field, value, nil),
+    do: "repo_from: #{field} #{inspect(value)} is not in the repo map; using default_repo."
+
+  defp route_fallback_note(field, value, repo),
+    do:
+      "repo_from: #{field} #{inspect(value)} maps to #{inspect(repo)}, which is not a " <>
+        "configured repo; using default_repo."
+
+  # `tracker.claim.difficulty_from_estimate`: %{"points" => difficulty}.
+  # Advisory seed only: an unmapped/missing estimate leaves difficulty to the
+  # adapter's own extraction (or unset), and explicit overrides still win.
+  defp maybe_seed_difficulty(attrs, workspace, adapter, issue_map) do
+    with map when is_map(map) <- claim_config(workspace, "difficulty_from_estimate"),
+         true <- function_exported?(adapter, :extract_estimate, 1),
+         pts when is_number(pts) <- adapter.extract_estimate(issue_map),
+         d when is_integer(d) <- Map.get(map, to_string(trunc(pts))) do
+      Map.put(attrs, :difficulty, d)
+    else
+      _ -> attrs
+    end
+  end
+
+  defp claim_config(workspace, key) do
+    case workspace.config do
+      %{"tracker" => %{"claim" => %{^key => value}}} -> value
+      _ -> nil
     end
   end
 

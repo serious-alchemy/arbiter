@@ -588,6 +588,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       end
     end)
     |> validate_child_policy(Map.get(tracker, "child_policy"))
+    |> validate_claim(Map.get(tracker, "claim"))
     |> then(fn cs ->
       case Map.get(tracker, "config") do
         nil -> cs
@@ -599,6 +600,60 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_tracker(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "tracker must be a map")
+  end
+
+  defp validate_claim(changeset, nil), do: changeset
+
+  defp validate_claim(changeset, claim) when is_map(claim) do
+    changeset
+    |> validate_repo_from(Map.get(claim, "repo_from"))
+    |> validate_difficulty_from_estimate(Map.get(claim, "difficulty_from_estimate"))
+  end
+
+  defp validate_claim(changeset, _),
+    do: Changeset.add_error(changeset, field: :config, message: "tracker.claim must be a map")
+
+  defp validate_repo_from(changeset, nil), do: changeset
+
+  defp validate_repo_from(changeset, %{"field" => field, "map" => map})
+       when is_binary(field) and field != "" and is_map(map) do
+    if Enum.all?(map, fn {k, v} -> is_binary(k) and is_binary(v) and v != "" end) do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message: "tracker.claim.repo_from.map must map field values to repo_paths keys (strings)"
+      )
+    end
+  end
+
+  defp validate_repo_from(changeset, _) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message:
+        ~s(tracker.claim.repo_from must be {"field": "<name>", "map": {"<value>": "<repo>"}})
+    )
+  end
+
+  defp validate_difficulty_from_estimate(changeset, nil), do: changeset
+
+  defp validate_difficulty_from_estimate(changeset, map) when is_map(map) do
+    if Enum.all?(map, fn {k, v} -> is_binary(k) and is_integer(v) and v in 0..5 end) do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message:
+          "tracker.claim.difficulty_from_estimate must map points (string) to a difficulty 0..5"
+      )
+    end
+  end
+
+  defp validate_difficulty_from_estimate(changeset, _) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "tracker.claim.difficulty_from_estimate must be a map"
+    )
   end
 
   defp validate_child_policy(changeset, nil), do: changeset

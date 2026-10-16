@@ -202,6 +202,43 @@ defmodule Arbiter.NodeAgent.RunSpecTest do
       end
     end
 
+    test "a digest-pinned image tag is accepted, with or without a tag" do
+      digest = "sha256:" <> String.duplicate("a", 64)
+
+      for tag <- [
+            "reg.example.com/org/ci@" <> digest,
+            "reg.example.com:5000/org/ci:main@" <> digest
+          ] do
+        assert {:ok, %{image: %{tag: ^tag}}} =
+                 RunSpec.validate(spec(%{"image" => %{"tag" => tag, "plan" => nil}}))
+      end
+    end
+
+    test "malformed digest tags and shell metacharacters are refused" do
+      good = String.duplicate("a", 64)
+
+      for tag <- [
+            "reg/ci@sha256:" <> String.duplicate("a", 63),
+            "reg/ci@sha256:" <> String.duplicate("a", 65),
+            "reg/ci@sha256:" <> String.duplicate("g", 64),
+            "reg/ci@sha256:" <> String.duplicate("A", 64),
+            "reg/ci@" <> good,
+            "reg/ci@md5:" <> good,
+            "reg/ci@",
+            "reg/ci@sha256:" <> good <> "@sha256:" <> good,
+            "reg/ci@sha256:" <> good <> ";id",
+            "reg/ci@sha256:" <> good <> " x",
+            "reg/ci;id@sha256:" <> good,
+            "reg/ci$(id)@sha256:" <> good,
+            "-reg/ci@sha256:" <> good,
+            "@sha256:" <> good
+          ] do
+        assert {:error, {:refused, {:bad_value, "image.tag"}}} =
+                 RunSpec.validate(spec(%{"image" => %{"tag" => tag, "plan" => nil}})),
+               "expected #{inspect(tag)} refused"
+      end
+    end
+
     test "an image, name or run that could be read as a flag" do
       assert {:error, {:refused, {:bad_value, "image.tag"}}} =
                RunSpec.validate(spec(%{"image" => %{"tag" => "--privileged"}}))

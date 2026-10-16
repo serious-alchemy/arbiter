@@ -96,11 +96,13 @@ defmodule ArbiterWeb.LiveHooks do
   import Phoenix.LiveView, only: [attach_hook: 4, connected?: 1, start_async: 3]
 
   alias Arbiter.Messages.Message
+  alias ArbiterWeb.DashboardUpdateController
   alias Phoenix.LiveView.AsyncResult
 
   require Logger
 
   @coordinator_ref Message.coordinator_ref()
+  @banner_topic "dashboard:banner_dismissed"
 
   # `start_async/3` keys. Namespaced: they share the host LiveView's async key
   # space, and the hooks below pass any other key on to it.
@@ -197,6 +199,46 @@ defmodule ArbiterWeb.LiveHooks do
       else
         socket
       end
+
+    {:cont, socket}
+  end
+
+  # bd-30nj1f: the update / deploy banner's × controls. The banner lives in the
+  # `Layouts.app` function component, which cannot own an event handler, so one
+  # shared hook handles the events for every LiveView. It saves the same
+  # setting the POST fallback (`DashboardUpdateController`) saves, bumps
+  # `banner_rev` (an attr on `Layouts.app`) so the layout re-renders and re-reads
+  # the dismissal, and broadcasts so other open tabs/views do the same.
+  def on_mount(:banner_dismiss, _params, _session, socket) do
+    socket =
+      if connected?(socket) do
+        Phoenix.PubSub.subscribe(Arbiter.PubSub, @banner_topic)
+        socket
+      else
+        socket
+      end
+
+    socket =
+      socket
+      |> assign(:banner_rev, 0)
+      |> attach_hook(:banner_dismiss_events, :handle_event, fn
+        "dismiss_update", _params, socket ->
+          DashboardUpdateController.save_update_dismissal()
+          broadcast_banner_dismissed()
+          {:halt, bump_banner_rev(socket)}
+
+        "dismiss_deploy", _params, socket ->
+          DashboardUpdateController.save_deploy_dismissal()
+          broadcast_banner_dismissed()
+          {:halt, bump_banner_rev(socket)}
+
+        _event, _params, socket ->
+          {:cont, socket}
+      end)
+      |> attach_hook(:banner_dismiss_updates, :handle_info, fn
+        :banner_dismissed, socket -> {:halt, bump_banner_rev(socket)}
+        _msg, socket -> {:cont, socket}
+      end)
 
     {:cont, socket}
   end
@@ -440,6 +482,12 @@ defmodule ArbiterWeb.LiveHooks do
 
   defp maybe_refresh_for(socket, _message), do: refresh_coordinator_inbox(socket)
 
+  defp broadcast_banner_dismissed do
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, @banner_topic, :banner_dismissed)
+  end
+
+  defp bump_banner_rev(socket), do: assign(socket, :banner_rev, socket.assigns.banner_rev + 1)
+
   # Two figures, not one: pending (unread — never seen) and outstanding (seen
   # but not cleared — still owes an action). Reading no longer empties the
   # queue, so "still open" needs its own number.
@@ -448,6 +496,7 @@ defmodule ArbiterWeb.LiveHooks do
   # the mount's async load has subscribed (or on a click), so it lands on an
   # `AsyncResult` either way; a read that raises says so in the drawer rather
   # than showing an empty inbox that isn't.
+
   defp refresh_coordinator_inbox(socket) do
     {inbox, outstanding} = read_coordinator_inbox()
     put_coordinator_inbox(socket, inbox, outstanding)
