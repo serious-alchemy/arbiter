@@ -156,7 +156,8 @@ defmodule Arbiter.NodeAgent.Backend.K8sTest do
                "bridge_streams" => "mux",
                "upgrade" => "image",
                "self_upgrade" => true,
-               "namespace" => "arbiter-workers"
+               "namespace" => "arbiter-workers",
+               "install" => %{"method" => "manifest"}
              }
 
       assert %{"ceiling" => 2, "pending" => 1, "running" => 0} = hello["capacity"]
@@ -167,6 +168,28 @@ defmodule Arbiter.NodeAgent.Backend.K8sTest do
 
       # The JSON the channel will carry: string keys all the way down.
       assert hello == hello |> Jason.encode!() |> Jason.decode!()
+    end
+
+    test "a helm install reports its release and chart in caps.install", env do
+      cluster = %{
+        namespace: "arbiter-workers",
+        self_upgrade?: false,
+        install: %{
+          method: "helm",
+          release: "node-a",
+          chart: "oci://ghcr.io/acme/charts/arbiter-node"
+        }
+      }
+
+      hello = Backend.K8s.hello(%{env.config | cluster: cluster}, Backend.K8s.readiness())
+
+      assert hello["caps"]["install"] == %{
+               "method" => "helm",
+               "release" => "node-a",
+               "chart" => "oci://ghcr.io/acme/charts/arbiter-node"
+             }
+
+      assert hello["caps"]["self_upgrade"] == false
     end
 
     test "a heartbeat carries the runs, capacity, degraded and readiness", env do

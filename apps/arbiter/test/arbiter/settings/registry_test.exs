@@ -11,7 +11,7 @@ defmodule Arbiter.Settings.RegistryTest do
            scheduling_finish_first scheduling_finish_first_max_wait_hours
            scheduler_admission machine.derate
            nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
-           nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
+           nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.chart_ref nodes.registry_username
            nodes.registry_password nodes.registry_insecure)
 
   test "keys/0 lists every installation setting" do
@@ -56,6 +56,27 @@ defmodule Arbiter.Settings.RegistryTest do
         assert {:error, msg} = Registry.cast("nodes.registry", bad)
         assert msg =~ "registry"
       end
+    end
+
+    test "nodes.chart_ref is a chart reference, operator-only" do
+      assert {:ok, "oci://ghcr.io/acme/charts/arbiter-node"} =
+               Registry.cast("nodes.chart_ref", "oci://ghcr.io/acme/charts/arbiter-node")
+
+      assert {:ok, "arbiter/arbiter-node"} =
+               Registry.cast("nodes.chart_ref", "arbiter/arbiter-node")
+
+      assert {:ok, nil} = Registry.cast("nodes.chart_ref", nil)
+
+      for bad <- ["a b", "oci://u:pw@h/c", "x;rm -rf", ""] do
+        assert {:error, msg} = Registry.cast("nodes.chart_ref", bad)
+        assert msg =~ "chart"
+      end
+
+      assert "nodes.chart_ref" in Registry.operator_only_keys()
+      assert {:ok, _} = Registry.put("nodes.chart_ref", "oci://h/c")
+      assert Settings.nodes_chart_ref() == "oci://h/c"
+      assert {:ok, _} = Registry.put("nodes.chart_ref", nil)
+      assert Settings.nodes_chart_ref() == nil
     end
 
     test "all four keys are operator-only" do
@@ -358,7 +379,7 @@ defmodule Arbiter.Settings.RegistryTest do
     @operator_only ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight machine.derate
                       nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
                       nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
-                      nodes.registry_password nodes.registry_insecure)
+                      nodes.registry_password nodes.registry_insecure nodes.chart_ref)
 
     test "operator_only_keys/0 is the schema's operator-only set" do
       assert Enum.sort(Registry.operator_only_keys()) == Enum.sort(@operator_only)

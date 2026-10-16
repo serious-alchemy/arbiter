@@ -128,7 +128,8 @@ defmodule Arbiter.NodeAgent.Backend.K8s do
         "bridge_streams" => "mux",
         "upgrade" => "image",
         "self_upgrade" => Map.get(cluster, :self_upgrade?, false) == true,
-        "namespace" => Map.get(cluster, :namespace)
+        "namespace" => Map.get(cluster, :namespace),
+        "install" => install_caps(cluster)
       },
       "capacity" => report.capacity,
       "degraded" => report.degraded,
@@ -136,6 +137,12 @@ defmodule Arbiter.NodeAgent.Backend.K8s do
       "readiness" => report.readiness || readiness
     }
     |> put_present("k8s_version", Map.get(cluster, :k8s_version))
+  end
+
+  # KH8: `caps.install{method,release,chart}`; a cluster with no word on it is a manifest install.
+  defp install_caps(cluster) do
+    install = Map.get(cluster, :install) || %{method: "manifest"}
+    Map.new(install, fn {k, v} -> {to_string(k), v} end)
   end
 
   @impl true

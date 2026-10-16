@@ -154,6 +154,14 @@ defmodule Arbiter.Settings.Registry do
           "claude/arb binaries. Operator-only."
     },
     %{
+      key: "nodes.chart_ref",
+      type: "chart_ref",
+      description:
+        "The arbiter-node Helm chart reference (oci://host/path or repo/chart) the primary " <>
+          "prints in `helm upgrade <release> <chart> ...` for a Helm-installed cluster node; " <>
+          "null = the chart the node reports. Operator-only."
+    },
+    %{
       key: "nodes.registry_username",
       type: "registry_user",
       description: "Login for nodes.registry; null = anonymous push. Operator-only."
@@ -189,14 +197,14 @@ defmodule Arbiter.Settings.Registry do
                     nodes.join_token_ttl_minutes nodes.fence_after_s nodes.lost_after_s
                     machine.derate
                     nodes.registry nodes.registry_username nodes.registry_password
-                    nodes.registry_insecure)
+                    nodes.registry_insecure nodes.chart_ref)
 
   # Built at compile time from the fixed schema above, so no input ever mints an
   # atom (some keys are dotted: `:"nodes.public_url"`).
   # Values that are strings whatever they look like: a password of "12345" must not
   # be unwrapped to an integer.
   @secret_mask "********"
-  @string_types ~w(registry_ref registry_user secret)
+  @string_types ~w(registry_ref registry_user secret chart_ref)
 
   @key_atoms Map.new(@keys, &{&1, String.to_atom(&1)})
 
@@ -285,6 +293,18 @@ defmodule Arbiter.Settings.Registry do
 
   defp do_cast("registry_ref", _),
     do: {:error, "value must be a registry host[:port][/path] string, or null"}
+
+  defp do_cast("chart_ref", v) when is_binary(v) do
+    if Settings.valid_chart_ref?(v),
+      do: {:ok, v},
+      else:
+        {:error,
+         "value must be a chart reference (oci://host/path or repo/chart) with no spaces, " <>
+           "credentials or shell characters, or null"}
+  end
+
+  defp do_cast("chart_ref", _),
+    do: {:error, "value must be a chart reference string, or null"}
 
   defp do_cast("registry_user", v) when is_binary(v) do
     if v != "" and byte_size(v) <= 256 and not String.match?(v, ~r/[\s\x00-\x1f\x7f:]/),
@@ -432,6 +452,7 @@ defmodule Arbiter.Settings.Registry do
   defp write("nodes.fence_after_s", v), do: wrap(Settings.set_nodes_fence_after_s(v))
   defp write("nodes.lost_after_s", v), do: wrap(Settings.set_nodes_lost_after_s(v))
 
+  defp write("nodes.chart_ref", v), do: wrap(Settings.set_nodes_chart_ref(v))
   defp write("nodes.registry", v), do: wrap(Settings.set_nodes_registry(v))
   defp write("nodes.registry_username", v), do: wrap(Settings.set_nodes_registry_username(v))
   defp write("nodes.registry_password", v), do: wrap(Settings.set_nodes_registry_password(v))
@@ -469,6 +490,7 @@ defmodule Arbiter.Settings.Registry do
   def override("nodes.fence_after_s"), do: Settings.nodes_fence_after_s()
   def override("nodes.lost_after_s"), do: Settings.nodes_lost_after_s_override()
 
+  def override("nodes.chart_ref"), do: Settings.nodes_chart_ref()
   def override("nodes.registry"), do: Settings.nodes_registry()
   def override("nodes.registry_username"), do: Settings.nodes_registry_username()
   def override("nodes.registry_insecure"), do: Settings.nodes_registry_insecure()
@@ -503,6 +525,7 @@ defmodule Arbiter.Settings.Registry do
 
   def default("machine.derate"), do: DerateConfig.defaults()
   def default("nodes.public_url"), do: nil
+  def default("nodes.chart_ref"), do: nil
   def default("nodes.registry"), do: nil
   def default("nodes.registry_username"), do: nil
   def default("nodes.registry_password"), do: nil
