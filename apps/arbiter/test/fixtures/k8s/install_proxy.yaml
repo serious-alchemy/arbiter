@@ -32,11 +32,11 @@ metadata:
   namespace: arbiter-workers
 spec:
   hard:
-    limits.cpu: 5500m
+    limits.cpu: 6500m
     limits.memory: 11008Mi
     pods: '4'
     requests.cpu: 2450m
-    requests.ephemeral-storage: 12Gi
+    requests.ephemeral-storage: 12544Mi
     requests.memory: 5056Mi
 
 ---
