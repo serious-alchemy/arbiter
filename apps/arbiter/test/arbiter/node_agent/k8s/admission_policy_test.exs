@@ -199,6 +199,65 @@ defmodule Arbiter.NodeAgent.K8s.AdmissionPolicyTest do
     end
   end
 
+  describe "a runsc-handled runtime class (KH1, bd-27o4ls)" do
+    defp sandbox_validations,
+      do: AdmissionPolicy.validations(registry(), ["docker.io/pgsty/"], ["gvisor"])
+
+    defp sandbox_denied_by(pod) do
+      b = bindings(pod)
+      for v <- sandbox_validations(), not MiniCel.admits?(v.expression, b), do: v.name
+    end
+
+    defp sandboxed_pod do
+      build!(nil, %{placement: %{runtime_class: "gvisor", runtime_handler: "runsc"}})
+    end
+
+    test "the default policy is unchanged and denies the sandboxed pod (no hostUsers)" do
+      assert AdmissionPolicy.validations(registry()) ==
+               AdmissionPolicy.validations(registry(), [], [])
+
+      refute Map.has_key?(sandboxed_pod()["spec"], "hostUsers")
+      assert denied_by(sandboxed_pod()) == ["host-users"]
+    end
+
+    test "naming the class admits the pod the builder emits for it, and relaxes only host-users" do
+      assert sandbox_denied_by(sandboxed_pod()) == []
+
+      plain = AdmissionPolicy.validations(registry(), ["docker.io/pgsty/"])
+      changed = for {a, b} <- Enum.zip(plain, sandbox_validations()), a != b, do: a.name
+      assert changed == ["host-users"]
+    end
+
+    test "every other runtime still needs hostUsers: false" do
+      spec = fn pod, fun -> update_in(pod, ["spec"], fun) end
+
+      no_class = spec.(sandboxed_pod(), &Map.delete(&1, "runtimeClassName"))
+      other_class = spec.(sandboxed_pod(), &Map.put(&1, "runtimeClassName", "kata"))
+      host_users_true = spec.(sandboxed_pod(), &Map.put(&1, "hostUsers", true))
+      false_under_gvisor = spec.(sandboxed_pod(), &Map.put(&1, "hostUsers", false))
+
+      assert "host-users" in sandbox_denied_by(no_class)
+      assert "host-users" in sandbox_denied_by(other_class)
+      assert "host-users" in sandbox_denied_by(host_users_true)
+      # the sandboxed class may still carry hostUsers: false (an older controller)
+      assert sandbox_denied_by(false_under_gvisor) == []
+      # and the default pod is admitted exactly as before
+      assert sandbox_denied_by(build!()) == []
+    end
+
+    test "non-root stays required under the sandbox class" do
+      pod = put_in(sandboxed_pod(), ["spec", "securityContext", "runAsUser"], 0)
+      assert "non-root" in sandbox_denied_by(pod)
+    end
+
+    test "the manifest carries the relaxed rule when sandbox_classes is given" do
+      [policy, _] = AdmissionPolicy.manifests(registry: registry(), sandbox_classes: ["gvisor"])
+
+      assert Enum.map(policy["spec"]["validations"], & &1["expression"]) ==
+               Enum.map(AdmissionPolicy.validations(registry(), [], ["gvisor"]), & &1.expression)
+    end
+  end
+
   describe "manifests" do
     test "the policy and binding carry the same expressions and bind the controller's namespace" do
       [policy, binding] =

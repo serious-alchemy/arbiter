@@ -912,6 +912,31 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
   end
 
   describe "placement and config" do
+    test "hostUsers is false without a runtime class, and with one whose handler is no kernel sandbox" do
+      assert build!(nil, %{})["spec"]["hostUsers"] == false
+
+      pod = build!(nil, %{placement: %{runtime_class: "kata", runtime_handler: "kata-qemu"}})
+      assert pod["spec"]["hostUsers"] == false
+      assert pod["spec"]["runtimeClassName"] == "kata"
+
+      pod = build!(nil, %{placement: %{runtime_class: "gvisor"}})
+      assert pod["spec"]["hostUsers"] == false
+
+      # a handler with no class names nothing the pod runs under
+      pod = build!(nil, %{placement: %{runtime_handler: "runsc"}})
+      assert pod["spec"]["hostUsers"] == false
+    end
+
+    test "a runsc-handled runtime class omits hostUsers (gVisor's sandbox replaces the user namespace)" do
+      for handler <- ["runsc", "runsc-kvm"] do
+        pod = build!(nil, %{placement: %{runtime_class: "gvisor", runtime_handler: handler}})
+        assert pod["spec"]["runtimeClassName"] == "gvisor"
+        refute Map.has_key?(pod["spec"], "hostUsers")
+        # the rest of the hardening is untouched
+        assert pod["spec"]["securityContext"]["runAsNonRoot"] == true
+      end
+    end
+
     test "node selector, tolerations, runtime class and pull secrets come from config" do
       pod =
         build!(nil, %{
