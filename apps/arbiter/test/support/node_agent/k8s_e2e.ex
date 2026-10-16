@@ -426,13 +426,33 @@ defmodule Arbiter.Test.K8sE2E do
         jsonpath(env, ["-n", ns, "get", "service", "arbiter-controller"], ".spec.clusterIP"),
       controller_uid:
         jsonpath(env, ["-n", ns, "get", "deployment", "arbiter-controller"], ".metadata.uid"),
-      controller_ip:
-        jsonpath(
-          env,
-          ["-n", ns, "get", "pods", "-l", "app.kubernetes.io/component=controller"],
-          ".items[0].status.podIP"
-        )
+      controller_ip: running_controller_ip!(env, ns)
     }
+  end
+
+  # The swap leaves the chart's own (never-ready) controller pod terminating beside the
+  # stand-in, so `.items[0]` can be the wrong one: take a Running pod's IP, waiting for one.
+  defp running_controller_ip!(env, ns, attempts \\ 60) do
+    ip =
+      env
+      |> jsonpath(
+        ["-n", ns, "get", "pods", "-l", "app.kubernetes.io/component=controller"],
+        ~s|.items[?(@.status.phase=="Running")].status.podIP|
+      )
+      |> String.split()
+      |> List.first()
+
+    cond do
+      ip not in [nil, ""] ->
+        ip
+
+      attempts > 1 ->
+        Process.sleep(1_000)
+        running_controller_ip!(env, ns, attempts - 1)
+
+      true ->
+        raise "no Running arbiter-controller pod in #{ns} after 60s"
+    end
   end
 
   # The Namespace the install runbook asks for, taken from the raw renderer so the labels
