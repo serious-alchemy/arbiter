@@ -249,11 +249,29 @@ defmodule Arbiter.NodeAgent.K8s.Boot do
         cluster: %{
           namespace: client.namespace,
           k8s_version: k8s_version,
-          self_upgrade?: SelfUpgrade.available?(env)
+          self_upgrade?: SelfUpgrade.available?(env),
+          install: install_from_env(env)
         }
       )
     )
   end
+
+  # KH8: how this controller was installed, as the manifest or chart set it. Only
+  # `ARB_INSTALL_METHOD=helm` makes it a Helm install; anything else is a raw manifest.
+  @doc false
+  @spec install_from_env(%{optional(String.t()) => String.t()}) :: map()
+  def install_from_env(%{"ARB_INSTALL_METHOD" => "helm"} = env) do
+    %{method: "helm"}
+    |> put_env(:release, env["ARB_HELM_RELEASE"])
+    |> put_env(:chart, env["ARB_CHART_REF"])
+  end
+
+  def install_from_env(_env), do: %{method: "manifest"}
+
+  defp put_env(map, key, value) when is_binary(value) and value != "",
+    do: Map.put(map, key, value)
+
+  defp put_env(map, _key, _value), do: map
 
   # Asked on every canary run: the primary may publish a worker image after this boot.
   # The image named at boot is the fallback while the primary cannot be asked.

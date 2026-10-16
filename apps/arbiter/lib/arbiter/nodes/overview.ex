@@ -40,6 +40,7 @@ defmodule Arbiter.Nodes.Overview do
   alias Arbiter.Nodes
 
   alias Arbiter.Nodes.{
+    Agent,
     Capacity,
     ClusterInstall,
     Hello,
@@ -52,6 +53,9 @@ defmodule Arbiter.Nodes.Overview do
 
   alias Arbiter.Settings
   alias Arbiter.Workers.{Run, RunState}
+
+  @default_helm_release "arbiter-node"
+  @default_chart "oci://ghcr.io/ryanrborn/charts/arbiter-node"
 
   @type row :: map()
 
@@ -196,30 +200,64 @@ defmodule Arbiter.Nodes.Overview do
   # exact `kubectl set image` for the controller image of this server's version. One that
   # reports `caps.self_upgrade` is on its way and gets none; a machine, a current node and a
   # primary with no `nodes.registry` have no command to give.
+  #
+  # KH8 (OD2): a node whose `caps.install.method` is `helm` is owned by Helm: self-upgrade is
+  # off and it is shown `helm upgrade ...`, never `kubectl set image`.
   defp upgrade_fields(node, snapshot) do
     caps = Map.get(snapshot, :caps) || %{}
-    self_upgrade? = caps["self_upgrade"] == true
+    install = install(caps)
+    helm? = install["method"] == "helm"
+    self_upgrade? = not helm? and caps["self_upgrade"] == true
 
     base = %{
       image: nil,
       upgrade_command: nil,
       self_upgrade?: self_upgrade?,
+      install_method: install["method"],
       upgrade_pending_to: node.upgrade_pending_to
     }
 
     with :cluster <- kind(node, snapshot),
-         health when health in [:outdated, :ahead] <- Map.get(snapshot, :health),
-         {:ok, image} <- ClusterInstall.controller_image() do
-      command =
-        if self_upgrade?,
-          do: nil,
-          else: ClusterInstall.set_image_command(namespace(caps), image)
-
-      %{base | image: image, upgrade_command: command}
+         health when health in [:outdated, :ahead] <- Map.get(snapshot, :health) do
+      if helm?,
+        do: %{base | upgrade_command: helm_command(install, caps)},
+        else: set_image_fields(base, caps, self_upgrade?)
     else
       _ -> base
     end
   end
+
+  defp set_image_fields(base, caps, self_upgrade?) do
+    case ClusterInstall.controller_image() do
+      {:ok, image} ->
+        command =
+          if self_upgrade?,
+            do: nil,
+            else: ClusterInstall.set_image_command(namespace(caps), image)
+
+        %{base | image: image, upgrade_command: command}
+
+      _ ->
+        base
+    end
+  end
+
+  # The chart version is the release's, without the `v` of its tag. `nodes.chart_ref` is the
+  # operator's say; the chart the node reported is the fallback.
+  defp helm_command(install, caps) do
+    with version when is_binary(version) <- Agent.release_tag() do
+      ClusterInstall.helm_upgrade_command(
+        install["release"] || @default_helm_release,
+        Settings.nodes_chart_ref() || install["chart"] || @default_chart,
+        String.trim_leading(version, "v"),
+        namespace(caps)
+      )
+    end
+  end
+
+  # A node that reports no `caps.install` (older controller) is a raw-manifest install.
+  defp install(%{"install" => %{} = install}), do: Map.put_new(install, "method", "manifest")
+  defp install(_caps), do: %{"method" => "manifest"}
 
   defp namespace(%{"namespace" => ns}) when is_binary(ns) and ns != "", do: ns
   defp namespace(_caps), do: ClusterInstall.default_namespace()

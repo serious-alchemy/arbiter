@@ -7,6 +7,7 @@ defmodule Arbiter.Nodes.ClusterInstall do
 
     * `plan/2` — the form values to the manifest URL, the `kubectl apply` command, the
       join-Secret command and the controller image.
+    * `helm_upgrade_command/4` — the `helm upgrade` a Helm-installed node needs instead.
     * `set_image_command/2` — the exact `kubectl set image` an `outdated` cluster node
       needs when its Role cannot patch its own Deployment.
     * `controller_facts/1` — what the enrolled controller itself asks for at boot
@@ -189,6 +190,16 @@ defmodule Arbiter.Nodes.ClusterInstall do
     "read -rs T && printf %s \"$T\" | kubectl -n #{namespace} create secret generic " <>
       "arbiter-join --from-file=token=/dev/stdin"
   end
+
+  @doc """
+  The one command that moves a Helm-installed cluster node to chart `version` (KH8). Helm
+  owns that Deployment, so `kubectl set image` on it would fight the release.
+  """
+  @spec helm_upgrade_command(String.t(), String.t(), String.t(), String.t()) :: String.t()
+  def helm_upgrade_command(release, chart, version, namespace),
+    do:
+      "helm upgrade #{release} #{chart} --version #{version} -n #{namespace} " <>
+        "--reset-then-reuse-values"
 
   @doc """
   The one command that moves an `outdated` cluster node to `image` by hand: its Deployment

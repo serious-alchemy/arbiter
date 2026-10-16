@@ -99,6 +99,7 @@ defmodule Arbiter.Settings.Installation do
     :nodes_lost_after_s,
     :nodes_local_max_workers,
     :nodes_registry,
+    :nodes_chart_ref,
     :nodes_registry_username,
     :nodes_registry_password,
     :nodes_registry_insecure,
@@ -335,6 +336,13 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description "nodes.registry: the host[:port]/path the primary publishes worker, seed and controller images to (K8); nil = no registry, nothing is pushed."
+    end
+
+    attribute :nodes_chart_ref, :string do
+      public? true
+      allow_nil? true
+
+      description "nodes.chart_ref: the arbiter-node Helm chart reference shown in `helm upgrade` (KH8); nil = the chart the node reports."
     end
 
     attribute :nodes_registry_username, :string do

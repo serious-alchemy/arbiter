@@ -763,6 +763,34 @@ defmodule Arbiter.Settings do
   @spec clear_local_cap_advisory() :: {:ok, nil} | {:error, term()}
   def clear_local_cap_advisory, do: write_setting(:local_cap_advisory, nil)
 
+  # ---- nodes.chart_ref (KH8) -----------------------------------------------
+
+  # An OCI URL (`oci://host/path`) or `repo/chart`: no spaces, credentials or shell
+  # metacharacters, since the primary prints it into a command the operator pastes.
+  @chart_ref_re ~r|\A[A-Za-z0-9][A-Za-z0-9._:/~+-]*\z|
+
+  @doc "`nodes.chart_ref`, the `arbiter-node` chart reference for `helm upgrade`, or `nil`."
+  @spec nodes_chart_ref() :: String.t() | nil
+  def nodes_chart_ref, do: read_setting(:nodes_chart_ref)
+
+  @doc "Whether `value` is a valid `nodes.chart_ref`."
+  @spec valid_chart_ref?(term()) :: boolean()
+  def valid_chart_ref?(value) when is_binary(value),
+    do: byte_size(value) <= 255 and Regex.match?(@chart_ref_re, value)
+
+  def valid_chart_ref?(_), do: false
+
+  @spec set_nodes_chart_ref(String.t() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+  def set_nodes_chart_ref(nil), do: write_setting(:nodes_chart_ref, nil)
+
+  def set_nodes_chart_ref(value) when is_binary(value) do
+    if valid_chart_ref?(value),
+      do: write_setting(:nodes_chart_ref, value),
+      else: {:error, :invalid_value}
+  end
+
+  def set_nodes_chart_ref(_), do: {:error, :invalid_value}
+
   # ---- nodes.registry (K8) -------------------------------------------------
 
   # `host[:port]` then optional `/path` segments: no scheme, no userinfo, no
