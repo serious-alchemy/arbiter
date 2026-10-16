@@ -2001,8 +2001,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     |> Enum.reject(&is_nil/1)
   end
 
-  defp public_url_result(nil, []), do: nil
-
   # A cluster controller accepts only https, or http to loopback
   # (`Arbiter.NodeAgent.Config.validate_url/1`); anything else retries forever.
   defp cluster_url_result(url, nodes) when is_binary(url) do
@@ -2034,6 +2032,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       match?({:ok, {127, _, _, _}}, :inet.parse_address(String.to_charlist(host))) or
       match?({:ok, {0, 0, 0, 0, 0, 0, 0, 1}}, :inet.parse_address(String.to_charlist(host)))
   end
+
+  defp public_url_result(nil, []), do: nil
 
   defp public_url_result(nil, _nodes) do
     nodes_result(
