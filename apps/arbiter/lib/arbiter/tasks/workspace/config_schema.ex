@@ -460,10 +460,31 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                       Registry resolves repo -> workspace -> the install-wide
                       nodes.registry setting (KH12). `arb doctor` shows an `image <repo>`
                       row for each prebuilt repo.
+      visual_baselines
+                      map — refresh stale Playwright-style reference images without
+                      an agent (bd-9obzu9, docs/visual-baseline-refresh.md). When a
+                      red head's ONLY failed job is `job` and the failure is main's
+                      drift (not the branch's own work), Arbiter downloads the job's
+                      artifacts, overwrites just the failing snapshots' baselines,
+                      commits and pushes; the new head goes back through review.
+                        job              required: the CI job that takes the screenshots
+                        baseline_dir     required: repo-relative dir holding the baselines
+                        artifact         GitHub only: the Actions artifact the job uploads
+                        artifact_path    dir inside the archive with the actual images
+                                         (default: its root)
+                        actual_suffix    default "-actual.png"
+                        baseline_suffix  default ".png"; <name><actual_suffix> in the archive
+                                         replaces <baseline_dir>/**/<name><baseline_suffix>
+                        ignore_paths     globs of repo files that never render a page; any
+                                         other own change since the last green visual run
+                                         blocks the refresh
+                        max_snapshots    default 50
+                      Set under worker.repos.<repo>.visual_baselines (merged over a
+                      workspace-level worker.visual_baselines). Unset: off.
       repos           map, repo name -> {seed_paths, image, prepush_check,
                       prepush_check_timeout_seconds, prepush_check_on_timeout,
                       pre_push_checks, pre_push_budget_seconds,
-                      pre_push_max_attempts, max_concurrent},
+                      pre_push_max_attempts, visual_baselines, max_concurrent},
                       deep-merged over the workspace-level value (per-repo wins)
                       max_concurrent (per repo only) is a positive integer, unset
                       by default: the most implementer runs (the implementer,

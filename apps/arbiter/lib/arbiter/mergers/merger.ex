@@ -299,6 +299,34 @@ defmodule Arbiter.Mergers.Merger do
   """
   @callback failing_check_logs(mr_ref) :: {:ok, [failing_check()]} | {:error, term()}
 
+  @typedoc """
+  What `ci_job_artifacts/3` reads off the MR's latest pipeline (bd-9obzu9):
+  its `:sha`, every `:failed_jobs` name (allowed failures excluded), and the
+  named job's artifacts `:archive` (a zip, raw bytes).
+  """
+  @type job_artifacts :: %{sha: String.t(), failed_jobs: [String.t()], archive: binary()}
+
+  @doc """
+  The latest CI run of `mr_ref`: which jobs failed in it and the artifacts
+  archive of the failed job `job_name` (for GitHub, the artifact named
+  `opts.artifact`). `{:error, _}` when there is no run, `job_name` did not fail
+  in it, or it has no artifacts.
+
+  Feeds `Arbiter.Worker.VisualBaselines`, the deterministic visual-baseline
+  refresh (GitHub #936), which checks `:sha` against the head it is about to
+  commit on. Optional; an adapter without it just never gets the refresh.
+  """
+  @callback ci_job_artifacts(mr_ref, job_name :: String.t(), opts :: map()) ::
+              {:ok, job_artifacts()} | {:error, term()}
+
+  @doc """
+  The head commit of the newest earlier CI run of `mr_ref` in which `job_name`
+  passed, or `{:ok, nil}` when it never did (or the forge no longer says).
+  Optional, with `ci_job_artifacts/3`.
+  """
+  @callback last_green_job_sha(mr_ref, job_name :: String.t(), opts :: map()) ::
+              {:ok, String.t() | nil} | {:error, term()}
+
   @doc """
   Re-run CI for `mr_ref`, choosing the *granularity* of the re-run
   (bd-5mzzww / #1448).
@@ -569,6 +597,8 @@ defmodule Arbiter.Mergers.Merger do
                       ancestor?: 3,
                       failing_check_logs: 1,
                       rerun_ci: 2,
+                      ci_job_artifacts: 3,
+                      last_green_job_sha: 3,
                       ref_for_pr: 2,
                       list_open: 0,
                       list_open_review_threads: 1,
