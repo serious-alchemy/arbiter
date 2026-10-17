@@ -61,20 +61,16 @@ defmodule Arbiter.Worker.VisualBaselines.Archive do
           String.ends_with?(base, config.actual_suffix),
           name = String.replace_suffix(base, config.actual_suffix, ""),
           name != "" do
-        {name, bytes}
+        %{name: name, dir: results_dir(parts), bytes: bytes}
       end
 
-    names = Enum.map(found, &elem(&1, 0))
+    if found == [], do: {:error, :no_actuals}, else: {:ok, found}
+  end
 
-    cond do
-      found == [] ->
-        {:error, :no_actuals}
-
-      dup = Enum.find(names, &(Enum.count(names, fn n -> n == &1 end) > 1)) ->
-        {:error, {:duplicate_actual, dup}}
-
-      true ->
-        {:ok, found}
+  defp results_dir(parts) do
+    case Enum.drop(parts, -1) do
+      [] -> ""
+      dirs -> List.last(dirs)
     end
   end
 
@@ -86,26 +82,109 @@ defmodule Arbiter.Worker.VisualBaselines.Archive do
     root = Path.join(checkout, config.baseline_dir)
     existing = if File.dir?(root), do: list_files(root), else: []
 
-    Enum.reduce_while(actuals, {:ok, []}, fn {name, bytes}, {:ok, acc} ->
-      wanted = name <> config.baseline_suffix
+    with {:ok, resolved} <- resolve(actuals, config, existing) do
+      resolved
+      |> Enum.reduce_while({:ok, []}, fn {name, wanted, bytes}, {:ok, acc} ->
+        case Enum.filter(existing, &wanted.(Path.basename(&1))) do
+          [one] ->
+            rel = Path.relative_to(one, checkout)
+            {:cont, {:ok, [%{name: name, baseline: rel, bytes: bytes} | acc]}}
 
-      case Enum.filter(existing, &(Path.basename(&1) == wanted)) do
-        [one] ->
-          rel = Path.relative_to(one, checkout)
-          {:cont, {:ok, [%{name: name, baseline: rel, bytes: bytes} | acc]}}
+          [] ->
+            {:halt, {:error, {:no_baseline, name}}}
 
-        [] ->
-          {:halt, {:error, {:no_baseline, name}}}
-
-        _many ->
-          {:halt, {:error, {:ambiguous_baseline, name}}}
+          _many ->
+            {:halt, {:error, {:ambiguous_baseline, name}}}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        error -> error
       end
-    end)
-    |> case do
-      {:ok, entries} -> {:ok, Enum.reverse(entries)}
-      error -> error
     end
   end
+
+  # One `{name, basename_matcher, bytes}` per snapshot to refresh.
+  defp resolve(actuals, %{layout: "playwright"} = config, existing) do
+    basenames = Enum.map(existing, &Path.basename/1)
+
+    actuals
+    |> Enum.group_by(& &1.name)
+    |> Enum.sort()
+    |> Enum.reduce_while({:ok, []}, fn {arg, group}, {:ok, acc} ->
+      case playwright_group(arg, group, basenames, config) do
+        {:ok, items} -> {:cont, {:ok, acc ++ items}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp resolve(actuals, config, _existing) do
+    names = Enum.map(actuals, & &1.name)
+
+    case Enum.find(names, &(Enum.count(names, fn n -> n == &1 end) > 1)) do
+      nil ->
+        {:ok,
+         Enum.map(actuals, fn a ->
+           wanted = a.name <> config.baseline_suffix
+           {a.name, &(&1 == wanted), a.bytes}
+         end)}
+
+      dup ->
+        {:error, {:duplicate_actual, dup}}
+    end
+  end
+
+  defp playwright_group(arg, group, basenames, config) do
+    tail = "-" <> config.platform <> ".png"
+
+    projects =
+      for base <- basenames,
+          String.starts_with?(base, arg <> "-"),
+          String.ends_with?(base, tail),
+          project =
+            base |> String.replace_prefix(arg <> "-", "") |> String.replace_suffix(tail, ""),
+          project != "",
+          uniq: true,
+          do: project
+
+    group
+    |> Enum.map(fn a ->
+      {base, retry} = split_retry(a.dir)
+
+      project =
+        projects
+        |> Enum.filter(&project_of?(base, &1))
+        |> Enum.max_by(&byte_size/1, fn -> nil end)
+
+      {project, base, retry, a.bytes}
+    end)
+    |> Enum.group_by(&elem(&1, 0))
+    |> Enum.reduce_while({:ok, []}, fn
+      {nil, _}, _ ->
+        {:halt, {:error, {:no_baseline, arg}}}
+
+      {project, runs}, {:ok, acc} ->
+        case runs |> Enum.map(&elem(&1, 1)) |> Enum.uniq() do
+          [_one] ->
+            {_, _, _, bytes} = Enum.max_by(runs, &elem(&1, 2))
+            wanted = arg <> "-" <> project <> tail
+            {:cont, {:ok, [{arg <> "-" <> project, &(&1 == wanted), bytes} | acc]}}
+
+          _many ->
+            {:halt, {:error, {:duplicate_actual, arg <> "-" <> project}}}
+        end
+    end)
+  end
+
+  defp split_retry(dir) do
+    case Regex.run(~r/^(.*)-retry(\d+)$/, dir) do
+      [_, base, n] -> {base, String.to_integer(n)}
+      _ -> {dir, 0}
+    end
+  end
+
+  defp project_of?(dir, project), do: dir == project or String.ends_with?(dir, "-" <> project)
 
   defp list_files(dir) do
     dir

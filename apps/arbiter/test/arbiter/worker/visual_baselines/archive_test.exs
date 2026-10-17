@@ -103,4 +103,99 @@ defmodule Arbiter.Worker.VisualBaselines.ArchiveTest do
 
     assert {:error, :bad_archive} = Archive.plan("not a zip", config(), dir)
   end
+
+  describe "playwright layout" do
+    @shots "test/visual/tests/__screenshots__/app.visual.spec.ts"
+    @results "test-results/app.visual-mobile-application-patient-summary"
+
+    defp pw_config do
+      config(%{
+        "baseline_dir" => "test/visual/tests/__screenshots__",
+        "baseline_suffix" => nil,
+        "layout" => "playwright",
+        "platform" => "linux"
+      })
+    end
+
+    defp pw_baselines(dir) do
+      for p <- ~w(mobile-dark mobile-light desktop-dark), plat <- ~w(linux darwin) do
+        baseline(dir, "#{@shots}/patient-summary-#{p}-#{plat}.png", "old-#{p}-#{plat}")
+      end
+    end
+
+    test "dark and light of one arg map to their own baselines, tonic paths", %{tmp_dir: dir} do
+      pw_baselines(dir)
+
+      archive =
+        zip([
+          {"#{@results}-mobile-dark/patient-summary-actual.png", "new-dark"},
+          {"#{@results}-mobile-light/patient-summary-actual.png", "new-light"}
+        ])
+
+      assert {:ok, plan} = Archive.plan(archive, pw_config(), dir)
+
+      assert Enum.map(plan, &{&1.baseline, &1.bytes}) |> Enum.sort() == [
+               {"#{@shots}/patient-summary-mobile-dark-linux.png", "new-dark"},
+               {"#{@shots}/patient-summary-mobile-light-linux.png", "new-light"}
+             ]
+    end
+
+    test "retry dirs count as one snapshot and the last retry wins", %{tmp_dir: dir} do
+      pw_baselines(dir)
+
+      archive =
+        zip([
+          {"#{@results}-mobile-dark/patient-summary-actual.png", "first"},
+          {"#{@results}-mobile-dark-retry2/patient-summary-actual.png", "second"},
+          {"#{@results}-mobile-dark-retry1/patient-summary-actual.png", "mid"}
+        ])
+
+      assert {:ok, [%{baseline: b, bytes: "second"}]} = Archive.plan(archive, pw_config(), dir)
+      assert b == "#{@shots}/patient-summary-mobile-dark-linux.png"
+    end
+
+    test "refuses when no project matches, or two tests collide", %{tmp_dir: dir} do
+      pw_baselines(dir)
+
+      assert {:error, {:no_baseline, "patient-summary"}} =
+               Archive.plan(
+                 zip([{"#{@results}-tablet-dark/patient-summary-actual.png", "x"}]),
+                 pw_config(),
+                 dir
+               )
+
+      assert {:error, {:duplicate_actual, _}} =
+               Archive.plan(
+                 zip([
+                   {"test-results/a-mobile-dark/patient-summary-actual.png", "x"},
+                   {"test-results/b-mobile-dark/patient-summary-actual.png", "y"}
+                 ]),
+                 pw_config(),
+                 dir
+               )
+
+      baseline(dir, "#{@shots}/sub/patient-summary-mobile-dark-linux.png", "dup")
+
+      assert {:error, {:ambiguous_baseline, _}} =
+               Archive.plan(
+                 zip([{"#{@results}-mobile-dark/patient-summary-actual.png", "x"}]),
+                 pw_config(),
+                 dir
+               )
+    end
+
+    test "the longest matching project wins", %{tmp_dir: dir} do
+      baseline(dir, "#{@shots}/s-dark-linux.png", "a")
+      baseline(dir, "#{@shots}/s-mobile-dark-linux.png", "b")
+
+      assert {:ok, [%{baseline: b}]} =
+               Archive.plan(
+                 zip([{"test-results/x-mobile-dark/s-actual.png", "n"}]),
+                 pw_config(),
+                 dir
+               )
+
+      assert b == "#{@shots}/s-mobile-dark-linux.png"
+    end
+  end
 end
