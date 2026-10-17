@@ -826,6 +826,34 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert StubMerger.get_count(@pr) == 0
     end
 
+    # bd-48kmfe: a pipeline queued in the forge (pending, not started) is not a stuck
+    # run. It outlasts the poll window without falling back, shows as waiting in the CI
+    # queue, and the review proceeds when the pipeline completes.
+    test "a long-pending pipeline outlasts the poll budget and proceeds on green", ctx do
+      rig = rig(ctx, "feature/ci-queued")
+      forge = start_forge(ctx, rig, [:pending])
+
+      gate = start_gate(rig, ctx, ci_max_polls: 3, command: [@probe, "HOLD"])
+
+      wait_until(fn -> StubMerger.get_count(@pr) >= 8 end)
+      assert awaiting_ci?(gate)
+      assert passes(rig) == 0
+
+      wait_until(fn ->
+        Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"]["queued_minutes"] != nil or
+          :sys.get_state(gate).ci_wait.wait.queued_polls >= 4
+      end)
+
+      assert :sys.get_state(gate).ci_wait.wait.polls == 0
+
+      set_pipeline(forge, [:success])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      prompt = :sys.get_state(gate).current_prompt
+      assert prompt =~ "CI passed on #{rig.head}"
+      stop_gate(gate)
+    end
+
     test "a poll timeout falls back to a reviewer that runs the tests, and records why", ctx do
       rig = rig(ctx, "feature/ci-11")
       start_forge(ctx, rig, [:running])

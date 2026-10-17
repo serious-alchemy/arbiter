@@ -149,7 +149,7 @@ defmodule Arbiter.Mergers.Gitlab do
       case request(cfg, :get, "/merge_requests/#{iid}", []) do
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
           merge_status = Map.get(body, "merge_status", "")
-          pipeline = fetch_pipeline_status(cfg, iid, Map.get(body, "sha"))
+          {pipeline, pipeline_id} = fetch_pipeline_status(cfg, iid, Map.get(body, "sha"))
           status = map_state(Map.get(body, "state"))
 
           {:ok,
@@ -172,6 +172,7 @@ defmodule Arbiter.Mergers.Gitlab do
              changes_requested: false,
              latest_review_id: nil,
              pipeline: pipeline,
+             pipeline_id: pipeline_id,
              ci_clean: merge_status == "can_be_merged",
              conflicting: settled_conflict?(body),
              block_reason: block_reason(cfg, body, status, pipeline),
@@ -1218,12 +1219,12 @@ defmodule Arbiter.Mergers.Gitlab do
         |> head_pipeline_candidates(head_sha)
         |> newest_first()
         |> case do
-          [latest | _] -> map_pipeline_status(Map.get(latest, "status"))
-          [] -> :pending
+          [latest | _] -> {map_pipeline_status(Map.get(latest, "status")), Map.get(latest, "id")}
+          [] -> {:pending, nil}
         end
 
       _ ->
-        nil
+        {nil, nil}
     end
   end
 

@@ -105,7 +105,7 @@ defmodule Arbiter.Worker.ReviewCiTest do
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: :failed}, @sha) == :red
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: :canceled}, @sha) == :cancelled
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: :running}, @sha) == :pending
-      assert ReviewCi.classify(%{head_sha: @sha, pipeline: :pending}, @sha) == :pending
+      assert ReviewCi.classify(%{head_sha: @sha, pipeline: :pending}, @sha) == :queued
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: :not_started}, @sha) == :not_started
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: nil}, @sha) == :unknown
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: :neutral}, @sha) == :unknown
@@ -337,6 +337,52 @@ defmodule Arbiter.Worker.ReviewCiTest do
 
       assert {actions, _} = run(new_wait(50), readings)
       assert Enum.all?(actions, &(&1 == :wait))
+    end
+
+    test "a queued pipeline does not spend the poll budget (bd-48kmfe)" do
+      wait = ReviewCi.new_wait(@sha, %{interval_ms: 1, max_polls: 3, queue_max_polls: 100})
+      {actions, wait} = run(wait, List.duplicate(:queued, 40))
+      assert Enum.all?(actions, &(&1 == :wait))
+      assert wait.queued_polls == 40
+      assert wait.polls == 0
+      # ...and proceeds once the pipeline finally completes.
+      assert {[:wait, :green], _} = run(wait, [:queued, :green])
+    end
+
+    test "a queue that outlasts the long ceiling falls back, naming the pipeline" do
+      wait = ReviewCi.new_wait(@sha, %{interval_ms: 1, max_polls: 3, queue_max_polls: 2})
+
+      {actions, _} =
+        Enum.map_reduce([:queued, :queued], wait, fn r, w ->
+          ReviewCi.advance(w, r, "pipeline 77 (pending)")
+        end)
+
+      assert [:wait, {:fallback, reason}] = actions
+      assert reason =~ "pipeline 77 (pending)"
+      assert reason =~ "queue"
+    end
+
+    test "a running pipeline past the budget still falls back and names the pipeline" do
+      {actions, _} =
+        Enum.map_reduce([:pending, :pending], new_wait(2), fn r, w ->
+          ReviewCi.advance(w, r, "pipeline 78 (running)")
+        end)
+
+      assert [:wait, {:fallback, reason}] = actions
+      assert reason =~ "pipeline 78 (running)"
+    end
+
+    test "progress_label says the ticket is waiting in the CI queue" do
+      label =
+        ReviewCi.progress_label(%{
+          sha: @sha,
+          polls: 0,
+          max_polls: 30,
+          queued_minutes: 6,
+          pipeline_id: 42
+        })
+
+      assert label == "waiting in the CI queue (pipeline 42, pending 6m)"
     end
 
     test "the poll budget bounds the wait and the fallback names why" do
