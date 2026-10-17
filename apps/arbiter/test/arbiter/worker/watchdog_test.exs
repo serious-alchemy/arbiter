@@ -1888,6 +1888,92 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  # bd-c0nhqs / #930. A pipeline queued in the forge (pending/created, never
+  # started) is not a stuck run: it must not spend `max_polls` or the
+  # auto-resume budget (the watchdog twin of bd-48kmfe's ReviewGate rule).
+  describe "queued pipeline does not spend the poll budget (bd-c0nhqs)" do
+    @queued_head String.duplicate("a", 40)
+
+    defp approved(pipeline, extra \\ %{}) do
+      Map.merge(
+        %{
+          status: :open,
+          approved: true,
+          block_reason: nil,
+          head_sha: @queued_head,
+          pipeline: pipeline,
+          pipeline_id: 2_958_258_135
+        },
+        extra
+      )
+    end
+
+    defp queued_opts(extra) do
+      Keyword.merge(
+        [
+          interval_ms: 10,
+          initial_delay_ms: 0,
+          max_polls: 3,
+          auto_merge: true,
+          workspace: test_workspace(),
+          auto_resume_dispatcher: StubAutoResumeDispatcher
+        ],
+        extra
+      )
+    end
+
+    test "an approved MR queued past max_polls keeps waiting and merges once it passes" do
+      task_id = new_task_id()
+      StubMerger.queue_get("!q1", List.duplicate(approved(:pending), 8) ++ [approved(:success)])
+
+      start_watchdog(task_id, "!q1", queued_opts([]))
+
+      assert_merged(task_id, 3_000)
+      refute_received {:watchdog, ^task_id, {:timed_out, _}}
+      assert StubAutoResumeDispatcher.resume_count() == 0
+      assert StubAutoResumeDispatcher.escalations() == []
+    end
+
+    test "a running pipeline past max_polls still escalates, naming its id and status" do
+      task_id = new_task_id()
+      StubMerger.queue_get("!q2", [approved(:running)])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(task_id, "!q2", queued_opts([]))
+          assert_timed_out(task_id, 3)
+        end)
+
+      assert log =~ "2958258135"
+      assert log =~ "running"
+    end
+
+    test "a pipeline queued past the overall queue ceiling escalates" do
+      task_id = new_task_id()
+      StubMerger.queue_get("!q3", [approved(:pending)])
+
+      start_watchdog(task_id, "!q3", queued_opts(queue_max_polls: 6))
+
+      assert_timed_out(task_id, 3)
+    end
+
+    test "attempt counters reset when the head SHA changes" do
+      task_id = new_task_id()
+      other = String.duplicate("b", 40)
+
+      StubMerger.queue_get("!q4", [
+        approved(:running),
+        approved(:running, %{head_sha: other})
+      ])
+
+      wpid =
+        start_watchdog(task_id, "!q4", queued_opts(max_polls: :infinity, auto_resumes: 2))
+
+      wait_until(fn -> :sys.get_state(wpid).last_head_sha == other end)
+      assert :sys.get_state(wpid).resume_attempts_seen == 0
+    end
+  end
+
   describe "awaiting_review_timeout auto-resume (bd-8eheb6)" do
     defp start_timeout_watchdog(task_id, mr_ref, opts \\ []) do
       base = [
