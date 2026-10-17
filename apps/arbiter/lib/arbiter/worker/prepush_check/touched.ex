@@ -51,17 +51,96 @@ defmodule Arbiter.Worker.PrepushCheck.Touched do
   @spec elixir_files([String.t()]) :: [String.t()]
   def elixir_files(files), do: Enum.filter(files, &(Path.extname(&1) in [".ex", ".exs"]))
 
+  @default_credo_included ["lib/", "apps/*/lib/", "test/", "apps/*/test/"]
+
   @doc """
-  The Elixir files credo analyses: those `.credo.exs` includes (`lib/`,
-  `apps/*/lib/`). Passing credo a file on the command line bypasses that filter,
-  so a touched test file would be linted by a rule set CI never applies to it.
+  The Elixir files credo analyses: those the target repo's `.credo.exs`
+  `files.included` globs cover and its `files.excluded` entries (strings or
+  `~r` sigils) do not. `worktree` is where `.credo.exs` is read; a directory
+  entry means everything under it. Without a readable `.credo.exs` (or without
+  an `included` list) the default is `lib/` and `test/`, at the root and under
+  `apps/*/`. Passing credo a file on the command line bypasses its file filter,
+  so a file outside the configured paths would be linted by a rule set CI never
+  applies.
   """
-  @spec credo_files([String.t()]) :: [String.t()]
-  def credo_files(files) do
+  @spec credo_files([String.t()], String.t() | nil) :: [String.t()]
+  def credo_files(files, worktree \\ nil) do
+    body = credo_config(worktree)
+    included = body |> credo_list("included") |> default_if_empty() |> Enum.map(&entry_regex/1)
+    excluded = body |> credo_list("excluded") |> Enum.map(&entry_regex/1)
+
     files
     |> elixir_files()
-    |> Enum.filter(&Regex.match?(~r{^(apps/[^/]+/)?lib/}, &1))
+    |> Enum.filter(fn file ->
+      Enum.any?(included, &Regex.match?(&1, file)) and
+        not Enum.any?(excluded, &Regex.match?(&1, file))
+    end)
   end
+
+  defp default_if_empty([]), do: Enum.map(@default_credo_included, &{:glob, &1})
+  defp default_if_empty(entries), do: entries
+
+  defp credo_config(worktree) when is_binary(worktree) do
+    case File.read(Path.join(worktree, ".credo.exs")) do
+      {:ok, body} -> body
+      _ -> ""
+    end
+  end
+
+  defp credo_config(_), do: ""
+
+  # The string and `~r` entries of a `files: %{<key>: [...]}` list.
+  defp credo_list(body, key) do
+    case Regex.run(~r/#{key}:\s*\[(.*?)\]/s, body) do
+      [_, list] ->
+        ~r/~r"([^"]*)"|~r\/([^\/]*)\/|"([^"]+)"/
+        |> Regex.scan(list)
+        |> Enum.map(fn
+          [_, re] -> {:regex, re}
+          [_, "", re] -> {:regex, re}
+          [_, "", "", glob] -> {:glob, glob}
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  defp entry_regex({:regex, source}) do
+    case Regex.compile(source) do
+      {:ok, re} -> re
+      _ -> ~r/\A\z\A/
+    end
+  end
+
+  defp entry_regex({:glob, glob}), do: glob_regex(glob)
+
+  # A credo `included` entry as an anchored regex: `**/` spans zero or more
+  # directories, `*` stays within one, `{a,b}` is an alternation, and an entry
+  # without a file extension is a directory prefix.
+  defp glob_regex(glob) do
+    dir? = Path.extname(glob) == ""
+    glob = if dir?, do: String.trim_trailing(glob, "/"), else: glob
+    Regex.compile!("^" <> translate(glob) <> if(dir?, do: "(?:/|$)", else: "$"))
+  end
+
+  defp translate(""), do: ""
+  defp translate("**/" <> rest), do: "(?:.*/)?" <> translate(rest)
+  defp translate("**" <> rest), do: ".*" <> translate(rest)
+  defp translate("*" <> rest), do: "[^/]*" <> translate(rest)
+
+  defp translate("{" <> rest) do
+    case String.split(rest, "}", parts: 2) do
+      [alts, tail] ->
+        alt = alts |> String.split(",") |> Enum.map_join("|", &Regex.escape/1)
+        "(?:" <> alt <> ")" <> translate(tail)
+
+      _ ->
+        Regex.escape("{") <> translate(rest)
+    end
+  end
+
+  defp translate(<<c::utf8, rest::binary>>), do: Regex.escape(<<c::utf8>>) <> translate(rest)
 
   @doc """
   The test files to run for `files`: a changed `*_test.exs` itself, and for a

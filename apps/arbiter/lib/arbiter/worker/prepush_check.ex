@@ -277,7 +277,12 @@ defmodule Arbiter.Worker.PrepushCheck do
   defp expand_and_run(step, worktree, touched, seconds, exec) do
     case expand(step, worktree, touched) do
       :nothing_touched ->
-        {{:skipped, :untouched, "skipped: no touched files for this step"}, nil}
+        reason =
+          if String.contains?(step.cmd, "{credo_files}"),
+            do: "skipped: no lintable touched files",
+            else: "skipped: no touched files for this step"
+
+        {{:skipped, :untouched, reason}, nil}
 
       {:ok, command} ->
         raw = safe_exec(command, exec, seconds)
@@ -331,7 +336,7 @@ defmodule Arbiter.Worker.PrepushCheck do
 
   defp files_for(:all_files, files, _worktree), do: files
   defp files_for(:elixir_files, files, _worktree), do: Touched.elixir_files(files)
-  defp files_for(:credo_files, files, _worktree), do: Touched.credo_files(files)
+  defp files_for(:credo_files, files, worktree), do: Touched.credo_files(files, worktree)
   defp files_for(:test_files, files, worktree), do: Touched.test_files(files, worktree)
 
   # coreutils `timeout`: 124 = the command timed out, 137 = it needed the

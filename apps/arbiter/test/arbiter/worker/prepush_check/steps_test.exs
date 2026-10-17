@@ -326,6 +326,51 @@ defmodule Arbiter.Worker.PrepushCheck.StepsTest do
       refute File.exists?(marker)
     end
 
+    test "{credo_files} puts a touched test file on the command line when the repo lints test/",
+         %{repo: repo, tmp_dir: dir} do
+      File.write!(
+        Path.join(repo, ".credo.exs"),
+        ~s|%{configs: [%{files: %{included: ["lib/", "test/"]}}]}|
+      )
+
+      git(repo, ["add", "-A"])
+      git(repo, ["commit", "-q", "-m", "credo config"])
+      git(repo, ["checkout", "-q", "-B", "main"])
+      git(repo, ["checkout", "-q", "-b", "work2"])
+      commit_change(repo, "test/a_test.exs")
+      out = Path.join(dir, "credo.txt")
+
+      spec = spec([step("credo", "echo {credo_files} > #{out}", %{"scope" => "touched"})])
+
+      assert %{result: :ok} = PrepushCheck.run_steps(spec, repo, target: "main")
+      assert File.read!(out) == "test/a_test.exs\n"
+    end
+
+    test "{credo_files} with no lintable touched file is skipped with an explicit reason", %{
+      repo: repo,
+      tmp_dir: dir
+    } do
+      File.write!(
+        Path.join(repo, ".credo.exs"),
+        ~s|%{configs: [%{files: %{included: ["lib/"]}}]}|
+      )
+
+      git(repo, ["add", "-A"])
+      git(repo, ["commit", "-q", "-m", "credo config"])
+      git(repo, ["checkout", "-q", "-B", "main"])
+      git(repo, ["checkout", "-q", "-b", "work2"])
+      commit_change(repo, "test/a_test.exs")
+      marker = Path.join(dir, "ran")
+
+      spec = spec([step("credo", "touch #{marker} {credo_files}", %{"scope" => "touched"})])
+
+      assert %{result: :ok, steps: [%{status: :skipped, output: output}]} =
+               PrepushCheck.run_steps(spec, repo, target: "main")
+
+      assert output == "skipped: no lintable touched files"
+      refute File.exists?(marker)
+    end
+
     test "when the diff base is unknown a touched step runs unscoped", %{repo: repo, tmp_dir: dir} do
       out = Path.join(dir, "unscoped")
       spec = spec([step("lint", "echo [{elixir_files}] > #{out}", %{"scope" => "touched"})])
