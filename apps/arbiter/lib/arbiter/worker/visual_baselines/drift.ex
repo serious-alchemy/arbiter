@@ -145,11 +145,10 @@ defmodule Arbiter.Worker.VisualBaselines.Drift do
         diff
         |> String.split("\n")
         |> Enum.reject(&String.starts_with?(&1, "index "))
-        |> Enum.map(fn
+        |> Enum.map_join("\n", fn
           "@@" <> _ -> "@@"
           line -> line
         end)
-        |> Enum.join("\n")
 
       {:error, _} ->
         :unreadable

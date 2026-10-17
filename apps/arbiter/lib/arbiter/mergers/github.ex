@@ -774,22 +774,26 @@ defmodule Arbiter.Mergers.Github do
       |> List.wrap()
       |> Enum.reverse()
       |> Enum.take(@green_walk_limit)
-      |> Enum.find_value({:ok, nil}, fn %{"sha" => sha} ->
-        case head_check_runs(cfg, owner, repo, sha) do
-          {:ok, runs} ->
-            green? =
-              runs
-              |> latest_per_check()
-              |> Enum.any?(
-                &(Map.get(&1, "name") == job_name and Map.get(&1, "conclusion") == "success")
-              )
+      |> Enum.find_value({:ok, nil}, &green_commit(cfg, owner, repo, &1, job_name))
+    end
+  end
 
-            if green?, do: {:ok, sha}
+  # `{:ok, sha}` when `job_name` passed on the commit, an error to stop the walk,
+  # `nil` to go on to the next (older) commit.
+  defp green_commit(cfg, owner, repo, %{"sha" => sha}, job_name) do
+    case head_check_runs(cfg, owner, repo, sha) do
+      {:ok, runs} ->
+        passed? =
+          runs
+          |> latest_per_check()
+          |> Enum.any?(
+            &(Map.get(&1, "name") == job_name and Map.get(&1, "conclusion") == "success")
+          )
 
-          {:error, _} = error ->
-            error
-        end
-      end)
+        if passed?, do: {:ok, sha}
+
+      {:error, _} = error ->
+        error
     end
   end
 

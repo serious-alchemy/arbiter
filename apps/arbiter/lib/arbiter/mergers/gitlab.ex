@@ -242,19 +242,25 @@ defmodule Arbiter.Mergers.Gitlab do
          {:ok, pipelines} <- mr_pipelines(cfg, iid) do
       pipelines
       |> Enum.filter(&(Map.get(&1, "status") in ["success", "failed"]))
-      |> Enum.find_value({:ok, nil}, fn pipeline ->
-        case pipeline_jobs(cfg, Map.get(pipeline, "id")) do
-          {:ok, jobs} ->
-            if Enum.any?(
-                 jobs,
-                 &(Map.get(&1, "name") == job_name and Map.get(&1, "status") == "success")
-               ),
-               do: {:ok, Map.get(pipeline, "sha")}
+      |> Enum.find_value({:ok, nil}, &green_pipeline(cfg, &1, job_name))
+    end
+  end
 
-          {:error, _} = error ->
-            error
-        end
-      end)
+  # `{:ok, sha}` when `job_name` passed in `pipeline`, an error to stop the walk,
+  # `nil` to go on to the next (older) pipeline.
+  defp green_pipeline(cfg, pipeline, job_name) do
+    case pipeline_jobs(cfg, Map.get(pipeline, "id")) do
+      {:ok, jobs} ->
+        passed? =
+          Enum.any?(
+            jobs,
+            &(Map.get(&1, "name") == job_name and Map.get(&1, "status") == "success")
+          )
+
+        if passed?, do: {:ok, Map.get(pipeline, "sha")}
+
+      {:error, _} = error ->
+        error
     end
   end
 
