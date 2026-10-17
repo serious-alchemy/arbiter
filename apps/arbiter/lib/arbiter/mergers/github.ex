@@ -860,7 +860,6 @@ defmodule Arbiter.Mergers.Github do
     do: http_error(status, body)
 
   defp artifact_error({:error, exception}), do: transport_error(exception)
-  defp artifact_error(other), do: {:unexpected, other}
 
   @impl true
   def rerun_ci(mr_ref, opts) when is_binary(mr_ref) and is_map(opts) do

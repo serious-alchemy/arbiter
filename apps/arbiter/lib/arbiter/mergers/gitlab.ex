@@ -391,7 +391,6 @@ defmodule Arbiter.Mergers.Gitlab do
     do: http_error(status, body)
 
   defp request_error({:error, exception}), do: transport_error(exception)
-  defp request_error(other), do: {:unexpected, other}
 
   defp newest_first(pipelines), do: Enum.sort_by(pipelines, &(Map.get(&1, "id") || 0), :desc)
 

@@ -139,6 +139,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # (`mix deps.get`) goes through `Worktree.ensure_deps_fetched/1`.
     "apps/arbiter/lib/arbiter/worker/private_clone.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker/prepush_check/touched.ex" => :pure_tool,
+    # bd-9obzu9: visual-baseline refresh: git only (clone / log / diff / commit / push)
+    # against the branch checkout; no BEAM or agent CLI is spawned.
+    "apps/arbiter/lib/arbiter/worker/visual_baselines.ex" => :pure_tool,
+    "apps/arbiter/lib/arbiter/worker/visual_baselines/drift.ex" => :pure_tool,
     # RW11: the one place checkout sync spawns `git` (seed bundles, the quarantine
     # ingest, the node's snapshot): git only, hooks and user config disabled.
     "apps/arbiter/lib/arbiter/nodes/checkout/git.ex" => :pure_tool,
