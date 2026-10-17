@@ -1295,6 +1295,11 @@ defmodule Arbiter.Worker.ReviewGate do
       ci_fallback: nil,
       # Times the wait moved to a newer head the branch had gained meanwhile.
       ci_retargets: 0,
+      # sha => sorted failed job names, for every head CI went red on: a second
+      # red on the same job set is deterministic, so it is not re-run again.
+      # Persisted on the ticket (`review_gate_state`) so a re-dispatched or
+      # re-armed gate inherits it instead of re-running the same head again.
+      ci_failed_sets: load_ci_failed_sets(task_id),
       # bd-2yt0d2: the cut-off pass this gate was re-armed to run again
       # (`rearm_pass/2`), as `ReviewPass.restore/1` reads it back. nil for every
       # gate that starts from the top.
@@ -1707,7 +1712,15 @@ defmodule Arbiter.Worker.ReviewGate do
             max_polls: state.ci_max_polls || budget.max_polls
           })
 
-        {:ok, %{workspace: workspace, adapter: adapter, pr_ref: pr_ref, budget: budget}, sha}
+        ctx = %{
+          workspace: workspace,
+          adapter: adapter,
+          pr_ref: pr_ref,
+          budget: budget,
+          no_rerun_jobs: ReviewCi.no_rerun_jobs(workspace, state.repo)
+        }
+
+        {:ok, ctx, sha}
       else
         {:error, why} -> {:fallback, why}
       end
@@ -1839,35 +1852,22 @@ defmodule Arbiter.Worker.ReviewGate do
   defp ci_act(state, wait, :rerun, _result) do
     checks = ci_failing_checks(state)
 
-    case ci_rerun(state) do
-      :ok ->
+    # The gate's own rerun after a no-diff fix round (bd-dun10t) is deliberate
+    # even though that head already failed, so the repeat-failure dedupe stands down.
+    seen = if post_noop_rerun?(state), do: %{}, else: state.ci_failed_sets
+
+    case ReviewCi.skip_rerun(checks, Map.get(state.ci_ctx, :no_rerun_jobs, []), seen, wait.sha) do
+      {:skip, why} ->
         Logger.info(
-          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red; " <>
-            "re-running the failed jobs once"
+          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red on " <>
+            "#{Enum.join(ReviewCi.failed_job_names(checks), ", ")} (#{why}); " <>
+            "skipping the flake re-run, taking it as a real failure"
         )
 
-        {:wait, ci_schedule(state, ReviewCi.rerun_started(wait, checks))}
+        ci_act(state, wait, :fix, nil)
 
-      {:error, why} ->
-        if why == :ci_in_progress and wait.polls < wait.max_polls do
-          # bd-9m6wl0 / bd-8o35da: the forge only reruns a FINISHED run, and the
-          # head's latest run / pipeline (or a sibling job, e.g. `mix audit`) is
-          # still going. The failure is not yet judged real: poll again and rerun
-          # once it has finished.
-          Logger.info(
-            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red but its run is " <>
-              "still in progress; waiting to re-run the failed jobs"
-          )
-
-          {:wait, ci_schedule(state, wait)}
-        else
-          Logger.warning(
-            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red and could not be " <>
-              "re-run (#{why}); treating it as a real failure"
-          )
-
-          ci_act(state, wait, :fix, nil)
-        end
+      :rerun ->
+        ci_rerun_once(state, wait, checks)
     end
   end
 
@@ -1935,6 +1935,70 @@ defmodule Arbiter.Worker.ReviewGate do
   defp ci_act(state, wait, {:fallback, reason}, _result) do
     ci_log_leave(state, wait, "CI could not vouch (#{reason})")
     {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+  end
+
+  defp ci_note_failed_set(state, _sha, []), do: state
+
+  defp ci_note_failed_set(state, sha, checks) do
+    sets = Map.put(state.ci_failed_sets, sha, ReviewCi.failed_job_names(checks))
+    save_ci_failed_sets(state.task_id, sets)
+    %{state | ci_failed_sets: sets}
+  end
+
+  # Best-effort: a failed read or write only loses the cross-gate dedupe.
+  defp load_ci_failed_sets(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %{review_gate_state: %{"ci_failed_sets" => %{} = sets}}} ->
+        Map.new(sets, fn {sha, names} -> {sha, Enum.map(names, &to_string/1)} end)
+
+      _ ->
+        %{}
+    end
+  rescue
+    _ -> %{}
+  end
+
+  defp save_ci_failed_sets(task_id, sets) do
+    case Arbiter.Tasks.PullRequest.record_review_gate(task_id, %{ci_failed_sets: sets}) do
+      :ok -> :ok
+      {:error, why} -> Logger.debug("ReviewGate: ci_failed_sets write failed: #{inspect(why)}")
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp ci_rerun_once(state, wait, checks) do
+    case ci_rerun(state) do
+      :ok ->
+        Logger.info(
+          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red; " <>
+            "re-running the failed jobs once"
+        )
+
+        state = ci_note_failed_set(state, wait.sha, checks)
+        {:wait, ci_schedule(state, ReviewCi.rerun_started(wait, checks))}
+
+      {:error, why} ->
+        if why == :ci_in_progress and wait.polls < wait.max_polls do
+          # bd-9m6wl0 / bd-8o35da: the forge only reruns a FINISHED run, and the
+          # head's latest run / pipeline (or a sibling job, e.g. `mix audit`) is
+          # still going. The failure is not yet judged real: poll again and rerun
+          # once it has finished.
+          Logger.info(
+            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red but its run is " <>
+              "still in progress; waiting to re-run the failed jobs"
+          )
+
+          {:wait, ci_schedule(state, wait)}
+        else
+          Logger.warning(
+            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red and could not be " <>
+              "re-run (#{why}); treating it as a real failure"
+          )
+
+          ci_act(state, wait, :fix, nil)
+        end
+    end
   end
 
   defp ci_review_unreviewed_red_head(state, sha) do

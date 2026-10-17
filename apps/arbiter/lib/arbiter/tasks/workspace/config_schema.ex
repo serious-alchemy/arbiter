@@ -138,6 +138,11 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       pr_title_format       string, e.g. "conventional_commit"
       watchdog_max_polls    positive integer, or the string "infinity"
       watch_pipeline        bool — wait for CI before declaring merged  (default: false)
+      ci                    map; ci.no_rerun_jobs is a list of job-name prefixes (e.g. ["visual"])
+                            that the review gate never re-runs as a flake check: a red
+                            head whose failed jobs ALL match goes straight to the CI fix
+                            path. A head that already failed the same job set once is
+                            never re-run either, listed or not. Per-repo via merge.repos.<repo>.ci.
       repos                 map, repo_paths key -> per-repo override of any key
                             above (strategy, config, auto_merge, …). Deep-merged
                             over the workspace-level merge block, so unset
