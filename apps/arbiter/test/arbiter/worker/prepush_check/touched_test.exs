@@ -64,18 +64,60 @@ defmodule Arbiter.Worker.PrepushCheck.TouchedTest do
     end
   end
 
-  describe "credo_files/1" do
-    test "keeps the Elixir files credo's config includes: those under lib/ or apps/*/lib/" do
+  describe "credo_files/2" do
+    test "with no readable .credo.exs, defaults to lib/ and test/ (root and apps/*/)" do
       files = [
         "lib/a.ex",
         "apps/x/lib/b.ex",
+        "test/tonic/device_keys_test.exs",
         "apps/x/test/b_test.exs",
         "apps/x/mix.exs",
         "config/runtime.exs",
         "apps/x/lib/c.md"
       ]
 
-      assert Touched.credo_files(files) == ["lib/a.ex", "apps/x/lib/b.ex"]
+      assert Touched.credo_files(files) == [
+               "lib/a.ex",
+               "apps/x/lib/b.ex",
+               "test/tonic/device_keys_test.exs",
+               "apps/x/test/b_test.exs"
+             ]
+    end
+
+    test "honors the repo's .credo.exs files.included (lib-only keeps tests out)", %{tmp_dir: dir} do
+      write(dir, ".credo.exs", """
+      %{configs: [%{name: "default", files: %{included: ["lib/", "apps/*/lib/"], excluded: [~r"/_build/"]}}]}
+      """)
+
+      files = ["lib/a.ex", "apps/x/lib/b.ex", "test/a_test.exs", "apps/x/test/b_test.exs"]
+      assert Touched.credo_files(files, dir) == ["lib/a.ex", "apps/x/lib/b.ex"]
+    end
+
+    test "a repo whose .credo.exs lints test/ gets touched test files (tonic case)", %{
+      tmp_dir: dir
+    } do
+      write(dir, ".credo.exs", """
+      %{configs: [%{name: "default", files: %{included: ["lib/", "test/"], excluded: []}}]}
+      """)
+
+      files = ["lib/tonic/a.ex", "test/tonic_web/live/rbac_enforcement_test.exs", "mix.exs"]
+
+      assert Touched.credo_files(files, dir) == [
+               "lib/tonic/a.ex",
+               "test/tonic_web/live/rbac_enforcement_test.exs"
+             ]
+    end
+
+    test "supports file globs; a config with no included list falls back to the default", %{
+      tmp_dir: dir
+    } do
+      write(dir, ".credo.exs", ~s|%{configs: [%{files: %{included: ["src/**/*.ex"]}}]}|)
+      assert Touched.credo_files(["src/a/b.ex", "src/c.exs", "lib/x.ex"], dir) == ["src/a/b.ex"]
+
+      write(dir, ".credo.exs", "%{configs: []}")
+
+      assert Touched.credo_files(["lib/x.ex", "test/y_test.exs", "z.ex"], dir) ==
+               ["lib/x.ex", "test/y_test.exs"]
     end
   end
 

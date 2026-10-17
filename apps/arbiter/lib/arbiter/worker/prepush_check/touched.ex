@@ -51,16 +51,49 @@ defmodule Arbiter.Worker.PrepushCheck.Touched do
   @spec elixir_files([String.t()]) :: [String.t()]
   def elixir_files(files), do: Enum.filter(files, &(Path.extname(&1) in [".ex", ".exs"]))
 
+  @default_credo_included ["lib/", "apps/*/lib/", "test/", "apps/*/test/"]
+
   @doc """
-  The Elixir files credo analyses: those `.credo.exs` includes (`lib/`,
-  `apps/*/lib/`). Passing credo a file on the command line bypasses that filter,
-  so a touched test file would be linted by a rule set CI never applies to it.
+  The Elixir files credo analyses: those the target repo's `.credo.exs`
+  `files.included` globs cover (read from `worktree`; a directory means
+  everything under it). Without a readable `.credo.exs` (or without an `included`
+  list) the default is `lib/` and `test/`, at the root and under `apps/*/`.
+  Passing credo a file on the command line bypasses its file filter, so a file
+  outside the configured paths would be linted by a rule set CI never applies.
   """
-  @spec credo_files([String.t()]) :: [String.t()]
-  def credo_files(files) do
+  @spec credo_files([String.t()], String.t() | nil) :: [String.t()]
+  def credo_files(files, worktree \\ nil) do
+    matchers = worktree |> credo_included() |> Enum.map(&glob_regex/1)
+
     files
     |> elixir_files()
-    |> Enum.filter(&Regex.match?(~r{^(apps/[^/]+/)?lib/}, &1))
+    |> Enum.filter(fn file -> Enum.any?(matchers, &Regex.match?(&1, file)) end)
+  end
+
+  defp credo_included(worktree) when is_binary(worktree) do
+    with {:ok, body} <- File.read(Path.join(worktree, ".credo.exs")),
+         [_, list] <- Regex.run(~r/included:\s*\[(.*?)\]/s, body),
+         [_ | _] = globs <- Regex.scan(~r/"([^"]+)"/, list, capture: :all_but_first) do
+      List.flatten(globs)
+    else
+      _ -> @default_credo_included
+    end
+  end
+
+  defp credo_included(_), do: @default_credo_included
+
+  # A credo `included` entry as an anchored regex: `**` crosses directories, `*`
+  # does not, and an entry without a file extension is a directory prefix.
+  defp glob_regex(glob) do
+    body =
+      glob
+      |> String.split("**")
+      |> Enum.map_join(".*", fn part ->
+        part |> String.split("*") |> Enum.map_join("[^/]*", &Regex.escape/1)
+      end)
+
+    tail = if Path.extname(glob) == "", do: "", else: "$"
+    Regex.compile!("^" <> body <> tail)
   end
 
   @doc """
