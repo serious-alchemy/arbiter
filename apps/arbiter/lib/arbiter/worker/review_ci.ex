@@ -720,7 +720,9 @@ defmodule Arbiter.Worker.ReviewCi do
             since: String.t() | nil,
             round: term(),
             polls: non_neg_integer() | nil,
-            max_polls: pos_integer() | nil
+            max_polls: pos_integer() | nil,
+            queued_minutes: non_neg_integer() | nil,
+            pipeline_id: term()
           }
           | nil
   def waiting(ticket, now \\ DateTime.utc_now())
