@@ -282,6 +282,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/server/merge_routing"} => :coordinator,
     {:get, "/api/server/tmux"} => :coordinator,
     {:get, "/api/server/worker_tmp"} => :coordinator,
+    {:get, "/api/server/worker_jail_unmask"} => :coordinator,
     {:get, "/api/server/podman_sandbox"} => :coordinator,
     {:get, "/api/server/worker_memory"} => :coordinator,
     {:get, "/api/server/dashboard_auth"} => :coordinator,
