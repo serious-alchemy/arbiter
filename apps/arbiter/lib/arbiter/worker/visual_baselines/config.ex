@@ -10,8 +10,8 @@ defmodule Arbiter.Worker.VisualBaselines.Config do
         "job": "visual",
         "artifact_path": "test-results",
         "actual_suffix": "-actual.png",
-        "baseline_dir": "e2e/visual.spec.ts-snapshots",
-        "baseline_suffix": "-chromium-linux.png",
+        "baseline_dir": "test/visual/tests/__screenshots__",
+        "layout": "playwright",
         "ignore_paths": ["docs/**", "**/*.md"]
       }}}}}
 
@@ -28,6 +28,12 @@ defmodule Arbiter.Worker.VisualBaselines.Config do
       searched recursively, so per-spec `*-snapshots` directories work.
     * `baseline_suffix` — a snapshot `<name>` has its baseline in
       `<baseline_dir>/**/<name><baseline_suffix>` (default `.png`).
+    * `layout` — `"default"`, or `"playwright"` for Playwright's per-project layout: the
+      actual `<results-dir>/<arg>-actual.png` maps to
+      `<baseline_dir>/**/<arg>-<project>-<platform>.png`, the project being the end of the
+      results directory name (minus a `-retryN` suffix). `baseline_suffix` is unused there.
+    * `platform` — the platform in the baseline name under the playwright layout
+      (default `"linux"`).
     * `ignore_paths` — globs of repo files that never render a page (docs, tests,
       CI config). The branch's own changes to everything else, except the baselines,
       count as "may have changed the failing pages" and stop the auto-refresh.
@@ -45,6 +51,8 @@ defmodule Arbiter.Worker.VisualBaselines.Config do
     artifact_path: "",
     actual_suffix: "-actual.png",
     baseline_suffix: ".png",
+    layout: "default",
+    platform: "linux",
     ignore_paths: [],
     max_snapshots: 50
   ]
@@ -56,6 +64,8 @@ defmodule Arbiter.Worker.VisualBaselines.Config do
           artifact_path: String.t(),
           actual_suffix: String.t(),
           baseline_suffix: String.t(),
+          layout: String.t(),
+          platform: String.t(),
           ignore_paths: [String.t()],
           max_snapshots: pos_integer()
         }
@@ -104,6 +114,8 @@ defmodule Arbiter.Worker.VisualBaselines.Config do
          {:ok, artifact} <- optional_string(block, "artifact"),
          {:ok, actual_suffix} <- suffix(block, "actual_suffix", "-actual.png"),
          {:ok, baseline_suffix} <- suffix(block, "baseline_suffix", ".png"),
+         {:ok, layout} <- layout(block),
+         {:ok, platform} <- platform(block),
          {:ok, ignore_paths} <- string_list(block, "ignore_paths"),
          {:ok, max_snapshots} <- positive(block, "max_snapshots", 50) do
       {:ok,
@@ -114,6 +126,8 @@ defmodule Arbiter.Worker.VisualBaselines.Config do
          artifact_path: artifact_path,
          actual_suffix: actual_suffix,
          baseline_suffix: baseline_suffix,
+         layout: layout,
+         platform: platform,
          ignore_paths: ignore_paths,
          max_snapshots: max_snapshots
        }}
@@ -188,6 +202,16 @@ defmodule Arbiter.Worker.VisualBaselines.Config do
         {:error, "visual_baselines.#{key} must be a list of non-empty strings"}
     end
   end
+
+  defp layout(block) do
+    case Map.get(block, "layout") do
+      nil -> {:ok, "default"}
+      l when l in ["default", "playwright"] -> {:ok, l}
+      _ -> {:error, ~s(visual_baselines.layout must be "default" or "playwright")}
+    end
+  end
+
+  defp platform(block), do: suffix(block, "platform", "linux")
 
   defp positive(block, key, default) do
     case Map.get(block, key) do

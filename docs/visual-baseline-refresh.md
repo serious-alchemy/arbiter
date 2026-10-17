@@ -62,6 +62,8 @@ carries the auto-refresh commit, which the heuristic refuses, so the normal fix 
 | `artifact_path` | directory inside the archive holding the actual images (default: the root) |
 | `actual_suffix` | actual images end in this (default `-actual.png`); the rest of the name is the snapshot name |
 | `baseline_suffix` | the baseline is `<baseline_dir>/**/<name><baseline_suffix>` (default `.png`) |
+| `layout` | `default`, or `playwright`: actual `<results-dir>/<arg>-actual.png` maps to `<baseline_dir>/**/<arg>-<project>-<platform>.png`, `<project>` being the longest project (from existing baseline names for that `<arg>`) the results dir name ends in, after stripping `-retryN`; retry dirs of one snapshot are one snapshot (last retry wins), unmatched/ambiguous refuses |
+| `platform` | playwright layout only: the platform in the baseline name (default `linux`) |
 | `ignore_paths` | globs (`*`, `**`, `?`) of files that never render a page; other own changes block the refresh |
 | `max_snapshots` | refuse to refresh more than this many at once (default 50) |
 
@@ -74,10 +76,11 @@ carries the auto-refresh commit, which the heuristic refuses, so the normal fix 
       "tonic": {
         "visual_baselines": {
           "job": "visual",
-          "artifact_path": "test-results",
+          "artifact_path": "test/visual/test-results",
           "actual_suffix": "-actual.png",
-          "baseline_dir": "e2e",
-          "baseline_suffix": "-chromium-linux.png",
+          "baseline_dir": "test/visual/tests/__screenshots__",
+          "layout": "playwright",
+          "platform": "linux",
           "ignore_paths": ["docs/**", "**/*.md", ".gitlab-ci.yml"]
         }
       }
@@ -86,9 +89,12 @@ carries the auto-refresh commit, which the heuristic refuses, so the normal fix 
 }
 ```
 
-The directory and suffixes above follow Playwright's default layout
-(`<spec>-snapshots/<name>-<project>-<platform>.png`, actuals in
-`test-results/<test>/<name>-actual.png`); adjust them to the repo's. For GitHub add
+The baseline directory follows Playwright's default `snapshotPathTemplate`
+(`{arg}-{projectName}-{platform}{ext}`, e.g. `app.visual.spec.ts/patient-summary-mobile-dark-linux.png`);
+actuals are `test/visual/test-results/<test>-<project>[-retryN]/<arg>-actual.png`. The `playwright`
+layout reads the project from the results directory name. `artifact_path` must be the
+directory the repo's `visual` job lists under `artifacts:paths` (tonic: `test/visual/test-results/`,
+with `when: on_failure`, which satisfies the upload-on-failure requirement below). For GitHub add
 `"artifact": "<name the workflow uploads>"`; Actions artifacts belong to a workflow run,
 not a job.
 

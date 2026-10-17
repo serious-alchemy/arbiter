@@ -85,4 +85,24 @@ defmodule Arbiter.Worker.VisualBaselines.ConfigTest do
       end
     end
   end
+
+  describe "layout" do
+    test "defaults to the plain layout, accepts playwright with a platform" do
+      {:ok, c} = Config.validate(%{"job" => "v", "baseline_dir" => "b"})
+      assert c.layout == "default"
+
+      {:ok, c} =
+        Config.validate(%{"job" => "v", "baseline_dir" => "b", "layout" => "playwright"})
+
+      assert {c.layout, c.platform} == {"playwright", "linux"}
+    end
+
+    test "rejects an unknown layout or platform" do
+      assert {:error, _} =
+               Config.validate(%{"job" => "v", "baseline_dir" => "b", "layout" => "x"})
+
+      assert {:error, _} =
+               Config.validate(%{"job" => "v", "baseline_dir" => "b", "platform" => ""})
+    end
+  end
 end

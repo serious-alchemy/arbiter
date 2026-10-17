@@ -480,6 +480,9 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                         actual_suffix    default "-actual.png"
                         baseline_suffix  default ".png"; <name><actual_suffix> in the archive
                                          replaces <baseline_dir>/**/<name><baseline_suffix>
+                        layout           "default" or "playwright": baselines are
+                                         <arg>-<project>-<platform>.png, project read from the
+                                         results dir name; platform default "linux"
                         ignore_paths     globs of repo files that never render a page; any
                                          other own change since the last green visual run
                                          blocks the refresh
