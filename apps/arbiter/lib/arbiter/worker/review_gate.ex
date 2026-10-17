@@ -263,6 +263,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.StopReason
+  alias Arbiter.Worker.VisualBaselines
   alias Arbiter.Worker.Withholding
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
@@ -442,6 +443,7 @@ defmodule Arbiter.Worker.ReviewGate do
           | {:pr_ref, String.t() | nil}
           | {:ci_gate, boolean() | nil}
           | {:ci_adapter, module() | nil}
+          | {:visual_refresher, (map() -> term())}
           | {:ci_poll_ms, pos_integer() | nil}
           | {:local_capacity_retry_ms, pos_integer()}
           | {:ci_max_polls, pos_integer() | nil}
@@ -1247,6 +1249,9 @@ defmodule Arbiter.Worker.ReviewGate do
       # poll budget (`Arbiter.Worker.ReviewCi`); nil leaves each to the config.
       ci_gate_override: Keyword.get(opts, :ci_gate),
       ci_adapter: Keyword.get(opts, :ci_adapter),
+      # bd-6vvpau: the deterministic visual-baseline refresh tried before a CI-red
+      # implementer round (`ci_visual_step/3`), injectable for tests.
+      visual_refresher: Keyword.get(opts, :visual_refresher, &VisualBaselines.refresh/1),
       ci_poll_ms: Keyword.get(opts, :ci_poll_ms),
       ci_max_polls: Keyword.get(opts, :ci_max_polls),
       # The wait in progress (phase `:awaiting_ci`): `ReviewCi.wait/0` plus the
@@ -1815,6 +1820,22 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp ci_retarget(state, wait, reading, _result), do: {state, wait, reading}
 
+  # bd-6vvpau: a red head is first offered to the deterministic visual-baseline
+  # refresh (`VisualBaselines`, the same module the Watchdog's `:ci_failed` path
+  # uses), before a flake re-run or an implementer round. A clean refresh pushes
+  # an authored commit, so the gate goes back to waiting on CI for that new head;
+  # nothing is approved yet, so the new head is still reviewed once CI is green.
+  # Anything else falls through to the red-CI handling unchanged.
+  defp ci_act(state, wait, action, result) when action in [:rerun, :fix] and is_map(result) do
+    case ci_visual_step(state, wait, result) do
+      {:refreshed, state, wait} -> {:wait, ci_schedule(state, wait)}
+      :skip -> ci_act_red(state, wait, action, result)
+    end
+  end
+
+  defp ci_act(state, wait, action, result) when action in [:rerun, :fix],
+    do: ci_act_red(state, wait, action, result)
+
   defp ci_act(state, wait, :green, result) do
     ci_log_leave(state, wait, "CI green")
     state = ci_end_wait(state)
@@ -1847,30 +1868,6 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp ci_act(state, wait, :wait, _result), do: {:wait, ci_schedule(state, wait)}
 
-  # First red on this head: re-run the failed jobs once before anyone is sent to
-  # fix anything. If that cannot be done, the failure is taken as real.
-  defp ci_act(state, wait, :rerun, _result) do
-    checks = ci_failing_checks(state)
-
-    # The gate's own rerun after a no-diff fix round (bd-dun10t) is deliberate
-    # even though that head already failed, so the repeat-failure dedupe stands down.
-    seen = if post_noop_rerun?(state), do: %{}, else: state.ci_failed_sets
-
-    case ReviewCi.skip_rerun(checks, Map.get(state.ci_ctx, :no_rerun_jobs, []), seen, wait.sha) do
-      {:skip, why} ->
-        Logger.info(
-          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red on " <>
-            "#{Enum.join(ReviewCi.failed_job_names(checks), ", ")} (#{why}); " <>
-            "skipping the flake re-run, taking it as a real failure"
-        )
-
-        ci_act(state, wait, :fix, nil)
-
-      :rerun ->
-        ci_rerun_once(state, wait, checks)
-    end
-  end
-
   # Cancelled checks (#360): nothing failed, so no fix round can help. Re-run them
   # (the wait already backs off between re-runs); a re-run that cannot be made is
   # the same escalation as one that keeps being cancelled.
@@ -1902,7 +1899,39 @@ defmodule Arbiter.Worker.ReviewGate do
     ci_infra(state, reason)
   end
 
-  defp ci_act(state, wait, :fix, _result) do
+  defp ci_act(state, wait, {:fallback, reason}, _result) do
+    ci_log_leave(state, wait, "CI could not vouch (#{reason})")
+    {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+  end
+
+  defp ci_act_red(state, wait, :rerun, _result), do: ci_red_rerun(state, wait)
+  defp ci_act_red(state, wait, :fix, _result), do: ci_red_fix(state, wait)
+
+  # First red on this head: re-run the failed jobs once before anyone is sent to
+  # fix anything. If that cannot be done, the failure is taken as real.
+  defp ci_red_rerun(state, wait) do
+    checks = ci_failing_checks(state)
+
+    # The gate's own rerun after a no-diff fix round (bd-dun10t) is deliberate
+    # even though that head already failed, so the repeat-failure dedupe stands down.
+    seen = if post_noop_rerun?(state), do: %{}, else: state.ci_failed_sets
+
+    case ReviewCi.skip_rerun(checks, Map.get(state.ci_ctx, :no_rerun_jobs, []), seen, wait.sha) do
+      {:skip, why} ->
+        Logger.info(
+          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red on " <>
+            "#{Enum.join(ReviewCi.failed_job_names(checks), ", ")} (#{why}); " <>
+            "skipping the flake re-run, taking it as a real failure"
+        )
+
+        ci_act(state, wait, :fix, nil)
+
+      :rerun ->
+        ci_rerun_once(state, wait, checks)
+    end
+  end
+
+  defp ci_red_fix(state, wait) do
     ci_log_leave(state, wait, "CI red")
     stored = if wait.rerun, do: wait.rerun.checks, else: []
 
@@ -1932,9 +1961,61 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp ci_act(state, wait, {:fallback, reason}, _result) do
-    ci_log_leave(state, wait, "CI could not vouch (#{reason})")
-    {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+  defp ci_visual_step(state, wait, result) do
+    head = wait.sha
+
+    if VisualBaselines.configured?(state.ci_ctx.workspace, state.repo) and
+         not post_noop_rerun?(state) and ReviewCi.same_sha?(Map.get(result, :head_sha), head) and
+         not VisualBaselines.tried?(state.task_id, head) do
+      VisualBaselines.mark_tried(state.task_id, head)
+
+      case safe_visual_refresh(state, result) do
+        {:refreshed, %{sha: sha} = info} ->
+          Logger.warning(
+            "ReviewGate: refreshed #{length(Map.get(info, :files, []))} visual baseline(s) for " <>
+              "task=#{state.task_id} (#{head} -> #{sha}) without an implementer round; " <>
+              "waiting on CI for the new head"
+          )
+
+          state =
+            record_thread(
+              state,
+              :system,
+              "Round #{state.round}: visual baselines refreshed",
+              "CI on #{head} failed only on the visual job, from main's drift. Its baselines " <>
+                "were refreshed without an implementer round (#{sha}); the gate waits on CI " <>
+                "for that head before a reviewer reads it."
+            )
+
+          {:refreshed, state, ReviewCi.new_wait(sha, state.ci_ctx.budget)}
+
+        other ->
+          Logger.info(
+            "ReviewGate: no visual-baseline refresh for task=#{state.task_id} head=#{head}: " <>
+              inspect(other)
+          )
+
+          :skip
+      end
+    else
+      :skip
+    end
+  end
+
+  defp safe_visual_refresh(state, result) do
+    ctx = state.ci_ctx
+
+    state.visual_refresher.(%{
+      workspace: ctx.workspace,
+      repo: state.repo,
+      adapter: ctx.adapter,
+      mr_ref: ctx.pr_ref,
+      result: result
+    })
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp ci_note_failed_set(state, _sha, []), do: state
