@@ -148,9 +148,27 @@ defmodule Arbiter.Tasks.Attention do
       event = if to == :operator, do: :handed_off, else: :handed_back
       now_attention = current(moved, opts)
       announce(moved, event, now_attention)
+      if to == :coordinator, do: maybe_recheck_merge(issue.id, attention.cause, opts)
       {:ok, now_attention}
     end
   end
+
+  # bd-8a5sts: an awaiting_manual_merge ticket is parked only because auto_merge
+  # was off. Handing it back is the operator saying the merge can go ahead, so
+  # re-enter the merge path rather than just moving attention. The Watchdog
+  # re-reads merge.auto_merge: still off, it stays parked; on, it merges (or
+  # follows the ordinary conflict / CI-fix path for a PR that cannot).
+  defp maybe_recheck_merge(id, :awaiting_manual_merge, opts) do
+    recheck = Keyword.get(opts, :recheck_merge, &Watchdog.recheck_auto_merge/1)
+    recheck.(id)
+    :ok
+  rescue
+    e ->
+      Logger.warning("Attention: merge re-check for #{id} raised: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp maybe_recheck_merge(_id, _cause, _opts), do: :ok
 
   @doc """
   Move `issue`'s attention to the operator because the coordinator did not

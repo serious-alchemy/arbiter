@@ -999,6 +999,22 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   @doc """
+  Nudge ticket `task_id`'s merge lane to re-check `merge.auto_merge` now rather
+  than at its next tick (bd-8a5sts). A live Watchdog polls at once when the flag
+  has flipped on; with none running (the lane exited) one is restarted from the
+  ticket's recorded lane. Best-effort: returns `:ok` either way.
+  """
+  @spec recheck_auto_merge(String.t()) :: :ok
+  def recheck_auto_merge(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
+      pid when is_pid(pid) -> GenServer.cast(pid, :recheck_auto_merge)
+      nil -> _ = restart(task_id)
+    end
+
+    :ok
+  end
+
+  @doc """
   Subscribe the caller to ticket `task_id`'s Watchdog outcomes, delivered as
   `{:watchdog, task_id, event}` where `event` is `{:merged, mr_ref}`,
   `{:closed, mr_ref}`, `{:timed_out, polls}` or `{:unreviewed_head, head}`.
@@ -1262,6 +1278,7 @@ defmodule Arbiter.Worker.Watchdog do
       adapter: adapter,
       workspace: workspace,
       auto_merge: auto_merge,
+      workspace_loader: Keyword.get(opts, :workspace_loader, &reload_workspace/1),
       via_review_gate: via_review_gate,
       # bd-dxgris / #1493 — the reviewed-SHA guard. `recorded_reviewed_sha` is
       # the task's own `last_reviewed_sha` (an external-review engagement's
@@ -1752,6 +1769,13 @@ defmodule Arbiter.Worker.Watchdog do
   @impl true
   def handle_call(:parked_on, _from, state) do
     {:reply, parked_reason(state), state}
+  end
+
+  @impl true
+  def handle_cast(:recheck_auto_merge, state) do
+    refreshed = refresh_auto_merge(state)
+    if refreshed.auto_merge and not state.auto_merge, do: send(self(), :poll)
+    {:noreply, refreshed}
   end
 
   # bd-985tkl acceptance 3. Once a resume deferral is in flight this Watchdog has
@@ -2765,7 +2789,55 @@ defmodule Arbiter.Worker.Watchdog do
   # narrow case — green, no changes requested, blocked solely on a required
   # review the author can't satisfy — so an ordinary "awaiting first review" PR
   # still flows through the normal pending path.
+  # bd-8a5sts: `auto_merge` is latched when the Watchdog starts, so a lane that
+  # parked as "approved — awaiting manual merge" while `merge.auto_merge` was
+  # off kept polling that stale `false` after the operator turned it back on.
+  # Re-read the workspace's flag on each poll of a manual lane; once it reads
+  # true, flip to the auto lane so the next steps (merge, or the ordinary
+  # conflict / CI-fix routing for a PR that cannot merge) run unattended. Only
+  # off -> on is followed; an explicit `auto_merge: false` with no workspace
+  # (tests, ad-hoc watches) is left alone.
+  defp refresh_auto_merge(%{auto_merge: false, workspace: %{id: id} = ws} = state)
+       when is_binary(id) do
+    fresh = state.workspace_loader.(ws)
+
+    if match?(%Arbiter.Tasks.Workspace{}, fresh) and Arbiter.Tasks.Workspace.auto_merge?(fresh) do
+      Logger.info(
+        "Worker.Watchdog: merge.auto_merge turned on for task=#{state.task_id} " <>
+          "mr=#{state.mr_ref}; leaving the manual-merge park"
+      )
+
+      state = %{state | auto_merge: true, workspace: fresh}
+
+      if state.base_max_polls == :infinity do
+        %{
+          state
+          | base_max_polls: @default_max_polls_auto,
+            max_polls: @default_max_polls_auto,
+            poll_count: 0
+        }
+      else
+        state
+      end
+    else
+      state
+    end
+  end
+
+  defp refresh_auto_merge(state), do: state
+
+  # Re-read the workspace row (keeping the repo-scoped view the Watchdog
+  # started with), so a config change reaches a running lane.
+  defp reload_workspace(ws) do
+    case Ash.get(Arbiter.Tasks.Workspace, ws.id) do
+      {:ok, fresh} -> Mergers.scope(fresh, Mergers.scoped_repo(ws))
+      _ -> nil
+    end
+  end
+
   defp maybe_escalate_merge_block(state, result) do
+    state = refresh_auto_merge(state)
+
     # Scope a worker's "infra, not my diff" verdict to the CI block episode it
     # was raised against, before any routing decision reads it (bd-5mzzww).
     state = clear_stale_ci_external(state, block_reason(result))
