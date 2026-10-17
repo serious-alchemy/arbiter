@@ -701,8 +701,13 @@ defmodule Arbiter.MCP.Tools do
   @doc """
   Reconcile the workspace's tasks against its external tracker (`arb sync`): open
   assigned issues with no task get a linked task; open tasks whose issue is
-  closed upstream or reassigned away get closed (an issue that is merely
-  unassigned is left alone — bd-83ojwi); closed tasks whose close was meant to
+  reassigned away get closed (an issue that is merely unassigned is left alone —
+  bd-83ojwi); claimed tasks re-sync with their story (bd-evxsrx, `resync`
+  actions — see `Arbiter.Tasks.TrackerResync`): an edited priority/title/
+  description is pulled onto a backlog/queued task, never onto one in flight
+  (the coordinator gets an inbox note), a locally changed field wins and is
+  reported as divergent, and a story closed or archived upstream is flagged to
+  the coordinator inbox, never closed; closed tasks whose close was meant to
   propagate upstream — a recorded close intent (bd-bsco7f), or for rows closed
   before that was recorded a non-blank `pr_ref` (bd-83ojwi) — but whose tracker
   issue is still open are reported as `drift` (bd-2wilou — a close that never

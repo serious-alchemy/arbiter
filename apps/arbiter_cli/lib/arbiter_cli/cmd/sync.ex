@@ -85,7 +85,30 @@ defmodule ArbiterCli.Cmd.Sync do
     IO.puts("      fix: #{@drift_remedy} #{id}")
   end
 
+  defp print_action(%{"action" => "resync", "task_id" => id} = action) do
+    IO.puts("  ~ resync #{id}: #{describe_resync(action)}")
+  end
+
   defp print_action(other), do: IO.puts("  ? #{inspect(other)}")
+
+  # What a tracker re-sync pulled onto a ticket, and what it left alone.
+  defp describe_resync(decision) do
+    applied = decision |> Map.get("applied", %{}) |> Map.keys() |> Enum.sort()
+
+    [
+      applied != [] && "pulled #{Enum.join(applied, ", ")}",
+      decision["mid_flight"] not in [nil, []] &&
+        "held back (in flight) #{Enum.join(decision["mid_flight"], ", ")}",
+      decision["divergent"] not in [nil, []] &&
+        "divergent (local wins) #{Enum.join(decision["divergent"], ", ")}",
+      decision["closed_upstream"] == true && "story closed upstream (flagged, not closed)"
+    ]
+    |> Enum.filter(& &1)
+    |> case do
+      [] -> "recorded the tracker's current values"
+      parts -> Enum.join(parts, "; ")
+    end
+  end
 
   # GitHub issue refs are bare numbers and read naturally with a `#` prefix
   # (`#43`); other trackers (Jira `AX-1234`, Shortcut ids) carry their own
@@ -105,6 +128,10 @@ defmodule ArbiterCli.Cmd.Sync do
   defp print_result(%{"outcome" => "drifted", "task" => task}) do
     IO.puts("  ! drift #{task["id"]}: closed locally but still open upstream")
     IO.puts("      fix: #{@drift_remedy} #{task["id"]}")
+  end
+
+  defp print_result(%{"outcome" => "resynced", "task" => task} = result) do
+    IO.puts("  ~ resynced #{task["id"]}: #{describe_resync(result["resync"] || %{})}")
   end
 
   defp print_result(%{"outcome" => "error", "action" => action, "reason" => reason}) do

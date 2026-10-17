@@ -154,6 +154,7 @@ defmodule Arbiter.Tasks.Issue do
       accept [
         :title,
         :description,
+        :tracker_snapshot,
         :acceptance,
         :acceptance_waived,
         :notes,
@@ -512,6 +513,21 @@ defmodule Arbiter.Tasks.Issue do
     # bd-a370ak / #2002: the durable pending-merge stamp. Written only through
     # `Arbiter.Mergers.PendingMerge`; deliberately no lifecycle broadcast — the
     # Watchdog writes it from its poll loop and nothing renders it live.
+    # bd-evxsrx: the tracker re-sync's write (`Arbiter.Tasks.TrackerResync`). It
+    # pulls a changed priority/title/description onto a backlog/queued ticket and
+    # advances the `tracker_snapshot`, without `:update`'s SyncFields echo — the
+    # value came from the tracker, so pushing it back would be a wasted write.
+    # Not reachable from REST/MCP/CLI.
+    update :record_tracker_sync do
+      require_atomic? false
+      accept [:title, :description, :priority, :tracker_snapshot]
+
+      change after_action(fn _changeset, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
     update :set_pending_merge do
       require_atomic? false
       accept [:pending_merge]
@@ -1811,6 +1827,23 @@ defmodule Arbiter.Tasks.Issue do
       `nil` means "closed before this was recorded" — for those rows the drift
       check still falls back to the `pr_ref` proxy. Not `public?`: it is a
       record of what an action did, never something a caller sets directly.
+      """
+    end
+
+    attribute :tracker_snapshot, :map do
+      allow_nil? true
+      public? false
+
+      description """
+      bd-evxsrx: what the tracker story said the last time Arbiter reconciled
+      this ticket with it (`title`, `description`, `priority`, whether a closed
+      story was already flagged, and which tracker values the coordinator has
+      already been told about). It is the common ancestor the re-sync compares
+      against: a ticket field that differs from it was changed locally (a
+      coordinator override that wins), and a tracker value that differs from it
+      is a story edit to pull. `nil` on a ticket claimed before this existed —
+      its first re-sync adopts the tracker's current values without touching the
+      ticket. Written only by `:create` (the claim) and `:record_tracker_sync`.
       """
     end
 

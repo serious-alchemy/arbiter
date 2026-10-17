@@ -684,6 +684,72 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   def tracker_transition_skipped(_snapshot, _reason), do: :ok
 
   @doc """
+  Tell the coordinator what a tracker re-sync **did not** do to a claimed ticket
+  (bd-evxsrx): a story edit held back because the ticket is in flight, a field the
+  coordinator changed locally that now disagrees with the story (divergent), or a
+  story closed/archived upstream. A neutral `:info` mailbox message addressed to
+  the coordinator with the ticket's `task_ref` — an FYI, not an escalation: the
+  ticket is untouched and nothing is blocked on it.
+
+  `decision` is the `Arbiter.Tasks.TrackerResync` decision that was just applied;
+  a decision that only pulled fields onto a backlog/queued ticket has nothing to
+  tell and sends nothing. Best-effort, returns `:ok`.
+  """
+  @spec tracker_resync(Issue.t(), map()) :: :ok
+  def tracker_resync(%Issue{} = task, decision) do
+    lines =
+      Enum.map(decision.mid_flight, &resync_line(task, decision, &1, "held back")) ++
+        Enum.map(decision.divergent, &resync_line(task, decision, &1, "divergent")) ++
+        if(decision.closed_upstream, do: [closed_upstream_line(task)], else: [])
+
+    if lines != [], do: send_resync_note(task, lines)
+    :ok
+  rescue
+    e ->
+      Logger.debug("CoordinatorNotifier.tracker_resync swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp send_resync_note(task, lines) do
+    Message.send_mail(%{
+      kind: :info,
+      to_ref: Message.coordinator_ref(),
+      from_ref: task.id,
+      workspace_id: task.workspace_id,
+      task_ref: task.id,
+      subject: "#{task.id} tracker story changed",
+      body:
+        ["#{task.id} (#{task.state}) — #{task.tracker_type} #{task.tracker_ref}:" | lines]
+        |> Enum.join("\n")
+    })
+  end
+
+  defp resync_line(task, decision, field, "held back") do
+    "- #{field}: tracker now #{resync_value(decision.observed, field)}, but the ticket is " <>
+      "#{task.state} (in flight), so it was not rewritten — currently #{resync_value(task, field)}."
+  end
+
+  defp resync_line(task, decision, field, "divergent") do
+    "- #{field}: divergent — the ticket's #{resync_value(task, field)} was changed locally and " <>
+      "wins over the tracker's #{resync_value(decision.observed, field)}; not overwritten."
+  end
+
+  # A field value for a one-line note: long descriptions are cut short.
+  defp resync_value(source, field) do
+    case source |> Map.get(field) |> to_string() do
+      text when byte_size(text) > 120 -> inspect(String.slice(text, 0, 120) <> "…")
+      text -> inspect(text)
+    end
+  end
+
+  defp closed_upstream_line(task) do
+    "- the story is closed or archived upstream. The ticket (#{task.state}) was left as it is — " <>
+      "close or park it yourself if the work is no longer wanted."
+  end
+
+  @doc """
   Escalate a failed **review-coverage write** to the coordinator (bd-203cl5 /
   #1648, design #1635 §3.3).
 

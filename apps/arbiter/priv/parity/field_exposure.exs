@@ -28,6 +28,8 @@
     "acceptance" => :same,
     "acceptance_waived" =>
       {:internal, "recorded by Claim when a tracker story's description is the spec"},
+    "tracker_snapshot" =>
+      {:internal, "recorded by Claim and the tracker re-sync; the ancestor it compares against"},
     "notes" => :same,
     "qa_notes" => :same,
     "deployment_notes" => :same,
