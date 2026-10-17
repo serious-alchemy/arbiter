@@ -93,9 +93,7 @@ The baseline directory follows Playwright's default `snapshotPathTemplate`
 (`{arg}-{projectName}-{platform}{ext}`, e.g. `app.visual.spec.ts/patient-summary-mobile-dark-linux.png`);
 actuals are `test-results/<test>-<project>[-retryN]/<arg>-actual.png`. The `playwright`
 layout reads the project from the results directory name. `artifact_path` must be the
-directory the repo's `visual` job uploads: tonic's `.gitlab-ci.yml` was not readable from this
-worktree, so `test-results` (the path in the failing job's trace) is used here; confirm it
-against the job's `artifacts:paths`. For GitHub add
+directory the repo's `visual` job lists under `artifacts:paths`. For GitHub add
 `"artifact": "<name the workflow uploads>"`; Actions artifacts belong to a workflow run,
 not a job.
 

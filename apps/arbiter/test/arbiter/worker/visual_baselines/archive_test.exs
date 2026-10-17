@@ -154,6 +154,42 @@ defmodule Arbiter.Worker.VisualBaselines.ArchiveTest do
       assert b == "#{@shots}/patient-summary-mobile-dark-linux.png"
     end
 
+    test "max_snapshots counts retry copies once", %{tmp_dir: dir} do
+      pw_baselines(dir)
+
+      archive =
+        zip([
+          {"#{@results}-mobile-dark/patient-summary-actual.png", "a"},
+          {"#{@results}-mobile-dark-retry1/patient-summary-actual.png", "b"},
+          {"#{@results}-mobile-dark-retry2/patient-summary-actual.png", "c"}
+        ])
+
+      config = %{pw_config() | max_snapshots: 1}
+      assert {:ok, [%{bytes: "c"}]} = Archive.plan(archive, config, dir)
+
+      two =
+        zip([
+          {"#{@results}-mobile-dark/patient-summary-actual.png", "a"},
+          {"#{@results}-mobile-light/patient-summary-actual.png", "b"}
+        ])
+
+      assert {:error, {:too_many, 2, 1}} = Archive.plan(two, config, dir)
+    end
+
+    test "a project read from another arg's baseline is not taken", %{tmp_dir: dir} do
+      pw_baselines(dir)
+      baseline(dir, "#{@shots}/patient-linux.png", "old-patient")
+      baseline(dir, "#{@shots}/patient-desktop-dark-linux.png", "old-pd")
+
+      archive =
+        zip([
+          {"test-results/x-patient-summary-mobile-dark/patient-summary-actual.png", "ps"},
+          {"test-results/x-patient-summary-mobile-dark/patient-actual.png", "p"}
+        ])
+
+      assert {:error, {:no_baseline, "patient"}} = Archive.plan(archive, pw_config(), dir)
+    end
+
     test "refuses when no project matches, or two tests collide", %{tmp_dir: dir} do
       pw_baselines(dir)
 

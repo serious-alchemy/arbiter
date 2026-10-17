@@ -11,6 +11,14 @@ defmodule Arbiter.Worker.VisualBaselines.Archive do
   to exactly one existing baseline refuses the whole plan (a new snapshot with no
   baseline, two baselines by the same name, two actuals for one snapshot): the
   caller then takes the normal fix path.
+
+  With `layout: "playwright"` the name is the screenshot argument and the
+  baseline is `<arg>-<project>-<platform>.png`. The project is read from the
+  results directory name (the longest project known from the baselines that the
+  directory ends with, after stripping a trailing `-retryN`). Retry directories
+  of one snapshot and project are one snapshot: the last retry's actual is used
+  and `max_snapshots` counts them once. Two different results directories for
+  one project still refuse.
   """
 
   alias Arbiter.Worker.VisualBaselines.Config
@@ -34,8 +42,9 @@ defmodule Arbiter.Worker.VisualBaselines.Archive do
   def plan(archive, %Config{} = config, checkout) when is_binary(archive) do
     with {:ok, files} <- unzip(archive),
          {:ok, actuals} <- actuals(files, config),
-         :ok <- within_cap(actuals, config),
-         {:ok, entries} <- map_baselines(actuals, config, checkout) do
+         :ok <- if(config.layout == "playwright", do: :ok, else: within_cap(actuals, config)),
+         {:ok, entries} <- map_baselines(actuals, config, checkout),
+         :ok <- within_cap(entries, config) do
       case Enum.reject(entries, &unchanged?(&1, checkout)) do
         [] -> {:error, :no_change}
         changed -> {:ok, changed}
@@ -74,8 +83,9 @@ defmodule Arbiter.Worker.VisualBaselines.Archive do
     end
   end
 
-  defp within_cap(actuals, %{max_snapshots: max}) do
-    if length(actuals) > max, do: {:error, {:too_many, length(actuals), max}}, else: :ok
+  # Counted on the resolved snapshots, so retry copies of one snapshot are one.
+  defp within_cap(entries, %{max_snapshots: max}) do
+    if length(entries) > max, do: {:error, {:too_many, length(entries), max}}, else: :ok
   end
 
   defp map_baselines(actuals, config, checkout) do
@@ -107,12 +117,13 @@ defmodule Arbiter.Worker.VisualBaselines.Archive do
   # One `{name, basename_matcher, bytes}` per snapshot to refresh.
   defp resolve(actuals, %{layout: "playwright"} = config, existing) do
     basenames = Enum.map(existing, &Path.basename/1)
+    args = actuals |> Enum.map(& &1.name) |> Enum.uniq()
 
     actuals
     |> Enum.group_by(& &1.name)
     |> Enum.sort()
     |> Enum.reduce_while({:ok, []}, fn {arg, group}, {:ok, acc} ->
-      case playwright_group(arg, group, basenames, config) do
+      case playwright_group(arg, group, basenames, args, config) do
         {:ok, items} -> {:cont, {:ok, acc ++ items}}
         error -> {:halt, error}
       end
@@ -135,7 +146,7 @@ defmodule Arbiter.Worker.VisualBaselines.Archive do
     end
   end
 
-  defp playwright_group(arg, group, basenames, config) do
+  defp playwright_group(arg, group, basenames, args, config) do
     tail = "-" <> config.platform <> ".png"
 
     projects =
@@ -145,6 +156,7 @@ defmodule Arbiter.Worker.VisualBaselines.Archive do
           project =
             base |> String.replace_prefix(arg <> "-", "") |> String.replace_suffix(tail, ""),
           project != "",
+          not claimed_by_other_arg?(arg, project, args),
           uniq: true,
           do: project
 
@@ -174,6 +186,16 @@ defmodule Arbiter.Worker.VisualBaselines.Archive do
           _many ->
             {:halt, {:error, {:duplicate_actual, arg <> "-" <> project}}}
         end
+    end)
+  end
+
+  # `patient-summary-mobile-dark-linux.png` read as arg `patient` gives the
+  # project `summary-mobile-dark`; when the archive also has an actual named
+  # `patient-summary`, that file belongs to it, not to `patient`.
+  defp claimed_by_other_arg?(arg, project, args) do
+    Enum.any?(args, fn other ->
+      String.starts_with?(other, arg <> "-") and
+        String.starts_with?(project, String.replace_prefix(other, arg <> "-", "") <> "-")
     end)
   end
 
