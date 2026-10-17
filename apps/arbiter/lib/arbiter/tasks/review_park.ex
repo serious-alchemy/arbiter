@@ -68,6 +68,7 @@ defmodule Arbiter.Tasks.ReviewPark do
           | :commit_gate_no_changes
           | :commit_gate_no_changes_after_non_file_fix
           | :commit_gate_uncommitted
+          | :commit_gate_prepush_failed
           | :empty_diff
           | :empty_net_diff
           | :head_not_pushed
@@ -90,6 +91,9 @@ defmodule Arbiter.Tasks.ReviewPark do
         "code change — distinct from an idle worker (G15/G16/bd-cb7wpq)",
     commit_gate_uncommitted:
       "the implementer left uncommitted work and HEAD did not move, twice (G15/G16)",
+    commit_gate_prepush_failed:
+      "a fix round's worker.pre_push_checks stayed red past the send-back cap, so its " <>
+        "head was not pushed",
     empty_diff: "the target branch has already absorbed this branch's commits (G2)",
     empty_net_diff:
       "the branch has commits ahead of the target but they contribute no net change — " <>
@@ -117,6 +121,7 @@ defmodule Arbiter.Tasks.ReviewPark do
     commit_gate_no_changes_after_non_file_fix:
       "fix round produced no changes after resolving findings without a file change",
     commit_gate_uncommitted: "implementer left uncommitted work",
+    commit_gate_prepush_failed: "fix round's pre-push checks are red; head not pushed",
     empty_diff: "the target branch already absorbed these commits",
     empty_net_diff: "the branch's commits contribute no net change against the target",
     head_not_pushed: "the branch is not pushed and could not be",

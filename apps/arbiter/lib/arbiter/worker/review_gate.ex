@@ -420,6 +420,7 @@ defmodule Arbiter.Worker.ReviewGate do
           | :commit_gate_no_changes
           | :commit_gate_no_changes_after_non_file_fix
           | :commit_gate_uncommitted
+          | :commit_gate_prepush_failed
           | :empty_diff
           | :head_not_pushed
 
@@ -2788,6 +2789,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # reviewer Worker resumes the same agy conversation, capped by its own
   # `resume_cap`) before the pass is scored as it stands.
   @max_denial_defers 3
+  @prepush_wait_ms 250
 
   @impl true
   def handle_info({:worker_output, id, line}, %{current_id: id} = state) do
@@ -2868,6 +2870,15 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   def handle_info({:__pass_exit_recheck__, _other, _status}, state), do: {:noreply, state}
+
+  # bd-a7yaer: a poll of the fix round's pre-push gate (see `settle_revise/1`).
+  def handle_info(
+        {:__prepush_wait__, id},
+        %{current_id: id, phase: :revising, prepush_waiting?: true, reported?: false} = state
+      ),
+      do: state |> Map.put(:prepush_waiting?, false) |> settle_revise()
+
+  def handle_info({:__prepush_wait__, _other}, state), do: {:noreply, state}
 
   # bd-cut6uv: a poll of the CI wait. The token says which wait armed it: a
   # poll for a wait that has since resolved (or been replaced) is ignored.
@@ -3123,14 +3134,37 @@ defmodule Arbiter.Worker.ReviewGate do
     |> redispatch_implementer(state.current_prompt)
   end
 
-  defp pass_exited(_status, %{phase: :revising} = state) do
-    case state |> clear_pass() |> finish_revise() do
-      {:done, state} -> {:stop, :normal, state}
-      {:continue, state} -> {:noreply, state}
-    end
-  end
+  # bd-a7yaer: a poll is already waiting on the round's pre-push gate.
+  defp pass_exited(_status, %{phase: :revising, prepush_waiting?: true} = state),
+    do: {:noreply, state}
+
+  defp pass_exited(_status, %{phase: :revising} = state),
+    do: state |> clear_pass() |> settle_revise()
 
   defp pass_exited(_status, state), do: {:noreply, state}
+
+  # bd-a7yaer: the implementer's subprocess exiting is not the end of its fix round:
+  # the round's worker then runs `worker.pre_push_checks`, and a red step sends the
+  # output back to a fresh session. Advancing before that settles would push a red
+  # (or still-being-fixed) head via `dispatch_next_review/2`, so wait for the worker
+  # to finish its gate; park, without pushing, when the gate ended red.
+  defp settle_revise(state) do
+    case revise_gate_status(state) do
+      :pending ->
+        Process.send_after(self(), {:__prepush_wait__, state.current_id}, @prepush_wait_ms)
+        {:noreply, Map.put(state, :prepush_waiting?, true)}
+
+      {:red, detail} ->
+        stop_worker(state)
+        {:stop, :normal, park_prepush_failed(state, detail)}
+
+      :clear ->
+        case finish_revise(state) do
+          {:done, state} -> {:stop, :normal, state}
+          {:continue, state} -> {:noreply, state}
+        end
+    end
+  end
 
   @impl true
   def terminate(reason, state) do
@@ -3836,6 +3870,47 @@ defmodule Arbiter.Worker.ReviewGate do
   # waiting" token is `:revise`. Both mean `{:noreply, state}`.
   defp keep_waiting({:continue, state}), do: {:revise, state}
   defp keep_waiting({:done, state}), do: {:done, state}
+
+  # bd-a7yaer: where the fix round's pre-push gate stands. `{:red, detail}`: the
+  # worker failed with `:prepush_failed` (the send-back cap ran out). `:pending`: a
+  # check is running, or a send-back left the worker fixing and it has not finished.
+  # `:clear`: no gate, passed, or the worker is gone.
+  defp revise_gate_status(%{reviewer_pid: pid}) when is_pid(pid) do
+    case safe(fn -> Worker.state(pid) end) do
+      %{outcome: :failed, meta: %{commit_gate_reason: :prepush_failed} = meta} ->
+        {:red, red_detail(Map.get(meta, :prepush_detail))}
+
+      %{state: :finished} ->
+        :clear
+
+      %{meta: %{} = meta} ->
+        if is_reference(Map.get(meta, :prepush_ref)) or
+             Map.get(meta, :prepush_nudge_attempts, 0) > 0,
+           do: :pending,
+           else: :clear
+
+      _ ->
+        :clear
+    end
+  end
+
+  defp revise_gate_status(_state), do: :clear
+
+  defp red_detail(detail) when is_binary(detail), do: detail
+  defp red_detail({_kind, _status, output}) when is_binary(output), do: output
+  defp red_detail(nil), do: ""
+  defp red_detail(other), do: inspect(other)
+
+  defp park_prepush_failed(state, detail) do
+    msg =
+      "The fix round's pre-push checks (worker.pre_push_checks) are still red after the " <>
+        "implementer was sent the output (task #{state.task_id}, round #{state.round}). " <>
+        "The red head was NOT pushed and no further review round was dispatched." <>
+        if(detail != "", do: "\n\n" <> detail, else: "") <>
+        "\n\n" <> escalation_payload(state)
+
+    finish(state, {:parked, :commit_gate_prepush_failed, msg})
+  end
 
   # The implementer finished addressing the round's findings. Capture its
   # transcript, post it back to the reviewer over the mailbox, and open the next
