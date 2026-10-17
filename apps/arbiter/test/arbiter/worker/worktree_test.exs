@@ -1794,17 +1794,34 @@ end
                Worktree.injected_config_paths_in_commits(wt, "main")
     end
 
-    test "a nested .arbiter/sub/Containerfile is still refused", %{repo: repo} do
-      {:ok, wt} = Worktree.create(repo, "feature/containerfile-lookalike", "main")
+    test "repo-authored build-context files under .arbiter/ pass", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/build-context", "main")
       File.mkdir_p!(Path.join(wt, ".arbiter/sub"))
-      File.write!(Path.join(wt, ".arbiter/sub/Containerfile"), "x\n")
-      {_, 0} = System.cmd("git", ["-C", wt, "add", "-f", ".arbiter/sub/Containerfile"])
-      {_, 0} = System.cmd("git", ["-C", wt, "commit", "-q", "-m", "nested"])
 
+      for f <- ~w(Containerfile entrypoint.sh .containerignore sub/Containerfile) do
+        File.write!(Path.join(wt, ".arbiter/#{f}"), "x\n")
+        {_, 0} = System.cmd("git", ["-C", wt, "add", "-f", ".arbiter/#{f}"])
+      end
+
+      {_, 0} = System.cmd("git", ["-C", wt, "commit", "-q", "-m", "ctx"])
+      assert {:ok, false} = Worktree.has_injected_config_in_commits?(wt, "main")
+      refute Worktree.excluded_checkout_path?(".arbiter/entrypoint.sh")
+    end
+
+    test "token files and .arbiter/INBOX still refused, and named", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/tokens", "main")
+      files = [".mcp.json", ".gemini/settings.json", ".codex/config.toml", ".arbiter/INBOX"]
+
+      for f <- files do
+        File.mkdir_p!(Path.dirname(Path.join(wt, f)))
+        File.write!(Path.join(wt, f), "x\n")
+        {_, 0} = System.cmd("git", ["-C", wt, "add", "-f", f])
+      end
+
+      {_, 0} = System.cmd("git", ["-C", wt, "commit", "-q", "-m", "tok"])
       assert {:ok, true} = Worktree.has_injected_config_in_commits?(wt, "main")
-
-      assert {:ok, [".arbiter/sub/Containerfile"]} =
-               Worktree.injected_config_paths_in_commits(wt, "main")
+      {:ok, found} = Worktree.injected_config_paths_in_commits(wt, "main")
+      assert Enum.sort(found) == Enum.sort(files)
     end
   end
 
@@ -1812,8 +1829,7 @@ end
     test "keeps .arbiter/Containerfile, drops the rest of .arbiter/ and the token files" do
       refute Worktree.excluded_checkout_path?(".arbiter/Containerfile")
       assert Worktree.excluded_checkout_path?(".arbiter/INBOX")
-      assert Worktree.excluded_checkout_path?(".arbiter/sub/Containerfile")
-      assert Worktree.excluded_checkout_path?(".arbiter")
+      refute Worktree.excluded_checkout_path?(".arbiter/sub/Containerfile")
       assert Worktree.excluded_checkout_path?(".mcp.json")
       assert Worktree.excluded_checkout_path?(".codex/config.toml")
       assert Worktree.excluded_checkout_path?(".gemini/settings.json")
