@@ -262,22 +262,22 @@ defmodule Arbiter.Worker.ReviewCi do
     head = Map.get(result, :head_sha)
 
     if same_sha?(head, expected) do
-      case Map.get(result, :pipeline) do
-        :success -> :green
-        :failed -> :red
-        :canceled -> :cancelled
-        :running -> :pending
-        # Queued in the forge (GitLab pending/created, GitHub all-queued): not a stuck run.
-        :pending -> :queued
-        :not_started -> :not_started
-        _ -> :unknown
-      end
+      pipeline_reading(Map.get(result, :pipeline))
     else
       {:head_mismatch, head}
     end
   end
 
   def classify(_result, _expected), do: {:unavailable, "no PR head to compare against"}
+
+  defp pipeline_reading(:success), do: :green
+  defp pipeline_reading(:failed), do: :red
+  defp pipeline_reading(:canceled), do: :cancelled
+  defp pipeline_reading(:running), do: :pending
+  # Queued in the forge (GitLab pending/created, GitHub all-queued): not a stuck run.
+  defp pipeline_reading(:pending), do: :queued
+  defp pipeline_reading(:not_started), do: :not_started
+  defp pipeline_reading(_), do: :unknown
 
   @doc """
   Whether two SHAs name the same commit. Both must be non-blank hex of at

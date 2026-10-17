@@ -1995,17 +1995,17 @@ defmodule Arbiter.Mergers.Github do
           Enum.all?(conclusions, &(&1 in ["success", "skipped", "neutral"])) ->
         :success
 
-      # Every unfinished run is still queued (none started): `:pending`, which
-      # ReviewGate's CI wait holds on a long queue ceiling rather than the poll budget.
-      in_flight? and not Enum.any?(statuses, &(&1 == "in_progress")) ->
-        :pending
-
-      in_flight? ->
-        :running
-
       true ->
-        :neutral
+        in_flight_status(in_flight?, statuses)
     end
+  end
+
+  # Every unfinished run still queued (none started) is `:pending`, which
+  # ReviewGate's CI wait holds on a long queue ceiling rather than the poll budget.
+  defp in_flight_status(false, _statuses), do: :neutral
+
+  defp in_flight_status(true, statuses) do
+    if Enum.any?(statuses, &(&1 == "in_progress")), do: :running, else: :pending
   end
 
   # A genuine code failure: a failing conclusion that is not an aggregate job
