@@ -53,10 +53,9 @@ defmodule Arbiter.Agents.ReviewerRouting do
   most first, ties to configured order, candidates with no reading last.
 
   Under `scheduler_admission: enforce` (DC8, design `provider-dynamic-concurrency.md`
-  §4.5) a reviewer is a follow-up of work In progress: for an account in
-  `enforce`, `quota_held` is the gate's hard rules only (`pace: false`), never
-  the paced line, and a pool with no free seat (`Arbiter.Accounts.SeatCheck`)
-  ranks after every pool that has one.
+  §4.5) a pool with no free seat (`Arbiter.Accounts.SeatCheck`) ranks after
+  every pool that has one. The quota gate, paced line included, holds a
+  reviewer pool in every mode (bd-44qs5l): a held pool is never spawned on.
 
   ## One reviewer family per task
 
@@ -879,14 +878,13 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
   defp check_quota(%{account: nil} = entry, _ctx), do: {:ok, entry}
 
-  # DC8 (design §4.5, E10): under `enforce` a reviewer is a follow-up, so the
-  # gate keeps its hard rules only (`pace: false`), and whether its pool has a
-  # free seat is noted for `rank/1`, which puts such pools first.
+  # bd-44qs5l: the full gate (paced line included) holds a reviewer pool in
+  # every mode. DC8: under `enforce`, whether its pool has a free seat is noted
+  # for `rank/1`, which puts such pools first.
   defp check_quota(%{account: account, model: model} = entry, ctx) do
     quota = ctx.quota_fun.(account)
     enforced? = enforced?(account, ctx)
     gate_opts = [account: account, model: model, now: ctx.now]
-    gate_opts = if enforced?, do: [{:pace, false} | gate_opts], else: gate_opts
 
     case ctx.gate.check(ctx.task, quota, ctx.ws, gate_opts) do
       {:hold, reason} ->

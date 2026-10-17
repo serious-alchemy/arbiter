@@ -5157,6 +5157,20 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # ---- verdict re-prompt (bd-8v8ays) -------------------------------------
 
+  # bd-44qs5l: the re-prompt reuses the round's `reviewer_selection`, but its
+  # provider may have become quota/paced-held since the round started. Ask
+  # `ReviewerRouting` again (it drops held providers) and take its pick; with
+  # nothing routable the existing selection stands. A timeout-rotation pin
+  # (`reviewer_provider`) is left alone.
+  defp reroute_held_reprompt(%{reviewer_selection: %{}, reviewer_provider: nil} = state) do
+    case select_reviewer(state, []) do
+      {:ok, selection} -> %{state | reviewer_selection: selection}
+      _ -> state
+    end
+  end
+
+  defp reroute_held_reprompt(state), do: state
+
   # A reviewer pass produced a malformed result: either no parseable VERDICT line
   # (`:no_verdict`) or a REQUEST_CHANGES with no actionable findings
   # (`:empty_findings`). If we have a re-prompt budget left, spawn one more minimal
@@ -5179,7 +5193,11 @@ defmodule Arbiter.Worker.ReviewGate do
     max_ext = if reason == :empty_findings and state.max_rounds > 1, do: 1, else: 0
 
     case launch_worker(
-           %{state | retries_left: budget - 1, max_rounds: state.max_rounds + max_ext},
+           %{
+             reroute_held_reprompt(state)
+             | retries_left: budget - 1,
+               max_rounds: state.max_rounds + max_ext
+           },
            retry_id,
            :reviewer,
            verdict_reprompt_prompt(state, reason),
