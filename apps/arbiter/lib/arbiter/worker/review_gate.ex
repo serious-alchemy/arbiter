@@ -2790,6 +2790,8 @@ defmodule Arbiter.Worker.ReviewGate do
   # `resume_cap`) before the pass is scored as it stands.
   @max_denial_defers 3
   @prepush_wait_ms 250
+  # About ten minutes of polling, then stop waiting on a worker that never finishes.
+  @prepush_max_polls 2400
 
   @impl true
   def handle_info({:worker_output, id, line}, %{current_id: id} = state) do
@@ -3149,20 +3151,31 @@ defmodule Arbiter.Worker.ReviewGate do
   # (or still-being-fixed) head via `dispatch_next_review/2`, so wait for the worker
   # to finish its gate; park, without pushing, when the gate ended red.
   defp settle_revise(state) do
+    polls = Map.get(state, :prepush_polls, 0)
+
     case revise_gate_status(state) do
-      :pending ->
+      :pending when polls < @prepush_max_polls ->
         Process.send_after(self(), {:__prepush_wait__, state.current_id}, @prepush_wait_ms)
-        {:noreply, Map.put(state, :prepush_waiting?, true)}
+
+        {:noreply,
+         state |> Map.put(:prepush_waiting?, true) |> Map.put(:prepush_polls, polls + 1)}
+
+      :pending ->
+        finish_settled_revise(state)
 
       {:red, detail} ->
         stop_worker(state)
         {:stop, :normal, park_prepush_failed(state, detail)}
 
       :clear ->
-        case finish_revise(state) do
-          {:done, state} -> {:stop, :normal, state}
-          {:continue, state} -> {:noreply, state}
-        end
+        finish_settled_revise(state)
+    end
+  end
+
+  defp finish_settled_revise(state) do
+    case finish_revise(state) do
+      {:done, state} -> {:stop, :normal, state}
+      {:continue, state} -> {:noreply, state}
     end
   end
 
@@ -3882,6 +3895,11 @@ defmodule Arbiter.Worker.ReviewGate do
 
       %{state: :finished} ->
         :clear
+
+      # Still working: the session's exit can reach the gate before the worker
+      # has handled its own `arb done` and begun the recipe.
+      %{state: :working} ->
+        :pending
 
       %{meta: %{} = meta} ->
         if is_reference(Map.get(meta, :prepush_ref)) or
