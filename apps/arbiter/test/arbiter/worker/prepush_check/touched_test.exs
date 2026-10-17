@@ -108,6 +108,26 @@ defmodule Arbiter.Worker.PrepushCheck.TouchedTest do
              ]
     end
 
+    test "brace globs, zero-depth **/, bare dir names and excluded entries", %{tmp_dir: dir} do
+      write(dir, ".credo.exs", ~s|%{configs: [%{files: %{included: ["lib/**/*.{ex,exs}"]}}]}|)
+
+      assert Touched.credo_files(["lib/a/b.ex", "lib/c.exs", "libx/d.ex"], dir) ==
+               ["lib/a/b.ex", "lib/c.exs"]
+
+      write(dir, ".credo.exs", ~s|%{configs: [%{files: %{included: ["src/**/*.ex"]}}]}|)
+      assert Touched.credo_files(["src/x.ex", "src/a/y.ex"], dir) == ["src/x.ex", "src/a/y.ex"]
+
+      write(dir, ".credo.exs", ~s|%{configs: [%{files: %{included: ["lib"]}}]}|)
+      assert Touched.credo_files(["lib/x.ex", "lib_extra/x.ex"], dir) == ["lib/x.ex"]
+
+      write(dir, ".credo.exs", """
+      %{configs: [%{files: %{included: ["lib/", "test/"], excluded: [~r"/gen/", "test/fixtures/"]}}]}
+      """)
+
+      assert Touched.credo_files(["lib/gen/a.ex", "test/fixtures/b.exs", "test/c_test.exs"], dir) ==
+               ["test/c_test.exs"]
+    end
+
     test "supports file globs; a config with no included list falls back to the default", %{
       tmp_dir: dir
     } do
