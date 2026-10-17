@@ -91,6 +91,30 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
       assert payload.note == "needs a credential only you have"
     end
 
+    # bd-8a5sts: handing an awaiting_manual_merge ticket back re-attempts the
+    # merge (auto_merge is on again) instead of only moving attention.
+    test "handing back an awaiting_manual_merge ticket re-checks its merge", ctx do
+      {:ok, _} = Attention.raise_cause(ctx.task.id, :awaiting_manual_merge, "auto_merge off")
+      parent = self()
+      recheck = fn id -> send(parent, {:recheck, id}) end
+
+      assert {:ok, %{owner: :coordinator}} =
+               Attention.hand_off(ctx.task.id, :coordinator, nil, recheck_merge: recheck)
+
+      assert_received {:recheck, id}
+      assert id == ctx.task.id
+    end
+
+    test "handing back any other cause does not touch the merge lane", ctx do
+      raise_crash(ctx.task)
+      {:ok, _} = Attention.hand_off(ctx.task.id, :operator, "stuck")
+      parent = self()
+      recheck = fn id -> send(parent, {:recheck, id}) end
+
+      assert {:ok, _} = Attention.hand_off(ctx.task.id, :coordinator, nil, recheck_merge: recheck)
+      refute_received {:recheck, _}
+    end
+
     test "a hand-off needs a note, and attention to hand off", ctx do
       assert {:error, :no_attention} = Attention.hand_off(ctx.task.id, :operator, "why")
 

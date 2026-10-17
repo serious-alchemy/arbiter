@@ -312,6 +312,50 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert StubMerger.merge_count("!4") == 0
     end
 
+    # bd-8a5sts: a lane that parked on auto_merge:false must notice the
+    # workspace flipping merge.auto_merge back on and merge on its own.
+    test "a parked approved lane merges once the workspace turns auto_merge back on" do
+      task_id = new_task_id()
+      flag = :counters.new(1, [])
+
+      loader = fn ws ->
+        on = :counters.get(flag, 1) == 1
+        %{ws | config: %{"merge" => %{"auto_merge" => on}}}
+      end
+
+      StubMerger.queue_get("!flip", [%{status: :open, approved: true}])
+
+      start_watchdog(task_id, "!flip",
+        workspace: test_workspace(%{"merge" => %{"auto_merge" => false}}),
+        workspace_loader: loader,
+        auto_merge: false,
+        interval_ms: 30
+      )
+
+      refute_receive {:watchdog, ^task_id, {:merged, _}}, 150
+      assert StubMerger.merge_count("!flip") == 0
+
+      :counters.put(flag, 1, 1)
+      assert_merged(task_id, 2_000)
+      assert StubMerger.merge_count("!flip") == 1
+    end
+
+    test "a parked lane stays parked while the workspace keeps auto_merge off" do
+      task_id = new_task_id()
+      loader = fn ws -> %{ws | config: %{"merge" => %{"auto_merge" => false}}} end
+      StubMerger.queue_get("!noflip", [%{status: :open, approved: true}])
+
+      start_watchdog(task_id, "!noflip",
+        workspace: test_workspace(),
+        workspace_loader: loader,
+        auto_merge: false,
+        interval_ms: 20
+      )
+
+      refute_receive {:watchdog, ^task_id, {:merged, _}}, 200
+      assert StubMerger.merge_count("!noflip") == 0
+    end
+
     # bd-741sid: the last merger status + checked-at is the ticket's now
     # (`Arbiter.Tasks.PullRequest.record_merger_status/2`), covered with a real
     # ticket row by `Arbiter.Worker.PrOpenEndsRunTest`.
