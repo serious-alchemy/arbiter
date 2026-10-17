@@ -338,6 +338,9 @@ defmodule Arbiter.Mergers.Github do
          # base_ref..HEAD` against a Tier-2 checkout worktree, sidestepping
          # GitHub's REST diff endpoint 20k-line cap (bd-5yp6yn).
          base_ref: get_in(pr, ["base", "ref"]),
+         # The PR's head branch: what a host-side push to the PR lands on (the
+         # visual-baseline refresh, bd-9obzu9).
+         head_ref: get_in(pr, ["head", "ref"]),
          # The PR author's login — ReviewPatrol uses this to tell an author's
          # reply on a review thread apart from another reviewer's comment
          # (phase-2 author-reply handling, bd-8fg64x).
@@ -721,6 +724,139 @@ defmodule Arbiter.Mergers.Github do
       fetch_failing_checks(cfg, owner, repo, get_in(pr, ["head", "sha"]))
     end
   end
+
+  # Actions artifacts belong to a workflow run, not a job, so the caller names the
+  # artifact the visual job uploads (`opts.artifact`).
+  @impl true
+  def ci_job_artifacts(_mr_ref, _job_name, %{artifact: artifact})
+      when artifact in [nil, ""],
+      do: {:error, :artifact_name_required}
+
+  def ci_job_artifacts(_mr_ref, _job_name, opts) when not is_map_key(opts, :artifact),
+    do: {:error, :artifact_name_required}
+
+  def ci_job_artifacts(mr_ref, job_name, %{artifact: artifact}) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json(),
+         sha when is_binary(sha) <- get_in(pr, ["head", "sha"]) || {:error, :no_head_sha},
+         {:ok, checks} <- head_check_runs(cfg, owner, repo, sha) do
+      failed =
+        checks
+        |> latest_per_check()
+        |> Enum.filter(&failing_check?/1)
+        |> Enum.map(&Map.get(&1, "name"))
+        |> Enum.uniq()
+
+      with true <- job_name in failed,
+           {:ok, archive} <- run_artifact(cfg, owner, repo, sha, artifact) do
+        {:ok, %{sha: sha, failed_jobs: failed, archive: archive}}
+      else
+        false -> {:error, :job_not_failed}
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  @green_walk_limit 30
+
+  @impl true
+  def last_green_job_sha(mr_ref, job_name, _opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, commits} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/commits",
+             params: [per_page: 100]
+           )
+           |> handle_json() do
+      commits
+      |> List.wrap()
+      |> Enum.reverse()
+      |> Enum.take(@green_walk_limit)
+      |> Enum.find_value({:ok, nil}, fn %{"sha" => sha} ->
+        case head_check_runs(cfg, owner, repo, sha) do
+          {:ok, runs} ->
+            green? =
+              runs
+              |> latest_per_check()
+              |> Enum.any?(
+                &(Map.get(&1, "name") == job_name and Map.get(&1, "conclusion") == "success")
+              )
+
+            if green?, do: {:ok, sha}
+
+          {:error, _} = error ->
+            error
+        end
+      end)
+    end
+  end
+
+  defp head_check_runs(cfg, owner, repo, sha) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs",
+           params: [per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, %{"check_runs" => runs}} when is_list(runs) -> {:ok, runs}
+      {:ok, _} -> {:ok, []}
+      {:error, _} = error -> error
+    end
+  end
+
+  # The named artifact of the newest finished workflow run on `sha` that has one
+  # that has not expired, downloaded raw (a zip; the API redirects to storage).
+  defp run_artifact(cfg, owner, repo, sha, name) do
+    with {:ok, %{"workflow_runs" => runs}} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/actions/runs",
+             params: [head_sha: sha, per_page: 100]
+           )
+           |> handle_json(),
+         {:ok, id} <- find_artifact(cfg, owner, repo, runs, name) do
+      case request(cfg, :get, "/repos/#{owner}/#{repo}/actions/artifacts/#{id}/zip",
+             decode_body: false
+           ) do
+        {:ok, %Req.Response{status: status, body: body}}
+        when status in 200..299 and is_binary(body) ->
+          {:ok, body}
+
+        other ->
+          {:error, artifact_error(other)}
+      end
+    else
+      {:ok, _} -> {:error, :no_artifact}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp find_artifact(cfg, owner, repo, runs, name) do
+    runs
+    |> Enum.filter(&(Map.get(&1, "status") == "completed"))
+    |> Enum.sort_by(&Map.get(&1, "id", 0), :desc)
+    |> Enum.find_value({:error, :no_artifact}, fn run ->
+      path = "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/artifacts"
+
+      case request(cfg, :get, path, params: [name: name, per_page: 100]) |> handle_json() do
+        {:ok, %{"artifacts" => artifacts}} when is_list(artifacts) ->
+          case Enum.find(
+                 artifacts,
+                 &(Map.get(&1, "name") == name and Map.get(&1, "expired") != true)
+               ) do
+            %{"id" => id} -> {:ok, id}
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp artifact_error({:ok, %Req.Response{status: status, body: body}}),
+    do: http_error(status, body)
+
+  defp artifact_error({:error, exception}), do: transport_error(exception)
+  defp artifact_error(other), do: {:unexpected, other}
 
   @impl true
   def rerun_ci(mr_ref, opts) when is_binary(mr_ref) and is_map(opts) do

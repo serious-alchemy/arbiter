@@ -100,6 +100,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       `Arbiter.Worker.PrepushCheck.Recipe`) adds `"pre_push_checks"` (`"arbiter"`
       or a list of `{name, cmd, timeout_s, scope}` steps), `"pre_push_budget_seconds"`
       (a positive integer) and `"pre_push_max_attempts"` (a non-negative integer).
+    * `"worker.visual_baselines"` / `"worker.repos.<repo>.visual_baselines"` must be a
+      map with a `"job"` and a repo-relative `"baseline_dir"`, plus the optional keys of
+      `Arbiter.Worker.VisualBaselines.Config` (bd-9obzu9, GitHub #936).
     * If `"worker.placement"` is present it must be `"local_only"` (the default),
       `"prefer_remote"` or `"remote_only"` (RW8, `Arbiter.Nodes.Placement`).
     * If `"attention"` is present, it must be a map whose
@@ -116,6 +119,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   alias Arbiter.Tasks.Workspace.ConfigSchema
   alias Arbiter.Worker.Egress.Policy, as: EgressPolicy
   alias Arbiter.Worker.Image.RepoConfig
+  alias Arbiter.Worker.VisualBaselines.Config, as: VisualBaselinesConfig
   alias Ash.Changeset
 
   @impl true
@@ -183,11 +187,44 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_worker_block(worker, "worker")
     |> validate_placement(worker)
     |> validate_image(Map.get(worker, "image"), "worker.image", :workspace)
+    |> validate_visual_baselines(worker)
     |> validate_worker_repos(Map.get(worker, "repos"))
   end
 
   defp validate_worker(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "worker must be a map")
+  end
+
+  # bd-9obzu9: `worker.visual_baselines` (`Arbiter.Worker.VisualBaselines.Config`).
+  # The workspace-level block must be complete on its own; a per-repo block is
+  # checked as the resolver reads it, merged over the workspace-level one, so it
+  # may set just the keys it overrides.
+  defp validate_visual_baselines(changeset, worker) do
+    top = Map.get(worker, "visual_baselines")
+    changeset = visual_baselines_error(changeset, top, "worker")
+    repos = Map.get(worker, "repos")
+
+    if is_map(repos) do
+      Enum.reduce(repos, changeset, fn
+        {repo, %{"visual_baselines" => block}}, cs ->
+          merged = if is_map(top) and is_map(block), do: Map.merge(top, block), else: block
+          visual_baselines_error(cs, merged, "worker.repos.#{repo}")
+
+        _, cs ->
+          cs
+      end)
+    else
+      changeset
+    end
+  end
+
+  defp visual_baselines_error(changeset, nil, _label), do: changeset
+
+  defp visual_baselines_error(changeset, block, label) do
+    case VisualBaselinesConfig.validate(block) do
+      {:ok, _} -> changeset
+      {:error, message} -> prepush_error(changeset, "#{label}.#{message}")
+    end
   end
 
   # RW8 (bd-3igo6h): `worker.placement`, workspace-wide only (`Arbiter.Nodes.Placement`).

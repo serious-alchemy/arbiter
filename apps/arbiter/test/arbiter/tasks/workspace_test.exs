@@ -1006,6 +1006,63 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "worker.visual_baselines validation (bd-9obzu9)" do
+    @visual %{"job" => "visual", "baseline_dir" => "e2e/__snapshots__"}
+
+    test "accepts the block workspace-wide and per repo" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "vb-ok-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "worker" => %{
+                     "visual_baselines" => @visual,
+                     "repos" => %{
+                       "tonic" => %{
+                         "visual_baselines" =>
+                           Map.merge(@visual, %{
+                             "ignore_paths" => ["docs/**"],
+                             "max_snapshots" => 9
+                           })
+                       }
+                     }
+                   }
+                 }
+               })
+    end
+
+    test "rejects a malformed block, naming the key" do
+      for {label, block} <- [
+            {"worker.visual_baselines.job", %{"baseline_dir" => "e2e"}},
+            {"worker.visual_baselines.baseline_dir", %{"job" => "visual"}},
+            {"worker.visual_baselines.baseline_dir", Map.put(@visual, "baseline_dir", "../x")},
+            {"worker.visual_baselines.max_snapshots", Map.put(@visual, "max_snapshots", 0)},
+            {"worker.visual_baselines must be a map", "visual"}
+          ] do
+        assert {:error, err} =
+                 Ash.create(Workspace, %{
+                   name: "vb-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => %{"visual_baselines" => block}}
+                 })
+
+        assert Exception.message(err) =~ label
+      end
+    end
+
+    test "the per-repo block is checked too" do
+      assert {:error, err} =
+               Ash.create(Workspace, %{
+                 name: "vb-bad-repo-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "worker" => %{
+                     "repos" => %{"tonic" => %{"visual_baselines" => %{"job" => "visual"}}}
+                   }
+                 }
+               })
+
+      assert Exception.message(err) =~ "worker.repos.tonic.visual_baselines.baseline_dir"
+    end
+  end
+
   describe "worker.pre_push_checks validation (bd-8wdrql)" do
     test "accepts the preset, a step list, budget and attempts — workspace-wide and per repo" do
       step = %{"name" => "fmt", "cmd" => "mix format --check-formatted", "timeout_s" => 60}

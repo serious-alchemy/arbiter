@@ -163,6 +163,9 @@ defmodule Arbiter.Mergers.Gitlab do
              # base_ref..HEAD` against a Tier-2 checkout worktree, sidestepping
              # a REST diff size cap (bd-5yp6yn).
              base_ref: Map.get(body, "target_branch"),
+             # The MR's source branch: what a host-side push to the MR lands on
+             # (the visual-baseline refresh, bd-9obzu9).
+             head_ref: Map.get(body, "source_branch"),
              # MR title/description — folded into the reviewer prompt
              # (bd-adpwl0) so the reviewer sees the author's own account of
              # the change's intent.
@@ -206,6 +209,52 @@ defmodule Arbiter.Mergers.Gitlab do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       fetch_failing_check_logs(cfg, iid)
+    end
+  end
+
+  @impl true
+  def ci_job_artifacts(mr_ref, job_name, _opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, [latest | _]} <- mr_pipelines(cfg, iid) |> no_pipeline(),
+         {:ok, jobs} <- pipeline_jobs(cfg, Map.get(latest, "id")) do
+      failed = Enum.filter(jobs, &(failing_job?(&1) and Map.get(&1, "allow_failure") != true))
+
+      with %{"id" => job_id} <- Enum.find(failed, &(Map.get(&1, "name") == job_name)),
+           {:ok, archive} <- job_artifacts(cfg, job_id) do
+        {:ok,
+         %{
+           sha: Map.get(latest, "sha"),
+           failed_jobs: failed |> Enum.map(&Map.get(&1, "name")) |> Enum.uniq(),
+           archive: archive
+         }}
+      else
+        nil -> {:error, :job_not_failed}
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  @impl true
+  def last_green_job_sha(mr_ref, job_name, _opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, pipelines} <- mr_pipelines(cfg, iid) do
+      pipelines
+      |> Enum.filter(&(Map.get(&1, "status") in ["success", "failed"]))
+      |> Enum.find_value({:ok, nil}, fn pipeline ->
+        case pipeline_jobs(cfg, Map.get(pipeline, "id")) do
+          {:ok, jobs} ->
+            if Enum.any?(
+                 jobs,
+                 &(Map.get(&1, "name") == job_name and Map.get(&1, "status") == "success")
+               ),
+               do: {:ok, Map.get(pipeline, "sha")}
+
+          {:error, _} = error ->
+            error
+        end
+      end)
     end
   end
 
@@ -293,6 +342,50 @@ defmodule Arbiter.Mergers.Gitlab do
         err
     end
   end
+
+  defp no_pipeline({:ok, []}), do: {:error, :no_pipeline}
+  defp no_pipeline(other), do: other
+
+  # Newest first (a bounded window: enough to find the last green run).
+  defp mr_pipelines(cfg, iid) do
+    case request(cfg, :get, "/merge_requests/#{iid}/pipelines", params: [per_page: 20]) do
+      {:ok, %Req.Response{status: status, body: pipelines}}
+      when status in 200..299 and is_list(pipelines) ->
+        {:ok, newest_first(pipelines)}
+
+      other ->
+        {:error, request_error(other)}
+    end
+  end
+
+  defp pipeline_jobs(cfg, pipeline_id) do
+    case request(cfg, :get, "/pipelines/#{pipeline_id}/jobs", params: [per_page: 100]) do
+      {:ok, %Req.Response{status: status, body: jobs}}
+      when status in 200..299 and is_list(jobs) ->
+        {:ok, jobs}
+
+      other ->
+        {:error, request_error(other)}
+    end
+  end
+
+  # The job's artifacts archive, raw (a zip): never JSON-decoded.
+  defp job_artifacts(cfg, job_id) do
+    case request(cfg, :get, "/jobs/#{job_id}/artifacts", decode_body: false) do
+      {:ok, %Req.Response{status: status, body: body}}
+      when status in 200..299 and is_binary(body) ->
+        {:ok, body}
+
+      other ->
+        {:error, request_error(other)}
+    end
+  end
+
+  defp request_error({:ok, %Req.Response{status: status, body: body}}),
+    do: http_error(status, body)
+
+  defp request_error({:error, exception}), do: transport_error(exception)
+  defp request_error(other), do: {:unexpected, other}
 
   defp newest_first(pipelines), do: Enum.sort_by(pipelines, &(Map.get(&1, "id") || 0), :desc)
 

@@ -315,6 +315,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.Registry, as: PRegistry
+  alias Arbiter.Worker.VisualBaselines
   alias Arbiter.Workflows.CodeReview.ConsumerTrace
   alias Arbiter.Workflows.MergeQueue.FlakeSuspect
   alias Arbiter.Workflows.MergeQueue.KnownFlakes
@@ -401,6 +402,11 @@ defmodule Arbiter.Worker.Watchdog do
   # The default dispatcher the Watchdog uses to spawn a fix-pass worker for a
   # :ci_failed block. Swappable via the `:fix_pass_dispatcher` opt (tests stub it).
   @default_fix_pass_dispatcher Arbiter.Workflows.MergeQueue.FixPassDispatcher
+
+  # bd-9obzu9: polls to wait, after a visual-baseline refresh pushed, for the
+  # forge to report the new head. Until it does the PR still reads red on the
+  # old head, which is the push lag, not a failed refresh.
+  @visual_push_grace_polls 20
 
   # Consecutive safe_merge failures before the Watchdog pages the coordinator with a
   # stall notification (bd-6gxosc). The Watchdog keeps retrying after notifying;
@@ -1416,6 +1422,12 @@ defmodule Arbiter.Worker.Watchdog do
       # block (bd-bspakl).
       base_max_auto_resolve_attempts: max_auto_resolve_attempts,
       fix_pass_dispatcher: fix_pass_dispatcher,
+      # bd-9obzu9: the deterministic visual-baseline refresh tried before a fix
+      # pass (`visual_step/3`), injectable for tests. `visual_tried_heads` are the
+      # heads it has already had its one go at.
+      visual_refresher: Keyword.get(opts, :visual_refresher, &VisualBaselines.refresh/1),
+      visual_tried_heads: [],
+      visual_pending: nil,
       # The per-task fix-pass cap (bd-2l0hzm) — see `@default_max_fix_passes`.
       # `fix_passes_dispatched` is this Watchdog's own lifetime count (never
       # reset per episode); `fix_pass_history` reads the durable count, which
@@ -3301,16 +3313,83 @@ defmodule Arbiter.Worker.Watchdog do
     if fix_pass_active?(state) do
       reschedule(%{state | last_block_reason: :ci_failed})
     else
-      checks = safe_failing_checks(state)
       head = Map.get(result, :head_sha)
 
-      case flake_step(state, checks, head) do
-        :await_rerun -> reschedule(%{state | last_block_reason: :ci_failed})
-        {:rerun, files, why} -> rerun_suspected_flake(state, checks, head, files, why)
-        {:escalate, files, prev} -> park_as_suspected_flake(state, head, files, prev)
-        {:fix, outside_diff} -> fix_or_cap(state, checks, outside_diff)
+      case visual_step(state, result, head) do
+        {:refreshed, state} -> reschedule(%{state | last_block_reason: :ci_failed})
+        {:wait, state} -> reschedule(%{state | last_block_reason: :ci_failed})
+        {:skip, state} -> resolve_ci_failed_by_fix(state, head)
       end
     end
+  end
+
+  defp resolve_ci_failed_by_fix(state, head) do
+    checks = safe_failing_checks(state)
+
+    case flake_step(state, checks, head) do
+      :await_rerun -> reschedule(%{state | last_block_reason: :ci_failed})
+      {:rerun, files, why} -> rerun_suspected_flake(state, checks, head, files, why)
+      {:escalate, files, prev} -> park_as_suspected_flake(state, head, files, prev)
+      {:fix, outside_diff} -> fix_or_cap(state, checks, outside_diff)
+    end
+  end
+
+  # bd-9obzu9 (GitHub #936): a repo with `worker.repos.<repo>.visual_baselines`
+  # whose only red job is the visual one, failing only because main moved, gets
+  # its baselines refreshed by `VisualBaselines.refresh/1` — no agent. One go
+  # per head, whatever the outcome: a head that stays red after a refresh is not
+  # drift, and a skip is not retried every poll. Anything but a clean refresh
+  # falls through to the flake / fix-pass path unchanged.
+  #
+  # The push is an AUTHORED push, like a fix pass's (`note_authored_push/1`): the
+  # approved baseline stays pinned, so the new head — carrying its image diff —
+  # is judged on content and goes back through the ReviewGate. It is never
+  # stamped reviewed, so it cannot merge on the earlier approval.
+  defp visual_step(%{visual_pending: %{from: head, poll: at}} = state, _result, head)
+       when state.poll_count - at < @visual_push_grace_polls,
+       do: {:wait, state}
+
+  defp visual_step(state, result, head) do
+    if is_binary(head) and head not in state.visual_tried_heads and
+         VisualBaselines.configured?(state.workspace, state.repo) do
+      state = %{state | visual_tried_heads: [head | Enum.take(state.visual_tried_heads, 9)]}
+
+      case safe_visual_refresh(state, result) do
+        {:refreshed, %{sha: sha} = info} ->
+          Logger.warning(
+            "Worker.Watchdog: refreshed #{length(Map.get(info, :files, []))} visual baseline(s) " <>
+              "for task=#{state.task_id} mr=#{state.mr_ref} (#{head} -> #{sha}) without a fix " <>
+              "pass; the new head goes back to review"
+          )
+
+          state = %{state | visual_pending: %{from: head, poll: state.poll_count}}
+          {:refreshed, note_authored_push(state)}
+
+        other ->
+          Logger.info(
+            "Worker.Watchdog: no visual-baseline refresh for task=#{state.task_id} " <>
+              "mr=#{state.mr_ref} head=#{head}: #{inspect(other)}"
+          )
+
+          {:skip, state}
+      end
+    else
+      {:skip, state}
+    end
+  end
+
+  defp safe_visual_refresh(state, result) do
+    state.visual_refresher.(%{
+      workspace: state.workspace,
+      repo: state.repo,
+      adapter: state.adapter,
+      mr_ref: state.mr_ref,
+      result: result
+    })
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   # What to do about a red head whose failing tests may all be known flakes
