@@ -1372,7 +1372,6 @@ defmodule Arbiter.Worker.Watchdog do
           max(1, div(@queue_ceiling_ms, Keyword.get(opts, :interval_ms, @default_interval_ms))),
       last_pipeline: nil,
       watch_pipeline: watch_pipeline,
-      last_pipeline: nil,
       # The last merge-block reason we escalated, so a blocked merge is
       # surfaced once per reason rather than on every poll (#354, Phase 1).
       last_block_reason: nil,
