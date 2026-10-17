@@ -332,6 +332,10 @@ defmodule Arbiter.Worker.Watchdog do
   @default_max_polls_auto 30
   @default_max_polls_manual :infinity
 
+  # bd-c0nhqs: overall ceiling on a pipeline that sits queued (never started) in
+  # the forge — the same 12h as `Arbiter.Worker.ReviewCi`'s queue ceiling.
+  @queue_ceiling_ms 12 * 3_600_000
+
   # Consecutive `:not_started` polls (zero check-runs on the head SHA) the
   # Watchdog will defer auto-merge for before treating the pipeline as settled
   # and falling through to a merge attempt (bd-aeb9wv / #1189). Bounded, not
@@ -1356,8 +1360,18 @@ defmodule Arbiter.Worker.Watchdog do
       # ticket. They are excluded from the `max_polls` ceiling — see
       # `reschedule/1`.
       pass_polls: 0,
-      watch_pipeline: watch_pipeline,
+
+      # bd-c0nhqs / #930. Polls on which the head pipeline sat queued in the
+      # forge (`:pending`/`:created`/`waiting_for_resource` — never started).
+      # They are held out of `max_polls` (a queue is not a stuck run) and bound
+      # instead by `queue_max_polls`, the overall queue ceiling. `last_pipeline`
+      # is the `{id, status}` the latest poll saw, named in a timeout log.
+      queued_polls: 0,
+      queue_max_polls:
+        Keyword.get(opts, :queue_max_polls) ||
+          max(1, div(@queue_ceiling_ms, Keyword.get(opts, :interval_ms, @default_interval_ms))),
       last_pipeline: nil,
+      watch_pipeline: watch_pipeline,
       # The last merge-block reason we escalated, so a blocked merge is
       # surfaced once per reason rather than on every poll (#354, Phase 1).
       last_block_reason: nil,
@@ -2362,7 +2376,11 @@ defmodule Arbiter.Worker.Watchdog do
         )
 
         state = note_pending_merge(state, :ci_pending, Map.get(result, :pipeline))
-        reschedule(%{state | not_started_polls: 0})
+        state = state |> Map.put(:not_started_polls, 0) |> note_pipeline(result)
+
+        if state.queued_polls >= state.queue_max_polls,
+          do: timeout_poll(state, queue_timeout_cap(state)),
+          else: reschedule(state)
 
       # CI reported, and it reported *failure*. "Not pending" is not "safe to
       # merge": before bd-23y19q this branch didn't exist, so a settled `:failed`
@@ -4107,22 +4125,8 @@ defmodule Arbiter.Worker.Watchdog do
   defp reschedule_poll(
          %{max_polls: cap, poll_count: count, pass_polls: held, auto_merge: true} = state
        )
-       when is_integer(cap) and cap > 0 and count + 1 - held >= cap do
-    Logger.warning(
-      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} exceeded " <>
-        "#{cap} polls without a terminal outcome (see the next line for " <>
-        "whether it was auto-resumed or escalated)"
-    )
-
-    case handle_review_timeout(state, cap) do
-      {:defer, state} ->
-        state = schedule_resume_retry(state)
-        {:noreply, %{state | poll_count: count + 1}}
-
-      {:stop, state} ->
-        {:stop, :normal, %{state | poll_count: count + 1}}
-    end
-  end
+       when is_integer(cap) and cap > 0 and count + 1 - held >= cap,
+       do: timeout_poll(state, cap)
 
   defp reschedule_poll(
          %{max_polls: cap, poll_count: count, pass_polls: held, auto_merge: false} = state
@@ -4139,8 +4143,53 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp reschedule_poll(state) do
     schedule(self(), state.interval_ms)
+
     {:noreply, %{state | poll_count: state.poll_count + 1}}
   end
+
+  defp timeout_poll(%{poll_count: count} = state, cap) do
+    Logger.warning(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} exceeded " <>
+        "#{cap} polls without a terminal outcome#{describe_last_pipeline(state)} " <>
+        "(see the next line for whether it was auto-resumed or escalated)"
+    )
+
+    case handle_review_timeout(state, cap) do
+      {:defer, state} ->
+        state = schedule_resume_retry(state)
+        {:noreply, %{state | poll_count: count + 1}}
+
+      {:stop, state} ->
+        {:stop, :normal, %{state | poll_count: count + 1}}
+    end
+  end
+
+  # bd-c0nhqs. A pending pipeline is queued, not stuck: hold the poll out of the
+  # `max_polls` ceiling (the same exclusion a live pass gets) and count it
+  # against the queue ceiling instead. Any other reading ends the queue streak.
+  defp note_pipeline(state, result) do
+    info = {Map.get(result, :pipeline_id), Map.get(result, :pipeline)}
+    state = %{state | last_pipeline: info}
+
+    case info do
+      {_id, :pending} ->
+        held = if is_integer(state.max_polls), do: state.pass_polls + 1, else: state.pass_polls
+        %{state | queued_polls: state.queued_polls + 1, pass_polls: held}
+
+      _ ->
+        %{state | queued_polls: 0}
+    end
+  end
+
+  # The queue ceiling can trip while `max_polls` is `:infinity` (a park); report
+  # the queued poll count then so the announcement still carries a number.
+  defp queue_timeout_cap(%{max_polls: cap}) when is_integer(cap) and cap > 0, do: cap
+  defp queue_timeout_cap(state), do: state.queued_polls
+
+  defp describe_last_pipeline(%{last_pipeline: {id, status}}) when not is_nil(status),
+    do: " (head pipeline #{if id, do: id, else: "?"} status #{inspect(status)})"
+
+  defp describe_last_pipeline(_state), do: ""
 
   # bd-8eheb6 / #1287. An awaiting_review timeout on an auto_merge lane is a
   # *distinct* failure: worktree preserved, MR usually mergeable — the attempt
@@ -5695,7 +5744,7 @@ defmodule Arbiter.Worker.Watchdog do
     head = Map.get(result, :head_sha)
     approved? = effective_outcome(state, result) == :approved
 
-    state = note_local_head_visible(state, head)
+    state = state |> reset_for_new_head(head) |> note_local_head_visible(head)
 
     state =
       cond do
@@ -5730,6 +5779,19 @@ defmodule Arbiter.Worker.Watchdog do
       %{state | recorded_reviewed_sha: nil, recorded_sha_loaded?: false}
     end
   end
+
+  # bd-c0nhqs. A new head is new work: the queue streak and the auto-resume
+  # attempts spent on the previous head say nothing about it, so both restart
+  # (the ticket's lane counter too, or the next Watchdog would reseed it).
+  defp reset_for_new_head(%{last_head_sha: prev} = state, head)
+       when is_binary(prev) and is_binary(head) and prev != head do
+    if state.resume_attempts_seen > 0,
+      do: safe(fn -> PullRequest.record_auto_resumes(state.task_id, 0) end)
+
+    %{state | resume_attempts_seen: 0, queued_polls: 0}
+  end
+
+  defp reset_for_new_head(state, _head), do: state
 
   # Record this poll's head and, if it is the SHA this worker pushed, latch the
   # fact that the forge's view of the branch has caught up with ours
