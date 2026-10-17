@@ -371,4 +371,56 @@ defmodule Arbiter.Worker.ReviewGateSpawnFailureTest do
       refute Enum.any?(review_rounds(task.id), &(&1.verdict == :approve))
     end
   end
+
+  # ---- bd-44qs5l -----------------------------------------------------------
+
+  # The CLI's own plan usage limit: no verdict, non-zero exit. The account is
+  # spent, not the review, so a different provider can still answer.
+  defp stub_usage_limit(dir, name, log) do
+    write_stub(dir, name, """
+    echo "#{name}" >> #{log}
+    echo "Claude AI usage limit reached|1735689600"
+    exit 1
+    """)
+  end
+
+  describe "a reviewer that dies of quota_exhausted (bd-44qs5l)" do
+    test "is re-routed to the next provider instead of parking the ticket",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      stub_usage_limit(stub_dir, "claude", log)
+      stub_approve(stub_dir, "agy", log)
+      prepend_path(stub_dir)
+
+      ws = workspace(["claude", "gemini"])
+      task = new_task(ws)
+
+      run_gate(task, repo, "feature/quota-reroute")
+
+      wait_until(fn -> merge_commit_count(repo) == 1 end, 10_000)
+
+      assert calls(log) == ["claude", "agy"], "no re-prompt on the spent provider"
+      assert [%Round{verdict: :approve, reviewer_provider: "gemini"}] = review_rounds(task.id)
+      refute Enum.any?(escalation_for(task.id, ws), &(&1.body =~ "session failed"))
+    end
+
+    test "with no other provider, parks as a quota deferral, not a failed session",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      stub_usage_limit(stub_dir, "claude", log)
+      prepend_path(stub_dir)
+
+      ws = workspace("claude")
+      task = new_task(ws)
+
+      pid = run_gate(task, repo, "feature/quota-deferred")
+
+      wait_until(fn -> finished_failed?(pid) end, 12_000)
+
+      assert calls(log) == ["claude"]
+      assert merge_commit_count(repo) == 0
+
+      assert [escalation] = escalation_for(task.id, ws)
+      assert escalation.body =~ "quota deferral"
+      assert Ash.get!(Issue, task.id).attention_cause != :reviewer_failed
+    end
+  end
 end

@@ -2,8 +2,8 @@ defmodule Arbiter.Agents.ReviewerRoutingEnforceTest do
   @moduledoc """
   The ReviewGate reviewer's routing under `scheduler_admission: enforce` (DC8,
   design `provider-dynamic-concurrency.md` §4.5, E10, O2): a reviewer is a
-  follow-up of work In progress, so its pool is dropped only on a hard rule —
-  never on the paced line — and among the pools it may use, one with a free seat
+  follow-up of work In progress; the quota gate (paced line included) still
+  holds its pool, and among the pools it may use, one with a free seat
   is preferred. Under `legacy` the gate's full check and today's ranking stand.
   """
   use Arbiter.DataCase, async: false
@@ -128,12 +128,12 @@ defmodule Arbiter.Agents.ReviewerRoutingEnforceTest do
       assert sel.fallback_reason =~ "quota_held"
     end
 
-    test "enforce: kept — the hard rules alone drop a follow-up's pool", ctx do
+    test "enforce: dropped too (bd-44qs5l) — a held pool is never spawned on", ctx do
       {:ok, _} = Arbiter.Settings.set_scheduler_admission(:enforce)
 
       assert {:ok, sel} = ReviewerRouting.select(ctx.ws, task!(ctx.ws), ctx.opts)
-      refute sel.same_family_fallback
-      assert sel.family == :google
+      assert sel.same_family_fallback
+      assert sel.fallback_reason =~ "quota_held"
     end
   end
 

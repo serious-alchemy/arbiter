@@ -3210,6 +3210,12 @@ defmodule Arbiter.Worker.ReviewGate do
       %StopReason{category: :agent_print_timeout} = reason ->
         handle_reviewer_print_timeout(state, reason)
 
+      # bd-44qs5l: the account's usage window is spent, not the review. Another
+      # provider can still answer, so re-route (or park as a quota deferral)
+      # instead of "the reviewer's session failed".
+      %StopReason{category: :quota_exhausted} = reason ->
+        handle_reviewer_quota_exhausted(state, reason)
+
       %StopReason{category: category} = reason when category in @infra_failure_categories ->
         Logger.warning(
           "ReviewGate: reviewer for task=#{state.task_id} died of an infrastructure " <>
@@ -4601,6 +4607,70 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  # bd-44qs5l: a reviewer that died of `:quota_exhausted` re-runs the SAME pass on
+  # another provider (`next_reviewer/2` routes through `ReviewerRouting`, which
+  # drops any provider the quota/paced gate holds, and subtracts the tried ones).
+  # Nothing else available: park as a quota deferral, not a session failure.
+  defp handle_reviewer_quota_exhausted(state, %StopReason{} = reason) do
+    pool = reviewer_pool(state)
+    state = record_reviewer_quota_exhausted(state, reason)
+
+    Logger.warning(
+      "ReviewGate: reviewer #{provider_label(reviewer_provider_for(state))} for " <>
+        "task=#{state.task_id} hit its quota (#{reason.summary}); re-routing the review"
+    )
+
+    next =
+      if length(pool) < 2 and is_nil(state.reviewer_selection),
+        do: {nil, nil},
+        else: next_reviewer(state, pool)
+
+    case next do
+      {nil, _selection} -> {:done, escalate_quota_exhausted(state)}
+      {next, selection} -> rotate_reviewer(state, next, pool, selection, :quota_exhausted)
+    end
+  end
+
+  defp record_reviewer_quota_exhausted(state, %StopReason{} = reason) do
+    entry = %{
+      kind: :quota_exhausted,
+      provider: reviewer_provider_for(state),
+      model: reviewer_model_label(state),
+      round: state.round,
+      pass_id: state.current_id,
+      summary: reason.summary
+    }
+
+    %{state | reviewer_timeouts: state.reviewer_timeouts ++ [entry]}
+  end
+
+  defp quota_exhausted_only?(%{reviewer_timeouts: [_ | _] = entries}),
+    do: Enum.all?(entries, &(Map.get(&1, :kind) == :quota_exhausted))
+
+  defp quota_exhausted_only?(_state), do: false
+
+  defp escalate_quota_exhausted(state) do
+    roster =
+      Enum.map_join(state.reviewer_timeouts, "\n", fn entry ->
+        "  - #{provider_label(entry.provider)}: #{entry.summary} (pass #{entry.pass_id || "unknown"})"
+      end)
+
+    msg =
+      String.trim("""
+      ReviewGate: the round #{state.round} reviewer ran out of provider quota and no other
+      eligible reviewer provider is available right now (every other one is held by its
+      quota/paced gate, excluded, or also out of quota):
+      #{roster}
+
+      This is a quota deferral, not a review finding: no verdict was produced and nothing
+      was approved. Resume the review once a provider's window resets.
+      """)
+
+    record_round(state, :review, :timed_out, msg, converged: false)
+    report(state, {:parked, :reviewer_timeout, msg})
+    %{state | reported?: true}
+  end
+
   # Entries share `reviewer_timeouts` with the print-timeout rotation: both mean
   # "this provider cannot answer this round", and `next_reviewer/2` already
   # subtracts that list.
@@ -4916,9 +4986,11 @@ defmodule Arbiter.Worker.ReviewGate do
   # inconclusive/no-verdict verdict: no reviewer said anything, so there is
   # nothing for an implementer to fix and a re-dispatch would time out again.
   defp escalate_pool_exhausted(state, pool) do
-    if spawn_failures_only?(state),
-      do: escalate_spawn_failure(state),
-      else: escalate_timeout_pool(state, pool)
+    cond do
+      spawn_failures_only?(state) -> escalate_spawn_failure(state)
+      quota_exhausted_only?(state) -> escalate_quota_exhausted(state)
+      true -> escalate_timeout_pool(state, pool)
+    end
   end
 
   # What a rotation leaves on record. A timeout is a `:timed_out` round row
@@ -4948,6 +5020,18 @@ defmodule Arbiter.Worker.ReviewGate do
     )
   end
 
+  defp record_rotation(state, :quota_exhausted, prior, next, _pool) do
+    record_thread(
+      state,
+      :system,
+      "Round #{state.round} reviewer (#{provider_label(prior)}) ran out of quota — " <>
+        "re-routing to #{provider_label(next)}",
+      "The reviewer's provider hit its usage limit before producing a verdict. " <>
+        "The SAME pass is re-run on `#{provider_label(next)}`; no round or re-prompt was consumed."
+    )
+  end
+
+  defp rotation_cause(:quota_exhausted), do: "ran out of quota"
   defp rotation_cause(:timeout), do: "hit its own print-timeout"
   defp rotation_cause(:spawn_failure), do: "failed to spawn"
 
@@ -5073,6 +5157,20 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # ---- verdict re-prompt (bd-8v8ays) -------------------------------------
 
+  # bd-44qs5l: the re-prompt reuses the round's `reviewer_selection`, but its
+  # provider may have become quota/paced-held since the round started. Ask
+  # `ReviewerRouting` again (it drops held providers) and take its pick; with
+  # nothing routable the existing selection stands. A timeout-rotation pin
+  # (`reviewer_provider`) is left alone.
+  defp reroute_held_reprompt(%{reviewer_selection: %{}, reviewer_provider: nil} = state) do
+    case select_reviewer(state, []) do
+      {:ok, selection} -> %{state | reviewer_selection: selection}
+      _ -> state
+    end
+  end
+
+  defp reroute_held_reprompt(state), do: state
+
   # A reviewer pass produced a malformed result: either no parseable VERDICT line
   # (`:no_verdict`) or a REQUEST_CHANGES with no actionable findings
   # (`:empty_findings`). If we have a re-prompt budget left, spawn one more minimal
@@ -5095,7 +5193,11 @@ defmodule Arbiter.Worker.ReviewGate do
     max_ext = if reason == :empty_findings and state.max_rounds > 1, do: 1, else: 0
 
     case launch_worker(
-           %{state | retries_left: budget - 1, max_rounds: state.max_rounds + max_ext},
+           %{
+             reroute_held_reprompt(state)
+             | retries_left: budget - 1,
+               max_rounds: state.max_rounds + max_ext
+           },
            retry_id,
            :reviewer,
            verdict_reprompt_prompt(state, reason),
