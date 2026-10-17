@@ -1845,6 +1845,7 @@ defmodule Arbiter.Mergers.GitlabTest do
     @rerun_jobs_path "/api/v4/projects/12345/pipelines/99/jobs"
     @retry_path "/api/v4/projects/12345/pipelines/99/retry"
     @new_pipeline_path "/api/v4/projects/12345/pipeline"
+    @mr_pipeline_path "/api/v4/projects/12345/merge_requests/42/pipelines"
 
     # Routes the MR / pipelines / jobs reads; `extra` handles the POST under test
     # and the stub reports what it received.
@@ -1892,15 +1893,49 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert result.run_attempt == 1
     end
 
-    test ":all_jobs creates a new pipeline on the MR source branch" do
+    test ":all_jobs creates a merge request pipeline, not a branch pipeline" do
       rerun_stub([failed_pipeline()], [], &created(&1, 100))
 
       assert {:ok, result} = Gitlab.rerun_ci(@ref, %{mode: :all_jobs})
-      assert_received {:post, @new_pipeline_path, body}
-      assert Jason.decode!(body)["ref"] == "feat/x"
+      assert_received {:post, @mr_pipeline_path, _}
+      refute_received {:post, @new_pipeline_path, _}
       assert result.mode == :all_jobs
       assert result.run_id == 100
       assert result.url == "https://gl/p/100"
+    end
+
+    test "auto at attempt 1 with succeeded jobs that produced no artifacts retries failed jobs" do
+      jobs = [
+        %{
+          "id" => 1,
+          "name" => "lint",
+          "status" => "success",
+          "artifacts" => [%{"file_type" => "trace"}]
+        },
+        %{"id" => 2, "name" => "test", "status" => "failed"}
+      ]
+
+      rerun_stub([failed_pipeline()], jobs, &created(&1, 99))
+
+      assert {:ok, %{mode: :failed_jobs, reused_jobs: ["lint"]}} = Gitlab.rerun_ci(@ref, %{})
+      assert_received {:post, @retry_path, _}
+    end
+
+    test "auto with succeeded jobs that produced artifacts still starts a fresh MR pipeline" do
+      jobs = [
+        %{
+          "id" => 1,
+          "name" => "build",
+          "status" => "success",
+          "artifacts" => [%{"file_type" => "archive"}, %{"file_type" => "trace"}]
+        },
+        %{"id" => 2, "name" => "test", "status" => "failed"}
+      ]
+
+      rerun_stub([failed_pipeline()], jobs, &created(&1, 100))
+
+      assert {:ok, %{mode: :all_jobs}} = Gitlab.rerun_ci(@ref, %{})
+      assert_received {:post, @mr_pipeline_path, _}
     end
 
     test ":workflow sends inputs as pipeline variables" do
@@ -1926,7 +1961,7 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:ok, result} = Gitlab.rerun_ci(@ref, %{})
       assert result.mode == :all_jobs
       assert result.reused_jobs == ["build"]
-      assert_received {:post, @new_pipeline_path, _}
+      assert_received {:post, @mr_pipeline_path, _}
     end
 
     test "auto with an all-failed first attempt picks failed_jobs" do

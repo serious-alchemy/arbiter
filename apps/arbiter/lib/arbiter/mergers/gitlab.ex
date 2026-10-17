@@ -228,10 +228,10 @@ defmodule Arbiter.Mergers.Gitlab do
           inputs: inputs
         })
 
-      mode =
-        if requested in [:failed_jobs, :all_jobs, :workflow], do: requested, else: decision.mode
+      {mode, rationale} = pick_mode(requested, decision, latest_jobs(jobs))
 
-      with {:ok, started} <- post_rerun(cfg, pipeline, mode, Map.get(mr, "source_branch"), inputs) do
+      with {:ok, started} <-
+             post_rerun(cfg, pipeline, mode, iid, Map.get(mr, "source_branch"), inputs) do
         {:ok,
          %{
            mode: mode,
@@ -239,7 +239,7 @@ defmodule Arbiter.Mergers.Gitlab do
            workflow: nil,
            run_attempt: decision.run_attempt,
            reused_jobs: decision.reused_jobs,
-           rationale: decision.rationale,
+           rationale: rationale,
            url: Map.get(started, "web_url") || Map.get(pipeline, "web_url")
          }}
       end
@@ -346,17 +346,56 @@ defmodule Arbiter.Mergers.Gitlab do
     |> Enum.max(fn -> 1 end)
   end
 
-  defp post_rerun(cfg, pipeline, :failed_jobs, _ref, _inputs) do
+  defp pick_mode(requested, decision, _jobs)
+       when requested in [:failed_jobs, :all_jobs, :workflow],
+       do: {requested, decision.rationale}
+
+  # GitLab's retry reruns only the failed jobs. When the first attempt's passed
+  # jobs left no artifacts behind (only the job trace), reusing them cannot hide
+  # a stale upstream build, so a likely flake is retried cheaply first; a repeat
+  # failure reaches attempt 2 and escalates to a fresh pipeline.
+  defp pick_mode(:auto, %{mode: :all_jobs, run_attempt: 1} = decision, jobs) do
+    if jobs_without_artifacts?(jobs) do
+      {:failed_jobs,
+       "first attempt; the #{length(decision.reused_jobs)} passed job(s) produced no artifacts, " <>
+         "so retrying only the failed job(s) first (a repeat failure escalates to a fresh pipeline)"}
+    else
+      {:all_jobs, decision.rationale}
+    end
+  end
+
+  defp pick_mode(_auto, decision, _jobs), do: {decision.mode, decision.rationale}
+
+  # Unknown (no `artifacts` key) counts as "may have artifacts".
+  defp jobs_without_artifacts?(jobs) do
+    jobs
+    |> Enum.filter(&(Map.get(&1, "status") == "success"))
+    |> Enum.all?(fn job ->
+      case Map.get(job, "artifacts") do
+        list when is_list(list) -> Enum.all?(list, &(Map.get(&1, "file_type") == "trace"))
+        _ -> false
+      end
+    end)
+  end
+
+  defp post_rerun(cfg, pipeline, :failed_jobs, _iid, _ref, _inputs) do
     request(cfg, :post, "/pipelines/#{Map.get(pipeline, "id")}/retry", json: %{})
     |> handle_json()
   end
 
-  defp post_rerun(_cfg, _pipeline, _mode, ref, _inputs) when ref in [nil, ""],
+  # `:all_jobs`: GitLab retry reuses succeeded jobs, so only a fresh pipeline
+  # rebuilds upstream artifacts. Start a merge request pipeline: projects whose
+  # `workflow:rules` only admit merge_request_event pipelines reject a branch
+  # pipeline ("The pipeline did not run").
+  defp post_rerun(cfg, _pipeline, :all_jobs, iid, _ref, inputs) when map_size(inputs) == 0 do
+    request(cfg, :post, "/merge_requests/#{iid}/pipelines", json: %{}) |> handle_json()
+  end
+
+  defp post_rerun(_cfg, _pipeline, _mode, _iid, ref, _inputs) when ref in [nil, ""],
     do: {:error, rerun_not_found("the MR has no source branch")}
 
-  # `:all_jobs` and `:workflow`: GitLab retry reuses succeeded jobs, so only a
-  # fresh pipeline rebuilds upstream artifacts or carries variables.
-  defp post_rerun(cfg, _pipeline, _mode, ref, inputs) do
+  # `:workflow`: only the branch-pipeline endpoint accepts variables.
+  defp post_rerun(cfg, _pipeline, _mode, _iid, ref, inputs) do
     variables =
       for {key, value} <- Enum.sort(inputs),
           do: %{key: key, value: value, variable_type: "env_var"}
