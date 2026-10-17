@@ -36,7 +36,7 @@ defmodule Arbiter.Worker.PrepushCheckReviseRoundTest do
     {_, 0} = git(["remote", "add", "origin", remote], repo)
     {_, 0} = git(["push", "-q", "origin", "main"], repo)
 
-    put_app_env(:arbiter, :worktree_root,Path.join(tmp, "worktrees"))
+    put_app_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
     put_app_env(:arbiter, :repo_paths, %{"gate/repo" => repo})
     on_exit(fn -> File.rm_rf(tmp) end)
 
@@ -98,7 +98,7 @@ defmodule Arbiter.Worker.PrepushCheckReviseRoundTest do
     deadline = System.monotonic_time(:millisecond) + timeout
 
     Stream.repeatedly(fn ->
-      if fun.(), do: :ok, else: (Process.sleep(15) && :retry)
+      if fun.(), do: :ok, else: Process.sleep(15) && :retry
     end)
     |> Enum.find(fn r -> r == :ok or System.monotonic_time(:millisecond) > deadline end)
     |> case do
