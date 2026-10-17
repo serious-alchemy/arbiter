@@ -6934,10 +6934,28 @@ defmodule Arbiter.Worker.ReviewGate do
       provider: Atom.to_string(provider),
       provider_fallback: fallback_reason
     }
+    |> put_revise_gate(state)
     |> put_placed_node(state)
     |> Map.merge(ProviderRouting.run_meta(decision))
     |> put_guardrail_decision(state, load_workspace(state.workspace_id), provider, :implementer)
   end
+
+  # The fix round runs the repo's pre-push recipe (`worker.pre_push_checks`) before it
+  # reports done, so a red step goes back to the implementer instead of reaching the
+  # gate's push. The round's worker is registered without a workspace, so the one
+  # whose recipe applies, the branch and the head the round starts from ride in meta.
+  defp put_revise_gate(meta, %{worktree_path: wt, branch: branch} = state)
+       when is_binary(wt) and is_binary(branch) do
+    Map.merge(meta, %{
+      revise_worktree: wt,
+      revise_branch: branch,
+      revise_base_head: Map.get(state, :head_sha),
+      revise_workspace_id: Map.get(state, :workspace_id),
+      target_branch: Map.get(state, :target_branch)
+    })
+  end
+
+  defp put_revise_gate(meta, _state), do: meta
 
   # bd-bg87oz (bd-8ikgoc): a fix round placed on a node is counted there from init.
   defp put_placed_node(meta, %{fix_node: %{id: id}}) when is_binary(id),
