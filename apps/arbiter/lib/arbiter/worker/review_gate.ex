@@ -1295,6 +1295,9 @@ defmodule Arbiter.Worker.ReviewGate do
       ci_fallback: nil,
       # Times the wait moved to a newer head the branch had gained meanwhile.
       ci_retargets: 0,
+      # sha => sorted failed job names, for every head CI went red on: a second
+      # red on the same job set is deterministic, so it is not re-run again.
+      ci_failed_sets: %{},
       # bd-2yt0d2: the cut-off pass this gate was re-armed to run again
       # (`rearm_pass/2`), as `ReviewPass.restore/1` reads it back. nil for every
       # gate that starts from the top.
@@ -1707,7 +1710,15 @@ defmodule Arbiter.Worker.ReviewGate do
             max_polls: state.ci_max_polls || budget.max_polls
           })
 
-        {:ok, %{workspace: workspace, adapter: adapter, pr_ref: pr_ref, budget: budget}, sha}
+        ctx = %{
+          workspace: workspace,
+          adapter: adapter,
+          pr_ref: pr_ref,
+          budget: budget,
+          no_rerun_jobs: ReviewCi.no_rerun_jobs(workspace, state.repo)
+        }
+
+        {:ok, ctx, sha}
       else
         {:error, why} -> {:fallback, why}
       end
@@ -1839,6 +1850,34 @@ defmodule Arbiter.Worker.ReviewGate do
   defp ci_act(state, wait, :rerun, _result) do
     checks = ci_failing_checks(state)
 
+    # The gate's own rerun after a no-diff fix round (bd-dun10t) is deliberate
+    # even though that head already failed, so the repeat-failure dedupe stands down.
+    seen = if post_noop_rerun?(state), do: %{}, else: state.ci_failed_sets
+
+    case ReviewCi.skip_rerun(checks, Map.get(state.ci_ctx, :no_rerun_jobs, []), seen, wait.sha) do
+      {:skip, why} ->
+        Logger.info(
+          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red on " <>
+            "#{Enum.join(ReviewCi.failed_job_names(checks), ", ")} (#{why}); " <>
+            "skipping the flake re-run, taking it as a real failure"
+        )
+
+        ci_act(state, wait, :fix, nil)
+
+      :rerun ->
+        ci_rerun_once(state, wait, checks)
+    end
+  end
+
+  defp ci_note_failed_set(state, _sha, []), do: state
+
+  defp ci_note_failed_set(state, sha, checks),
+    do: %{
+      state
+      | ci_failed_sets: Map.put(state.ci_failed_sets, sha, ReviewCi.failed_job_names(checks))
+    }
+
+  defp ci_rerun_once(state, wait, checks) do
     case ci_rerun(state) do
       :ok ->
         Logger.info(
@@ -1846,6 +1885,7 @@ defmodule Arbiter.Worker.ReviewGate do
             "re-running the failed jobs once"
         )
 
+        state = ci_note_failed_set(state, wait.sha, checks)
         {:wait, ci_schedule(state, ReviewCi.rerun_started(wait, checks))}
 
       {:error, why} ->

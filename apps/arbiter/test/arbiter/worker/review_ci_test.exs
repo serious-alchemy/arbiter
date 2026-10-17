@@ -16,6 +16,56 @@ defmodule Arbiter.Worker.ReviewCiTest do
 
   defp ws(config), do: %Workspace{id: "w", config: config}
 
+  describe "no_rerun_jobs/2" do
+    test "reads merge.ci.no_rerun_jobs, a repo's entry overriding the workspace's" do
+      config = %{
+        "merge" => %{
+          "ci" => %{"no_rerun_jobs" => ["lint"]},
+          "repos" => %{"o/r" => %{"ci" => %{"no_rerun_jobs" => ["visual"]}}}
+        }
+      }
+
+      assert ReviewCi.no_rerun_jobs(ws(config), "o/r") == ["visual"]
+      assert ReviewCi.no_rerun_jobs(ws(config), "o/other") == ["lint"]
+    end
+
+    test "is empty when unset, malformed or the workspace is missing" do
+      malformed = %{"merge" => %{"ci" => %{"no_rerun_jobs" => "visual"}}}
+
+      assert ReviewCi.no_rerun_jobs(ws(%{}), "o/r") == []
+      assert ReviewCi.no_rerun_jobs(ws(malformed), "o/r") == []
+      assert ReviewCi.no_rerun_jobs(nil, "o/r") == []
+    end
+  end
+
+  describe "skip_rerun/4" do
+    test "skips when every failed job matches a no-rerun prefix" do
+      checks = [%{name: "visual (1/2)"}, %{name: "visual (2/2)"}]
+      assert {:skip, :no_rerun_jobs} = ReviewCi.skip_rerun(checks, ["visual"], %{}, @sha)
+    end
+
+    test "reruns when any failed job is outside the list" do
+      checks = [%{name: "visual"}, %{name: "unit tests"}]
+      assert :rerun = ReviewCi.skip_rerun(checks, ["visual"], %{}, @sha)
+    end
+
+    test "skips when this SHA already failed the same job set" do
+      checks = [%{name: "unit tests"}, %{name: "lint"}]
+      seen = %{@sha => ["lint", "unit tests"]}
+      assert {:skip, :repeat_failure} = ReviewCi.skip_rerun(checks, [], seen, @sha)
+    end
+
+    test "reruns when the SHA failed a different job set, or another SHA failed this one" do
+      checks = [%{name: "unit tests"}]
+      assert :rerun = ReviewCi.skip_rerun(checks, [], %{@sha => ["lint"]}, @sha)
+      assert :rerun = ReviewCi.skip_rerun(checks, [], %{@other => ["unit tests"]}, @sha)
+    end
+
+    test "reruns when the failed jobs could not be read" do
+      assert :rerun = ReviewCi.skip_rerun([], ["visual"], %{@sha => []}, @sha)
+    end
+  end
+
   describe "required?/2" do
     test "defaults on for a forge repo and off for a direct one" do
       assert ReviewCi.required?(ws(%{"merge" => %{"strategy" => "github"}}), "o/r")

@@ -274,6 +274,69 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] != "request_changes"
     end
 
+    test "a failure confined to merge.ci.no_rerun_jobs goes straight to the fix path, no rerun",
+         ctx do
+      ws =
+        new_ws(%{
+          "review" => %{"required" => true, "require_ci_green" => true},
+          "merge" => %{"ci" => %{"no_rerun_jobs" => ["visual"]}}
+        })
+
+      ctx = %{ctx | ws: ws}
+      rig = rig(ctx, "feature/ci-norerun")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "visual (1/2)", summary: "screenshot differs", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed, :success])
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"]
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      refute remote_head(ctx, rig) == rig.head
+      assert StubMerger.ci_reruns() == []
+      stop_gate(gate)
+    end
+
+    test "a head that already failed the same job set is not re-run again", ctx do
+      rig = rig(ctx, "feature/ci-dedupe")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      forge = start_forge(ctx, rig, [:running])
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"]
+        )
+
+      wait_until(fn -> awaiting_ci?(gate) end, 10_000)
+      head = remote_head(ctx, rig)
+
+      :sys.replace_state(gate, fn st ->
+        %{st | ci_failed_sets: %{head => ["unit tests"]}}
+      end)
+
+      set_pipeline(forge, [:failed, :success])
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      refute remote_head(ctx, rig) == rig.head
+      assert StubMerger.ci_reruns() == []
+      stop_gate(gate)
+    end
+
     test "red then red dispatches the existing fix path, then waits for CI on the fix", ctx do
       rig = rig(ctx, "feature/ci-4")
 

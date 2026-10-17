@@ -141,6 +141,57 @@ defmodule Arbiter.Worker.ReviewCi do
   defp boolean_setting("false"), do: false
   defp boolean_setting(_), do: nil
 
+  # ---- jobs that are not worth a flake re-run -------------------------------
+
+  @doc """
+  The job-name prefixes `repo` never re-runs as a flake check
+  (`merge.ci.no_rerun_jobs`, a repo entry overriding the workspace's). Empty when
+  unset or not a list of strings.
+  """
+  @spec no_rerun_jobs(Workspace.t() | nil, String.t() | nil) :: [String.t()]
+  def no_rerun_jobs(%Workspace{} = workspace, repo) do
+    case workspace |> Mergers.merge_config(repo) |> Map.get("ci") do
+      %{"no_rerun_jobs" => jobs} when is_list(jobs) -> Enum.filter(jobs, &is_binary/1)
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
+  def no_rerun_jobs(_workspace, _repo), do: []
+
+  @doc """
+  Whether a first red on `sha` should skip the flake re-run and go straight to the
+  fix path: every failed job matches a `no_rerun_jobs` prefix (deterministic
+  failures such as visual baselines), or `sha` already failed this same job set
+  (`seen`, sha => sorted job names, so a re-run would only repeat it). Failed jobs
+  that could not be read never skip.
+  """
+  @spec skip_rerun([map()], [String.t()], %{String.t() => [String.t()]}, String.t()) ::
+          :rerun | {:skip, :no_rerun_jobs | :repeat_failure}
+  def skip_rerun([], _prefixes, _seen, _sha), do: :rerun
+
+  def skip_rerun(checks, prefixes, seen, sha) do
+    names = failed_job_names(checks)
+
+    cond do
+      prefixes != [] and
+          Enum.all?(names, fn n -> Enum.any?(prefixes, &String.starts_with?(n, &1)) end) ->
+        {:skip, :no_rerun_jobs}
+
+      Map.get(seen, sha) == names ->
+        {:skip, :repeat_failure}
+
+      true ->
+        :rerun
+    end
+  end
+
+  @doc "The sorted, unique job names of `checks`."
+  @spec failed_job_names([map()]) :: [String.t()]
+  def failed_job_names(checks),
+    do: checks |> Enum.map(&(&1 |> Map.get(:name) |> to_string())) |> Enum.uniq() |> Enum.sort()
+
   # ---- the poll budget -----------------------------------------------------
 
   @doc """
