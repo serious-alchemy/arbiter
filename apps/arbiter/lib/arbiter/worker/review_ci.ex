@@ -305,6 +305,8 @@ defmodule Arbiter.Worker.ReviewCi do
   the re-run has been seen under way, and the failing checks that prompted it.
   """
   @type wait :: %{
+          optional(:last_info) => String.t() | nil,
+          optional(:pipeline_id) => term(),
           sha: String.t(),
           max_polls: pos_integer(),
           polls: non_neg_integer(),
