@@ -1869,49 +1869,6 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp ci_note_failed_set(state, _sha, []), do: state
-
-  defp ci_note_failed_set(state, sha, checks),
-    do: %{
-      state
-      | ci_failed_sets: Map.put(state.ci_failed_sets, sha, ReviewCi.failed_job_names(checks))
-    }
-
-  defp ci_rerun_once(state, wait, checks) do
-    case ci_rerun(state) do
-      :ok ->
-        Logger.info(
-          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red; " <>
-            "re-running the failed jobs once"
-        )
-
-        state = ci_note_failed_set(state, wait.sha, checks)
-        {:wait, ci_schedule(state, ReviewCi.rerun_started(wait, checks))}
-
-      {:error, why} ->
-        if why == :ci_in_progress and wait.polls < wait.max_polls do
-          # bd-9m6wl0 / bd-8o35da: the forge only reruns a FINISHED run, and the
-          # head's latest run / pipeline (or a sibling job, e.g. `mix audit`) is
-          # still going. The failure is not yet judged real: poll again and rerun
-          # once it has finished.
-          Logger.info(
-            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red but its run is " <>
-              "still in progress; waiting to re-run the failed jobs"
-          )
-
-          {:wait, ci_schedule(state, wait)}
-        else
-          Logger.warning(
-            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red and could not be " <>
-              "re-run (#{why}); treating it as a real failure"
-          )
-
-          ci_act(state, wait, :fix, nil)
-        end
-    end
-  end
-
-  # Cancelled checks (#360): nothing failed, so no fix round can help. Re-run them
   # (the wait already backs off between re-runs); a re-run that cannot be made is
   # the same escalation as one that keeps being cancelled.
   defp ci_act(state, wait, :rerun_infra, _result) do
@@ -1977,6 +1934,49 @@ defmodule Arbiter.Worker.ReviewGate do
     {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
   end
 
+  defp ci_note_failed_set(state, _sha, []), do: state
+
+  defp ci_note_failed_set(state, sha, checks),
+    do: %{
+      state
+      | ci_failed_sets: Map.put(state.ci_failed_sets, sha, ReviewCi.failed_job_names(checks))
+    }
+
+  defp ci_rerun_once(state, wait, checks) do
+    case ci_rerun(state) do
+      :ok ->
+        Logger.info(
+          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red; " <>
+            "re-running the failed jobs once"
+        )
+
+        state = ci_note_failed_set(state, wait.sha, checks)
+        {:wait, ci_schedule(state, ReviewCi.rerun_started(wait, checks))}
+
+      {:error, why} ->
+        if why == :ci_in_progress and wait.polls < wait.max_polls do
+          # bd-9m6wl0 / bd-8o35da: the forge only reruns a FINISHED run, and the
+          # head's latest run / pipeline (or a sibling job, e.g. `mix audit`) is
+          # still going. The failure is not yet judged real: poll again and rerun
+          # once it has finished.
+          Logger.info(
+            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red but its run is " <>
+              "still in progress; waiting to re-run the failed jobs"
+          )
+
+          {:wait, ci_schedule(state, wait)}
+        else
+          Logger.warning(
+            "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red and could not be " <>
+              "re-run (#{why}); treating it as a real failure"
+          )
+
+          ci_act(state, wait, :fix, nil)
+        end
+    end
+  end
+
+  # Cancelled checks (#360): nothing failed, so no fix round can help. Re-run them
   defp ci_review_unreviewed_red_head(state, sha) do
     jobs =
       state.ci_fix_pending.checks
