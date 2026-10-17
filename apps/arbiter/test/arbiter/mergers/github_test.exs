@@ -502,7 +502,7 @@ defmodule Arbiter.Mergers.GithubTest do
 
       assert {:ok, result} = Github.get(@ref)
       assert result.head_sha == "newhead"
-      assert result.pipeline == :running
+      assert result.pipeline == :pending
       refute result.block_reason == :ci_failed
     end
 
@@ -550,7 +550,7 @@ defmodule Arbiter.Mergers.GithubTest do
       end)
 
       assert {:ok, result} = Github.get(@ref)
-      assert result.pipeline == :running
+      assert result.pipeline == :pending
       refute result.block_reason == :ci_failed
     end
 

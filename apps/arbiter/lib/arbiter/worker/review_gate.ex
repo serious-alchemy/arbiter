@@ -1700,10 +1700,11 @@ defmodule Arbiter.Worker.ReviewGate do
            {:ok, adapter} <- ReviewCi.adapter(workspace, state.repo, state.ci_adapter) do
         budget = ReviewCi.budget(workspace, state.repo)
 
-        budget = %{
-          interval_ms: state.ci_poll_ms || budget.interval_ms,
-          max_polls: state.ci_max_polls || budget.max_polls
-        }
+        budget =
+          Map.merge(budget, %{
+            interval_ms: state.ci_poll_ms || budget.interval_ms,
+            max_polls: state.ci_max_polls || budget.max_polls
+          })
 
         {:ok, %{workspace: workspace, adapter: adapter, pr_ref: pr_ref, budget: budget}, sha}
       else
@@ -1756,8 +1757,18 @@ defmodule Arbiter.Worker.ReviewGate do
       ReviewCi.read(ctx.adapter, ctx.workspace, state.repo, ctx.pr_ref, wait.sha)
 
     {state, wait, reading} = ci_retarget(state, wait, reading, result)
-    {action, wait} = ReviewCi.advance(wait, reading)
+    wait = Map.put(wait, :pipeline_id, Map.get(result, :pipeline_id))
+    {action, wait} = ReviewCi.advance(wait, reading, ci_pipeline_info(result))
     ci_act(state, wait, action, result)
+  end
+
+  # "pipeline 12 (pending)": what an escalation names, so a stuck run is findable.
+  defp ci_pipeline_info(result) do
+    case {Map.get(result, :pipeline_id), Map.get(result, :pipeline)} do
+      {nil, nil} -> nil
+      {nil, status} -> "pipeline #{status}"
+      {id, status} -> "pipeline #{id} (#{status})"
+    end
   end
 
   # The forge reports a head other than the one waited on. If the branch on
@@ -2006,7 +2017,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp ci_schedule(state, wait) do
     token = make_ref()
     Process.send_after(self(), {:ci_poll, token}, state.ci_ctx.budget.interval_ms)
-    marked = {wait.sha, not is_nil(wait.rerun), wait.polls}
+    marked = {wait.sha, not is_nil(wait.rerun), wait.polls, wait.queued_polls}
 
     since =
       if state.ci_wait, do: state.ci_wait.since, else: DateTime.to_iso8601(DateTime.utc_now())
@@ -2025,6 +2036,17 @@ defmodule Arbiter.Worker.ReviewGate do
       # `polls` / `max_polls` let `worker show` / `prime` say how far the wait is.
       extra = %{"polls" => wait.polls, "max_polls" => wait.max_polls, "since" => since}
       extra = if wait.rerun, do: Map.put(extra, "rerun", true), else: extra
+
+      extra =
+        if wait.queued_polls > 0 do
+          Map.merge(extra, %{
+            "queued_minutes" => div(wait.queued_polls * state.ci_ctx.budget.interval_ms, 60_000),
+            "pipeline_id" => Map.get(wait, :pipeline_id)
+          })
+        else
+          extra
+        end
+
       marker = ReviewCi.marker(wait.sha, state.round, state.ci_ctx.budget, extra)
       ReviewCi.put_marker(state.task_id, marker)
     end

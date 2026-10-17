@@ -77,12 +77,20 @@ defmodule Arbiter.Worker.ReviewCi do
           | :red
           | :cancelled
           | :pending
+          | :queued
           | :not_started
           | :unknown
           | {:head_mismatch, String.t() | nil}
           | {:unavailable, String.t()}
 
-  @type budget :: %{interval_ms: pos_integer(), max_polls: pos_integer()}
+  @type budget :: %{
+          required(:interval_ms) => pos_integer(),
+          required(:max_polls) => pos_integer(),
+          optional(:queue_max_polls) => pos_integer()
+        }
+
+  # Overall ceiling on a pipeline that sits queued (not started) in the forge.
+  @queue_ceiling_ms 12 * 3_600_000
 
   @doc "Polls, after a re-run, that a red reading is still the old attempt."
   @spec rerun_grace_polls() :: pos_integer()
@@ -148,11 +156,17 @@ defmodule Arbiter.Worker.ReviewCi do
         _ -> Watchdog.default_max_polls_auto()
       end
 
-    %{interval_ms: Watchdog.default_interval_ms(), max_polls: max_polls}
+    with_queue_ceiling(%{interval_ms: Watchdog.default_interval_ms(), max_polls: max_polls})
   rescue
     _ ->
-      %{interval_ms: Watchdog.default_interval_ms(), max_polls: Watchdog.default_max_polls_auto()}
+      with_queue_ceiling(%{
+        interval_ms: Watchdog.default_interval_ms(),
+        max_polls: Watchdog.default_max_polls_auto()
+      })
   end
+
+  defp with_queue_ceiling(%{interval_ms: interval} = budget),
+    do: Map.put(budget, :queue_max_polls, max(1, div(@queue_ceiling_ms, interval)))
 
   # ---- reading CI ----------------------------------------------------------
 
@@ -252,7 +266,9 @@ defmodule Arbiter.Worker.ReviewCi do
         :success -> :green
         :failed -> :red
         :canceled -> :cancelled
-        p when p in [:running, :pending] -> :pending
+        :running -> :pending
+        # Queued in the forge (GitLab pending/created, GitHub all-queued): not a stuck run.
+        :pending -> :queued
         :not_started -> :not_started
         _ -> :unknown
       end
@@ -292,6 +308,8 @@ defmodule Arbiter.Worker.ReviewCi do
           sha: String.t(),
           max_polls: pos_integer(),
           polls: non_neg_integer(),
+          queued_polls: non_neg_integer(),
+          queue_max_polls: pos_integer(),
           not_started: non_neg_integer(),
           unavailable: non_neg_integer(),
           infra_reruns: non_neg_integer(),
@@ -315,11 +333,13 @@ defmodule Arbiter.Worker.ReviewCi do
 
   @doc "A fresh wait on `sha`."
   @spec new_wait(String.t(), budget()) :: wait()
-  def new_wait(sha, %{max_polls: max_polls}) do
+  def new_wait(sha, %{max_polls: max_polls} = budget) do
     %{
       sha: sha,
       max_polls: max_polls,
       polls: 0,
+      queued_polls: 0,
+      queue_max_polls: Map.get(budget, :queue_max_polls, max_polls),
       not_started: 0,
       unavailable: 0,
       infra_reruns: 0,
@@ -350,8 +370,30 @@ defmodule Arbiter.Worker.ReviewCi do
   attempt as newest; it is waited out for `rerun_grace_polls/0` polls unless the
   re-run has already been seen under way.
   """
-  @spec advance(wait(), reading()) :: {action(), wait()}
-  def advance(wait, reading), do: step(%{wait | polls: wait.polls + 1}, reading)
+  @spec advance(wait(), reading(), String.t() | nil) :: {action(), wait()}
+  def advance(wait, reading, info \\ nil)
+
+  # A queued pipeline has not started: it spends the queue ceiling, not the poll
+  # budget (bd-48kmfe), and a re-run waiting to be seen counts as seen.
+  def advance(wait, :queued, info), do: queued(wait, info)
+
+  def advance(wait, reading, info),
+    do: step(Map.put(%{wait | polls: wait.polls + 1}, :last_info, info), reading)
+
+  defp queued(wait, info) do
+    wait = wait |> see_pending() |> reset_streaks()
+    wait = %{wait | queued_polls: wait.queued_polls + 1}
+
+    if wait.queued_polls >= wait.queue_max_polls do
+      detail = if info, do: " (" <> info <> ")", else: ""
+
+      {{:fallback,
+        "CI on #{wait.sha} sat in the forge queue for #{wait.queued_polls} polls without " <>
+          "starting#{detail}."}, wait}
+    else
+      {:wait, wait}
+    end
+  end
 
   defp step(wait, :green) do
     case wait.rerun do
@@ -434,7 +476,12 @@ defmodule Arbiter.Worker.ReviewCi do
   # Another poll, unless the budget is spent.
   defp spend(wait, why \\ nil) do
     if wait.polls >= wait.max_polls do
-      detail = if why, do: " (last reading: #{why})", else: ""
+      detail =
+        [why && "last reading: #{why}", Map.get(wait, :last_info)]
+        |> Enum.filter(& &1)
+        |> Enum.join("; ")
+
+      detail = if detail == "", do: "", else: " (#{detail})"
       rerun = if wait.rerun, do: " after re-running the failed jobs", else: ""
 
       {{:fallback,
@@ -625,8 +672,9 @@ defmodule Arbiter.Worker.ReviewCi do
   without clearing it.
   """
   @spec marker(String.t(), non_neg_integer(), budget(), map()) :: map()
-  def marker(sha, round, %{interval_ms: interval, max_polls: max}, extra \\ %{}) do
+  def marker(sha, round, %{interval_ms: interval, max_polls: max} = budget, extra \\ %{}) do
     now = DateTime.utc_now()
+    max = max + Map.get(budget, :queue_max_polls, 0)
     ttl = (max + @rerun_grace_polls + 1) * interval + @marker_slack_ms
 
     Map.merge(
@@ -685,7 +733,9 @@ defmodule Arbiter.Worker.ReviewCi do
             since: Map.get(wait, "since"),
             round: Map.get(wait, "round"),
             polls: Map.get(wait, "polls"),
-            max_polls: Map.get(wait, "max_polls")
+            max_polls: Map.get(wait, "max_polls"),
+            queued_minutes: Map.get(wait, "queued_minutes"),
+            pipeline_id: Map.get(wait, "pipeline_id")
           },
           else: nil
 
@@ -707,6 +757,11 @@ defmodule Arbiter.Worker.ReviewCi do
   """
   @spec progress_label(%{required(:sha) => String.t(), optional(atom()) => term()}) ::
           String.t()
+  def progress_label(%{queued_minutes: minutes} = wait) when is_integer(minutes) do
+    pipeline = if wait[:pipeline_id], do: "pipeline #{wait.pipeline_id}, ", else: ""
+    "waiting in the CI queue (#{pipeline}pending #{minutes}m)"
+  end
+
   def progress_label(%{sha: sha} = wait) do
     base = "awaiting CI on " <> String.slice(sha, 0, 8)
 
