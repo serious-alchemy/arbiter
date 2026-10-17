@@ -3351,8 +3351,10 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp visual_step(state, result, head) do
     if is_binary(head) and head not in state.visual_tried_heads and
-         VisualBaselines.configured?(state.workspace, state.repo) do
+         VisualBaselines.configured?(state.workspace, state.repo) and
+         not VisualBaselines.tried?(state.task_id, head) do
       state = %{state | visual_tried_heads: [head | Enum.take(state.visual_tried_heads, 9)]}
+      VisualBaselines.mark_tried(state.task_id, head)
 
       case safe_visual_refresh(state, result) do
         {:refreshed, %{sha: sha} = info} ->

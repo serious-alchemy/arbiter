@@ -205,6 +205,21 @@ defmodule Arbiter.Worker.WatchdogVisualBaselinesTest do
     refute_received {:refresh, _}
   end
 
+  test "a head the ReviewGate already tried is not refreshed again (one try per head)" do
+    ws = workspace(true)
+    mr_ref = "!vb5"
+    head = sha("head5")
+    task = approved_task(ws, head)
+    Application.put_env(:arbiter, :visual_refresher_reply, {:skip, :unused})
+    Arbiter.Worker.VisualBaselines.mark_tried(task.id, head)
+
+    StubMerger.queue_get(mr_ref, [red(head)])
+    start_watchdog(task, mr_ref, ws)
+
+    wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+    refute_received {:refresh, _}
+  end
+
   test "a refresher error also falls through to the fix pass" do
     ws = workspace(true)
     mr_ref = "!vb4"

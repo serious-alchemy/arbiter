@@ -30,6 +30,7 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
   alias Arbiter.Test.StubMerger
   alias Arbiter.Worker
   alias Arbiter.Worker.ReviewGate
+  alias Arbiter.Worker.VisualBaselines
 
   @probe Path.expand("../../fixtures/review_ci_probe.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
@@ -636,6 +637,129 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
   end
 
   # ---- #360: cancelled checks are infrastructure, never a fix round -----------
+
+  # bd-6vvpau: the deterministic visual-baseline refresh on the pre-review CI wait.
+  describe "visual-baseline refresh on red CI (bd-6vvpau)" do
+    defmodule Refresher do
+      @moduledoc false
+      # Records its context and answers what the test installed (a fun of the ctx).
+      def refresh(ctx) do
+        send(Application.get_env(:arbiter, :vb_pid), {:refresh, ctx})
+        Application.get_env(:arbiter, :vb_reply).(ctx)
+      end
+    end
+
+    setup do
+      Application.put_env(:arbiter, :vb_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :vb_pid) end)
+
+      ws =
+        new_ws(%{
+          "review" => %{"required" => true, "require_ci_green" => true},
+          "worker" => %{
+            "repos" => %{
+              "trib/repo" => %{
+                "visual_baselines" => %{"job" => "visual", "baseline_dir" => "e2e"}
+              }
+            }
+          }
+        })
+
+      %{ws: ws}
+    end
+
+    defp reply(fun), do: Application.put_env(:arbiter, :vb_reply, fun)
+
+    test "a refresh on a drift-only red head waits on CI for the new head: no round, still reviewed",
+         ctx do
+      rig = rig(ctx, "feature/vb-1")
+
+      StubMerger.set_failing_checks(@pr, [%{name: "visual", summary: "diff", url: "u", files: []}])
+
+      start_forge(ctx, rig, [:failed, :success])
+
+      reply(fn _ctx ->
+        new = push_other_commit(ctx, rig)
+        {:refreshed, %{sha: new, files: ["e2e/a.png"]}}
+      end)
+
+      implement_runs_before = implement_runs(rig)
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"],
+          visual_refresher: &Refresher.refresh/1
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert_received {:refresh, %{mr_ref: @pr, repo: "trib/repo", result: %{head_sha: head}}}
+      assert head == rig.head
+      refute_received {:refresh, _}
+
+      refreshed = remote_head(ctx, rig)
+      refute refreshed == rig.head
+      assert reviewed_head(rig) == refreshed
+      assert StubMerger.ci_reruns() == []
+      assert implement_runs(rig) == implement_runs_before
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] != "request_changes"
+      assert VisualBaselines.tried?(rig.task.id, rig.head)
+      stop_gate(gate)
+    end
+
+    test "a refused refresh (drift refuses, or other jobs failed) sends the CI-red round as before",
+         ctx do
+      rig = rig(ctx, "feature/vb-2")
+
+      StubMerger.set_failing_checks(@pr, [%{name: "visual", summary: "diff", url: "u", files: []}])
+
+      start_forge(ctx, rig, [:failed, :running, :failed, :success])
+      reply(fn _ -> {:skip, {:other_jobs_failed, ["unit tests"]}} end)
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"],
+          visual_refresher: &Refresher.refresh/1
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      assert_received {:refresh, _}
+      refute_received {:refresh, _}
+      fixed = remote_head(ctx, rig)
+      refute fixed == rig.head
+      assert length(StubMerger.ci_reruns()) == 1
+      assert reviewed_head(rig) == fixed
+      stop_gate(gate)
+    end
+
+    test "a head already tried (by the Watchdog) is not refreshed again", ctx do
+      rig = rig(ctx, "feature/vb-3")
+
+      StubMerger.set_failing_checks(@pr, [%{name: "visual", summary: "diff", url: "u", files: []}])
+
+      start_forge(ctx, rig, [:failed, :running, :success])
+      reply(fn _ -> flunk("refresh must not run twice for one head") end)
+      VisualBaselines.mark_tried(rig.task.id, rig.head)
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"],
+          visual_refresher: &Refresher.refresh/1
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      refute_received {:refresh, _}
+      assert length(StubMerger.ci_reruns()) == 1
+      stop_gate(gate)
+    end
+  end
 
   describe "cancelled CI (#360)" do
     test "cancelled then green on the re-run proceeds to the reviewer, no fix round", ctx do

@@ -59,6 +59,45 @@ defmodule Arbiter.Worker.VisualBaselines do
   @spec configured?(term(), String.t() | nil) :: boolean()
   def configured?(workspace, repo), do: match?({:ok, _}, Config.resolve(workspace, repo))
 
+  @tried_cap 10
+
+  @doc """
+  Whether a refresh was already tried for `head` of task `task_id`, from either
+  call site (the Watchdog's `:ci_failed` path and the ReviewGate's pre-review CI
+  wait). The record lives on the ticket's `review_gate_state`, so the two
+  processes share it and it survives a restart. Unreadable reads as "not tried".
+  """
+  @spec tried?(String.t() | nil, String.t() | nil) :: boolean()
+  def tried?(task_id, head) when is_binary(task_id) and is_binary(head) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
+      {:ok, %{review_gate_state: %{"visual_tried_heads" => heads}}} when is_list(heads) ->
+        head in heads
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
+  end
+
+  def tried?(_task_id, _head), do: false
+
+  @doc "Record that a refresh was tried for `head`: one go per head, whatever the outcome."
+  @spec mark_tried(String.t() | nil, String.t() | nil) :: :ok
+  def mark_tried(task_id, head) when is_binary(task_id) and is_binary(head) do
+    with {:ok, %{review_gate_state: state}} <- Ash.get(Arbiter.Tasks.Issue, task_id) do
+      heads = List.wrap((state || %{})["visual_tried_heads"])
+      heads = Enum.take([head | Enum.reject(heads, &(&1 == head))], @tried_cap)
+      Arbiter.Tasks.PullRequest.record_review_gate(task_id, %{visual_tried_heads: heads})
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  def mark_tried(_task_id, _head), do: :ok
+
   @spec refresh(ctx()) :: outcome()
   def refresh(%{workspace: workspace, repo: repo} = ctx) do
     case Config.resolve(workspace, repo) do
