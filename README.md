@@ -302,6 +302,21 @@ old release) rather than a green-wait timeout, the message says the new
 release's migrations *may* have been applied rather than claiming they were —
 a release that never booted never ran its boot migrator.
 
+### Worker jail unmask (`ARB_WORKER_JAIL_UNMASK`)
+
+The worker jail hides credential directories such as `~/.config/glab-cli`. To
+re-expose one, set `ARB_WORKER_JAIL_UNMASK` (e.g. in `~/.arbiter/arbiter.env`)
+to colon- or comma-separated absolute paths; `~` expands against `HOME`:
+
+```sh
+echo "ARB_WORKER_JAIL_UNMASK=~/.config/glab-cli" >> ~/.arbiter/arbiter.env
+```
+
+Malformed (non-absolute) entries are skipped with a warning and never block
+boot. Don't use `ERL_FLAGS=-arbiter worker_jail_unmask ...`: systemd strips the
+quotes and every release then refuses to boot. `arb server doctor` lists the
+unmasked paths ("worker jail unmask").
+
 ### Server bind address (`ARB_BIND_ADDRESS`)
 
 The dashboard's auth model is "a loopback peer is trusted; there is no login" —

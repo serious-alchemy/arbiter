@@ -110,6 +110,16 @@ defmodule ArbiterWeb.Api.ServerController do
 
   def bind_address(conn, _params), do: json(conn, ArbiterWeb.InstallationSettings.bind_address())
 
+  def worker_jail_unmask(conn, _params) do
+    paths =
+      :arbiter
+      |> Application.get_env(:worker_jail_unmask, [])
+      |> List.wrap()
+      |> Enum.filter(&is_binary/1)
+
+    json(conn, %{paths: paths})
+  end
+
   def agy_write_jail(conn, _params) do
     json(
       conn,

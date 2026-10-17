@@ -90,6 +90,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {"worker_tmp", :sandboxes, nil, :always, plain(&check_worker_tmp/0)},
       {"worker_memory", :sandboxes, nil, :always, plain(&check_worker_memory/0)},
       {"spawn", :sandboxes, nil, :always, plain(fn -> check_spawn(opts[:spawn] || :auto) end)},
+      {"worker_jail_unmask", :sandboxes, nil, :always, plain(&check_worker_jail_unmask/0)},
       {"bind_address", :security, nil, :always, plain(&check_bind_address/0)},
       {"anonymous_api", :security, nil, :always, plain(&check_anonymous_api/0)},
       {"dashboard_auth", :security, nil, :always, plain(&check_dashboard_auth/0)},
@@ -2478,6 +2479,32 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # a posture advisory ([warn], never blocks readiness). An ambiguous response
   # (server predates this endpoint, unreachable, 5xx) is a [warn] "could not
   # check", never an all-clear.
+  # Info row: which paths the operator re-exposed to jailed workers via
+  # ARB_WORKER_JAIL_UNMASK (config :arbiter, :worker_jail_unmask).
+  defp check_worker_jail_unmask do
+    case Client.get("/api/server/worker_jail_unmask") do
+      {:ok, %{"paths" => []}} ->
+        %Result{
+          name: "worker jail unmask",
+          status: :ok,
+          detail: "no paths unmasked (ARB_WORKER_JAIL_UNMASK unset)",
+          blocks_readiness: false
+        }
+
+      {:ok, %{"paths" => paths}} when is_list(paths) ->
+        %Result{
+          name: "worker jail unmask",
+          status: :ok,
+          detail: "unmasked for jailed workers: " <> Enum.join(paths, ", "),
+          meta: %{paths: paths},
+          blocks_readiness: false
+        }
+
+      other ->
+        unknown_result("worker jail unmask", other)
+    end
+  end
+
   defp check_bind_address do
     case Client.get("/api/server/bind_address") do
       {:ok, %{"loopback" => true, "ip" => ip}} ->
