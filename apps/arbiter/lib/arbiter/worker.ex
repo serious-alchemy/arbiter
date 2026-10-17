@@ -4795,6 +4795,11 @@ defmodule Arbiter.Worker do
           reviewable_code_type?(meta) ->
             fail_missing_worktree(state)
 
+          # A ReviewGate fix round has no branch of its own (the gate pushes it),
+          # but the repo's pre-push recipe still guards that push.
+          revise_round?(meta) ->
+            finish_revise_round(state)
+
           # Ad-hoc / unconfigured runs carry no `:issue_type` in meta (they were
           # started directly, not via Dispatch, so there was never a worktree to
           # provision and nothing to lose). Keep the legacy direct-complete.
@@ -4819,6 +4824,28 @@ defmodule Arbiter.Worker do
           # exists" — sitting on the uncommitted changes and ignoring them.
           run_commit_gate(state, branch)
         end
+    end
+  end
+
+  # A fix round the ReviewGate launched carries where it works
+  # (`revise_worktree` / `revise_branch`), the head it started from and the
+  # workspace whose recipe applies; none of these are the `:worktree_path` /
+  # `:branch` keys that make a run mergeable.
+  defp revise_round?(meta),
+    do: is_map(meta) and is_binary(Map.get(meta, :revise_worktree))
+
+  # Run the recipe only when the round committed something to push: a rebuttal
+  # round leaves HEAD where the reviewer saw it and has nothing to check.
+  defp finish_revise_round(%State{meta: meta} = state) do
+    head = Arbiter.Worker.Worktree.head_sha(Map.get(meta, :revise_worktree))
+
+    if is_binary(head) and head != Map.get(meta, :revise_base_head) do
+      case begin_prepush_check(state, :revise) do
+        :proceed -> complete_now(state, :claude_done)
+        {:started, new_state} -> new_state
+      end
+    else
+      complete_now(state, :claude_done)
     end
   end
 
@@ -5392,22 +5419,44 @@ defmodule Arbiter.Worker do
   end
 
   defp prepush_spec(%State{meta: meta} = state, ctx) do
-    worktree = meta && Map.get(meta, :worktree_path)
-    branch = meta && (Map.get(meta, :branch) || Map.get(meta, :fix_pass_branch))
+    view = prepush_view(meta)
+    worktree = view && Map.get(view, :worktree_path)
+    branch = view && (Map.get(view, :branch) || Map.get(view, :fix_pass_branch))
 
     runnable? =
       is_binary(worktree) and File.dir?(worktree) and
-        (ctx == :fix_pass or worktree_on_branch?(worktree, branch))
+        (ctx in [:fix_pass, :revise] or worktree_on_branch?(worktree, branch))
 
     if runnable? do
-      Arbiter.Worker.PrepushCheck.resolve(notes_gate_workspace(state), state.repo)
+      Arbiter.Worker.PrepushCheck.resolve(prepush_workspace(state, ctx), state.repo)
     end
   end
+
+  # A fix round's worker is registered without a workspace (its completion must
+  # stay silent), so the recipe's workspace rides in its meta.
+  defp prepush_workspace(%State{meta: meta}, :revise) do
+    case Map.get(meta, :revise_workspace_id) do
+      id when is_binary(id) -> notes_gate_workspace(%State{workspace_id: id})
+      _ -> nil
+    end
+  end
+
+  defp prepush_workspace(state, _ctx), do: notes_gate_workspace(state)
+
+  # The meta as the recipe and its send-back prompt read it: a fix round's
+  # worktree and branch under the keys a main run uses.
+  defp prepush_view(%{revise_worktree: worktree} = meta) when is_binary(worktree) do
+    meta
+    |> Map.put(:worktree_path, worktree)
+    |> Map.put(:branch, Map.get(meta, :revise_branch))
+  end
+
+  defp prepush_view(meta), do: meta
 
   defp start_prepush_task(%State{meta: meta} = state, ctx, spec) do
     me = self()
     ref = make_ref()
-    worktree = Map.fetch!(meta, :worktree_path)
+    worktree = Map.fetch!(prepush_view(meta), :worktree_path)
 
     run_opts = prepush_run_opts(meta)
 
@@ -5562,6 +5611,7 @@ defmodule Arbiter.Worker do
   end
 
   defp continue_after_prepush(%State{} = state, :fix_pass), do: push_and_deliver_fix_pass(state)
+  defp continue_after_prepush(%State{} = state, :revise), do: complete_now(state, :claude_done)
 
   defp push_and_deliver_fix_pass(%State{meta: meta, task_id: task_id} = state) do
     worktree = meta && Map.get(meta, :worktree_path)
@@ -5619,7 +5669,8 @@ defmodule Arbiter.Worker do
         park_commit_gate(state, :prepush_failed, {:respawn_failed, :session_live})
 
       true ->
-        nudge = Arbiter.Worker.PrepushCheck.nudge_prompt(state.task_id, meta, detail, ctx)
+        nudge =
+          Arbiter.Worker.PrepushCheck.nudge_prompt(state.task_id, prepush_view(meta), detail, ctx)
 
         case respawn_with_nudge(state, nudge,
                attempts_key: :prepush_nudge_attempts,
@@ -7093,11 +7144,13 @@ defmodule Arbiter.Worker do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp commit_gate_summary(%State{task_id: task_id, meta: meta}, reason, why) do
+    view = prepush_view(meta)
+
     branch =
-      (meta && (Map.get(meta, :branch) || Map.get(meta, :fix_pass_branch))) || "(unknown)"
+      (view && (Map.get(view, :branch) || Map.get(view, :fix_pass_branch))) || "(unknown)"
 
     target = (meta && Map.get(meta, :target_branch)) || "main"
-    worktree = (meta && Map.get(meta, :worktree_path)) || "(unknown)"
+    worktree = (view && Map.get(view, :worktree_path)) || "(unknown)"
     attempts_key = commit_gate_attempts_key(reason)
     attempts = (meta && Map.get(meta, attempts_key)) || 0
 
@@ -7118,7 +7171,7 @@ defmodule Arbiter.Worker do
             "the worker did no work, or its edits landed elsewhere."
 
         :prepush_failed ->
-          Arbiter.Worker.PrepushCheck.failure_blurb(meta || %{})
+          Arbiter.Worker.PrepushCheck.failure_blurb(prepush_view(meta || %{}))
 
         :secret_in_commit ->
           "SECURITY: the committed diff (#{target}..HEAD on `#{branch}`) contains " <>

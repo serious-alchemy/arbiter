@@ -413,6 +413,56 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
     end
   end
 
+  # bd-a7yaer: a fix round whose worker.pre_push_checks stay red must not have
+  # its head pushed by the gate; the round parks instead.
+  describe "a fix round with a red pre-push recipe (bd-a7yaer)" do
+    test "parks without pushing the red head", %{repo: repo, tmp: tmp} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rg-red-#{System.unique_integer([:positive])}",
+          prefix: "rr",
+          config: %{
+            "review" => %{"required" => true},
+            "worker" => %{
+              "pre_push_checks" => [
+                %{
+                  "name" => "credo",
+                  "cmd" => "test ! -f guard.txt|| { echo 'alias warning'; exit 2; }"
+                }
+              ],
+              "pre_push_max_attempts" => 0
+            }
+          }
+        })
+
+      task = new_task(ws)
+      branch = "feature/push-red"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      round1_head = sha(wt, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [@revise_commit],
+        rounds: 2
+      )
+
+      wait_until(
+        fn -> Ash.get!(Issue, task.id).attention_cause == :commit_gate_prepush_failed end,
+        60_000
+      )
+
+      red_head = sha(wt, "HEAD")
+      refute red_head == round1_head, "the fix round should have committed"
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == round1_head, "the red head was pushed"
+    end
+  end
+
   # bd-4axlg0: a fix round (a podman container, which cannot push) that rebases
   # or amends its branch hands the host a head that has "diverged" from the one
   # the gate pushed in round 1. The gate delivers it with a lease pinned to the
