@@ -305,36 +305,36 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       stop_gate(gate)
     end
 
-    test "a head that already failed the same job set is not re-run again", ctx do
+    test "a head that already failed the same job set is not re-run by the next gate", ctx do
       rig = rig(ctx, "feature/ci-dedupe")
 
       StubMerger.set_failing_checks(@pr, [
         %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
       ])
 
-      forge = start_forge(ctx, rig, [:running])
+      forge = start_forge(ctx, rig, [:failed, :running])
 
-      gate =
+      first = start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      # The first gate does the one flake re-run, then waits on it.
+      wait_until(fn -> length(StubMerger.ci_reruns()) == 1 end, 30_000)
+      stop_gate(first)
+
+      # A redispatched / re-armed gate meets the same head red on the same job set.
+      set_pipeline(forge, [:failed, :success])
+
+      second =
         start_gate(rig, ctx,
           revise_command: [@revise_commit],
           rounds: 3,
           command: [@probe, "HOLD"]
         )
 
-      wait_until(fn -> awaiting_ci?(gate) end, 10_000)
-      head = remote_head(ctx, rig)
-
-      :sys.replace_state(gate, fn st ->
-        %{st | ci_failed_sets: %{head => ["unit tests"]}}
-      end)
-
-      set_pipeline(forge, [:failed, :success])
-
       wait_until(fn -> passes(rig) == 1 end, 30_000)
 
       refute remote_head(ctx, rig) == rig.head
-      assert StubMerger.ci_reruns() == []
-      stop_gate(gate)
+      assert length(StubMerger.ci_reruns()) == 1
+      stop_gate(second)
     end
 
     test "red then red dispatches the existing fix path, then waits for CI on the fix", ctx do

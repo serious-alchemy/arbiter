@@ -1297,7 +1297,9 @@ defmodule Arbiter.Worker.ReviewGate do
       ci_retargets: 0,
       # sha => sorted failed job names, for every head CI went red on: a second
       # red on the same job set is deterministic, so it is not re-run again.
-      ci_failed_sets: %{},
+      # Persisted on the ticket (`review_gate_state`) so a re-dispatched or
+      # re-armed gate inherits it instead of re-running the same head again.
+      ci_failed_sets: load_ci_failed_sets(task_id),
       # bd-2yt0d2: the cut-off pass this gate was re-armed to run again
       # (`rearm_pass/2`), as `ReviewPass.restore/1` reads it back. nil for every
       # gate that starts from the top.
@@ -1869,6 +1871,7 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  # Cancelled checks (#360): nothing failed, so no fix round can help. Re-run them
   # (the wait already backs off between re-runs); a re-run that cannot be made is
   # the same escalation as one that keeps being cancelled.
   defp ci_act(state, wait, :rerun_infra, _result) do
@@ -1936,11 +1939,33 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp ci_note_failed_set(state, _sha, []), do: state
 
-  defp ci_note_failed_set(state, sha, checks),
-    do: %{
-      state
-      | ci_failed_sets: Map.put(state.ci_failed_sets, sha, ReviewCi.failed_job_names(checks))
-    }
+  defp ci_note_failed_set(state, sha, checks) do
+    sets = Map.put(state.ci_failed_sets, sha, ReviewCi.failed_job_names(checks))
+    save_ci_failed_sets(state.task_id, sets)
+    %{state | ci_failed_sets: sets}
+  end
+
+  # Best-effort: a failed read or write only loses the cross-gate dedupe.
+  defp load_ci_failed_sets(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %{review_gate_state: %{"ci_failed_sets" => %{} = sets}}} ->
+        Map.new(sets, fn {sha, names} -> {sha, Enum.map(names, &to_string/1)} end)
+
+      _ ->
+        %{}
+    end
+  rescue
+    _ -> %{}
+  end
+
+  defp save_ci_failed_sets(task_id, sets) do
+    case Arbiter.Tasks.PullRequest.record_review_gate(task_id, %{ci_failed_sets: sets}) do
+      :ok -> :ok
+      {:error, why} -> Logger.debug("ReviewGate: ci_failed_sets write failed: #{inspect(why)}")
+    end
+  rescue
+    _ -> :ok
+  end
 
   defp ci_rerun_once(state, wait, checks) do
     case ci_rerun(state) do
@@ -1976,7 +2001,6 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  # Cancelled checks (#360): nothing failed, so no fix round can help. Re-run them
   defp ci_review_unreviewed_red_head(state, sha) do
     jobs =
       state.ci_fix_pending.checks
