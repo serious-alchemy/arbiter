@@ -53,6 +53,36 @@ if config_env() != :test and not agent? do
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5")
 end
 
+# `ARB_WORKER_JAIL_UNMASK`: colon- or comma-separated absolute paths the worker
+# jail re-exposes (Arbiter.Worker.Jail.Hide). `~` expands against HOME. Malformed
+# entries are skipped with a warning; this must never stop boot. Settable here
+# because `ERL_FLAGS=-arbiter worker_jail_unmask ...` is unparseable through systemd.
+jail_home = System.get_env("HOME") || ""
+
+jail_unmask =
+  "ARB_WORKER_JAIL_UNMASK"
+  |> System.get_env("")
+  |> String.split([":", ","], trim: true)
+  |> Enum.map(&String.trim/1)
+  |> Enum.reject(&(&1 == ""))
+  |> Enum.flat_map(fn entry ->
+    expanded =
+      case entry do
+        "~" -> jail_home
+        "~/" <> rest -> Path.join(jail_home, rest)
+        other -> other
+      end
+
+    if expanded != "" and Path.type(expanded) == :absolute do
+      [expanded]
+    else
+      IO.warn("ARB_WORKER_JAIL_UNMASK: skipping #{inspect(entry)} (not an absolute path)")
+      []
+    end
+  end)
+
+config :arbiter, :worker_jail_unmask, jail_unmask
+
 if config_env() == :prod and not agent? do
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||

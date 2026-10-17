@@ -59,7 +59,8 @@ defmodule Arbiter.Worker.Jail.Hide do
   `gh` then needs a `GH_TOKEN`/`GITHUB_TOKEN` in the workspace's `worker_env`.
 
   `config :arbiter, :worker_jail_unmask, [path]` is the operator's escape
-  hatch: an entry equal to a masked path drops that mask; an entry beneath
+  hatch (a list of binaries; in a release set `ARB_WORKER_JAIL_UNMASK`, colon- or
+  comma-separated absolute paths, read in `config/runtime.exs`): an entry equal to a masked path drops that mask; an entry beneath
   one is bound back read-only (`~` expands).
   """
 

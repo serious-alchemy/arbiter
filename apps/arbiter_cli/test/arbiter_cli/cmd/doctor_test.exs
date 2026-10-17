@@ -176,6 +176,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     "/api/server/podman_sandbox",
     "/api/server/provider_accounts",
     "/api/server/tmux",
+    "/api/server/worker_jail_unmask",
     "/api/server/worker_memory",
     "/api/server/worker_tmp"
   ]

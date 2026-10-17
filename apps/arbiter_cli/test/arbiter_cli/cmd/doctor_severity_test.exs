@@ -107,6 +107,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       {{"get", "/api/server/tmux"}, {%{"available" => true, "version" => "3.4"}, 200}},
       {{"get", "/api/server/podman_sandbox"}, {%{"installed" => false}, 200}},
       {{"get", "/api/server/worker_tmp"}, {%{"root" => "/var/tmp/arb"}, 200}},
+      {{"get", "/api/server/worker_jail_unmask"}, {%{"paths" => []}, 200}},
       {{"get", "/api/server/worker_memory"},
        {%{
           "service_unit" => "arbiter.service",
@@ -642,7 +643,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       last_deploy migrations bind_address anonymous_api dashboard_auth
       erlang_distribution restart_safety safe_default_categories agy_write_jail
       agy_jail_escape agy_jail_reads agy_jail_network agy_jail_keyring egress_jail
-      guardrails agy_ssh_transport tmux podman_sandbox worker_tmp worker_memory
+      guardrails agy_ssh_transport tmux podman_sandbox worker_tmp worker_jail_unmask worker_memory
       claude_worker_credentials grok_auth agy_models provider_accounts quota_policy
       merge_routing nodes pr_patrol
     )
