@@ -118,12 +118,23 @@ defmodule Arbiter.Worker.DeferredCriteriaTest do
       assert DeferredCriteria.classify(findings) == :park
     end
 
-    test "parks when the pre-merge tag appears anywhere in the findings" do
+    test "a pre-merge tag mentioned only in prose or backticks does not park (#958)" do
       findings = """
       VERDICT: APPROVE
       CRITERIA:
       - [NOT MET] [DEFERRED] AC3: only after deploy
-      Note: [NEEDS-COORDINATOR-PREMERGE] the runner must exist before merge.
+      Note: `[NEEDS-COORDINATOR-PREMERGE]` and `[NEEDS-COORDINATOR]` are for other cases.
+      """
+
+      assert {:defer, ["AC3: only after deploy"]} = DeferredCriteria.classify(findings)
+    end
+
+    test "parks when a criterion line carries the pre-merge tag in the outcome position" do
+      findings = """
+      VERDICT: APPROVE
+      CRITERIA:
+      - [NOT MET] [DEFERRED] AC3: only after deploy
+      - [NOT MET] [NEEDS-COORDINATOR-PREMERGE] AC4: the runner must exist before merge
       """
 
       assert DeferredCriteria.classify(findings) == :park

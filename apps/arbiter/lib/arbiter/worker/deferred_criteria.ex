@@ -54,6 +54,7 @@ defmodule Arbiter.Worker.DeferredCriteria do
   # #958: the standalone form the reviewer prompts document (`example_line/2`):
   # `[DEFERRED]` IS the outcome bracket.
   @standalone_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*DEFERRED\s*\]\s*(?<text>.*)$/i
+  @park_tag_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*NOT\s+MET\s*\]\s*\[NEEDS-COORDINATOR(?:-PREMERGE)?\]/i
 
   @doc """
   The one canonical standalone deferred criteria line. Every reviewer prompt
@@ -99,13 +100,20 @@ defmodule Arbiter.Worker.DeferredCriteria do
     cond do
       deferred == [] -> :park
       length(legacy) != length(unmet) -> :park
-      String.contains?(findings, [@premerge_tag, @ambiguous_tag]) -> :park
+      park_tag_on_criterion?(findings) -> :park
       ReviewVerification.partial?(findings) -> :park
       true -> {:defer, deferred}
     end
   end
 
   def classify(_), do: :park
+
+  # The park tags only count in the CRITERIA outcome position (right after the
+  # `[NOT MET]` bracket), not when review prose or a criterion's text merely
+  # mentions them.
+  defp park_tag_on_criterion?(findings) do
+    findings |> String.split("\n") |> Enum.any?(&Regex.match?(@park_tag_line, &1))
+  end
 
   defp deferred_text(line, regex) do
     case Regex.named_captures(regex, line) do

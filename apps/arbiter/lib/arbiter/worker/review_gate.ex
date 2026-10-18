@@ -3810,7 +3810,11 @@ defmodule Arbiter.Worker.ReviewGate do
       EvidenceIntegrity.flagged?(findings) ->
         escalate_fabricated_evidence(state, findings)
 
-      CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings) ->
+      # #958: a standalone `[DEFERRED]` is an unmet gap only on the APPROVE
+      # path's guard reject, not on a genuine REQUEST_CHANGES.
+      CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings,
+        standalone_deferred: state.guard_rejected == :unmet_criteria
+      ) ->
         escalate_coordinator_only(state, findings)
 
       true ->

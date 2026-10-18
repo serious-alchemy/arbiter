@@ -1088,6 +1088,31 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       refute issue.verify_after_deploy
     end
 
+    test "a REQUEST_CHANGES with a code finding and a standalone [DEFERRED] revises, not escalates (#958)",
+         ctx do
+      findings =
+        """
+        VERDICT: REQUEST_CHANGES
+        CRITERIA:
+        - [MET] The gate approves — feature.txt:1
+        #{Arbiter.Worker.DeferredCriteria.example_line("Observed live", "only observable live")}
+        Findings:
+        1. Severity: Medium. feature.txt:1 — nil crash
+        """
+
+      {rig, _issue} = deferral_gate(ctx, "feature/defer-sa-5", findings)
+
+      rounds =
+        Arbiter.ReviewGate.Round |> Ash.Query.filter(task_id == ^rig.task.id) |> Ash.read!()
+
+      assert Enum.any?(rounds, &(&1.verdict == :request_changes))
+
+      refute Enum.any?(
+               rounds,
+               &Arbiter.Worker.CoordinatorOnlyFindings.escalation?(&1.findings)
+             )
+    end
+
     # The branch's content lands on main by another route and main is merged
     # back in, so HEAD moves but nets to nothing (G20).
     defp absorb_into_main(ctx, rig) do
