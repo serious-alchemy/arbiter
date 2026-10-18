@@ -9,6 +9,7 @@ defmodule Arbiter.Quota.BudgetCalibrationTest do
   alias Arbiter.Loop.Scarcity.Calibration
   alias Arbiter.Quota.BudgetCalibration
   alias Arbiter.Quota.QuotaSnapshot
+  alias Arbiter.Tasks.TicketTransition
   alias Arbiter.Workers.Run
 
   @t0 ~U[2026-10-01 00:00:00Z]
@@ -272,6 +273,43 @@ defmodule Arbiter.Quota.BudgetCalibrationTest do
       assert [result] = BudgetCalibration.calibrate(since: at(-60), until: at(24 * 60))
       assert result.fit.n >= 8
       assert result.fit.models["seat"].n >= 3
+    end
+
+    test "reads the horizon of more than 1000 tickets without an expression-depth blowup" do
+      account = Ecto.UUID.generate()
+      insert_series(account, "claude", "claude", "5h", fn _ -> 1 end, 3)
+
+      for i <- 1..1100 do
+        ticket = "bd-many#{i}"
+
+        Ash.create!(Run, %{
+          task_id: ticket,
+          workspace_id: "ws",
+          repo: "arbiter",
+          kind: :implement,
+          provider: "claude",
+          provider_account_id: account,
+          started_at: at(10),
+          completed_at: at(20)
+        })
+
+        for {from, to, minutes} <- [{:queued, :active, 10}, {:active, :merging, 130}] do
+          Ash.create!(
+            TicketTransition,
+            %{
+              ticket_id: ticket,
+              from_state: from,
+              to_state: to,
+              transition: "t",
+              at: at(minutes)
+            },
+            action: :record
+          )
+        end
+      end
+
+      assert [result] = BudgetCalibration.calibrate(since: at(-60), until: at(24 * 60))
+      assert result.horizon_hours == 2.0
     end
 
     test "writes nothing" do
