@@ -178,7 +178,7 @@ defmodule Arbiter.Workers.ReconcilerTicketWatchdogTest do
   test "a cut-off conflict pass is listed on a ticket whose Watchdog already runs", %{ws: ws} do
     ticket = merging_ticket(ws, "!rt")
     cut_off_run!(ws, ticket, :conflict)
-    assert {:ok, _pid} = Watchdog.restart(ticket.id)
+    assert :ok = Watchdog.restart(ticket.id)
 
     assert {:ok, %{watched: 0, passes: [pass]}} =
              Reconciler.reconcile_open_pr_tasks(pass_fun: recording_pass_fun())
