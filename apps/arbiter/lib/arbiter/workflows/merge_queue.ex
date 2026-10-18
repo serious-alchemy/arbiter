@@ -226,6 +226,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   alias Arbiter.Tasks.Verification
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
+  alias Arbiter.Worker.MergeFreshness
   alias Arbiter.Worker.PrimarySync
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.TargetBranch
@@ -250,6 +251,9 @@ defmodule Arbiter.Workflows.MergeQueue do
   # either transient or an operator's problem; what it must never be is a wait
   # with no end (§5.1's I1).
   @coverage_unknown_grace_ticks 5
+
+  # bd-5z9yvb. Merge-time freshness syncs per item before the merge proceeds anyway.
+  @max_freshness_syncs 3
 
   @typedoc "Status atom for an in-flight item."
   @type status ::
@@ -285,7 +289,9 @@ defmodule Arbiter.Workflows.MergeQueue do
           coverage_unknown_polls: non_neg_integer(),
           coverage_unknown_head: String.t() | nil,
           coverage_parked?: boolean(),
-          review_refused_head: String.t() | :unknown | nil
+          review_refused_head: String.t() | :unknown | nil,
+          freshness_synced_head: String.t() | nil,
+          freshness_syncs: non_neg_integer()
         }
 
   defmodule State do
@@ -1423,10 +1429,71 @@ defmodule Arbiter.Workflows.MergeQueue do
 
     case MergeAuthorization.check(item.task_id, head) do
       :ok ->
-        merge_coverage_guarded(state, item, head)
+        case freshness_precheck(state, item, head) do
+          :proceed -> merge_coverage_guarded(state, item, head)
+          {:hold, item} -> {{:error, {:freshness_sync, head}}, item}
+        end
 
       {:error, {:review_not_approved, _} = refusal} ->
         {{:error, refusal}, note_review_refusal(state, item, head, refusal)}
+    end
+  end
+
+  # bd-5z9yvb. The forge only reports `:behind_base` when it enforces up-to-date;
+  # GitLab `merge_method=merge` (Free) never does, and its MR pipeline tests the
+  # branch head alone. So before the merge call, check forge-independently that
+  # the head contains the target tip; if not, sync once (`update_branch/1`) and
+  # hold the merge until CI has run on the synced head (the item is demoted, so
+  # the ladder waits for green). The synced head is covered by the ordinary
+  # guards: only the target merge on top of the reviewed content passes them.
+  # A failed sync is not retried on the same head; the forge's conflict flag
+  # routes it to the resolver. Bounded by `@max_freshness_syncs`, after which the
+  # merge proceeds (the target is moving faster than a branch can be synced).
+  defp freshness_precheck(state, item, head) do
+    base = Map.get(item, :base) || state.base
+
+    if base_update_supported?(state.adapter) and is_binary(head) and
+         is_binary(base) do
+      case MergeFreshness.check(
+             Mergers.scope(state.workspace, item.repo),
+             local_repo(state, item),
+             base,
+             head
+           ) do
+        {:stale, behind} -> freshness_hold(state, item, head, behind)
+        _fresh_or_unknown -> :proceed
+      end
+    else
+      :proceed
+    end
+  end
+
+  defp freshness_hold(_state, %{freshness_synced_head: head} = item, head, _behind),
+    do: {:hold, item}
+
+  defp freshness_hold(_state, %{freshness_syncs: n}, _head, _behind)
+       when n >= @max_freshness_syncs,
+       do: :proceed
+
+  defp freshness_hold(state, item, head, behind) do
+    Logger.info(
+      "MergeQueue: #{item_branch_label(item)} head #{head} lacks #{behind} target commit(s); " <>
+        "syncing before merge"
+    )
+
+    item = %{item | freshness_synced_head: head, freshness_syncs: item.freshness_syncs + 1}
+
+    case safe_update_branch(state.adapter, item.mr_ref) do
+      :ok ->
+        {:hold, item}
+
+      {:error, reason} ->
+        Logger.warning(
+          "MergeQueue: freshness sync for #{item_branch_label(item)} failed: " <>
+            "#{inspect(reason)}; awaiting conflict signal on next poll"
+        )
+
+        {:hold, %{item | last_error: {:update_branch_failed, reason}}}
     end
   end
 
@@ -2010,6 +2077,11 @@ defmodule Arbiter.Workflows.MergeQueue do
       {:error, :empty_net_diff = reason} ->
         {%{item | last_error: reason}, state}
 
+      # bd-5z9yvb: the branch was synced with the target first. Demote so the
+      # ladder waits for CI on the synced head instead of re-trying the merge.
+      {:error, {:freshness_sync, _head}} ->
+        {%{item | status: :awaiting_approval}, state}
+
       # bd-651ine: the gate's record forbids the merge until a reviewer round
       # approves the head or the coordinator accepts it. Non-terminal for the
       # same reason: the next tick re-reads the record.
@@ -2182,6 +2254,10 @@ defmodule Arbiter.Workflows.MergeQueue do
       # bd-651ine / #529. The head `MergeAuthorization` last refused (and paged
       # for): one page per head, not one per tick.
       review_refused_head: nil,
+      # bd-5z9yvb. The merge-time freshness sync: the head it was issued from
+      # (no second sync until the head moves) and how many have been issued.
+      freshness_synced_head: nil,
+      freshness_syncs: 0,
       last_error: nil,
       resolver_spawned_at: nil,
       prior_status: nil,

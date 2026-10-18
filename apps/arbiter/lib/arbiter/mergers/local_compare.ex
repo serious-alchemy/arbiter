@@ -163,6 +163,31 @@ defmodule Arbiter.Mergers.LocalCompare do
   end
 
   @doc """
+  How many commits of `origin/<base>` (fetched first) `head` lacks:
+  `git rev-list --count head..origin/<base>`. `0` means `head` contains the
+  target tip. `{:error, _}` is "could not tell" and is never `0`.
+  """
+  @spec behind_by(String.t() | nil, String.t(), String.t()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def behind_by(repo_path, base, head) do
+    with {:ok, repo} <- usable_repo(repo_path),
+         :ok <- refresh(repo, base, [head]),
+         {:ok, base_rev} <- resolve_base(repo, base),
+         {:ok, [head_rev]} <- resolve_commits(repo, [head]) do
+      case run(repo, ["rev-list", "--count", "#{head_rev}..#{base_rev}"]) do
+        {out, 0} ->
+          case Integer.parse(String.trim(out)) do
+            {n, ""} -> {:ok, n}
+            _ -> {:error, {:unparsable_count, String.trim(out)}}
+          end
+
+        {out, code} ->
+          {:error, {:git_failed, code, String.trim(out)}}
+      end
+    end
+  end
+
+  @doc """
   What `head` adds over the approved commits once the target is accounted for
   (`Arbiter.Reviews.ConflictResolution.classify/4`), in `repo_path`, after
   fetching `base` and any commit the checkout lacks. `base` is read as

@@ -225,6 +225,27 @@ worth an explicit `git pull` if you're about to trust a primary checkout for
 something high-stakes and aren't certain `auto_sync_primary` is on for that
 repo.
 
+### Merge-time freshness (`merge.require_up_to_date`)
+
+Since #951 the ReviewGate no longer merges `origin/<target>` into a branch at
+every gate, so the one sync a merge needs happens right before the merge. The
+forge's own `behind_base` block only fires on forges that enforce up-to-date
+(GitHub "require branches to be up to date", GitLab fast-forward / semi-linear
+merge methods). On GitLab `merge_method=merge` (Free tier: no merged-results
+pipelines, no merge trains) the MR pipeline tests the branch head alone and
+GitLab never calls the branch behind — so a stale branch would merge after CI
+only saw its old head.
+
+`merge.require_up_to_date` (default **`true`**) closes that gap for every forge:
+if an approved PR's head lacks the target tip, Arbiter syncs the branch once
+(`update_branch`), waits for CI green on the synced head, then merges. A sync
+commit that is only the target merge needs no new review; any other change on
+the head still goes back to review. A sync that conflicts takes the normal
+conflict path. **GitLab `merge_method=merge` on Free needs this on.**
+`merge.up_to_date_tolerance` (default `0`) lets a branch lacking up to N target
+commits merge unsynced; raising it saves a sync pipeline per unrelated main
+commit but merges a combination CI never ran.
+
 ## 7. Config Safety
 
 Workspace config is a single JSON map stored in the database.

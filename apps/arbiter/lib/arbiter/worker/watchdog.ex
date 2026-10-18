@@ -306,6 +306,7 @@ defmodule Arbiter.Worker.Watchdog do
 
   alias Arbiter.Mergers
   alias Arbiter.Mergers.LocalCompare
+  alias Arbiter.Worker.MergeFreshness
   alias Arbiter.Mergers.PendingMerge
   alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.Reviews.ConflictReview
@@ -360,6 +361,11 @@ defmodule Arbiter.Worker.Watchdog do
   # all must fall through to the normal unreviewed-head handling rather than
   # parking the lane forever.
   @head_lag_grace_polls 5
+
+  # bd-5z9yvb. Bounds on the merge-time freshness sync: syncs per Watchdog, and
+  # polls to wait for a synced head to appear before syncing again.
+  @max_freshness_syncs 3
+  @freshness_wait_polls 10
 
   # bd-df3zlo / #1736 (P4, AC4). How many consecutive polls a `{:unknown, _}`
   # coverage answer is waited out before the lane parks and pages the
@@ -1359,6 +1365,12 @@ defmodule Arbiter.Worker.Watchdog do
       # (`coverage_unknown_head`) — a new head is a new question, so the
       # count and the one-page-per-episode latch both reset.
       coverage_unknown_polls: 0,
+      # bd-5z9yvb. Merge-time freshness sync bookkeeping: syncs issued, the head the
+      # last one was issued from, and polls spent waiting for it to show up.
+      freshness_syncs: 0,
+      freshness_sync_head: nil,
+      freshness_failed_head: nil,
+      freshness_wait_polls: 0,
       coverage_unknown_head: nil,
       coverage_parked?: false,
       # `poll_count` as it stood when the coverage park lifted `max_polls` to
@@ -4987,11 +4999,144 @@ defmodule Arbiter.Worker.Watchdog do
     legacy = legacy_merge_decision(state)
     {old, head, state} = coverage_shadow_inputs(legacy)
 
-    if Workspace.coverage_enabled?(state.workspace) do
-      coverage_merge_decision(state, old, head, legacy)
+    decision =
+      if Workspace.coverage_enabled?(state.workspace) do
+        coverage_merge_decision(state, old, head, legacy)
+      else
+        observe_coverage(state, old, head, nil)
+        legacy
+      end
+
+    freshness_gate(decision)
+  end
+
+  # bd-5z9yvb. The forge only calls a branch behind when it enforces up-to-date
+  # (and the `:behind_base` path above handles that). On a forge that does not —
+  # GitLab `merge_method=merge` on Free — a green pipeline says nothing about
+  # the branch combined with the target. So an otherwise-authorised merge first
+  # checks, forge-independently, that the head contains the target tip; if not it
+  # syncs once (`update_branch/1`), waits, and the merge decision re-runs on the
+  # synced head once CI is green. The synced head is then covered by the usual
+  # content-equal / clean-integration rules, so a sync commit that is only the
+  # target merge needs no new review while any other change still does.
+  defp freshness_gate({:merge, _sha, state} = merge) do
+    cond do
+      not function_exported?(state.adapter, :update_branch, 1) ->
+        merge
+
+      not (is_binary(state.mr_base_ref) and is_binary(state.last_head_sha)) ->
+        merge
+
+      true ->
+        case MergeFreshness.check(
+               state.workspace,
+               local_repo(state),
+               state.mr_base_ref,
+               state.last_head_sha
+             ) do
+          :fresh -> merge
+          {:unknown, reason} -> freshness_unknown(merge, reason)
+          {:stale, behind} -> freshness_sync(merge, behind)
+        end
+    end
+  end
+
+  defp freshness_gate(other), do: other
+
+  defp freshness_unknown({:merge, _sha, state} = merge, reason) do
+    Logger.warning(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not tell whether " <>
+        "#{state.last_head_sha} contains #{state.mr_base_ref} (#{inspect_short(reason)}); " <>
+        "merging without the freshness sync"
+    )
+
+    merge
+  end
+
+  # The synced head has not shown up yet (the forge applies update-branch
+  # asynchronously): wait for it rather than syncing again, but only for a bounded
+  # number of polls so a sync the forge dropped is retried.
+  defp freshness_sync(
+         {:merge, _sha, %{freshness_sync_head: head, last_head_sha: head} = state},
+         _
+       )
+       when is_binary(head) do
+    polls = state.freshness_wait_polls + 1
+
+    if polls <= @freshness_wait_polls do
+      {:wait, %{state | freshness_wait_polls: polls}}
     else
-      observe_coverage(state, old, head, nil)
-      legacy
+      freshness_sync_now(%{state | freshness_sync_head: nil, freshness_wait_polls: 0}, nil)
+    end
+  end
+
+  # A sync that failed on this head is not retried (no repeat page); a new head
+  # re-enables it. The forge's `conflicting` flag drives the conflict resolver.
+  defp freshness_sync(
+         {:merge, _sha, %{freshness_failed_head: head, last_head_sha: head} = state},
+         _
+       )
+       when is_binary(head),
+       do: {:wait, state}
+
+  # A sync that failed on this head is not retried (no repeat page); a new head
+  # re-enables it. The forge's `conflicting` flag drives the conflict resolver.
+  defp freshness_sync(
+         {:merge, _sha, %{freshness_failed_head: head, last_head_sha: head} = state},
+         _
+       )
+       when is_binary(head),
+       do: {:wait, state}
+
+  defp freshness_sync({:merge, _sha, state}, behind), do: freshness_sync_now(state, behind)
+
+  defp freshness_sync_now(state, behind) do
+    if state.freshness_syncs >= @max_freshness_syncs do
+      Logger.warning(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} still behind " <>
+          "#{state.mr_base_ref} after #{state.freshness_syncs} syncs (the target keeps " <>
+          "moving); merging without another sync"
+      )
+
+      {:merge, state.last_head_sha, state}
+    else
+      Logger.info(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head " <>
+          "#{state.last_head_sha} lacks #{behind || "some"} commit(s) of #{state.mr_base_ref}; " <>
+          "syncing before merge (#{state.freshness_syncs + 1}/#{@max_freshness_syncs})"
+      )
+
+      state = %{state | freshness_syncs: state.freshness_syncs + 1}
+
+      case safe_update_branch(state) do
+        :ok ->
+          # Deliberately NOT `clear_reviewed_latch/1`: that floats the guard's
+          # baseline to whatever head appears next, which would let a commit that
+          # is more than the sync through. The reviewed-SHA guard stays bound and
+          # covers the synced head only if it is the reviewed content plus the
+          # target.
+          {:wait, %{state | freshness_sync_head: state.last_head_sha, freshness_wait_polls: 0}}
+
+        {:error, reason} ->
+          # Same fall-through as a failed `:behind_base` update-branch: a sync
+          # that does not apply is a conflict, and the forge's `conflicting` flag
+          # on the next poll routes it to the conflict resolver.
+          Logger.warning(
+            "Worker.Watchdog: freshness sync failed for task=#{state.task_id} " <>
+              "mr=#{state.mr_ref}: #{inspect(reason)}; treating as :conflict"
+          )
+
+          safe(fn ->
+            Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+              snapshot(state),
+              state.mr_ref,
+              :conflict
+            )
+          end)
+
+          {:wait,
+           %{state | last_block_reason: :conflict, freshness_failed_head: state.last_head_sha}}
+      end
     end
   end
 

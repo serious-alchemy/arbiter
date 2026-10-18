@@ -2008,6 +2008,49 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     end
 
     @tag workspace_config: @ws_github
+    test "bd-5z9yvb: a clean-but-stale branch (forge says not behind) is synced once before merging",
+         %{workspace: ws} do
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            231 => %{
+              reviews: "APPROVED",
+              pr: %{"mergeStateStatus" => "clean", "head" => %{"sha" => "abc1234def"}}
+            }
+          }
+        end)
+
+      {:ok, behind} = Agent.start_link(fn -> 3 end)
+
+      Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h ->
+        {:ok, Agent.get(behind, & &1)}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :merge_freshness_probe) end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#231", 2)
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      # Stale: synced, not merged.
+      :ok = MergeQueue.tick(name)
+      assert_received {:update_branch, 231}
+      refute_received {:merged, 231}
+
+      # The sync has not shown up yet: no second sync, still no merge.
+      :ok = MergeQueue.tick(name)
+      refute_received {:update_branch, 231}
+      refute_received {:merged, 231}
+
+      # Synced head now contains the target: merges.
+      Agent.update(behind, fn _ -> 0 end)
+      :ok = MergeQueue.tick(name)
+      :ok = MergeQueue.tick(name)
+      assert_received {:merged, 231}
+    end
+
+    @tag workspace_config: @ws_github
     test "a base-introduced conflict surfaces during the rebase step → Phase 2 resolution", %{
       workspace: ws
     } do
