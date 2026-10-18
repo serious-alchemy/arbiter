@@ -3495,6 +3495,11 @@ defmodule Arbiter.Worker.ReviewGate do
       has_acceptance_criteria?(state) and ReviewVerification.unmet_criteria?(findings) ->
         unmet_or_deferred(state, verdict, findings)
 
+      # #958: a standalone `- [DEFERRED]` line (the prompt-documented form) on
+      # an otherwise-clean APPROVE takes the same deferral path.
+      has_acceptance_criteria?(state) and DeferredCriteria.deferred_present?(findings) ->
+        unmet_or_deferred(state, verdict, findings)
+
       has_acceptance_criteria?(state) and not ReviewVerification.criteria_present?(findings) ->
         run_verdict_guard(:missing_criteria, state, findings)
 

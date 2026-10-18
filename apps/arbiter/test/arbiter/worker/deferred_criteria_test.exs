@@ -10,6 +10,63 @@ defmodule Arbiter.Worker.DeferredCriteriaTest do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.DeferredCriteria
 
+  describe "classify/1 with the standalone prompt-documented form (#958)" do
+    test "the exact format the reviewer prompt documents defers" do
+      example =
+        DeferredCriteria.example_line("AC3: dashboard shows the metric", "only after deploy")
+
+      findings = """
+      VERDICT: APPROVE
+      CRITERIA:
+      - [MET] AC1: done
+      - [N/A] AC2: n/a
+      #{example}
+      """
+
+      assert {:defer, [text]} = DeferredCriteria.classify(findings)
+      assert text =~ "AC3: dashboard shows the metric"
+      refute text =~ "[DEFERRED]"
+    end
+
+    test "standalone and legacy forms mix" do
+      findings = """
+      - [MET] AC1
+      - [DEFERRED] AC2 — later
+      - [NOT MET] [DEFERRED] AC3 — later still
+      """
+
+      assert {:defer, [_, _]} = DeferredCriteria.classify(findings)
+    end
+
+    test "a standalone [DEFERRED] still parks with a pre-merge tag, bare tag, PARTIAL or other unmet" do
+      base = "- [MET] AC1\n- [DEFERRED] AC2 — later\n"
+
+      for extra <- [
+            "- [NOT MET] [NEEDS-COORDINATOR-PREMERGE] AC3\n",
+            "- [NOT MET] [NEEDS-COORDINATOR] AC3\n",
+            "- [NOT MET] AC3 — broken\n",
+            "VERIFICATION: PARTIAL — could not build\n"
+          ] do
+        assert DeferredCriteria.classify(base <> extra) == :park
+      end
+    end
+
+    test "deferred_present?/1 detects standalone lines only" do
+      assert DeferredCriteria.deferred_present?("- [DEFERRED] x")
+      refute DeferredCriteria.deferred_present?("- [NOT MET] [DEFERRED] x")
+      refute DeferredCriteria.deferred_present?("- [MET] x")
+    end
+
+    test "the prompt block's example is parsed by the classifier" do
+      line =
+        DeferredCriteria.prompt_block()
+        |> String.split("\n")
+        |> Enum.find(&String.contains?(&1, "- [DEFERRED]"))
+
+      assert {:defer, [_]} = DeferredCriteria.classify(line)
+    end
+  end
+
   describe "classify/1" do
     test "defers when the only NOT MET lines are tagged [DEFERRED] and the rest are MET/N/A" do
       findings = """

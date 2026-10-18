@@ -18,9 +18,11 @@ defmodule Arbiter.Worker.DeferredCriteria do
   `classify/1` returns `{:defer, criteria}` only when ALL of these hold,
   otherwise `:park`:
 
-    * at least one `[NOT MET]` criteria line exists;
+    * at least one deferred criterion exists: standalone
+      (`- [DEFERRED] <criterion> — <why>`, the form the prompts document) or the
+      legacy `- [NOT MET] [DEFERRED] ...`;
     * EVERY `[NOT MET]` line carries `tag/0` directly after the outcome
-      bracket (`- [NOT MET] [DEFERRED] <criterion> — ...`);
+      bracket (any other `[NOT MET]` line parks);
     * no `[NEEDS-COORDINATOR-PREMERGE]` or bare `[NEEDS-COORDINATOR]` tag
       appears anywhere in the findings (a pre-merge coordinator-only criterion
       must still park, and the bare tag does not say which side of the merge it
@@ -49,6 +51,24 @@ defmodule Arbiter.Worker.DeferredCriteria do
 
   @not_met_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*NOT\s+MET\s*\]/im
   @deferred_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*NOT\s+MET\s*\]\s*\[DEFERRED\]\s*(?<text>.*)$/i
+  # #958: the standalone form the reviewer prompts document (`example_line/2`):
+  # `[DEFERRED]` IS the outcome bracket.
+  @standalone_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*DEFERRED\s*\]\s*(?<text>.*)$/i
+
+  @doc """
+  The one canonical standalone deferred criteria line. Every reviewer prompt
+  renders its example from this and `classify/1` parses it, so they can't drift.
+  """
+  @spec example_line(String.t(), String.t()) :: String.t()
+  def example_line(criterion \\ "<criterion>", why \\ "<why it cannot be checked pre-merge>"),
+    do: "- #{@tag} #{criterion} — #{why}"
+
+  @doc "Whether `findings` has a standalone `- [DEFERRED] ...` criteria line."
+  @spec deferred_present?(String.t() | nil) :: boolean()
+  def deferred_present?(findings) when is_binary(findings),
+    do: findings |> String.split("\n") |> Enum.any?(&Regex.match?(@standalone_line, &1))
+
+  def deferred_present?(_), do: false
 
   @doc "The tag a reviewer puts on a `[NOT MET]` criterion that can only be verified after the merge."
   @spec tag() :: String.t()
@@ -69,11 +89,16 @@ defmodule Arbiter.Worker.DeferredCriteria do
   @spec classify(String.t() | nil) :: {:defer, [String.t()]} | :park
   def classify(findings) when is_binary(findings) do
     unmet = findings |> String.split("\n") |> Enum.filter(&Regex.match?(@not_met_line, &1))
-    deferred = Enum.flat_map(unmet, &deferred_text/1)
+    legacy = Enum.flat_map(unmet, &deferred_text(&1, @deferred_line))
+
+    standalone =
+      findings |> String.split("\n") |> Enum.flat_map(&deferred_text(&1, @standalone_line))
+
+    deferred = legacy ++ standalone
 
     cond do
-      unmet == [] -> :park
-      length(deferred) != length(unmet) -> :park
+      deferred == [] -> :park
+      length(legacy) != length(unmet) -> :park
       String.contains?(findings, [@premerge_tag, @ambiguous_tag]) -> :park
       ReviewVerification.partial?(findings) -> :park
       true -> {:defer, deferred}
@@ -82,8 +107,8 @@ defmodule Arbiter.Worker.DeferredCriteria do
 
   def classify(_), do: :park
 
-  defp deferred_text(line) do
-    case Regex.named_captures(@deferred_line, line) do
+  defp deferred_text(line, regex) do
+    case Regex.named_captures(regex, line) do
       %{"text" => text} -> [String.trim(text)]
       _ -> []
     end
@@ -166,7 +191,9 @@ defmodule Arbiter.Worker.DeferredCriteria do
     `VERDICT: APPROVE`; ReviewGate then merges and records it for post-deploy
     verification:
 
-        - [NOT MET] #{@tag} <criterion> — <why it can only be checked after the merge>
+        #{example_line()}
+
+    (the older `- [NOT MET] #{@tag} <criterion>` form is also accepted).
 
     If instead a coordinator/operator must act BEFORE the merge (e.g. "register
     a runner first"), tag it #{@premerge_tag}; that parks the review for a human.

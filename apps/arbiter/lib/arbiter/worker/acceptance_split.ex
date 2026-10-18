@@ -66,7 +66,7 @@ defmodule Arbiter.Worker.AcceptanceSplit do
     An acceptance criterion that can only be checked after merge or deploy (or with
     access the worker lacks) is NOT a reason for REQUEST_CHANGES. Mark it
     `[DEFERRED]` (post-merge) with the reason, e.g.
-    `- [DEFERRED] <criterion> — <why it cannot be checked pre-merge>`, and
+    `#{Arbiter.Worker.DeferredCriteria.example_line()}`, and
     judge the remaining criteria on their merits.
     """
   end

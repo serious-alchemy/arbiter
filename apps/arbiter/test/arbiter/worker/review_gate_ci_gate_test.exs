@@ -1043,6 +1043,40 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert issue.deployment_notes =~ "The dashboard shows the metric after deploy"
     end
 
+    @standalone_deferred """
+    VERDICT: APPROVE
+    CRITERIA:
+    - [MET] The gate approves — feature.txt:1
+    #{Arbiter.Worker.DeferredCriteria.example_line("The dashboard shows the metric after deploy", "only observable live")}
+    """
+
+    test "a standalone [DEFERRED] (prompt-documented form) defers and merges (#958)", ctx do
+      {rig, issue} = deferral_gate(ctx, "feature/defer-sa-1", @standalone_deferred)
+
+      assert approved_round?(rig)
+      assert issue.verify_after_deploy
+      assert issue.deployment_notes =~ "The dashboard shows the metric after deploy"
+    end
+
+    test "a standalone [DEFERRED] with VERIFICATION: PARTIAL still parks (#958)", ctx do
+      findings = @standalone_deferred <> "VERIFICATION: PARTIAL — could not build\n"
+      {rig, issue} = deferral_gate(ctx, "feature/defer-sa-2", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+    end
+
+    test "a standalone [DEFERRED] with a pre-merge tag still parks (#958)", ctx do
+      findings =
+        @standalone_deferred <>
+          "- [NOT MET] [NEEDS-COORDINATOR-PREMERGE] The operator registers a runner first\n"
+
+      {rig, issue} = deferral_gate(ctx, "feature/defer-sa-3", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+    end
+
     # The branch's content lands on main by another route and main is merged
     # back in, so HEAD moves but nets to nothing (G20).
     defp absorb_into_main(ctx, rig) do
