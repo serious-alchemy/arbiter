@@ -315,6 +315,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.Registry, as: PRegistry
+  alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.VisualBaselines
   alias Arbiter.Workflows.CodeReview.ConsumerTrace
   alias Arbiter.Workflows.MergeQueue.FlakeSuspect
@@ -3457,9 +3458,38 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
+  # Same gate as the ReviewGate's rerun (`ReviewCi.skip_rerun/4`): a red whose
+  # jobs are all `merge.ci.no_rerun_jobs`, or that this head already failed with
+  # the same job set (at either site), is not re-run; it goes to the fix path.
   defp rerun_suspected_flake(state, checks, head, files, why) do
+    seen = ReviewCi.load_failed_sets(state.task_id)
+    prefixes = ReviewCi.no_rerun_jobs(state.workspace, state.repo)
+
+    case ReviewCi.skip_rerun(checks, prefixes, seen, head || "") do
+      {:skip, reason} ->
+        Logger.info(
+          "Worker.Watchdog: CI on task=#{state.task_id} head=#{head} is red on " <>
+            "#{Enum.join(ReviewCi.failed_job_names(checks), ", ")} (#{reason}); " <>
+            "skipping the flake re-run, dispatching the fix pass"
+        )
+
+        fix_or_cap(state, checks, files)
+
+      :rerun ->
+        do_rerun_suspected_flake(state, checks, head, files, why)
+    end
+  end
+
+  defp do_rerun_suspected_flake(state, checks, head, files, why) do
     case safe_rerun_ci(state) do
       {:ok, _} ->
+        ReviewCi.note_failed_set(
+          state.task_id,
+          ReviewCi.load_failed_sets(state.task_id),
+          head,
+          checks
+        )
+
         Logger.warning(
           "Worker.Watchdog: CI on task=#{state.task_id} mr=#{state.mr_ref} head=#{head} " <>
             "failed #{why} (#{Enum.join(files, ", ")}); " <>
