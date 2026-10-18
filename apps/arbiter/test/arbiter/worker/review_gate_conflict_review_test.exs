@@ -47,7 +47,10 @@ defmodule Arbiter.Worker.ReviewGateConflictReviewTest do
       Ash.create(Workspace, %{
         name: "rg-cr-#{System.unique_integer([:positive])}",
         prefix: "rc",
-        config: %{"review" => %{"required" => true}}
+        # bd-8slhrb: the gate no longer merges a merely-behind branch; staleness of
+        # more than one commit sends the tests that move main twice down the
+        # merge / conflict-review path they exercise.
+        config: %{"review" => %{"required" => true, "max_commits_behind" => 1}}
       })
 
     %{repo: repo, ws: ws, tmp: tmp}
@@ -59,6 +62,7 @@ defmodule Arbiter.Worker.ReviewGateConflictReviewTest do
        %{repo: repo, ws: ws, tmp: tmp} do
     {approved, wt, task} = approved_branch(repo, ws, tmp, "feature/clean")
     advance_main(repo, "other.ex", "main moved, nowhere near the feature\n")
+    advance_main(repo, "other2.ex", "and moved again (past max_commits_behind: 1)\n")
 
     gate = start_gate(task, ws, wt, "feature/clean", command: slow_reviewer())
     assert_gate_stops(gate)
@@ -110,6 +114,7 @@ defmodule Arbiter.Worker.ReviewGateConflictReviewTest do
          %{repo: repo, ws: ws, tmp: tmp} do
       {_approved, wt, task} = approved_branch(repo, ws, tmp, "feature/ci-clean")
       advance_main(repo, "other.ex", "main moved, nowhere near the feature\n")
+      advance_main(repo, "other2.ex", "and moved again (past max_commits_behind: 1)\n")
 
       gate = start_gate(task, ws, wt, "feature/ci-clean", [command: slow_reviewer()] ++ @ci_opts)
       assert_gate_stops(gate)
