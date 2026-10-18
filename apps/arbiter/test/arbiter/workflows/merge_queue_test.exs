@@ -2029,7 +2029,9 @@ defmodule Arbiter.Workflows.MergeQueueTest do
         {:ok, Agent.get(behind, & &1)}
       end)
 
-      on_exit(fn -> Application.delete_env(:arbiter, :merge_freshness_probe) end)
+      on_exit(fn ->
+        Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 0} end)
+      end)
 
       mutable_pr_stub(agent)
       task = adopted_task(ws, "#231", 2)
@@ -2071,7 +2073,10 @@ defmodule Arbiter.Workflows.MergeQueueTest do
         end)
 
       Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 3} end)
-      on_exit(fn -> Application.delete_env(:arbiter, :merge_freshness_probe) end)
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 0} end)
+      end)
 
       mutable_pr_stub(agent)
       task = adopted_task(ws, "#232", 2)
@@ -2105,7 +2110,10 @@ defmodule Arbiter.Workflows.MergeQueueTest do
         end)
 
       Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 3} end)
-      on_exit(fn -> Application.delete_env(:arbiter, :merge_freshness_probe) end)
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 0} end)
+      end)
 
       mutable_pr_stub(agent)
       task = adopted_task(ws, "#233", 2)
@@ -2137,7 +2145,10 @@ defmodule Arbiter.Workflows.MergeQueueTest do
         end)
 
       Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 3} end)
-      on_exit(fn -> Application.delete_env(:arbiter, :merge_freshness_probe) end)
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 0} end)
+      end)
 
       mutable_pr_stub(agent)
       task = adopted_task(ws, "#234", 2)

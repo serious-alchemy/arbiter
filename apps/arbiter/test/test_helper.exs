@@ -1,3 +1,8 @@
+# bd-5z9yvb: the merge-time freshness check shells out to a local checkout; with
+# no repo path it can't tell and syncs. Suites that aren't about freshness get a
+# probe that says "up to date"; the freshness tests override and restore it.
+Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 0} end)
+
 System.delete_env("ARBITER_WORKTREE_ROOT")
 System.delete_env("ARBITER_OUTPUT_LOG_ROOT")
 # bd-aprlbb: same reason as the two above — `Arbiter.Config.Paths.resolve/3` is

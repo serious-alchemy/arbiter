@@ -56,7 +56,11 @@ defmodule Arbiter.Worker.WatchdogMergeFreshnessTest do
   setup do
     StubMerger.reset()
     StubAutoResumeDispatcher.reset()
-    on_exit(fn -> Application.delete_env(:arbiter, :merge_freshness_probe) end)
+
+    on_exit(fn ->
+      Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 0} end)
+    end)
+
     :ok
   end
 
