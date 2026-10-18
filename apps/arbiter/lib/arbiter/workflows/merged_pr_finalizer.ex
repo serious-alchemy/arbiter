@@ -441,9 +441,12 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         "(tracker=#{task.tracker_type} ref=#{task.tracker_ref}) — finalizing"
     )
 
-    task = record_review_waiver(task)
-
-    Sync.lifecycle(task, :merged)
+    # bd-49r9ns: neither pre-close step may stop the close. A raise from the
+    # waiver note or the tracker transition used to fall into the `rescue`
+    # below and leave the merged ticket open, retried (and failing) on every
+    # tick; both are best-effort, the local close is the point.
+    task = best_effort(task, "review waiver", task, fn -> record_review_waiver(task) end)
+    best_effort(:ok, "tracker lifecycle sync", task, fn -> Sync.lifecycle(task, :merged) end)
 
     # bd-9so315: the same funnel the merge queue uses — closes as before unless
     # the task carries `verify_after_deploy`, in which case it parks at
@@ -470,6 +473,18 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
       )
 
       :ok
+  end
+
+  defp best_effort(default, what, %Issue{id: id}, fun) do
+    fun.()
+  rescue
+    e ->
+      Logger.warning("MergedPRFinalizer: #{what} failed for task=#{id}: #{Exception.message(e)}")
+      default
+  catch
+    :exit, reason ->
+      Logger.warning("MergedPRFinalizer: #{what} exited for task=#{id}: #{inspect(reason)}")
+      default
   end
 
   # bd-3lj713: this sweep closes a ticket on the strength of a forge merge it

@@ -1031,3 +1031,31 @@ Read-only. No code under `apps/*/lib` was changed by this PR.
   anchored `` `path:line` (`symbol`) `` citation in this document on every test
   run. If it fails, the inventory has drifted — re-anchor it rather than
   loosening the test.
+
+## Deferring post-merge criteria (bd-49r9ns)
+
+A criterion that can only be checked after the merge/deploy used to park the
+review as `review_gate_not_converged`, which the coordinator could only clear
+with `resolve --accept-as-is` plus a hand-merge. `Arbiter.Worker.DeferredCriteria`
+turns that into an approval with the criterion deferred. It applies only when
+**all** of these hold, and otherwise the review parks exactly as before:
+
+- the reviewer's verdict is `APPROVE` (a `REQUEST_CHANGES` is never converted);
+- every `[NOT MET]` line is tagged `[DEFERRED]` directly after the outcome
+  bracket, every other criterion is `[MET]` / `[N/A]`, and no
+  `[NEEDS-COORDINATOR-PREMERGE]` or bare `[NEEDS-COORDINATOR]` tag appears
+  anywhere (a bare tag is ambiguous, so it parks);
+- no `VERIFICATION: PARTIAL` disclosure;
+- CI was read green on the very head the reviewer reviewed (no CI evidence
+  parks);
+- the setting is not off.
+
+On approval the criteria are appended to the ticket's `deployment_notes`
+("Criteria deferred from acceptance by ReviewGate round N"), `verify_after_deploy`
+is set (the merge then parks the ticket at `verifying` and nudges the
+coordinator), and the normal merge path runs. If that ticket write fails the
+approval is not honored and the review parks.
+
+**Opt-out:** `review.defer_post_merge_criteria: false` in the workspace config,
+or per repo at `review.repos.<repo>.defer_post_merge_criteria` (default on). A
+`[DEFERRED]` line then parks like `[NEEDS-COORDINATOR]`.

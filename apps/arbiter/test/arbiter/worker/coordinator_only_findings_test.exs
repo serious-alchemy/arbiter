@@ -39,6 +39,17 @@ defmodule Arbiter.Worker.CoordinatorOnlyFindingsTest do
       refute CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings)
     end
 
+    test "true when the unmet lines are [DEFERRED] / [NEEDS-COORDINATOR-PREMERGE] (bd-49r9ns)" do
+      findings = """
+      VERDICT: REQUEST_CHANGES
+      CRITERIA:
+      - [NOT MET] [DEFERRED] AC3: observe after deploy
+      - [NOT MET] [NEEDS-COORDINATOR-PREMERGE] AC4: register the runner first
+      """
+
+      assert CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings)
+    end
+
     test "false for nil/non-binary input" do
       refute CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(nil)
     end

@@ -1349,6 +1349,11 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_review(changeset, %{} = review) do
     changeset
     |> validate_boolean_setting(review, "require_ci_green", "review.require_ci_green")
+    |> validate_boolean_setting(
+      review,
+      "defer_post_merge_criteria",
+      "review.defer_post_merge_criteria"
+    )
     |> validate_non_negative_int(review, "max_commits_behind", "review.max_commits_behind")
     |> validate_non_negative_int(review, "max_hours_behind", "review.max_hours_behind")
     |> validate_review_repos(Map.get(review, "repos"))
@@ -1364,6 +1369,11 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           entry,
           "require_ci_green",
           "review.repos.#{repo}.require_ci_green"
+        )
+        |> validate_boolean_setting(
+          entry,
+          "defer_post_merge_criteria",
+          "review.repos.#{repo}.defer_post_merge_criteria"
         )
         |> validate_non_negative_int(
           entry,

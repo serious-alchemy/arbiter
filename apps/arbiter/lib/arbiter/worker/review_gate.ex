@@ -244,6 +244,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.ConflictAbortFindings
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.CoordinatorOnlyFindings
+  alias Arbiter.Worker.DeferredCriteria
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.GitCredential
@@ -3491,6 +3492,18 @@ defmodule Arbiter.Worker.ReviewGate do
       ReviewFindings.gap?(gap) ->
         run_verdict_guard(:unaddressed_findings, state, findings, gap)
 
+      # bd-49r9ns: every unmet criterion is a reviewer-tagged `[DEFERRED]`
+      # post-merge one, the rest are MET, and CI is green on the reviewed head.
+      # The deferral is recorded on the ticket first; if that write fails the
+      # approval is NOT honored and the unmet-criteria guard runs as before.
+      has_acceptance_criteria?(state) and match?({:defer, _}, deferral(state, findings)) ->
+        {:defer, criteria} = deferral(state, findings)
+
+        case record_deferred_criteria(state, criteria) do
+          :ok -> finalize_approval(state, verdict, findings)
+          {:error, _} -> run_verdict_guard(:unmet_criteria, state, findings)
+        end
+
       has_acceptance_criteria?(state) and ReviewVerification.unmet_criteria?(findings) ->
         run_verdict_guard(:unmet_criteria, state, findings)
 
@@ -3546,6 +3559,62 @@ defmodule Arbiter.Worker.ReviewGate do
   # the guard is fully live there.
   defp finalize_approval(state, verdict, findings) do
     {:done, finalize_approval_state(state, verdict, findings)}
+  end
+
+  # bd-49r9ns: whether an APPROVE whose only unmet criteria are post-merge may
+  # proceed to merge with them deferred. Fail-closed on every input: the
+  # reviewer's tags must classify cleanly (`DeferredCriteria.classify/1`), the
+  # workspace/repo must not have opted out, and CI must have been read green on
+  # the very head the reviewer reviewed. Anything else is `:park`, which falls
+  # through to the `:unmet_criteria` guard exactly as before.
+  defp deferral(state, findings) do
+    with {:defer, criteria} <- DeferredCriteria.classify(findings),
+         true <- DeferredCriteria.enabled?(load_workspace(state.workspace_id), state.repo),
+         true <- ci_green_on_reviewed_head?(state) do
+      {:defer, criteria}
+    else
+      _ -> :park
+    end
+  end
+
+  defp ci_green_on_reviewed_head?(state) do
+    with %{sha: green} <- Map.get(state, :ci_green),
+         {:ok, reviewed} <- reviewed_head(state) do
+      ReviewCi.same_sha?(green, reviewed)
+    else
+      _ -> false
+    end
+  end
+
+  # Records the deferred criteria on the ticket the approval is about to merge:
+  # appended to `deployment_notes`, and `verify_after_deploy` set so the merge
+  # parks at awaiting-verification and the coordinator gets the nudge. A failed
+  # write returns an error so the caller parks rather than lose the criteria.
+  defp record_deferred_criteria(state, criteria) do
+    with {:ok, %Issue{} = task} <- Ash.get(Issue, state.task_id),
+         {:ok, _} <-
+           Ash.update(task, %{
+             deployment_notes:
+               DeferredCriteria.append_notes(task.deployment_notes, criteria, state.round),
+             verify_after_deploy: true
+           }) do
+      Logger.info(
+        "ReviewGate: task=#{state.task_id} round #{state.round} approved with " <>
+          "#{length(criteria)} post-merge criteria deferred to deployment_notes"
+      )
+
+      :ok
+    else
+      other ->
+        Logger.warning(
+          "ReviewGate: task=#{state.task_id} could not record deferred criteria: " <>
+            "#{inspect(other)}; not honoring the approval"
+        )
+
+        {:error, other}
+    end
+  rescue
+    e -> {:error, e}
   end
 
   # The bare-state core of `finalize_approval/3`, for callers that already own
@@ -8076,7 +8145,9 @@ defmodule Arbiter.Worker.ReviewGate do
   defp criteria_prompt_block(task) do
     if acceptance_present?(task.acceptance) do
       ReviewVerification.criteria_block() <>
-        "\n" <> CoordinatorOnlyFindings.coordinator_only_block() <> "\n"
+        "\n" <>
+        CoordinatorOnlyFindings.coordinator_only_block() <>
+        "\n" <> DeferredCriteria.prompt_block() <> "\n"
     else
       ""
     end

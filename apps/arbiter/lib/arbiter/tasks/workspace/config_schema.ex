@@ -354,6 +354,16 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                   merge.watchdog_max_polls falls back to a reviewer that runs the
                   tests. Default: on for a github/gitlab merge strategy, off for
                   direct. Per-repo override: review.repos.<repo>.require_ci_green.
+      defer_post_merge_criteria  bool — (review only, bd-49r9ns) when the reviewer
+                  APPROVEs and every unmet criterion is tagged [DEFERRED] (only
+                  verifiable after merge/deploy), every other criterion is MET and
+                  CI is green on the reviewed head, the ReviewGate approves: the
+                  criteria are appended to the ticket's deployment_notes and
+                  verify_after_deploy is set. [NEEDS-COORDINATOR-PREMERGE], a bare
+                  [NEEDS-COORDINATOR] or any untagged [NOT MET] still parks.
+                  Default: on; set false to have a human look first (the review
+                  parks as before). Per-repo override:
+                  review.repos.<repo>.defer_post_merge_criteria.
       max_commits_behind  non-negative integer — (bd-8slhrb) a ReviewGate gate no
                   longer merges + pushes origin/<target> into a branch that is
                   merely behind (that started a full CI pipeline per gate); the

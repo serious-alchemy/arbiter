@@ -1123,6 +1123,39 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "review.defer_post_merge_criteria validation (bd-49r9ns)" do
+    test "accepts booleans workspace-wide and per repo, rejects anything else" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "dpm-ok-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "review" => %{
+                     "defer_post_merge_criteria" => false,
+                     "repos" => %{"mesaana" => %{"defer_post_merge_criteria" => true}}
+                   }
+                 }
+               })
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "dpm-bad1",
+                 config: %{"review" => %{"defer_post_merge_criteria" => "yes"}}
+               })
+
+      assert Exception.message(err) =~ "review.defer_post_merge_criteria must be true or false"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "dpm-bad2",
+                 config: %{
+                   "review" => %{"repos" => %{"mesaana" => %{"defer_post_merge_criteria" => 1}}}
+                 }
+               })
+
+      assert Exception.message(err) =~ "review.repos.mesaana.defer_post_merge_criteria"
+    end
+  end
+
   describe "review.require_ci_green validation (bd-cut6uv)" do
     test "accepts booleans and their JSON strings, workspace-wide and per repo" do
       for value <- [true, false, "true", "false"] do
