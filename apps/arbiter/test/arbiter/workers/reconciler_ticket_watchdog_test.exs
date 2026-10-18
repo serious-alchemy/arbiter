@@ -105,40 +105,119 @@ defmodule Arbiter.Workers.ReconcilerTicketWatchdogTest do
     assert Watchdog.alive?(ticket.id)
   end
 
-  # bd-7s6y2j: a conflict or fix pass live at shutdown on a ticket that stayed
-  # Merging must show up in the sweep's result and log, not vanish into "watched".
-  for kind <- [:conflict, :fix_pass] do
-    test "a Merging ticket's cut-off #{kind} run is listed as re-queued through its Watchdog",
-         %{ws: ws} do
-      ticket = merging_ticket(ws, "!rp")
+  defp cut_off_run!(ws, ticket, kind) do
+    {:ok, run} =
+      Ash.create(Arbiter.Workers.Run, %{
+        task_id: ticket.id,
+        repo: "rt/repo",
+        workspace_id: ws.id,
+        kind: kind,
+        state: :finished,
+        outcome: :interrupted,
+        failure_reason: "server shutdown",
+        started_at: DateTime.utc_now()
+      })
 
-      {:ok, _run} =
-        Ash.create(Arbiter.Workers.Run, %{
-          task_id: ticket.id,
-          repo: "rt/repo",
-          workspace_id: ws.id,
-          kind: unquote(kind),
-          state: :finished,
-          outcome: :interrupted,
-          failure_reason: "server shutdown",
-          started_at: DateTime.utc_now()
-        })
+    run
+  end
 
-      Logger.put_module_level(Reconciler, :info)
-      on_exit(fn -> Logger.delete_module_level(Reconciler) end)
+  defp recording_pass_fun(result \\ :ok) do
+    test = self()
 
-      log =
-        ExUnit.CaptureLog.capture_log([level: :info], fn ->
-          assert {:ok, %{watched: 1, escalated: 0, passes: [pass]}} =
-                   Reconciler.reconcile_open_pr_tasks()
-
-          assert pass == %{task_id: ticket.id, kind: unquote(kind), outcome: :watched}
-        end)
-
-      assert log =~ "cut-off pass"
-      assert log =~ ticket.id
-      assert Watchdog.alive?(ticket.id)
+    fn task_id, kind, opts ->
+      send(test, {:queued, task_id, kind, opts})
+      result
     end
+  end
+
+  # bd-7s6y2j: a conflict pass live at shutdown is handed to the scheduler's
+  # queue, held for local capacity, rather than waiting on the Watchdog to
+  # re-observe an approved, conflicting PR.
+  test "a Merging ticket's cut-off conflict pass is queued held for local capacity", %{ws: ws} do
+    ticket = merging_ticket(ws, "!rp")
+    cut_off_run!(ws, ticket, :conflict)
+
+    Logger.put_module_level(Reconciler, :info)
+    on_exit(fn -> Logger.delete_module_level(Reconciler) end)
+
+    log =
+      ExUnit.CaptureLog.capture_log([level: :info], fn ->
+        assert {:ok, %{watched: 1, escalated: 0, passes: [pass]}} =
+                 Reconciler.reconcile_open_pr_tasks(pass_fun: recording_pass_fun())
+
+        assert pass == %{task_id: ticket.id, kind: :conflict, outcome: :queued}
+      end)
+
+    ticket_id = ticket.id
+    pr_ref = ticket.pr_ref
+    ws_id = ws.id
+
+    assert_received {:queued, ^ticket_id, :conflict, opts}
+    assert opts[:held_for] == :local_capacity
+    assert opts[:resume_origin] == :automatic
+    assert %{task_id: ^ticket_id, workspace_id: ^ws_id, pr_ref: ^pr_ref} = opts[:args]
+
+    assert log =~ "cut-off pass"
+    assert log =~ ticket.id
+    assert Watchdog.alive?(ticket.id)
+  end
+
+  test "a cut-off conflict pass that cannot be queued is escalated, not dropped", %{ws: ws} do
+    ticket = merging_ticket(ws, "!rs")
+    cut_off_run!(ws, ticket, :conflict)
+
+    assert {:ok, %{escalated: 1, passes: [pass]}} =
+             Reconciler.reconcile_open_pr_tasks(
+               pass_fun: recording_pass_fun({:error, :not_running})
+             )
+
+    assert pass == %{task_id: ticket.id, kind: :conflict, outcome: :escalated}
+    assert Message.inbox(Message.coordinator_ref(), workspace_id: ws.id) != []
+  end
+
+  test "a cut-off conflict pass is listed on a ticket whose Watchdog already runs", %{ws: ws} do
+    ticket = merging_ticket(ws, "!rt")
+    cut_off_run!(ws, ticket, :conflict)
+    assert {:ok, _pid} = Watchdog.restart(ticket.id)
+
+    assert {:ok, %{watched: 0, passes: [pass]}} =
+             Reconciler.reconcile_open_pr_tasks(pass_fun: recording_pass_fun())
+
+    assert pass == %{task_id: ticket.id, kind: :conflict, outcome: :queued}
+  end
+
+  # A fix pass needs the failing checks only the Watchdog's poll has, so its
+  # restarted Watchdog asks for it again; the sweep lists it.
+  test "a Merging ticket's cut-off fix_pass is listed as watched, not queued directly",
+       %{ws: ws} do
+    ticket = merging_ticket(ws, "!rf")
+    cut_off_run!(ws, ticket, :fix_pass)
+
+    assert {:ok, %{watched: 1, passes: [pass]}} =
+             Reconciler.reconcile_open_pr_tasks(pass_fun: recording_pass_fun())
+
+    assert pass == %{task_id: ticket.id, kind: :fix_pass, outcome: :watched}
+    refute_received {:queued, _, _, _}
+  end
+
+  test "the resume sweep's line counts the cut-off passes it is handed", %{ws: ws} do
+    ticket = merging_ticket(ws, "!ru")
+    passes = [%{task_id: ticket.id, kind: :conflict, outcome: :queued}]
+
+    Logger.put_module_level(Reconciler, :info)
+    on_exit(fn -> Logger.delete_module_level(Reconciler) end)
+
+    log =
+      ExUnit.CaptureLog.capture_log([level: :info], fn ->
+        assert {:ok, %{resumed: 0}} =
+                 Reconciler.reconcile_resumable_tasks(
+                   cut_off_passes: passes,
+                   resume_fun: fn _ -> {:ok, %{}} end
+                 )
+      end)
+
+    assert log =~ "resume sweep"
+    assert log =~ "#{ticket.id} (conflict: queued)"
   end
 
   test "a Merging ticket whose last run finished normally lists no cut-off pass", %{ws: ws} do

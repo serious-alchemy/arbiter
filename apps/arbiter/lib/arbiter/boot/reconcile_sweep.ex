@@ -63,9 +63,19 @@ defmodule Arbiter.Boot.ReconcileSweep do
     skip_ids =
       reconciler.restarted_ids([ci_waits, passes, held]) ++ Enum.map(owned, & &1.base_task_id)
 
-    reconciler.reconcile_open_pr_tasks(primary?: primary?, skip_ids: skip_ids)
-    reconciler.reconcile_resumable_tasks(primary?: primary?, skip_ids: skip_ids)
+    open_pr = reconciler.reconcile_open_pr_tasks(primary?: primary?, skip_ids: skip_ids)
+
+    # bd-7s6y2j: the conflict/fix passes the open-PR sweep re-queued, watched or
+    # escalated ride into the resume sweep's line, so none is dropped silently.
+    reconciler.reconcile_resumable_tasks(
+      primary?: primary?,
+      skip_ids: skip_ids,
+      cut_off_passes: cut_off_passes(open_pr)
+    )
   end
+
+  defp cut_off_passes({:ok, %{passes: passes}}) when is_list(passes), do: passes
+  defp cut_off_passes(_), do: []
 
   # What recovery reported: its `run_id => outcome` map, `:skipped`, or `nil` when it
   # failed to say (it raised, exited or returned something else).
