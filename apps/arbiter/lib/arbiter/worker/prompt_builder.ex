@@ -18,6 +18,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.Issue
   alias Arbiter.Trackers
+  alias Arbiter.Worker.AcceptanceSplit
   alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.PermissionsBlock
   alias Arbiter.Worker.ReviewVerification
@@ -430,7 +431,8 @@ defmodule Arbiter.Worker.PromptBuilder do
     create`). The MergeQueue opens the single canonical PR for this task, on
     the correct base branch, using the body you author in the next step.
     Opening your own PR creates a duplicate on the wrong base.
-    #{pr_review_instruction(task, opts)}#{verify_after_deploy_step(task, mcp?)}#{pr_body_step(task, mcp?)}#{completion_notes_step(task, mcp?)}
+    #{pr_review_instruction(task, opts)}#{verify_after_deploy_step(task, mcp?)}
+    #{AcceptanceSplit.implementer_block()}#{pr_body_step(task, mcp?)}#{completion_notes_step(task, mcp?)}
     #{coordination_section(task, opts)}
     CRITICAL — continuation discipline: NEVER end a response with only a plan
     or a statement of the next step (for example, announcing that you will now
@@ -600,6 +602,8 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{read_discipline_section()}
     #{EvidenceIntegrity.worker_block()}#{permissions_section(opts)}
     #{no_pr_job(task, kind, mcp?)}
+
+    #{String.trim_trailing(AcceptanceSplit.planner_block())}
     #{completion_notes_step(task, mcp?)}
     Coordination: at the start of each step, check your mailbox by running
 
@@ -760,6 +764,9 @@ defmodule Arbiter.Worker.PromptBuilder do
       * **Summary** — what changed and why, in a few sentences.
       * **Test plan** — the checks you ran, with checked boxes for what passed.
       * **References** — the task id (#{id}) and any linked ticket/PRs.#{closes_guidance}
+      * **Not verifiable pre-merge** (only if applicable) — any acceptance
+        criterion you could not verify in the worktree, with the reason, and a
+        suggestion to move it to `deployment_notes`.
 
     If the repo has a PR template (`.github/pull_request_template.md`), FILL it
     rather than discard it. #{pr_body_persist(id, mcp?)}

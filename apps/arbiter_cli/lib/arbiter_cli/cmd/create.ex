@@ -16,6 +16,20 @@ defmodule ArbiterCli.Cmd.Create do
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
 
+  ## ACCEPTANCE vs DEPLOYMENT_NOTES, and `--type`
+
+  `--acceptance` holds only what the implementer can do and the reviewer can
+  verify from the diff, the worktree, the tests and the MR's own CI — e.g.
+  "test X covers Y". `--deployment-notes` holds what can only be checked after
+  merge or deploy, or by someone with access the worker lacks — e.g. "main-branch
+  pipeline finishes under 5.5 min", prod observation, forge settings. Never put
+  those in `--acceptance`, or review parks the ticket.
+
+  Set `--type` by the child's OWN work type, not the parent's: `chore` / `bug` /
+  `feature` for any code change; `task` is research/ops only, with no diff (a
+  `task` worker refuses to edit code and closes with no MR). Also set
+  `--difficulty` and name `--deps` tickets in the description.
+
   `--acceptance TEXT` sets the acceptance criteria at create time, so a
   bug/feature can be promoted to Ready straight away. `--acceptance-file PATH`
   reads the (usually multi-line) criteria from a file instead (`-` for stdin);

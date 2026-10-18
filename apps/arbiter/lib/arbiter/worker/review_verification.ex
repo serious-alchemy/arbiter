@@ -12,10 +12,10 @@ defmodule Arbiter.Worker.ReviewVerification do
 
   # A single per-criterion line of the CRITERIA breakdown (bd-4yhv4x): a list
   # item (`-`, `*`, or `1.`/`1)`) whose first token is a bracketed outcome —
-  # `[MET]`, `[NOT MET]`, or `[N/A]`. The alternation lists `NOT MET` after
+  # `[MET]`, `[NOT MET]`, `[N/A]`, or `[DEFERRED]`. The alternation lists `NOT MET` after
   # `MET`, but each anchors to the `[` so `[NOT MET]` can never be mis-read as
   # `[MET]` (the `M`-first branch fails on the leading `N`).
-  @criteria_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*(MET|NOT\s+MET|N\/?A)\s*\]/im
+  @criteria_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*(MET|NOT\s+MET|N\/?A|DEFERRED)\s*\]/im
   @criteria_unmet ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*NOT\s+MET\s*\]/im
 
   @doc "Whether a verdict's findings text discloses `VERIFICATION: PARTIAL`."
@@ -70,7 +70,7 @@ defmodule Arbiter.Worker.ReviewVerification do
 
   @doc """
   Whether the findings text carries a per-criterion CRITERIA breakdown at all —
-  i.e. at least one `- [MET] / [NOT MET] / [N/A]` line. Distinguishes "the
+  i.e. at least one `- [MET] / [NOT MET] / [N/A] / [DEFERRED]` line. Distinguishes "the
   reviewer addressed the criteria individually" from a plain prose verdict.
   """
   @spec criteria_present?(String.t() | nil) :: boolean()
@@ -180,9 +180,10 @@ defmodule Arbiter.Worker.ReviewVerification do
         - [MET] <criterion> — <specific evidence: the file:line / test that satisfies it>
         - [NOT MET] <criterion> — <what is missing or wrong>
         - [N/A] <criterion> — <why it does not apply>
+        - [DEFERRED] <criterion> — <why it cannot be checked pre-merge>
 
     Rules — this is the verdict payload, not a formality:
-    - One line per criterion; use exactly one of `[MET]`, `[NOT MET]`, `[N/A]`.
+    - One line per criterion; use exactly one of `[MET]`, `[NOT MET]`, `[N/A]`, `[DEFERRED]`.
     - "Met" means the criterion is actually SATISFIED by the diff, not merely
       that the code looks clean or that some test is green. Tests passing is NOT
       the same as a criterion being met: a test can assert against a test-local
@@ -192,6 +193,7 @@ defmodule Arbiter.Worker.ReviewVerification do
     - If the implementer declared a limitation, deferral, or "out of scope" that
       touches a stated criterion, that criterion is `[NOT MET]` — do not launder
       a declared gap into an approval.
+    - #{Arbiter.Worker.AcceptanceSplit.reviewer_block() |> String.trim() |> String.replace("\n", "\n      ")}
     - Do NOT mark a criterion `[MET]` unless you verified it against the CURRENT
       diff. An APPROVE whose breakdown contains any `[NOT MET]` line will not be
       accepted as final — mark honestly.
