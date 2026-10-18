@@ -186,7 +186,7 @@ defmodule Arbiter.Worker.WatchdogMergeFreshnessTest do
 
     StubMerger.queue_get("!mf7", [open("sha-reviewed", %{pipeline: :success, ci_clean: true})])
 
-    wpid = start_watchdog(task, "!mf7", ws)
+    wpid = start_watchdog(task, "!mf7", ws, max_polls: 500)
 
     wait_until(fn -> :sys.get_state(wpid).last_block_reason == :behind_base end, 10_000)
 

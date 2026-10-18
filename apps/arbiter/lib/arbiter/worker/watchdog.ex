@@ -5027,6 +5027,11 @@ defmodule Arbiter.Worker.Watchdog do
       not MergeFreshness.required?(state.workspace) ->
         merge
 
+      # The forge reported no head or target ref at all: there is nothing to
+      # compare or sync, and the sha-pinned merge guards still apply.
+      not (is_binary(state.mr_base_ref) and is_binary(state.last_head_sha)) ->
+        merge
+
       true ->
         case MergeFreshness.check(
                state.workspace,

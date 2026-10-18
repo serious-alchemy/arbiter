@@ -57,7 +57,7 @@ defmodule Arbiter.Worker.MergeFreshnessTest do
 
     test "0 when the branch contains the target tip, N once main moves", %{clone: clone} do
       feat = rev(clone, "feat")
-      assert {:ok, 0} = MergeFreshness.behind_by(clone, "main", feat)
+      assert {:ok, 0} = Arbiter.Mergers.LocalCompare.behind_by(clone, "main", feat)
 
       git(clone, ["checkout", "main"])
       File.write!(Path.join(clone, "c"), "1")
@@ -65,11 +65,11 @@ defmodule Arbiter.Worker.MergeFreshnessTest do
       git(clone, ["commit", "-m", "main2"])
       git(clone, ["push", "origin", "main"])
 
-      assert {:ok, 1} = MergeFreshness.behind_by(clone, "main", feat)
+      assert {:ok, 1} = Arbiter.Mergers.LocalCompare.behind_by(clone, "main", feat)
     end
 
     test "an unusable repo is an error, never 'fresh'" do
-      assert {:error, _} = MergeFreshness.behind_by(nil, "main", "abc1234")
+      assert {:error, _} = Arbiter.Mergers.LocalCompare.behind_by(nil, "main", "abc1234")
     end
 
     defp rev(clone, ref) do
