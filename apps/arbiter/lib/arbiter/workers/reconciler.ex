@@ -324,34 +324,51 @@ defmodule Arbiter.Workers.Reconciler do
       do_reconcile_open_pr_tasks(
         Keyword.get(opts, :watch_fun, &default_watch/1),
         Keyword.get(opts, :rewatch_fun, &default_rewatch/1),
-        Keyword.get(opts, :skip_ids, [])
+        Keyword.get(opts, :skip_ids, []),
+        Keyword.get(opts, :pass_fun, &Arbiter.Board.Autopilot.defer_resume/3)
       )
     else
       {:ok, :skipped}
     end
   end
 
-  defp do_reconcile_open_pr_tasks(watch_fun, rewatch_fun, skip_ids) do
-    stuck =
+  defp do_reconcile_open_pr_tasks(watch_fun, rewatch_fun, skip_ids, pass_fun) do
+    # bd-7s6y2j: the cut-off pass is read once, before the sweep acts —
+    # `back_to_merging/1` and the Watchdog restart both start new work on the
+    # ticket — and for tickets another boot path already watches too.
+    candidates =
       Issue
       |> Ash.Query.filter(state in [:active, :merging])
       |> Ash.read!()
       |> Enum.reject(&(live_worker_for_issue?(&1) or &1.id in skip_ids))
       |> Enum.filter(&rewatchable?/1)
-      |> Enum.reject(&watched?/1)
+      |> Enum.map(&{&1, cut_off_pass_kind(&1.id)})
 
     counts =
-      Enum.reduce(stuck, %{watched: 0, rewatched: 0, escalated: 0}, fn issue, counts ->
-        case reconcile_open_pr(issue, watch_fun, rewatch_fun) do
-          :none -> counts
-          outcome -> Map.update!(counts, outcome, &(&1 + 1))
+      Enum.reduce(
+        candidates,
+        %{watched: 0, rewatched: 0, escalated: 0, passes: []},
+        fn {issue, pass_kind}, counts ->
+          if watched?(issue) do
+            note_pass(counts, issue, pass_kind, :watched, pass_fun)
+          else
+            case reconcile_open_pr(issue, pass_kind, watch_fun, rewatch_fun) do
+              :none ->
+                note_pass(counts, issue, pass_kind, :none, pass_fun)
+
+              outcome ->
+                counts
+                |> Map.update!(outcome, &(&1 + 1))
+                |> note_pass(issue, pass_kind, outcome, pass_fun)
+            end
+          end
         end
-      end)
+      )
 
     if counts.watched + counts.rewatched + counts.escalated > 0 do
       Logger.info(
         "Workers.Reconciler: open-PR sweep — watched #{counts.watched}, re-watched " <>
-          "#{counts.rewatched}, escalated #{counts.escalated}"
+          "#{counts.rewatched}, escalated #{counts.escalated}" <> describe_passes(counts.passes)
       )
     end
 
@@ -714,6 +731,9 @@ defmodule Arbiter.Workers.Reconciler do
   ## Options
 
     * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
+    * `:cut_off_passes` — the open-PR sweep's `passes` (bd-7s6y2j): the conflict
+      and fix passes the restart cut off, each already queued, watched or escalated
+      there. Listed on the sweep's line so none is dropped silently.
     * `:skip_ids` — tickets an earlier sweep already restarted
       (`restarted_ids/1`), left alone here: their gate is running, but holds no
       worker this sweep could see.
@@ -737,14 +757,15 @@ defmodule Arbiter.Workers.Reconciler do
     if Keyword.get(opts, :primary?, true) do
       do_reconcile_resumable_tasks(
         Keyword.get(opts, :resume_fun, &default_resume/1),
-        Keyword.get(opts, :skip_ids, [])
+        Keyword.get(opts, :skip_ids, []),
+        Keyword.get(opts, :cut_off_passes, [])
       )
     else
       {:ok, :skipped}
     end
   end
 
-  defp do_reconcile_resumable_tasks(resume_fun, skip_ids) do
+  defp do_reconcile_resumable_tasks(resume_fun, skip_ids, cut_off_passes) do
     stuck =
       Issue
       |> Ash.Query.filter(state in [:active, :merging])
@@ -792,12 +813,12 @@ defmodule Arbiter.Workers.Reconciler do
         end
       end)
 
-    if report.resumed + report.deferred + report.escalated > 0 do
+    if report.resumed + report.deferred + report.escalated + length(cut_off_passes) > 0 do
       Logger.info(
         "Workers.Reconciler: resume sweep — resumed #{report.resumed}" <>
           describe_ids(report.restarted) <>
           ", deferred #{report.deferred}, escalated #{report.escalated}" <>
-          describe_not_restarted(report.not_restarted)
+          describe_not_restarted(report.not_restarted) <> describe_passes(cut_off_passes)
       )
     end
 
@@ -846,7 +867,7 @@ defmodule Arbiter.Workers.Reconciler do
   # queue, left as the operator left it). A Merging ticket gets its Watchdog
   # back from its row; only when that cannot start does it fall back to the
   # patrols, and past them to the coordinator.
-  defp reconcile_open_pr(%Issue{state: :merging} = issue, watch_fun, rewatch_fun) do
+  defp reconcile_open_pr(%Issue{state: :merging} = issue, _pass_kind, watch_fun, rewatch_fun) do
     case watch_fun.(issue) do
       result when result in [:ok, {:error, :already_running}] ->
         Logger.info(
@@ -881,8 +902,8 @@ defmodule Arbiter.Workers.Reconciler do
   # progress with the PR still open and nothing working it. Back to Merging,
   # which restarts its Watchdog from the row: it sees the same red CI or
   # conflict and asks for the pass again.
-  defp reconcile_open_pr(%Issue{state: :active} = issue, watch_fun, rewatch_fun) do
-    if pass_cut_off?(issue.id) do
+  defp reconcile_open_pr(%Issue{state: :active} = issue, pass_kind, watch_fun, rewatch_fun) do
+    if pass_kind do
       case Arbiter.Tasks.PullRequest.back_to_merging(issue.id) do
         :ok ->
           Logger.info(
@@ -890,7 +911,7 @@ defmodule Arbiter.Workers.Reconciler do
               "back to Merging (PR #{issue.pr_ref})"
           )
 
-          Issue |> Ash.get!(issue.id) |> watch_merging(watch_fun, rewatch_fun)
+          Issue |> Ash.get!(issue.id) |> watch_merging(pass_kind, watch_fun, rewatch_fun)
 
         {:error, reason} ->
           Logger.warning(
@@ -905,33 +926,101 @@ defmodule Arbiter.Workers.Reconciler do
     end
   end
 
-  defp reconcile_open_pr(issue, _watch_fun, rewatch_fun),
+  defp reconcile_open_pr(issue, _pass_kind, _watch_fun, rewatch_fun),
     do: rewatch_or_escalate(issue, rewatch_fun)
 
   # `back_to_merging/1` restarts the Watchdog itself; count it, or start it now.
-  defp watch_merging(%Issue{state: :merging} = issue, watch_fun, rewatch_fun) do
+  defp watch_merging(%Issue{state: :merging} = issue, pass_kind, watch_fun, rewatch_fun) do
     if Watchdog.alive?(issue.id),
       do: :watched,
-      else: reconcile_open_pr(issue, watch_fun, rewatch_fun)
+      else: reconcile_open_pr(issue, pass_kind, watch_fun, rewatch_fun)
   end
 
-  defp watch_merging(issue, _watch_fun, rewatch_fun), do: rewatch_or_escalate(issue, rewatch_fun)
+  defp watch_merging(issue, _pass_kind, _watch_fun, rewatch_fun),
+    do: rewatch_or_escalate(issue, rewatch_fun)
 
-  # The ticket's latest run was a fix or conflict pass that the restart cut off
-  # (the graceful-shutdown `:interrupted`, a row still live, or the orphan
-  # sweep's "server restarted").
-  defp pass_cut_off?(task_id) do
+  # bd-7s6y2j: the kind (`:fix_pass` / `:conflict`) of the ticket's latest run
+  # when the restart cut it off (the graceful-shutdown `:interrupted`, a row
+  # still live, or the orphan sweep's "server restarted"), else `nil`. A cut-off
+  # review round is the ReviewGate's (`reconcile_review_passes/1`), not listed
+  # here.
+  defp cut_off_pass_kind(task_id) do
     Run
     |> Ash.Query.filter(task_id == ^task_id)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
     |> case do
-      [%Run{kind: kind} = run] when kind in [:fix_pass, :conflict] -> cut_off?(run)
-      _ -> false
+      [%Run{kind: kind} = run] when kind in [:fix_pass, :conflict] ->
+        if cut_off?(run), do: kind
+
+      _ ->
+        nil
     end
   rescue
-    _ -> false
+    _ -> nil
+  end
+
+  # A cut-off pass is never dropped silently. A `:conflict` pass is handed
+  # straight to the scheduler's queue, held for local capacity (`arb scheduler
+  # status` shows it held; it starts when the primary has room): the restarted
+  # Watchdog only re-asks once its poll reads an approved, conflicting PR, which
+  # a pass cut off after a new head was pushed never reaches. A `:fix_pass`
+  # needs the failing checks only the Watchdog's poll has, so its Watchdog
+  # (restarted above) asks for it again. Outcomes: `:queued`, `:watched` /
+  # `:rewatched` (the Watchdog or patrol is back), `:left` (a pulled ticket or a
+  # deduped escalation: nothing to resume), `:escalated` (nothing could be
+  # arranged).
+  defp note_pass(counts, _issue, nil, _outcome, _pass_fun), do: counts
+
+  defp note_pass(counts, issue, :conflict, outcome, pass_fun)
+       when outcome in [:watched, :rewatched] do
+    case queue_conflict_pass(issue, pass_fun) do
+      :ok ->
+        add_pass(counts, issue.id, :conflict, :queued)
+
+      {:error, reason} ->
+        Logger.warning(
+          "Workers.Reconciler: cannot re-queue ticket #{issue.id}'s cut-off conflict pass " <>
+            "(#{inspect(reason)}) — escalating"
+        )
+
+        escalate_stuck_issue(issue, {:unresumable, reason})
+
+        counts
+        |> Map.update!(:escalated, &(&1 + 1))
+        |> add_pass(issue.id, :conflict, :escalated)
+    end
+  end
+
+  defp note_pass(counts, issue, kind, :none, _pass_fun),
+    do: add_pass(counts, issue.id, kind, :left)
+
+  defp note_pass(counts, issue, kind, outcome, _pass_fun),
+    do: add_pass(counts, issue.id, kind, outcome)
+
+  defp add_pass(counts, task_id, kind, outcome),
+    do: %{counts | passes: counts.passes ++ [%{task_id: task_id, kind: kind, outcome: outcome}]}
+
+  defp queue_conflict_pass(%Issue{} = issue, pass_fun) do
+    args = %{task_id: issue.id, workspace_id: issue.workspace_id, pr_ref: issue.pr_ref}
+
+    case pass_fun.(issue.id, :conflict,
+           args: args,
+           resume_origin: :automatic,
+           held_for: :local_capacity
+         ) do
+      :ok -> :ok
+      {:error, _} = error -> error
+      other -> {:error, other}
+    end
+  end
+
+  defp describe_passes([]), do: ""
+
+  defp describe_passes(passes) do
+    "; cut-off pass(es) — " <>
+      Enum.map_join(passes, ", ", &"#{&1.task_id} (#{&1.kind}: #{&1.outcome})")
   end
 
   defp cut_off?(%Run{state: state}) when state != :finished, do: true
