@@ -44,6 +44,10 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.Watchdog, :rerun_cancelled, 2,
      "bd-8o35da: `{:error, :ci_in_progress}` means the head's latest run/pipeline is still " <>
        "going; the watcher waits for it (no verdict, no fix round, no escalation) — a wait, not a refusal"},
+    {Arbiter.Worker.Watchdog, :do_rerun_suspected_flake, 5,
+     "bd-8o35da: `{:error, :ci_in_progress}` from the suspected-flake CI re-run means the head's " <>
+       "latest run/pipeline is unfinished; the watcher waits for it (no verdict, no fix round, " <>
+       "no escalation) — a wait, not a refusal"},
     {Arbiter.Worker.Watchdog, :spawn_conflict_resolver, 1,
      "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
        "until the operator lifts the pause — an operator safety stop, not a guard"},
