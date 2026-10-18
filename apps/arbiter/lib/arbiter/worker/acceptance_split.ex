@@ -63,11 +63,11 @@ defmodule Arbiter.Worker.AcceptanceSplit do
   @spec reviewer_block() :: String.t()
   def reviewer_block do
     """
-    Criteria that cannot be verified before merge: an acceptance criterion that
-    can only be checked after merge or deploy (or with access the worker lacks)
-    is NOT a reason for REQUEST_CHANGES. Mark it `[DEFERRED]` (post-merge) with
-    the reason, e.g. `- [DEFERRED] <criterion> — <why it cannot be checked
-    pre-merge>`, and judge the remaining criteria on their merits.
+    An acceptance criterion that can only be checked after merge or deploy (or with
+    access the worker lacks) is NOT a reason for REQUEST_CHANGES. Mark it
+    `[DEFERRED]` (post-merge) with the reason, e.g.
+    `- [DEFERRED] <criterion> — <why it cannot be checked pre-merge>`, and
+    judge the remaining criteria on their merits.
     """
   end
 end

@@ -42,6 +42,22 @@ defmodule Arbiter.Worker.AcceptanceSplitTest do
 
   test "reviewer criteria prompt carries DEFERRED rule" do
     assert ReviewVerification.criteria_block() =~ "NOT a reason for REQUEST_CHANGES"
+
+    assert ReviewVerification.criteria_block() =~
+             AcceptanceSplit.reviewer_block()
+             |> String.trim()
+             |> String.split("\n")
+             |> hd()
+             |> String.trim()
+
+    assert ReviewVerification.criteria_block() =~ "- [DEFERRED] <criterion>"
+    assert ReviewVerification.criteria_block() =~ "`[N/A]`, `[DEFERRED]`"
+  end
+
+  test "an all-DEFERRED APPROVE breakdown is recognised and not unmet" do
+    findings = "VERDICT: APPROVE\n\nCRITERIA:\n- [DEFERRED] prod timing — post-merge only\n"
+    assert ReviewVerification.criteria_present?(findings)
+    refute ReviewVerification.unmet_criteria?(findings)
   end
 
   describe "rendered prompts" do

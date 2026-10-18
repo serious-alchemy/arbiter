@@ -8146,7 +8146,7 @@ defmodule Arbiter.Worker.ReviewGate do
     this time:
 
       * Address EACH acceptance criterion on its own `CRITERIA:` line, using
-        exactly one of `[MET]`, `[NOT MET]`, `[N/A]` — this is the verdict
+        exactly one of `[MET]`, `[NOT MET]`, `[N/A]`, `[DEFERRED]` — this is the verdict
         payload, not a formality. Omitting the breakdown will get this approval
         rejected again.
       * "Met" means the criterion is actually SATISFIED by the diff you can see
@@ -8155,8 +8155,8 @@ defmodule Arbiter.Worker.ReviewGate do
         exercise an inert feature) and NOT that the code merely looks clean. If
         the implementer declared a limitation, deferral, or "out of scope" that
         touches a criterion, that criterion is `[NOT MET]`.
-      * Only finish with `VERDICT: APPROVE` if EVERY criterion is `[MET]` or
-        `[N/A]`. If any criterion is genuinely `[NOT MET]`, finish with
+      * Only finish with `VERDICT: APPROVE` if EVERY criterion is `[MET]`, `[N/A]`
+        or `[DEFERRED]` (post-merge only). If any criterion is genuinely `[NOT MET]`, finish with
         `VERDICT: REQUEST_CHANGES` followed by an ENUMERATED list of concrete
         findings — each with a severity, a `file:line` location, and a suggested
         fix — so the implementer can close the gap.
@@ -8176,7 +8176,7 @@ defmodule Arbiter.Worker.ReviewGate do
     this time:
 
       * Address EACH acceptance criterion on its own `CRITERIA:` line, using
-        exactly one of `[MET]`, `[NOT MET]`, `[N/A]` — this is the verdict
+        exactly one of `[MET]`, `[NOT MET]`, `[N/A]`, `[DEFERRED]` — this is the verdict
         payload, not a formality.
       * "Met" means the criterion is actually SATISFIED by the diff you can see
         RIGHT NOW, traced to the real behaviour that delivers it — NOT that a
@@ -8184,8 +8184,8 @@ defmodule Arbiter.Worker.ReviewGate do
         exercise an inert feature) and NOT that the code merely looks clean. If
         the implementer declared a limitation, deferral, or "out of scope" that
         touches a criterion, that criterion is `[NOT MET]`.
-      * Only finish with `VERDICT: APPROVE` if EVERY criterion is `[MET]` or
-        `[N/A]`. If any criterion is genuinely `[NOT MET]`, finish with
+      * Only finish with `VERDICT: APPROVE` if EVERY criterion is `[MET]`, `[N/A]`
+        or `[DEFERRED]` (post-merge only). If any criterion is genuinely `[NOT MET]`, finish with
         `VERDICT: REQUEST_CHANGES` followed by an ENUMERATED list of concrete
         findings — each with a severity, a `file:line` location, and a suggested
         fix — so the implementer can close the gap. An APPROVE whose breakdown
