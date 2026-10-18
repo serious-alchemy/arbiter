@@ -3492,12 +3492,7 @@ defmodule Arbiter.Worker.ReviewGate do
       ReviewFindings.gap?(gap) ->
         run_verdict_guard(:unaddressed_findings, state, findings, gap)
 
-      has_acceptance_criteria?(state) and ReviewVerification.unmet_criteria?(findings) ->
-        unmet_or_deferred(state, verdict, findings)
-
-      # #958: a standalone `- [DEFERRED]` line (the prompt-documented form) on
-      # an otherwise-clean APPROVE takes the same deferral path.
-      has_acceptance_criteria?(state) and DeferredCriteria.deferred_present?(findings) ->
+      has_acceptance_criteria?(state) and unmet_or_deferred_findings?(findings) ->
         unmet_or_deferred(state, verdict, findings)
 
       has_acceptance_criteria?(state) and not ReviewVerification.criteria_present?(findings) ->
@@ -3524,6 +3519,12 @@ defmodule Arbiter.Worker.ReviewGate do
       true ->
         handle_reject(state, findings)
     end
+  end
+
+  # #958: a standalone `- [DEFERRED]` line (the prompt-documented form) on an
+  # otherwise-clean APPROVE takes the same path as an `[UNMET]` criterion.
+  defp unmet_or_deferred_findings?(findings) do
+    ReviewVerification.unmet_criteria?(findings) or DeferredCriteria.deferred_present?(findings)
   end
 
   # bd-aq81qz / G20: an APPROVE whose net diff against the target branch is
