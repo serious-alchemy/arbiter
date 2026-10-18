@@ -143,6 +143,19 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                             head whose failed jobs ALL match goes straight to the CI fix
                             path. A head that already failed the same job set once is
                             never re-run either, listed or not. Per-repo via merge.repos.<repo>.ci.
+      require_up_to_date    bool — (bd-5z9yvb) before merging an approved PR, if its head lacks
+                            the target tip, Arbiter syncs the branch once (update-branch), waits
+                            for CI green on the synced head, then merges. Forge-independent: it
+                            covers forges that never report "behind" (GitLab merge_method=merge
+                            on Free, which has no merged-results pipelines or merge trains and
+                            tests the branch head alone, so this MUST stay on there). A forge
+                            that already reports behind_base is handled by the existing
+                            update-branch path, with no double sync. (default: true)
+      up_to_date_tolerance  non-negative integer — commits of the target a branch may lack and
+                            still merge unsynced (default: 0 = sync for any). Trade-off: a higher
+                            value avoids a sync pipeline per unrelated target commit, at the cost
+                            of merging a combination CI never ran, so only raise it where main
+                            runs the tests.
       repos                 map, repo_paths key -> per-repo override of any key
                             above (strategy, config, auto_merge, …). Deep-merged
                             over the workspace-level merge block, so unset

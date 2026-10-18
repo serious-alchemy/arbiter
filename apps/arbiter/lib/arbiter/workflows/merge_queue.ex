@@ -226,6 +226,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   alias Arbiter.Tasks.Verification
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
+  alias Arbiter.Worker.MergeFreshness
   alias Arbiter.Worker.PrimarySync
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.TargetBranch
@@ -250,6 +251,10 @@ defmodule Arbiter.Workflows.MergeQueue do
   # either transient or an operator's problem; what it must never be is a wait
   # with no end (§5.1's I1).
   @coverage_unknown_grace_ticks 5
+
+  # bd-5z9yvb. Merge-time freshness syncs per item before the merge proceeds anyway.
+  @max_freshness_syncs 3
+  @freshness_wait_ticks 10
 
   @typedoc "Status atom for an in-flight item."
   @type status ::
@@ -285,7 +290,11 @@ defmodule Arbiter.Workflows.MergeQueue do
           coverage_unknown_polls: non_neg_integer(),
           coverage_unknown_head: String.t() | nil,
           coverage_parked?: boolean(),
-          review_refused_head: String.t() | :unknown | nil
+          review_refused_head: String.t() | :unknown | nil,
+          freshness_synced_head: String.t() | nil,
+          freshness_syncs: non_neg_integer(),
+          freshness_waits: non_neg_integer(),
+          freshness_parked_head: String.t() | nil
         }
 
   defmodule State do
@@ -1423,11 +1432,147 @@ defmodule Arbiter.Workflows.MergeQueue do
 
     case MergeAuthorization.check(item.task_id, head) do
       :ok ->
-        merge_coverage_guarded(state, item, head)
+        case freshness_precheck(state, item, head) do
+          :proceed -> merge_coverage_guarded(state, item, head)
+          {:hold, item} -> {{:error, {:freshness_sync, head}}, item}
+        end
 
       {:error, {:review_not_approved, _} = refusal} ->
         {{:error, refusal}, note_review_refusal(state, item, head, refusal)}
     end
+  end
+
+  # bd-5z9yvb. The forge only reports `:behind_base` when it enforces up-to-date;
+  # GitLab `merge_method=merge` (Free) never does, and its MR pipeline tests the
+  # branch head alone. So before the merge call, check forge-independently that
+  # the head contains the target tip; if not, sync once (`update_branch/1`) and
+  # hold the merge until CI has run on the synced head (the item is demoted, so
+  # the ladder waits for green). The synced head is covered by the ordinary
+  # guards: only the target merge on top of the reviewed content passes them.
+  # A failed sync pages the coordinator once and is not retried on the same head;
+  # the forge's conflict flag routes a real conflict to the resolver. Bounded by
+  # `@max_freshness_syncs`, after which the item stays held and the coordinator
+  # is paged — it never merges an unsynced head.
+  defp freshness_precheck(state, item, head) do
+    base = Map.get(item, :base) || state.base
+
+    if base_update_supported?(state.adapter) and is_binary(head) do
+      case MergeFreshness.check(
+             Mergers.scope(state.workspace, item.repo),
+             local_repo(state, item),
+             base,
+             head
+           ) do
+        :fresh ->
+          :proceed
+
+        {:stale, behind} ->
+          freshness_hold(state, item, head, behind)
+
+        {:unknown, reason} ->
+          # "Could not tell" is not "fresh": sync anyway (harmless on a branch
+          # that already has the tip) rather than merging unchecked.
+          Logger.warning(
+            "MergeQueue: #{item_branch_label(item)} could not tell whether #{head} contains " <>
+              "#{inspect(base)} (#{inspect(reason)}); syncing rather than merging unchecked"
+          )
+
+          freshness_hold(state, item, head, nil)
+      end
+    else
+      :proceed
+    end
+  end
+
+  # Parked on this head (paged already): no forge call, no repeat page.
+  defp freshness_hold(_state, %{freshness_parked_head: head} = item, head, _behind),
+    do: {:hold, item}
+
+  # Synced from this head; the forge applies it asynchronously. Wait a bounded
+  # number of ticks for the head to move, then sync again (a dropped sync).
+  defp freshness_hold(state, %{freshness_synced_head: head} = item, head, behind) do
+    waits = item.freshness_waits + 1
+
+    if waits <= @freshness_wait_ticks do
+      {:hold, %{item | freshness_waits: waits}}
+    else
+      freshness_sync(
+        state,
+        %{item | freshness_synced_head: nil, freshness_waits: 0},
+        head,
+        behind
+      )
+    end
+  end
+
+  defp freshness_hold(state, item, head, behind), do: freshness_sync(state, item, head, behind)
+
+  defp freshness_sync(state, %{freshness_syncs: n} = item, head, _behind)
+       when n >= @max_freshness_syncs do
+    # Fail closed: never merge a head CI never saw combined with the target.
+    freshness_park(
+      state,
+      item,
+      head,
+      "still not current with the target after #{n} syncs (the target keeps moving)"
+    )
+  end
+
+  defp freshness_sync(state, item, head, behind) do
+    Logger.info(
+      "MergeQueue: #{item_branch_label(item)} head #{head} lacks #{behind || "some"} target " <>
+        "commit(s); syncing before merge"
+    )
+
+    item = %{
+      item
+      | freshness_synced_head: head,
+        freshness_waits: 0,
+        freshness_syncs: item.freshness_syncs + 1
+    }
+
+    case safe_update_branch(state.adapter, item.mr_ref) do
+      :ok ->
+        {:hold, item}
+
+      {:error, reason} ->
+        freshness_park(
+          state,
+          %{item | last_error: {:update_branch_failed, reason}},
+          head,
+          "the sync did not apply (#{inspect(reason)})"
+        )
+    end
+  end
+
+  defp freshness_park(state, item, head, why) do
+    Logger.warning(
+      "MergeQueue: #{item_branch_label(item)} freshness sync blocked: #{why}; paging the " <>
+        "coordinator once and not merging"
+    )
+
+    safe_notify_freshness_blocked(state, item)
+    {:hold, %{item | freshness_parked_head: head}}
+  end
+
+  defp safe_notify_freshness_blocked(%State{} = state, item) do
+    Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+      %{task_id: item.task_id, workspace_id: state.workspace_id},
+      item.mr_ref,
+      :behind_base
+    )
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "MergeQueue.safe_notify_freshness_blocked: swallowed exception for task=#{item.task_id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # The refusal is answered by a reviewer round or an `accept_as_is` / `amend`
@@ -1958,6 +2103,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp try_merge(state, item) do
     state = for_item(state, item)
 
@@ -2009,6 +2155,11 @@ defmodule Arbiter.Workflows.MergeQueue do
       # the item :failed here would give it no way back in.
       {:error, :empty_net_diff = reason} ->
         {%{item | last_error: reason}, state}
+
+      # bd-5z9yvb: the branch was synced with the target first. Demote so the
+      # ladder waits for CI on the synced head instead of re-trying the merge.
+      {:error, {:freshness_sync, _head}} ->
+        {%{item | status: :awaiting_approval}, state}
 
       # bd-651ine: the gate's record forbids the merge until a reviewer round
       # approves the head or the coordinator accepts it. Non-terminal for the
@@ -2182,6 +2333,12 @@ defmodule Arbiter.Workflows.MergeQueue do
       # bd-651ine / #529. The head `MergeAuthorization` last refused (and paged
       # for): one page per head, not one per tick.
       review_refused_head: nil,
+      # bd-5z9yvb. The merge-time freshness sync: the head it was issued from
+      # (no second sync until the head moves) and how many have been issued.
+      freshness_synced_head: nil,
+      freshness_syncs: 0,
+      freshness_waits: 0,
+      freshness_parked_head: nil,
       last_error: nil,
       resolver_spawned_at: nil,
       prior_status: nil,
