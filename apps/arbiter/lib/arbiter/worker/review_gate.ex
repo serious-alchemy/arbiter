@@ -3492,7 +3492,7 @@ defmodule Arbiter.Worker.ReviewGate do
       ReviewFindings.gap?(gap) ->
         run_verdict_guard(:unaddressed_findings, state, findings, gap)
 
-      has_acceptance_criteria?(state) and ReviewVerification.unmet_criteria?(findings) ->
+      has_acceptance_criteria?(state) and unmet_or_deferred_findings?(findings) ->
         unmet_or_deferred(state, verdict, findings)
 
       has_acceptance_criteria?(state) and not ReviewVerification.criteria_present?(findings) ->
@@ -3519,6 +3519,12 @@ defmodule Arbiter.Worker.ReviewGate do
       true ->
         handle_reject(state, findings)
     end
+  end
+
+  # #958: a standalone `- [DEFERRED]` line (the prompt-documented form) on an
+  # otherwise-clean APPROVE takes the same path as an `[UNMET]` criterion.
+  defp unmet_or_deferred_findings?(findings) do
+    ReviewVerification.unmet_criteria?(findings) or DeferredCriteria.deferred_present?(findings)
   end
 
   # bd-aq81qz / G20: an APPROVE whose net diff against the target branch is
@@ -3804,7 +3810,11 @@ defmodule Arbiter.Worker.ReviewGate do
       EvidenceIntegrity.flagged?(findings) ->
         escalate_fabricated_evidence(state, findings)
 
-      CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings) ->
+      # #958: a standalone `[DEFERRED]` is an unmet gap only on the APPROVE
+      # path's guard reject, not on a genuine REQUEST_CHANGES.
+      CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings,
+        standalone_deferred: state.guard_rejected == :unmet_criteria
+      ) ->
         escalate_coordinator_only(state, findings)
 
       true ->
@@ -8256,8 +8266,10 @@ defmodule Arbiter.Worker.ReviewGate do
   def verdict_reprompt_prompt(state, :unmet_criteria) do
     """
     A prior review pass of this diff returned `VERDICT: APPROVE`, but its own
-    CRITERIA breakdown marked one or more stated acceptance criteria `[NOT MET]`.
-    An APPROVE that admits an unmet criterion is a contradiction — "the code
+    CRITERIA breakdown marked one or more stated acceptance criteria `[NOT MET]`
+    (or `[DEFERRED]`, which cannot be honoured on this run because post-merge
+    deferral is unavailable: it is disabled, or CI is not green on the reviewed
+    head). An APPROVE that admits an unmet criterion is a contradiction — "the code
     looks fine" is not "the task is done". This is exactly the failure this gate
     exists to catch: shipping work that does not satisfy the task as stated.
 

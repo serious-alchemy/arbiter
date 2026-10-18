@@ -49,7 +49,6 @@ defmodule Arbiter.Worker.CoordinatorOnlyFindings do
   # CI evidence is missing, or the verdict was not an APPROVE, and a
   # `[NEEDS-COORDINATOR-PREMERGE]` line always does. Either way no implementer
   # round can close the gap, so it parks instead of burning a revise round.
-  @park_tags [@tag, "[DEFERRED]", "[NEEDS-COORDINATOR-PREMERGE]"]
   @marker "ReviewGate: every unmet criterion needs coordinator/operator action, not an implementer round"
 
   # A `[NOT MET]` CRITERIA line, same shape as
@@ -57,6 +56,16 @@ defmodule Arbiter.Worker.CoordinatorOnlyFindings do
   # this module's detection rule can't drift by way of an unrelated edit to
   # that module's regex.
   @not_met_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*NOT\s+MET\s*\]/im
+
+  # #958: a standalone `- [DEFERRED] ...` line is the same coordinator-only gap
+  # when the deferral is unavailable (opted out, CI not green on the reviewed
+  # head), so it is a candidate line and parks via `@tagged_line`.
+  @standalone_deferred_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*DEFERRED\s*\]/im
+
+  # Candidate lines are criteria lines only; one is coordinator-blocked when a
+  # park/deferral tag appears anywhere on it (fail closed). The same tags in
+  # prose or a findings paragraph never count.
+  @tagged_line ~r/\[NEEDS-COORDINATOR(?:-PREMERGE)?\]|\[DEFERRED\]/i
 
   @doc "The tag a reviewer puts on a `[NOT MET]` criterion needing coordinator/operator action."
   @spec tag() :: String.t()
@@ -75,18 +84,31 @@ defmodule Arbiter.Worker.CoordinatorOnlyFindings do
   line, where EVERY `[NOT MET]` line carries `tag/0`. A round with no `[NOT
   MET]` lines at all is not this case (there is no rejection to route), and one
   untagged `[NOT MET]` line means an implementer round is still warranted.
+
+  Pass `standalone_deferred: true` (only for the APPROVE path's unmet-criteria
+  guard reject) to count a standalone `- [DEFERRED]` line as a coordinator-blocked
+  criterion too; on a genuine REQUEST_CHANGES it is not a reason to skip the
+  implementer's fix round. A tag counts anywhere on a criteria line, but not in
+  prose or a findings paragraph.
   """
-  @spec only_coordinator_blocked_unmet?(String.t() | nil) :: boolean()
-  def only_coordinator_blocked_unmet?(findings) when is_binary(findings) do
+  @spec only_coordinator_blocked_unmet?(String.t() | nil, keyword()) :: boolean()
+  def only_coordinator_blocked_unmet?(findings, opts \\ [])
+
+  def only_coordinator_blocked_unmet?(findings, opts) when is_binary(findings) do
+    standalone? = Keyword.get(opts, :standalone_deferred, false)
+
     unmet_lines =
       findings
       |> String.split("\n")
-      |> Enum.filter(&Regex.match?(@not_met_line, &1))
+      |> Enum.filter(
+        &(Regex.match?(@not_met_line, &1) or
+            (standalone? and Regex.match?(@standalone_deferred_line, &1)))
+      )
 
-    unmet_lines != [] and Enum.all?(unmet_lines, &String.contains?(&1, @park_tags))
+    unmet_lines != [] and Enum.all?(unmet_lines, &Regex.match?(@tagged_line, &1))
   end
 
-  def only_coordinator_blocked_unmet?(_), do: false
+  def only_coordinator_blocked_unmet?(_, _), do: false
 
   @doc """
   Whether a rejection's findings call for the coordinator rather than a fix

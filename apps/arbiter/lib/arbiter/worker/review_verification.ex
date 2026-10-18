@@ -180,7 +180,7 @@ defmodule Arbiter.Worker.ReviewVerification do
         - [MET] <criterion> — <specific evidence: the file:line / test that satisfies it>
         - [NOT MET] <criterion> — <what is missing or wrong>
         - [N/A] <criterion> — <why it does not apply>
-        - [DEFERRED] <criterion> — <why it cannot be checked pre-merge>
+        #{Arbiter.Worker.DeferredCriteria.example_line()}
 
     Rules — this is the verdict payload, not a formality:
     - One line per criterion; use exactly one of `[MET]`, `[NOT MET]`, `[N/A]`, `[DEFERRED]`.

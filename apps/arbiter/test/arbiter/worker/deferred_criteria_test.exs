@@ -10,6 +10,63 @@ defmodule Arbiter.Worker.DeferredCriteriaTest do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.DeferredCriteria
 
+  describe "classify/1 with the standalone prompt-documented form (#958)" do
+    test "the exact format the reviewer prompt documents defers" do
+      example =
+        DeferredCriteria.example_line("AC3: dashboard shows the metric", "only after deploy")
+
+      findings = """
+      VERDICT: APPROVE
+      CRITERIA:
+      - [MET] AC1: done
+      - [N/A] AC2: n/a
+      #{example}
+      """
+
+      assert {:defer, [text]} = DeferredCriteria.classify(findings)
+      assert text =~ "AC3: dashboard shows the metric"
+      refute text =~ "[DEFERRED]"
+    end
+
+    test "standalone and legacy forms mix" do
+      findings = """
+      - [MET] AC1
+      - [DEFERRED] AC2 — later
+      - [NOT MET] [DEFERRED] AC3 — later still
+      """
+
+      assert {:defer, [_, _]} = DeferredCriteria.classify(findings)
+    end
+
+    test "a standalone [DEFERRED] still parks with a pre-merge tag, bare tag, PARTIAL or other unmet" do
+      base = "- [MET] AC1\n- [DEFERRED] AC2 — later\n"
+
+      for extra <- [
+            "- [NOT MET] [NEEDS-COORDINATOR-PREMERGE] AC3\n",
+            "- [NOT MET] [NEEDS-COORDINATOR] AC3\n",
+            "- [NOT MET] AC3 — broken\n",
+            "VERIFICATION: PARTIAL — could not build\n"
+          ] do
+        assert DeferredCriteria.classify(base <> extra) == :park
+      end
+    end
+
+    test "deferred_present?/1 detects standalone lines only" do
+      assert DeferredCriteria.deferred_present?("- [DEFERRED] x")
+      refute DeferredCriteria.deferred_present?("- [NOT MET] [DEFERRED] x")
+      refute DeferredCriteria.deferred_present?("- [MET] x")
+    end
+
+    test "the prompt block's example is parsed by the classifier" do
+      line =
+        DeferredCriteria.prompt_block()
+        |> String.split("\n")
+        |> Enum.find(&String.contains?(&1, "- [DEFERRED]"))
+
+      assert {:defer, [_]} = DeferredCriteria.classify(line)
+    end
+  end
+
   describe "classify/1" do
     test "defers when the only NOT MET lines are tagged [DEFERRED] and the rest are MET/N/A" do
       findings = """
@@ -61,15 +118,50 @@ defmodule Arbiter.Worker.DeferredCriteriaTest do
       assert DeferredCriteria.classify(findings) == :park
     end
 
-    test "parks when the pre-merge tag appears anywhere in the findings" do
+    test "a pre-merge tag mentioned only in prose or backticks does not park (#958)" do
       findings = """
       VERDICT: APPROVE
       CRITERIA:
       - [NOT MET] [DEFERRED] AC3: only after deploy
-      Note: [NEEDS-COORDINATOR-PREMERGE] the runner must exist before merge.
+      Note: `[NEEDS-COORDINATOR-PREMERGE]` and `[NEEDS-COORDINATOR]` are for other cases.
+      """
+
+      assert {:defer, ["AC3: only after deploy"]} = DeferredCriteria.classify(findings)
+    end
+
+    test "parks when a criterion line carries the pre-merge tag in the outcome position" do
+      findings = """
+      VERDICT: APPROVE
+      CRITERIA:
+      - [NOT MET] [DEFERRED] AC3: only after deploy
+      - [NOT MET] [NEEDS-COORDINATOR-PREMERGE] AC4: the runner must exist before merge
       """
 
       assert DeferredCriteria.classify(findings) == :park
+    end
+
+    test "parks when a park tag appears anywhere on any criteria line (#958)" do
+      for line <- [
+            "- [DEFERRED] [NEEDS-COORDINATOR-PREMERGE] x",
+            "- [NOT MET] [DEFERRED] [NEEDS-COORDINATOR-PREMERGE] x",
+            "- [DEFERRED] x — needs [NEEDS-COORDINATOR] later",
+            "- [NOT MET] [DEFERRED] x — see [NEEDS-COORDINATOR]"
+          ] do
+        findings = "VERDICT: APPROVE\nCRITERIA:\n- [DEFERRED] AC1: ok\n#{line}\n"
+        assert DeferredCriteria.classify(findings) == :park, line
+      end
+    end
+
+    test "a findings paragraph quoting a park tag with clean criteria does not park (#958)" do
+      findings = """
+      VERDICT: APPROVE
+      CRITERIA:
+      - [MET] AC1: done
+      - [DEFERRED] AC2: only after deploy
+      The prior round used "`[NEEDS-COORDINATOR]`" wrongly; it is not needed here.
+      """
+
+      assert {:defer, ["AC2: only after deploy"]} = DeferredCriteria.classify(findings)
     end
 
     test "parks when the deferred tag is not directly after the outcome bracket" do
