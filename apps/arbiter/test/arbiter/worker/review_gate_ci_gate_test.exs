@@ -1077,6 +1077,17 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       refute issue.verify_after_deploy
     end
 
+    test "a standalone [DEFERRED] with a bare [NEEDS-COORDINATOR] still parks (#958)", ctx do
+      findings =
+        @standalone_deferred <>
+          "- [NOT MET] [NEEDS-COORDINATOR] The operator rotates a credential\n"
+
+      {rig, issue} = deferral_gate(ctx, "feature/defer-sa-4", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+    end
+
     # The branch's content lands on main by another route and main is merged
     # back in, so HEAD moves but nets to nothing (G20).
     defp absorb_into_main(ctx, rig) do

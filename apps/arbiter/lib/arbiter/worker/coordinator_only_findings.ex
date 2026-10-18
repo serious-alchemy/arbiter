@@ -58,6 +58,11 @@ defmodule Arbiter.Worker.CoordinatorOnlyFindings do
   # that module's regex.
   @not_met_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*NOT\s+MET\s*\]/im
 
+  # #958: a standalone `- [DEFERRED] ...` line is the same coordinator-only gap
+  # when the deferral is unavailable (opted out, CI not green on the reviewed
+  # head), so it is a candidate line and parks via `@park_tags`.
+  @standalone_deferred_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*DEFERRED\s*\]/im
+
   @doc "The tag a reviewer puts on a `[NOT MET]` criterion needing coordinator/operator action."
   @spec tag() :: String.t()
   def tag, do: @tag
@@ -81,7 +86,9 @@ defmodule Arbiter.Worker.CoordinatorOnlyFindings do
     unmet_lines =
       findings
       |> String.split("\n")
-      |> Enum.filter(&Regex.match?(@not_met_line, &1))
+      |> Enum.filter(
+        &(Regex.match?(@not_met_line, &1) or Regex.match?(@standalone_deferred_line, &1))
+      )
 
     unmet_lines != [] and Enum.all?(unmet_lines, &String.contains?(&1, @park_tags))
   end

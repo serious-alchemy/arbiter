@@ -17,7 +17,13 @@ defmodule Arbiter.Worker.ReviewVerificationStandaloneDeferredTest do
     assert ReviewVerification.criteria_counts(@findings) == {2, 0}
   end
 
-  test "CoordinatorOnlyFindings does not treat it as an unmet coordinator-blocked line" do
-    refute CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(@findings)
+  test "CoordinatorOnlyFindings treats it as coordinator-blocked (deferral unavailable)" do
+    assert CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(@findings)
+  end
+
+  test "an untagged [NOT MET] beside a standalone [DEFERRED] still goes to the implementer" do
+    refute CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(
+             @findings <> "- [NOT MET] AC3: missing code\n"
+           )
   end
 end

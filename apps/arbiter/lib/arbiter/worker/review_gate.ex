@@ -8262,8 +8262,10 @@ defmodule Arbiter.Worker.ReviewGate do
   def verdict_reprompt_prompt(state, :unmet_criteria) do
     """
     A prior review pass of this diff returned `VERDICT: APPROVE`, but its own
-    CRITERIA breakdown marked one or more stated acceptance criteria `[NOT MET]`.
-    An APPROVE that admits an unmet criterion is a contradiction — "the code
+    CRITERIA breakdown marked one or more stated acceptance criteria `[NOT MET]`
+    (or `[DEFERRED]`, which cannot be honoured on this run because post-merge
+    deferral is unavailable: it is disabled, or CI is not green on the reviewed
+    head). An APPROVE that admits an unmet criterion is a contradiction — "the code
     looks fine" is not "the task is done". This is exactly the failure this gate
     exists to catch: shipping work that does not satisfy the task as stated.
 
