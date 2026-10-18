@@ -3492,20 +3492,8 @@ defmodule Arbiter.Worker.ReviewGate do
       ReviewFindings.gap?(gap) ->
         run_verdict_guard(:unaddressed_findings, state, findings, gap)
 
-      # bd-49r9ns: every unmet criterion is a reviewer-tagged `[DEFERRED]`
-      # post-merge one, the rest are MET, and CI is green on the reviewed head.
-      # The deferral is recorded on the ticket first; if that write fails the
-      # approval is NOT honored and the unmet-criteria guard runs as before.
-      has_acceptance_criteria?(state) and match?({:defer, _}, deferral(state, findings)) ->
-        {:defer, criteria} = deferral(state, findings)
-
-        case record_deferred_criteria(state, criteria) do
-          :ok -> finalize_approval(state, verdict, findings)
-          {:error, _} -> run_verdict_guard(:unmet_criteria, state, findings)
-        end
-
       has_acceptance_criteria?(state) and ReviewVerification.unmet_criteria?(findings) ->
-        run_verdict_guard(:unmet_criteria, state, findings)
+        unmet_or_deferred(state, verdict, findings)
 
       has_acceptance_criteria?(state) and not ReviewVerification.criteria_present?(findings) ->
         run_verdict_guard(:missing_criteria, state, findings)
@@ -3559,6 +3547,20 @@ defmodule Arbiter.Worker.ReviewGate do
   # the guard is fully live there.
   defp finalize_approval(state, verdict, findings) do
     {:done, finalize_approval_state(state, verdict, findings)}
+  end
+
+  # bd-49r9ns: an APPROVE that admits `[NOT MET]` criteria. When every one is a
+  # reviewer-tagged `[DEFERRED]` post-merge criterion, the rest are MET and CI
+  # is green on the reviewed head, the deferral is recorded on the ticket and
+  # the approval stands; if that write fails the approval is NOT honored.
+  # Anything else runs the `:unmet_criteria` guard as before.
+  defp unmet_or_deferred(state, verdict, findings) do
+    with {:defer, criteria} <- deferral(state, findings),
+         :ok <- record_deferred_criteria(state, criteria) do
+      finalize_approval(state, verdict, findings)
+    else
+      _ -> run_verdict_guard(:unmet_criteria, state, findings)
+    end
   end
 
   # bd-49r9ns: whether an APPROVE whose only unmet criteria are post-merge may
