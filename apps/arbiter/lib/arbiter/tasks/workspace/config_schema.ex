@@ -341,6 +341,16 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                   merge.watchdog_max_polls falls back to a reviewer that runs the
                   tests. Default: on for a github/gitlab merge strategy, off for
                   direct. Per-repo override: review.repos.<repo>.require_ci_green.
+      max_commits_behind  non-negative integer — (bd-8slhrb) a ReviewGate gate no
+                  longer merges + pushes origin/<target> into a branch that is
+                  merely behind (that started a full CI pipeline per gate); the
+                  reviewer diffs against merge-base(HEAD, origin/<target>). The
+                  target is merged only when it is MORE than this many commits
+                  ahead of the branch (or the branch conflicts, which escalates).
+                  0 disables. Default: 100. Per-repo: review.repos.<repo>.max_commits_behind.
+      max_hours_behind  non-negative integer — merge the target once its tip is
+                  MORE than this many hours newer than the branch's fork point.
+                  0 disables. Default: 0. Per-repo: review.repos.<repo>.max_hours_behind.
 
     notes_gate  (map — the research-directive notes gate, bd-4qjl0q)
       nudge_cap   non-negative integer — send-backs a research worker gets for

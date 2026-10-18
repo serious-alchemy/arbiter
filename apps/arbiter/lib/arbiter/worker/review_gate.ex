@@ -258,6 +258,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.ReviewFindings
   alias Arbiter.Worker.ReviewPass
+  alias Arbiter.Worker.ReviewSync
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.Sandbox
@@ -1436,10 +1437,12 @@ defmodule Arbiter.Worker.ReviewGate do
       do: state |> resume_rereview_pass() |> continue_reply()
 
   def handle_continue(:spawn_reviewer, state) do
-    # bd-ased52: bring the branch up to date with its target BEFORE anything
-    # else, so the reviewer diffs against the current target tip rather than the
-    # stale base it was cut from. A branch that conflicts with the advanced
-    # target escalates instead of being reviewed stale.
+    # bd-ased52 / bd-8slhrb: check the branch against its target BEFORE anything
+    # else. The reviewer diffs against merge-base(HEAD, origin/<target>), so a
+    # merely-behind branch is reviewed as is (no merge commit, no push, no CI
+    # run); a branch that conflicts with the advanced target — or is stale past
+    # `review.max_commits_behind` / `review.max_hours_behind` — gets the merge /
+    # conflict escalation instead of being reviewed stale.
     case prepare_branch_for_review(state) do
       {:error, {:conflict, escalation}} ->
         Logger.warning(
@@ -2305,18 +2308,22 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # ---- bring the branch current with its target (bd-ased52) ---------------
 
-  # Before reviewing, bring the branch up to date with its target so the
-  # reviewer diffs against the CURRENT target tip, not the stale base it was cut
-  # from. When the target advances mid-run, an un-updated branch makes the
-  # target's unrelated commits look like the branch's own work — a phantom
-  # "out-of-scope" / "empty branch" finding that false-rejects correct work.
+  # Before reviewing, check the branch against its target (`Worktree.review_sync/3`).
+  # The reviewer diffs against merge-base(HEAD, origin/<target>) (`with_base_sha/1`),
+  # which isolates the branch's own changes however far the target has moved, so
+  # the bd-ased52 false reject (the target's unrelated commits read as the
+  # branch's work) needs no merge. bd-8slhrb: merging `origin/<target>` into every
+  # behind branch and pushing it started a full CI pipeline per gate, so:
   #
-  #   * clean update (merged / already up to date) → proceed; record the
-  #     merge-base so the reviewer diff isolates the branch's own changes.
-  #   * conflict → do NOT review a stale/conflicted branch. Return a conflict
+  #   * up to date, or behind but clean and under the staleness thresholds
+  #     (`review.max_commits_behind` / `review.max_hours_behind`, see
+  #     `Arbiter.Worker.ReviewSync`) → proceed; nothing is committed or pushed.
+  #     The one sync a merge needs happens at merge time (MergeQueue / Watchdog
+  #     `update_branch`).
+  #   * stale past a threshold → the target is merged (and pushed by `push_gate/1`).
+  #   * conflict → do NOT review a conflicted branch. Return a conflict
   #     escalation so the gate escalates for resolution (mirrors the #97
-  #     abort-on-conflict posture; the merge is aborted by update_from_target/2,
-  #     leaving the worktree clean).
+  #     abort-on-conflict posture; the worktree is left untouched).
   #   * any other git error (no origin, fetch failed) → fail open and proceed;
   #     the merge-base diff still isolates the branch's own changes.
   #
@@ -2347,7 +2354,7 @@ defmodule Arbiter.Worker.ReviewGate do
             )
         end
 
-        case Arbiter.Worker.Worktree.update_from_target(wt, target) do
+        case Arbiter.Worker.Worktree.review_sync(wt, target, review_sync_opts(state)) do
           {:ok, result} ->
             Logger.info(
               "ReviewGate: branch `#{branch}` #{result} with `#{target}` for task=#{state.task_id}"
@@ -2376,6 +2383,10 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp prepare_branch_for_review(state), do: {:ok, with_base_sha(state)}
+
+  defp review_sync_opts(state) do
+    ReviewSync.opts(load_workspace(Map.get(state, :workspace_id)), Map.get(state, :repo))
+  end
 
   defp with_base_sha(%{worktree_path: wt, target_branch: target} = state) when is_binary(wt) do
     %{state | base_sha: Arbiter.Worker.Worktree.merge_base(wt, target)}

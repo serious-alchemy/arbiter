@@ -1164,6 +1164,40 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "review pre-review sync thresholds validation (bd-8slhrb)" do
+    test "accepts non-negative integers, workspace-wide and per repo" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "rsync-ok",
+                 config: %{
+                   "review" => %{
+                     "max_commits_behind" => 50,
+                     "max_hours_behind" => "24",
+                     "repos" => %{"mesaana" => %{"max_commits_behind" => 0}}
+                   }
+                 }
+               })
+    end
+
+    test "rejects a negative or non-numeric value, naming the key" do
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "rsync-bad1",
+                 config: %{"review" => %{"max_commits_behind" => -1}}
+               })
+
+      assert Exception.message(err) =~ "review.max_commits_behind"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "rsync-bad2",
+                 config: %{"review" => %{"repos" => %{"mesaana" => %{"max_hours_behind" => "x"}}}}
+               })
+
+      assert Exception.message(err) =~ "review.repos.mesaana.max_hours_behind"
+    end
+  end
+
   describe "agent.security.sandbox egress validation (bd-5yydxh)" do
     defp security_config(sandbox, repo_sandbox \\ nil) do
       security = %{"sandbox" => sandbox}

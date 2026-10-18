@@ -1839,6 +1839,122 @@ defmodule Arbiter.Worker.Worktree do
     end
   end
 
+  @doc """
+  The pre-review sync (bd-8slhrb): fetch `origin/<target_branch>` and decide
+  whether the branch under review needs the target merged in. It does NOT merge a
+  branch that is merely behind — a pushed merge commit starts a full CI pipeline
+  per review gate, and the reviewer already isolates the branch's own changes with
+  the `merge_base/2` diff, so a stale base cannot produce the bd-ased52 phantom
+  findings. Conflicts are found with `git merge-tree` (no index, worktree or ref
+  is touched).
+
+  Options (a value of `nil` or `0` disables that trigger):
+
+    * `:max_commits_behind` — merge once the target is MORE than this many
+      commits ahead of the branch.
+    * `:max_hours_behind` — merge once the target tip is MORE than this many
+      hours newer than the branch's fork point.
+
+  Returns:
+
+    * `{:ok, :up_to_date}` — `origin/<target>` is already an ancestor of HEAD.
+    * `{:ok, :behind}` — behind, no conflict, under both thresholds: nothing was
+      committed; review against `merge_base/2`.
+    * `{:ok, :merged}` — behind past a threshold; merged via `update_from_target/2`.
+    * `{:error, {:conflict, %{files: [path], output: raw}}}` — the target would
+      conflict; the worktree is untouched.
+    * `{:error, reason}` — no origin, fetch failed, or git failed; fail open.
+  """
+  @spec review_sync(path(), String.t(), keyword()) ::
+          {:ok, :up_to_date | :behind | :merged}
+          | {:error, {:conflict, %{files: [String.t()], output: String.t()}} | error_reason()}
+  def review_sync(path, target_branch, opts \\ [])
+      when is_binary(path) and is_binary(target_branch) do
+    ref = "origin/" <> target_branch
+
+    with :ok <- ensure_origin_remote(path),
+         :ok <- fetch_origin_branch(path, target_branch),
+         :ok <- ensure_origin_ref(path, target_branch) do
+      case run_git(["merge-base", "--is-ancestor", ref, "HEAD"], cd: path) do
+        {:ok, _} -> {:ok, :up_to_date}
+        {:error, _not_ancestor} -> review_sync_behind(path, ref, opts)
+      end
+    end
+  end
+
+  defp review_sync_behind(path, ref, opts) do
+    with :ok <- check_no_conflict(path, ref) do
+      if stale?(path, ref, opts) do
+        case merge_target(path, ref) do
+          {:ok, :up_to_date} -> {:ok, :behind}
+          other -> other
+        end
+      else
+        {:ok, :behind}
+      end
+    end
+  end
+
+  # `git merge-tree --write-tree` exits 1 on a conflict and prints the tree oid,
+  # then the conflicted paths (`--name-only`). `run_git/2` (which keeps the
+  # PrivateClone guard) folds every non-zero exit into `{:error, {:git_failed,
+  # output}}`, so a conflict is told apart from a real failure (git < 2.38, no
+  # merge base) by that leading oid line; real failures fail open.
+  defp check_no_conflict(path, ref) do
+    args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", "HEAD", ref]
+
+    case run_git(args, cd: path) do
+      {:ok, _} ->
+        :ok
+
+      {:error, {:git_failed, out}} = error ->
+        case String.split(out, "\n", trim: true) do
+          [oid | [_ | _] = files] when byte_size(oid) in [40, 64] ->
+            if oid =~ ~r/\A[0-9a-f]+\z/,
+              do: conflict(files, out),
+              else: error
+
+          _ ->
+            error
+        end
+    end
+  end
+
+  defp conflict(files, out), do: {:error, {:conflict, %{files: files, output: String.trim(out)}}}
+
+  defp stale?(path, ref, opts) do
+    over_commit_threshold?(path, ref, Keyword.get(opts, :max_commits_behind)) or
+      over_hours_threshold?(path, ref, Keyword.get(opts, :max_hours_behind))
+  end
+
+  defp over_commit_threshold?(path, ref, max) when is_integer(max) and max > 0 do
+    case run_git(["rev-list", "--count", "HEAD.." <> ref], cd: path) do
+      {:ok, out} -> parse_int(out) > max
+      {:error, _} -> false
+    end
+  end
+
+  defp over_commit_threshold?(_path, _ref, _max), do: false
+
+  defp over_hours_threshold?(path, ref, max) when is_number(max) and max > 0 do
+    with {:ok, base} <- run_git(["merge-base", ref, "HEAD"], cd: path),
+         {:ok, base_ts} <- run_git(["log", "-1", "--format=%ct", String.trim(base)], cd: path),
+         {:ok, tip_ts} <- run_git(["log", "-1", "--format=%ct", ref], cd: path) do
+      (parse_int(tip_ts) - parse_int(base_ts)) / 3600 > max
+    else
+      _ -> false
+    end
+  end
+
+  defp over_hours_threshold?(_path, _ref, _max), do: false
+
+  defp parse_int(out) do
+    case Integer.parse(String.trim(out)) do
+      {n, _} -> n
+      :error -> 0
+    end
+  end
+
   # Merge `ref` (origin/<target>) into the current branch. If `ref` is already
   # an ancestor of HEAD there is nothing to do. On a conflicted merge, capture
   # the conflicting paths (while the index still holds them), abort, and report
