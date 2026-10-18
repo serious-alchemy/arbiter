@@ -3555,14 +3555,26 @@ defmodule Arbiter.Worker.ReviewGate do
   # the approval stands; if that write fails the approval is NOT honored.
   # Anything else runs the `:unmet_criteria` guard as before.
   defp unmet_or_deferred(state, verdict, findings) do
-    with {:defer, criteria} <- deferral(state, findings),
-         # An approval `finalize_approval_state/3` will park (G20) never goes
-         # ahead, so it must not leave the verify flag / notes on the ticket.
-         false <- empty_net_diff?(state),
-         :ok <- record_deferred_criteria(state, criteria) do
+    case deferral(state, findings) do
+      {:defer, criteria} ->
+        defer_and_finalize(state, verdict, findings, criteria)
+
+      _ ->
+        run_verdict_guard(:unmet_criteria, state, findings)
+    end
+  end
+
+  # An approval `finalize_approval_state/3` will park (G20) never goes ahead,
+  # so it goes straight there without leaving the verify flag / notes on the
+  # ticket.
+  defp defer_and_finalize(state, verdict, findings, criteria) do
+    if empty_net_diff?(state) do
       finalize_approval(state, verdict, findings)
     else
-      _ -> run_verdict_guard(:unmet_criteria, state, findings)
+      case record_deferred_criteria(state, criteria) do
+        :ok -> finalize_approval(state, verdict, findings)
+        _ -> run_verdict_guard(:unmet_criteria, state, findings)
+      end
     end
   end
 
