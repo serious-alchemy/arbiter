@@ -461,6 +461,10 @@ defmodule Arbiter.Quota.BudgetCalibration do
 
   # ---- reads ---------------------------------------------------------------
 
+  # SQLite caps expression depth at 1000 and Ash expands `in ^list` into a
+  # chain of ORs, so an id list is read in chunks to keep the depth constant.
+  @id_chunk 200
+
   defp read_snapshots(since, until) do
     QuotaSnapshot
     |> Ash.Query.filter(captured_at >= ^since and captured_at <= ^until)
@@ -471,9 +475,11 @@ defmodule Arbiter.Quota.BudgetCalibration do
   defp read_accounts([]), do: %{}
 
   defp read_accounts(ids) do
-    ProviderAccount
-    |> Ash.Query.filter(id in ^ids)
-    |> Ash.read!()
+    ids
+    |> Enum.chunk_every(@id_chunk)
+    |> Enum.flat_map(fn chunk ->
+      ProviderAccount |> Ash.Query.filter(id in ^chunk) |> Ash.read!()
+    end)
     |> Map.new(&{&1.id, &1})
   end
 
@@ -481,13 +487,17 @@ defmodule Arbiter.Quota.BudgetCalibration do
   defp read_runs([], _since, _until), do: %{}
 
   defp read_runs(account_ids, since, until) do
-    Run
-    |> Ash.Query.filter(
-      provider_account_id in ^account_ids and started_at <= ^until and
-        (is_nil(completed_at) or completed_at >= ^since)
-    )
-    |> Ash.Query.select([:provider_account_id, :provider, :model, :started_at, :completed_at])
-    |> Ash.read!()
+    account_ids
+    |> Enum.chunk_every(@id_chunk)
+    |> Enum.flat_map(fn chunk ->
+      Run
+      |> Ash.Query.filter(
+        provider_account_id in ^chunk and started_at <= ^until and
+          (is_nil(completed_at) or completed_at >= ^since)
+      )
+      |> Ash.Query.select([:provider_account_id, :provider, :model, :started_at, :completed_at])
+      |> Ash.read!()
+    end)
     |> Enum.group_by(& &1.provider_account_id)
   end
 
@@ -508,11 +518,16 @@ defmodule Arbiter.Quota.BudgetCalibration do
   defp ticket_pools([]), do: %{}
 
   defp ticket_pools(ticket_ids) do
-    Run
-    |> Ash.Query.filter(task_id in ^ticket_ids and kind == :implement)
-    |> Ash.Query.select([:task_id, :provider, :model, :started_at])
-    |> Ash.Query.sort(started_at: :asc)
-    |> Ash.read!()
+    ticket_ids
+    |> Enum.chunk_every(@id_chunk)
+    |> Enum.flat_map(fn chunk ->
+      Run
+      |> Ash.Query.filter(task_id in ^chunk and kind == :implement)
+      |> Ash.Query.select([:task_id, :provider, :model, :started_at])
+      |> Ash.Query.sort(started_at: :asc)
+      |> Ash.read!()
+    end)
+    # A ticket's runs all land in one chunk, so each chunk's ordering is its order.
     |> Enum.reduce(%{}, fn run, acc ->
       case run_pool(run) do
         pool when is_binary(pool) -> Map.put_new(acc, run.task_id, pool)
