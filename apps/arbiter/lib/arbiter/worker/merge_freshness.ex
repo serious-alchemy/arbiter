@@ -85,25 +85,19 @@ defmodule Arbiter.Worker.MergeFreshness do
           :fresh | {:stale, pos_integer()} | {:unknown, term()}
   def check(workspace, repo_path, base, head) do
     cond do
-      not required?(workspace) ->
-        :fresh
-
-      not (is_binary(base) and base != "" and is_binary(head) and head != "") ->
-        {:unknown, :no_base_or_head}
-
-      true ->
-        case behind_by(repo_path, base, head) do
-          {:ok, n} when n > 0 ->
-            if n > tolerance(workspace), do: {:stale, n}, else: :fresh
-
-          {:ok, _} ->
-            :fresh
-
-          {:error, reason} ->
-            {:unknown, reason}
-        end
+      not required?(workspace) -> :fresh
+      not (present?(base) and present?(head)) -> {:unknown, :no_base_or_head}
+      true -> classify(workspace, behind_by(repo_path, base, head))
     end
   end
+
+  defp classify(workspace, {:ok, n}) when n > 0,
+    do: if(n > tolerance(workspace), do: {:stale, n}, else: :fresh)
+
+  defp classify(_workspace, {:ok, _}), do: :fresh
+  defp classify(_workspace, {:error, reason}), do: {:unknown, reason}
+
+  defp present?(value), do: is_binary(value) and value != ""
 
   defp merge_setting(%{config: %{} = config}, key), do: get_in(config, ["merge", key])
   defp merge_setting(_workspace, _key), do: nil

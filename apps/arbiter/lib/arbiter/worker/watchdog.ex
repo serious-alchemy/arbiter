@@ -306,7 +306,6 @@ defmodule Arbiter.Worker.Watchdog do
 
   alias Arbiter.Mergers
   alias Arbiter.Mergers.LocalCompare
-  alias Arbiter.Worker.MergeFreshness
   alias Arbiter.Mergers.PendingMerge
   alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.Reviews.ConflictReview
@@ -315,6 +314,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Tasks.PullRequest
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
+  alias Arbiter.Worker.MergeFreshness
   alias Arbiter.Worker.Registry, as: PRegistry
   alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.VisualBaselines

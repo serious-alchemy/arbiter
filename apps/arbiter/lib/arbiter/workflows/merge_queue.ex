@@ -2025,6 +2025,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp try_merge(state, item) do
     state = for_item(state, item)
 

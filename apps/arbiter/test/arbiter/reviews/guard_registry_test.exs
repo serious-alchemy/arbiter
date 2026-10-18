@@ -38,6 +38,10 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.Watchdog, :dispatch_ci_fix_pass, 4,
      "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
        "until the operator lifts the pause — an operator safety stop, not a guard"},
+    {Arbiter.Worker.Watchdog, :freshness_sync_now, 2,
+     "bd-5z9yvb: a merge-time freshness sync (update-branch) the forge rejected pages the " <>
+       "coordinator once per head as a :conflict and stays parked on that head — nothing is " <>
+       "refused or failed; the sync is capped at @max_freshness_syncs"},
     {Arbiter.Worker.Watchdog, :park_ci_cancelled, 1,
      "#360: cancelled CI checks still cancelled after the re-run cap park the watcher and page " <>
        "the coordinator once as CI infrastructure — nothing is refused, no fix round is dispatched"},
