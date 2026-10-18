@@ -1343,11 +1343,14 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     end
   end
 
-  # bd-cut6uv: only `require_ci_green` is checked here; the rest of the `review`
+  # bd-cut6uv: `require_ci_green` (and, bd-8slhrb, the pre-review sync
+  # thresholds `max_commits_behind` / `max_hours_behind`) are checked here; the rest of the `review`
   # block (`required`, `rounds`) has always been read leniently.
   defp validate_review(changeset, %{} = review) do
     changeset
     |> validate_boolean_setting(review, "require_ci_green", "review.require_ci_green")
+    |> validate_non_negative_int(review, "max_commits_behind", "review.max_commits_behind")
+    |> validate_non_negative_int(review, "max_hours_behind", "review.max_hours_behind")
     |> validate_review_repos(Map.get(review, "repos"))
   end
 
@@ -1361,6 +1364,16 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           entry,
           "require_ci_green",
           "review.repos.#{repo}.require_ci_green"
+        )
+        |> validate_non_negative_int(
+          entry,
+          "max_commits_behind",
+          "review.repos.#{repo}.max_commits_behind"
+        )
+        |> validate_non_negative_int(
+          entry,
+          "max_hours_behind",
+          "review.repos.#{repo}.max_hours_behind"
         )
 
       {repo, _other}, acc ->

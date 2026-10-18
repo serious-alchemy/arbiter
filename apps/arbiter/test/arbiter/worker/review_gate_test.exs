@@ -5508,6 +5508,97 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert round.verdict == :request_changes
       assert round.findings =~ "conflicts with its target"
     end
+
+    # bd-8slhrb: a branch that is merely BEHIND (no conflict) must be reviewed
+    # as is — no merge commit, HEAD unchanged — and still reach the reviewer, who
+    # diffs against the merge-base so the target's file is not the branch's work.
+    test "a merely-behind branch is not merged: the reviewer runs on the unchanged HEAD",
+         %{repo: repo, ws: ws} do
+      remote = Path.join(Path.dirname(repo), "remote-behind.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = git(["remote", "set-url", "origin", remote], repo)
+      {_, 0} = git(["push", "-q", "origin", "main"], repo)
+
+      task = new_task(ws)
+      branch = "feature/behind"
+      sub_wt = Path.join(Path.dirname(repo), "behind-wt")
+
+      on_exit(fn ->
+        _ = System.cmd("git", ["-C", repo, "worktree", "remove", "--force", sub_wt])
+        File.rm_rf!(sub_wt)
+        File.rm_rf!(remote)
+      end)
+
+      {_, 0} =
+        System.cmd("git", ["-C", repo, "worktree", "add", sub_wt, "-b", branch, "origin/main"],
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(sub_wt, "branch.txt"), "branch work\n")
+      {_, 0} = git(["add", "branch.txt"], sub_wt)
+      {_, 0} = git(["commit", "-q", "-m", "branch work"], sub_wt)
+      {head_before, 0} = git(["rev-parse", "HEAD"], sub_wt)
+
+      # The target advances mid-run with an UNRELATED file → behind, no conflict.
+      File.write!(Path.join(repo, "fleet.txt"), "fleet work\n")
+      {_, 0} = git(["add", "fleet.txt"], repo)
+      {_, 0} = git(["commit", "-q", "-m", "fleet work"], repo)
+      {_, 0} = git(["push", "-q", "origin", "main"], repo)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_spawn: false
+      }
+
+      {:ok, author} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
+      :ok = Worker.advance(author, :claude)
+      send(author, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
+      end)
+
+      {:ok, _gate} =
+        ReviewGate.start(
+          author: author,
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "trib/repo",
+          worktree_path: sub_wt,
+          branch: branch,
+          target_branch: "main",
+          command: [@reviewer, "APPROVE"],
+          timeout_ms: 5_000
+        )
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+
+      wait_until(
+        fn ->
+          Enum.any?(Ash.read!(Arbiter.Workers.Run), &(&1.task_id == review_id))
+        end,
+        6_000
+      )
+
+      # No merge was committed on the branch and HEAD is where the author left it.
+      {head_after, 0} = git(["rev-parse", "HEAD"], sub_wt)
+      assert head_after == head_before
+      {merges, 0} = git(["rev-list", "--merges", "--count", branch], repo)
+      assert String.trim(merges) == "0"
+      refute File.exists?(Path.join(sub_wt, "fleet.txt"))
+
+      # ...and the merge-base diff still isolates the branch's own change.
+      base = Arbiter.Worker.Worktree.merge_base(sub_wt, "main")
+      {diff, 0} = git(["diff", "--name-only", "#{base}..HEAD"], sub_wt)
+      assert String.split(diff, "\n", trim: true) == ["branch.txt"]
+    end
   end
 
   describe "review_prompt/1 HEAD-SHA anchoring (bd-1mksks)" do

@@ -1662,6 +1662,77 @@ end
     end
   end
 
+  # bd-8slhrb: the pre-review sync must not commit a merge when the branch is
+  # merely behind; it merges only on staleness, and reports conflicts untouched.
+  describe "review_sync/3" do
+    defp head_of(path) do
+      {out, 0} = System.cmd("git", ["-C", path, "rev-parse", "HEAD"])
+      String.trim(out)
+    end
+
+    test "up to date when the target has not advanced", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/rs-noop", "main")
+      :ok = commit(wt, "a.txt", "branch work\n", "branch a")
+
+      assert {:ok, :up_to_date} = Worktree.review_sync(wt, "main", [])
+    end
+
+    test "a merely-behind clean branch is NOT merged: no commit, HEAD unchanged, diff isolated",
+         %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/rs-behind", "main")
+      :ok = commit(wt, "a.txt", "branch work\n", "branch a")
+      head = head_of(wt)
+      :ok = advance_origin_main(repo, "b.txt", "fleet work\n", "main b")
+
+      assert {:ok, :behind} = Worktree.review_sync(wt, "main", [])
+
+      assert head_of(wt) == head, "no merge commit may be created"
+      assert {:ok, false} = Worktree.has_uncommitted?(wt)
+      refute File.exists?(Path.join(wt, "b.txt"))
+
+      base = Worktree.merge_base(wt, "main")
+      files = changed_files(wt, "#{base}..HEAD")
+      assert "a.txt" in files
+      refute "b.txt" in files
+    end
+
+    test "a conflicting target advance still reports the conflict and leaves the tree clean",
+         %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/rs-conflict", "main")
+      :ok = commit(wt, "README.md", "branch version\n", "branch readme")
+      head = head_of(wt)
+      :ok = advance_origin_main(repo, "README.md", "fleet version\n", "main readme")
+
+      assert {:error, {:conflict, %{files: files}}} = Worktree.review_sync(wt, "main", [])
+      assert "README.md" in files
+      assert head_of(wt) == head
+      assert {:ok, false} = Worktree.has_uncommitted?(wt)
+    end
+
+    test "merges once the branch is more than max_commits_behind commits behind",
+         %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/rs-stale", "main")
+      :ok = commit(wt, "a.txt", "branch work\n", "branch a")
+      :ok = advance_origin_main(repo, "b.txt", "one\n", "main b")
+      :ok = advance_origin_main(repo, "c.txt", "two\n", "main c")
+
+      # Two behind with a threshold of two → not yet stale.
+      assert {:ok, :behind} = Worktree.review_sync(wt, "main", max_commits_behind: 2)
+      # Threshold one → stale: merged.
+      assert {:ok, :merged} = Worktree.review_sync(wt, "main", max_commits_behind: 1)
+      assert File.exists?(Path.join(wt, "c.txt"))
+    end
+
+    test "a zero threshold disables the staleness merge", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/rs-zero", "main")
+      :ok = commit(wt, "a.txt", "branch work\n", "branch a")
+      :ok = advance_origin_main(repo, "b.txt", "one\n", "main b")
+
+      assert {:ok, :behind} =
+               Worktree.review_sync(wt, "main", max_commits_behind: 0, max_hours_behind: 0)
+    end
+  end
+
   # bd-9q966y: belt-and-suspenders commit gate check for injected agent-config files.
   describe "has_injected_config_in_commits?/2" do
     test "returns false when no injected config files are in the diff", %{repo: repo} do
