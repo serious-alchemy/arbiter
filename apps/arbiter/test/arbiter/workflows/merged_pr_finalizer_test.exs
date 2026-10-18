@@ -470,9 +470,11 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert Ash.get!(Issue, task.id).state == :closed
     end
 
-    # bd-49r9ns AC5 (emr-cp74oe): a ticket parked `review_gate_not_converged`
-    # (active, worker finished/failed) whose PR is then merged by hand must
-    # finalize, whatever the park left on the ticket.
+    # bd-49r9ns AC5 (emr-cp74oe): characterization, NOT a reproduction. A ticket
+    # parked `review_gate_not_converged` (active, worker finished/failed) whose
+    # PR is then merged by hand finalizes today, so this passes on the merge-base
+    # too. emr-cp74oe's real failure could not be diagnosed from inside the repo
+    # (no run log for it); see the PR notes.
     for {label, vad} <- [{"plain", false}, {"verify_after_deploy", true}] do
       test "a hand-merged PR finalizes a ticket parked review_gate_not_converged (#{label})", %{
         ws: ws

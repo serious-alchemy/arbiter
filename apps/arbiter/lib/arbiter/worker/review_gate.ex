@@ -3556,6 +3556,9 @@ defmodule Arbiter.Worker.ReviewGate do
   # Anything else runs the `:unmet_criteria` guard as before.
   defp unmet_or_deferred(state, verdict, findings) do
     with {:defer, criteria} <- deferral(state, findings),
+         # An approval `finalize_approval_state/3` will park (G20) never goes
+         # ahead, so it must not leave the verify flag / notes on the ticket.
+         false <- empty_net_diff?(state),
          :ok <- record_deferred_criteria(state, criteria) do
       finalize_approval(state, verdict, findings)
     else
@@ -3627,11 +3630,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp finalize_approval_state(state, verdict, findings) do
     # bd-a22hib: a round checkout IS the branch's pushed head by construction
     # (detached, so the on-branch test would always say no) — ask it directly.
-    empty_net_diff? =
-      (is_map(Map.get(state, :review_checkout)) or worktree_on_expected_branch?(state)) and
-        match?({:ok, true}, NetDiff.local_diff_blank?(review_tree(state), diff_range(state)))
-
-    if empty_net_diff? do
+    if empty_net_diff?(state) do
       Logger.warning(
         "ReviewGate: task=#{state.task_id} APPROVE nets to an empty diff against " <>
           "the target branch (commits exist but contribute nothing); parking " <>
@@ -3646,6 +3645,11 @@ defmodule Arbiter.Worker.ReviewGate do
       record_review_coverage(state)
       finish(state, verdict)
     end
+  end
+
+  defp empty_net_diff?(state) do
+    (is_map(Map.get(state, :review_checkout)) or worktree_on_expected_branch?(state)) and
+      match?({:ok, true}, NetDiff.local_diff_blank?(review_tree(state), diff_range(state)))
   end
 
   # Mirrors `reviewer_commit_check/1`'s and `Worker.commit_gate/1`'s branch

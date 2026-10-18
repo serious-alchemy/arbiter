@@ -1008,9 +1008,10 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
     - [NOT MET] [DEFERRED] The dashboard shows the metric after deploy — only observable live
     """
 
-    defp deferral_gate(ctx, branch, findings, ws \\ nil) do
+    defp deferral_gate(ctx, branch, findings, ws \\ nil, prepare \\ fn _ctx, _rig -> :ok end) do
       ctx = if ws, do: Map.put(ctx, :ws, ws), else: ctx
       rig = rig(ctx, branch)
+      prepare.(ctx, rig)
       {:ok, _} = Ash.update(rig.task, %{acceptance: @acceptance})
       start_forge(ctx, rig, [:success])
 
@@ -1040,6 +1041,28 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert issue.verify_after_deploy
       assert issue.deployment_notes =~ "deferred from acceptance by ReviewGate round 1"
       assert issue.deployment_notes =~ "The dashboard shows the metric after deploy"
+    end
+
+    # The branch's content lands on main by another route and main is merged
+    # back in, so HEAD moves but nets to nothing (G20).
+    defp absorb_into_main(ctx, rig) do
+      git!(["checkout", "-q", "main"], ctx.repo)
+      File.write!(Path.join(ctx.repo, "feature.txt"), "worker work\n")
+      git!(["add", "feature.txt"], ctx.repo)
+      git!(["commit", "-q", "-m", "already squashed onto main"], ctx.repo)
+      git!(["push", "-q", "origin", "main"], ctx.repo)
+      git!(["merge", "-q", "main", "-m", "merge main"], rig.wt)
+      git!(["push", "-q", "origin", rig.branch], rig.wt)
+    end
+
+    test "an approval G20 parks for an empty net diff leaves no deferral on the ticket", ctx do
+      {rig, issue} =
+        deferral_gate(ctx, "feature/defer-g20", @deferred_only, nil, &absorb_into_main/2)
+
+      refute approved_round?(rig)
+      assert issue.attention_cause == :empty_net_diff
+      refute issue.verify_after_deploy
+      assert issue.deployment_notes in [nil, ""]
     end
 
     test "an implementer-fixable unmet criterion alongside a deferred one still parks", ctx do
