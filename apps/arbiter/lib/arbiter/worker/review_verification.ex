@@ -193,7 +193,7 @@ defmodule Arbiter.Worker.ReviewVerification do
     - If the implementer declared a limitation, deferral, or "out of scope" that
       touches a stated criterion, that criterion is `[NOT MET]` — do not launder
       a declared gap into an approval.
-    - #{AcceptanceSplit.reviewer_block() |> String.trim() |> String.replace("\n", "\n      ")}
+    - #{Arbiter.Worker.AcceptanceSplit.reviewer_block() |> String.trim() |> String.replace("\n", "\n      ")}
     - Do NOT mark a criterion `[MET]` unless you verified it against the CURRENT
       diff. An APPROVE whose breakdown contains any `[NOT MET]` line will not be
       accepted as final — mark honestly.
