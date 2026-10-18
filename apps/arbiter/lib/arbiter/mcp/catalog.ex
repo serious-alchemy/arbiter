@@ -519,7 +519,8 @@ defmodule Arbiter.MCP.Catalog do
           "The board scheduler (Autopilot) is the only dispatcher, and it promotes from " <>
           "Ready only, so a ticket filed here waits for that promotion. bd-7mbrlg: filing a `bug`/`feature`/`chore` with no " <>
           "`acceptance` returns a non-blocking `warnings` entry in the response — the ticket " <>
-          "still gets created, but `ticket_promote` will later refuse it without ACs or a waiver.",
+          "still gets created, but `ticket_promote` will later refuse it without ACs or a waiver. " <>
+          Arbiter.Worker.AcceptanceSplit.filing_rule(),
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -687,7 +688,9 @@ defmodule Arbiter.MCP.Catalog do
           "cycle — including through existing tickets — a duplicate title without `force`, " <>
           "a self-reference …) writes nothing and the error names the failing entry " <>
           "(`tickets[i]`, its ref and title). Success returns `refs` (ref → id), `tickets` " <>
-          "(index, ref, id, title, state, warnings), `edges` and `counts`. `promote: true` " <>
+          "(index, ref, id, title, state, warnings), `edges` and `counts`. " <>
+          Arbiter.Worker.AcceptanceSplit.filing_rule() <>
+          " `promote: true` " <>
           "promotes every created ticket AFTER all edges exist, in the same call, and returns " <>
           "`promote: {results, counts}` with the per-id contract of `ticket_promote` `ids` " <>
           "(a refused promote does not undo the batch). Duplicate-title refusal is per entry " <>

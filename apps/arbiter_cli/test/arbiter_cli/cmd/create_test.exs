@@ -104,6 +104,14 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert_received {:posted, %{"parent_id" => "bd-epic"}}
   end
 
+  test "--help teaches the acceptance vs deployment-notes split and --type" do
+    {out, _err, 0} = capture(fn -> Create.run(["--help"]) end)
+    assert out =~ "ACCEPTANCE vs DEPLOYMENT_NOTES"
+    assert out =~ "can only be checked after"
+    assert out =~ "OWN work type"
+    assert out =~ "`task` is research/ops only, with no diff"
+  end
+
   test "--acceptance is sent in the create payload and documented in --help" do
     parent = self()
 

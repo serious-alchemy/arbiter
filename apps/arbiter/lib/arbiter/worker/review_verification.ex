@@ -192,6 +192,11 @@ defmodule Arbiter.Worker.ReviewVerification do
     - If the implementer declared a limitation, deferral, or "out of scope" that
       touches a stated criterion, that criterion is `[NOT MET]` — do not launder
       a declared gap into an approval.
+    - An acceptance criterion that can only be checked after merge or deploy
+      (or with access the worker lacks) is NOT a reason for REQUEST_CHANGES.
+      Mark it `[DEFERRED]` (post-merge) with the reason, e.g.
+      `- [DEFERRED] <criterion> — <why it cannot be checked pre-merge>`, and
+      judge the remaining criteria on their merits.
     - Do NOT mark a criterion `[MET]` unless you verified it against the CURRENT
       diff. An APPROVE whose breakdown contains any `[NOT MET]` line will not be
       accepted as final — mark honestly.

@@ -180,6 +180,13 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            assertions, a migration — leave it alone; the flag costs a human round trip
            and is not free.
 
+           ACCEPTANCE CRITERIA YOU CANNOT VERIFY IN THE WORKTREE — if a criterion can
+           only be checked after merge/deploy or with access you lack (prod, a
+           main-branch pipeline, forge settings, operator registrations), do not fake
+           it and do not block on it. Say so in the PR body (a "Not verifiable
+           pre-merge" note naming the criterion and why) and suggest moving it to
+           `deployment_notes`. Do the rest of the task.
+
            Author the PR description and persist it on the task — the MergeQueue opens
            the PR with this exact body, so write it as the PR writeup, not a restatement
            of the ticket. Do this AFTER the work is implemented and tested, so it
@@ -188,6 +195,9 @@ defmodule Arbiter.Worker.PromptBuilderTest do
              * **Summary** — what changed and why, in a few sentences.
              * **Test plan** — the checks you ran, with checked boxes for what passed.
              * **References** — the task id (bd-golden1) and any linked ticket/PRs.
+             * **Not verifiable pre-merge** (only if applicable) — any acceptance
+               criterion you could not verify in the worktree, with the reason, and a
+               suggestion to move it to `deployment_notes`.
 
            If the repo has a PR template (`.github/pull_request_template.md`), FILL it
            rather than discard it. Persist the finished body verbatim by calling the
@@ -405,6 +415,21 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            blank, you will be reprompted to write your findings before the directive
            can close. Do NOT shell out to the `arb` CLI for the notes — use the
            `ticket_update_progress` MCP tool.
+
+           FILING CHILD TICKETS — if you file follow-up tickets (`ticket_create` /
+           `arb ticket create`):
+             * `acceptance` is only what the implementer can do and the reviewer can
+               verify from the diff, the worktree, the tests and the MR's own CI
+               (example: "test X covers Y").
+             * `deployment_notes` is what can only be checked after merge or deploy, or
+               by someone with access the worker lacks: prod or live observation, timing
+               on a main/default-branch pipeline, forge settings, operator registrations,
+               "seen working on a real failing pipeline". NEVER put those in `acceptance`
+               — ReviewGate parks a ticket whose unmet criteria need coordinator action.
+             * Set `issue_type` to the work type of the CHILD, not the parent's:
+               `chore`/`bug`/`feature` for code changes; `task` only for research with
+               no diff (a `task` worker refuses to edit code and closes with no MR).
+             * Set `difficulty`, and list `depends_on` tickets in the description.
 
            Coordination: at the start of each step, check your mailbox by running
 
