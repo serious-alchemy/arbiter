@@ -140,6 +140,30 @@ defmodule Arbiter.Worker.DeferredCriteriaTest do
       assert DeferredCriteria.classify(findings) == :park
     end
 
+    test "parks when a park tag appears anywhere on any criteria line (#958)" do
+      for line <- [
+            "- [DEFERRED] [NEEDS-COORDINATOR-PREMERGE] x",
+            "- [NOT MET] [DEFERRED] [NEEDS-COORDINATOR-PREMERGE] x",
+            "- [DEFERRED] x — needs [NEEDS-COORDINATOR] later",
+            "- [NOT MET] [DEFERRED] x — see [NEEDS-COORDINATOR]"
+          ] do
+        findings = "VERDICT: APPROVE\nCRITERIA:\n- [DEFERRED] AC1: ok\n#{line}\n"
+        assert DeferredCriteria.classify(findings) == :park, line
+      end
+    end
+
+    test "a findings paragraph quoting a park tag with clean criteria does not park (#958)" do
+      findings = """
+      VERDICT: APPROVE
+      CRITERIA:
+      - [MET] AC1: done
+      - [DEFERRED] AC2: only after deploy
+      The prior round used "`[NEEDS-COORDINATOR]`" wrongly; it is not needed here.
+      """
+
+      assert {:defer, ["AC2: only after deploy"]} = DeferredCriteria.classify(findings)
+    end
+
     test "parks when the deferred tag is not directly after the outcome bracket" do
       findings = """
       VERDICT: APPROVE

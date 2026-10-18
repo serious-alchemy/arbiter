@@ -62,9 +62,10 @@ defmodule Arbiter.Worker.CoordinatorOnlyFindings do
   # head), so it is a candidate line and parks via `@tagged_line`.
   @standalone_deferred_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*DEFERRED\s*\]/im
 
-  # A park tag in the outcome position: right after `[NOT MET]`, or the
-  # standalone `[DEFERRED]` outcome itself.
-  @tagged_line ~r/^\s*(?:[-*]|\d+[.)])\s*(?:\[\s*NOT\s+MET\s*\]\s*(?:\[NEEDS-COORDINATOR(?:-PREMERGE)?\]|\[DEFERRED\])|\[\s*DEFERRED\s*\])/i
+  # Candidate lines are criteria lines only; one is coordinator-blocked when a
+  # park/deferral tag appears anywhere on it (fail closed). The same tags in
+  # prose or a findings paragraph never count.
+  @tagged_line ~r/\[NEEDS-COORDINATOR(?:-PREMERGE)?\]|\[DEFERRED\]/i
 
   @doc "The tag a reviewer puts on a `[NOT MET]` criterion needing coordinator/operator action."
   @spec tag() :: String.t()
@@ -87,8 +88,8 @@ defmodule Arbiter.Worker.CoordinatorOnlyFindings do
   Pass `standalone_deferred: true` (only for the APPROVE path's unmet-criteria
   guard reject) to count a standalone `- [DEFERRED]` line as a coordinator-blocked
   criterion too; on a genuine REQUEST_CHANGES it is not a reason to skip the
-  implementer's fix round. A tag counts only in the outcome position of its
-  line, not when prose or the criterion text mentions it.
+  implementer's fix round. A tag counts anywhere on a criteria line, but not in
+  prose or a findings paragraph.
   """
   @spec only_coordinator_blocked_unmet?(String.t() | nil, keyword()) :: boolean()
   def only_coordinator_blocked_unmet?(findings, opts \\ [])

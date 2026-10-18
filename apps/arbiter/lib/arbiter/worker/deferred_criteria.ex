@@ -24,7 +24,7 @@ defmodule Arbiter.Worker.DeferredCriteria do
     * EVERY `[NOT MET]` line carries `tag/0` directly after the outcome
       bracket (any other `[NOT MET]` line parks);
     * no `[NEEDS-COORDINATOR-PREMERGE]` or bare `[NEEDS-COORDINATOR]` tag
-      appears anywhere in the findings (a pre-merge coordinator-only criterion
+      appears anywhere on a criteria line (a pre-merge coordinator-only criterion
       must still park, and the bare tag does not say which side of the merge it
       is on, so it stays ambiguous → parks);
     * the reviewer did not disclose a `VERIFICATION: PARTIAL` gap.
@@ -53,7 +53,10 @@ defmodule Arbiter.Worker.DeferredCriteria do
   # #958: the standalone form the reviewer prompts document (`example_line/2`):
   # `[DEFERRED]` IS the outcome bracket.
   @standalone_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*DEFERRED\s*\]\s*(?<text>.*)$/i
-  @park_tag_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*NOT\s+MET\s*\]\s*\[NEEDS-COORDINATOR(?:-PREMERGE)?\]/i
+  # A CRITERIA line: list marker + an outcome bracket. A park tag anywhere on
+  # one parks (fail closed); the same tag in prose does not.
+  @criteria_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*(?:NOT\s+MET|MET|N\/A|DEFERRED)\s*\]/i
+  @park_tag ~r/\[NEEDS-COORDINATOR(?:-PREMERGE)?\]/i
 
   @doc """
   The one canonical standalone deferred criteria line. Every reviewer prompt
@@ -107,11 +110,12 @@ defmodule Arbiter.Worker.DeferredCriteria do
 
   def classify(_), do: :park
 
-  # The park tags only count in the CRITERIA outcome position (right after the
-  # `[NOT MET]` bracket), not when review prose or a criterion's text merely
-  # mentions them.
+  # The park tags count anywhere on a CRITERIA line, but not in review prose
+  # or a findings paragraph that merely mentions them.
   defp park_tag_on_criterion?(findings) do
-    findings |> String.split("\n") |> Enum.any?(&Regex.match?(@park_tag_line, &1))
+    findings
+    |> String.split("\n")
+    |> Enum.any?(&(Regex.match?(@criteria_line, &1) and Regex.match?(@park_tag, &1)))
   end
 
   defp deferred_text(line, regex) do

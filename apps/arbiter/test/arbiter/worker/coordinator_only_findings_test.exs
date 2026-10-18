@@ -50,6 +50,50 @@ defmodule Arbiter.Worker.CoordinatorOnlyFindingsTest do
       assert CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings)
     end
 
+    test "a tag anywhere on a criteria line counts (#958)" do
+      findings = """
+      - [NOT MET] AC3: needs deploy [NEEDS-COORDINATOR]
+      - [NOT MET] [DEFERRED] [NEEDS-COORDINATOR-PREMERGE] AC4: x
+      """
+
+      assert CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings)
+    end
+
+    test "tags only in prose/backticks do not make an untagged NOT MET coordinator-blocked (#958)" do
+      findings = """
+      VERDICT: REQUEST_CHANGES
+      CRITERIA:
+      - [NOT MET] AC1: the guard clause is missing
+      Reviewer note: `[NEEDS-COORDINATOR]` and `[DEFERRED]` are not applicable here.
+      """
+
+      refute CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings)
+
+      refute CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings,
+               standalone_deferred: true
+             )
+    end
+
+    test "standalone [DEFERRED] counts only with standalone_deferred: true (#958)" do
+      findings = """
+      VERDICT: REQUEST_CHANGES
+      CRITERIA:
+      - [NOT MET] AC1: the guard clause is missing
+      - [DEFERRED] AC2: observe after deploy
+      """
+
+      refute CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(findings,
+               standalone_deferred: true
+             )
+
+      only_deferred = "CRITERIA:\n- [DEFERRED] AC2: observe after deploy\n"
+      refute CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(only_deferred)
+
+      assert CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(only_deferred,
+               standalone_deferred: true
+             )
+    end
+
     test "false for nil/non-binary input" do
       refute CoordinatorOnlyFindings.only_coordinator_blocked_unmet?(nil)
     end
