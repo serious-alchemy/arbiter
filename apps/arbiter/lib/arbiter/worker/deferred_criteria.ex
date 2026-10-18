@@ -46,7 +46,6 @@ defmodule Arbiter.Worker.DeferredCriteria do
 
   @tag "[DEFERRED]"
   @premerge_tag "[NEEDS-COORDINATOR-PREMERGE]"
-  @ambiguous_tag "[NEEDS-COORDINATOR]"
   @setting "defer_post_merge_criteria"
 
   @not_met_line ~r/^\s*(?:[-*]|\d+[.)])\s*\[\s*NOT\s+MET\s*\]/im
