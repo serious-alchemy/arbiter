@@ -105,6 +105,47 @@ defmodule Arbiter.Workers.ReconcilerTicketWatchdogTest do
     assert Watchdog.alive?(ticket.id)
   end
 
+  # bd-7s6y2j: a conflict or fix pass live at shutdown on a ticket that stayed
+  # Merging must show up in the sweep's result and log, not vanish into "watched".
+  for kind <- [:conflict, :fix_pass] do
+    test "a Merging ticket's cut-off #{kind} run is listed as re-queued through its Watchdog",
+         %{ws: ws} do
+      ticket = merging_ticket(ws, "!rp")
+
+      {:ok, _run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ticket.id,
+          repo: "rt/repo",
+          workspace_id: ws.id,
+          kind: unquote(kind),
+          state: :finished,
+          outcome: :interrupted,
+          failure_reason: "server shutdown",
+          started_at: DateTime.utc_now()
+        })
+
+      Logger.put_module_level(Reconciler, :info)
+      on_exit(fn -> Logger.delete_module_level(Reconciler) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :info], fn ->
+          assert {:ok, %{watched: 1, escalated: 0, passes: [pass]}} =
+                   Reconciler.reconcile_open_pr_tasks()
+
+          assert pass == %{task_id: ticket.id, kind: unquote(kind), outcome: :watched}
+        end)
+
+      assert log =~ "cut-off pass"
+      assert log =~ ticket.id
+      assert Watchdog.alive?(ticket.id)
+    end
+  end
+
+  test "a Merging ticket whose last run finished normally lists no cut-off pass", %{ws: ws} do
+    _ = merging_ticket(ws, "!rq")
+    assert {:ok, %{watched: 1, passes: []}} = Reconciler.reconcile_open_pr_tasks()
+  end
+
   # bd-741sid, review round 1 (finding 4): a reboot does not undo an
   # operator's pull out of the merge queue.
   test "leaves a Merging ticket pulled out of the merge queue unwatched, paging no one",

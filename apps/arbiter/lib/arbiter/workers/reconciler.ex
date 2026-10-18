@@ -341,17 +341,27 @@ defmodule Arbiter.Workers.Reconciler do
       |> Enum.reject(&watched?/1)
 
     counts =
-      Enum.reduce(stuck, %{watched: 0, rewatched: 0, escalated: 0}, fn issue, counts ->
+      Enum.reduce(stuck, %{watched: 0, rewatched: 0, escalated: 0, passes: []}, fn issue,
+                                                                                   counts ->
+        # bd-7s6y2j: read before the sweep acts — `back_to_merging/1` and the
+        # Watchdog restart both start new work on the ticket.
+        pass_kind = cut_off_pass_kind(issue.id)
+
         case reconcile_open_pr(issue, watch_fun, rewatch_fun) do
-          :none -> counts
-          outcome -> Map.update!(counts, outcome, &(&1 + 1))
+          :none ->
+            counts
+
+          outcome ->
+            counts
+            |> Map.update!(outcome, &(&1 + 1))
+            |> note_cut_off_pass(issue.id, pass_kind, outcome)
         end
       end)
 
     if counts.watched + counts.rewatched + counts.escalated > 0 do
       Logger.info(
         "Workers.Reconciler: open-PR sweep — watched #{counts.watched}, re-watched " <>
-          "#{counts.rewatched}, escalated #{counts.escalated}"
+          "#{counts.rewatched}, escalated #{counts.escalated}" <> describe_passes(counts.passes)
       )
     end
 
@@ -920,18 +930,41 @@ defmodule Arbiter.Workers.Reconciler do
   # The ticket's latest run was a fix or conflict pass that the restart cut off
   # (the graceful-shutdown `:interrupted`, a row still live, or the orphan
   # sweep's "server restarted").
-  defp pass_cut_off?(task_id) do
+  defp pass_cut_off?(task_id), do: not is_nil(cut_off_pass_kind(task_id))
+
+  # bd-7s6y2j: the kind (`:fix_pass` / `:conflict`) of the ticket's latest run
+  # when the restart cut it off, else `nil`. A cut-off review round is the
+  # ReviewGate's (`reconcile_review_passes/1`), not listed here.
+  defp cut_off_pass_kind(task_id) do
     Run
     |> Ash.Query.filter(task_id == ^task_id)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
     |> case do
-      [%Run{kind: kind} = run] when kind in [:fix_pass, :conflict] -> cut_off?(run)
-      _ -> false
+      [%Run{kind: kind} = run] when kind in [:fix_pass, :conflict] ->
+        if cut_off?(run), do: kind
+
+      _ ->
+        nil
     end
   rescue
-    _ -> false
+    _ -> nil
+  end
+
+  # A cut-off pass is never dropped silently: `:watched` / `:rewatched` mean its
+  # Watchdog (or patrol) is back and asks for the pass again — queued for a slot
+  # if the node is full — and `:escalated` means nothing could.
+  defp note_cut_off_pass(counts, _task_id, nil, _outcome), do: counts
+
+  defp note_cut_off_pass(counts, task_id, kind, outcome),
+    do: %{counts | passes: counts.passes ++ [%{task_id: task_id, kind: kind, outcome: outcome}]}
+
+  defp describe_passes([]), do: ""
+
+  defp describe_passes(passes) do
+    "; cut-off pass(es) — " <>
+      Enum.map_join(passes, ", ", &"#{&1.task_id} (#{&1.kind}: #{&1.outcome})")
   end
 
   defp cut_off?(%Run{state: state}) when state != :finished, do: true
