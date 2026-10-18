@@ -195,8 +195,8 @@ defmodule Arbiter.Worker.ReviewVerification do
       a declared gap into an approval.
     - #{Arbiter.Worker.AcceptanceSplit.reviewer_block() |> String.trim() |> String.replace("\n", "\n      ")}
     - Do NOT mark a criterion `[MET]` unless you verified it against the CURRENT
-      diff. An APPROVE whose breakdown contains any `[NOT MET]` line will not be
-      accepted as final — mark honestly.
+      diff. An APPROVE whose breakdown contains any `[NOT MET]` line (other than
+      one tagged `[DEFERRED]`, below) will not be accepted as final — mark honestly.
     """
   end
 

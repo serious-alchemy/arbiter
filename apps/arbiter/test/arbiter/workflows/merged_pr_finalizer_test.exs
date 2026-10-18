@@ -470,6 +470,30 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert Ash.get!(Issue, task.id).state == :closed
     end
 
+    # bd-49r9ns AC5 (emr-cp74oe): characterization, NOT a reproduction. A ticket
+    # parked `review_gate_not_converged` (active, worker finished/failed) whose
+    # PR is then merged by hand finalizes today, so this passes on the merge-base
+    # too. emr-cp74oe's real failure could not be diagnosed from inside the repo
+    # (no run log for it); see the PR notes.
+    for {label, vad} <- [{"plain", false}, {"verify_after_deploy", true}] do
+      test "a hand-merged PR finalizes a ticket parked review_gate_not_converged (#{label})", %{
+        ws: ws
+      } do
+        task = create_task(ws, "710", verify_after_deploy: unquote(vad))
+        task = put_state!(task, :active)
+        register_live_worker(task.id, :finished, :failed)
+        {:ok, _} = Arbiter.Tasks.Attention.raise_cause(task.id, :review_gate_not_converged, "x")
+
+        stub(pr_get_stub(710, :merged))
+
+        {_pid, name} = start_finalizer(ws)
+        :ok = MergedPRFinalizer.tick(name)
+
+        expected = if unquote(vad), do: :verifying, else: :closed
+        assert Ash.get!(Issue, task.id).state == expected
+      end
+    end
+
     test "a worker waiting on a question still protects the task", %{ws: ws} do
       task = create_task(ws, "705")
       put_state!(task, :merging)

@@ -996,6 +996,133 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
     end
   end
 
+  # ---- bd-49r9ns: post-merge criteria deferred to deployment_notes ------------
+
+  describe "deferred post-merge criteria (bd-49r9ns)" do
+    @acceptance "1. The gate approves.\n2. The dashboard shows the metric after deploy."
+
+    @deferred_only """
+    VERDICT: APPROVE
+    CRITERIA:
+    - [MET] The gate approves — feature.txt:1
+    - [NOT MET] [DEFERRED] The dashboard shows the metric after deploy — only observable live
+    """
+
+    defp deferral_gate(ctx, branch, findings, ws \\ nil, prepare \\ fn _ctx, _rig -> :ok end) do
+      ctx = if ws, do: Map.put(ctx, :ws, ws), else: ctx
+      rig = rig(ctx, branch)
+      prepare.(ctx, rig)
+      {:ok, _} = Ash.update(rig.task, %{acceptance: @acceptance})
+      start_forge(ctx, rig, [:success])
+
+      findings_file = Path.join(ctx.tmp, "findings-#{System.unique_integer([:positive])}.md")
+      File.write!(findings_file, findings)
+      script = Path.join(ctx.tmp, "reviewer-#{System.unique_integer([:positive])}.sh")
+      File.write!(script, "#!/bin/sh\ncat '#{findings_file}'\n")
+      File.chmod!(script, 0o755)
+
+      gate = start_gate(rig, ctx, command: [script])
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+      {rig, Ash.get!(Issue, rig.task.id)}
+    end
+
+    defp approved_round?(rig) do
+      Arbiter.ReviewGate.Round
+      |> Ash.Query.filter(task_id == ^rig.task.id)
+      |> Ash.read!()
+      |> Enum.any?(&(&1.verdict == :approve and &1.converged))
+    end
+
+    test "approves, defers the criterion to deployment_notes and sets verify_after_deploy", ctx do
+      {rig, issue} = deferral_gate(ctx, "feature/defer-1", @deferred_only)
+
+      assert approved_round?(rig)
+      assert issue.verify_after_deploy
+      assert issue.deployment_notes =~ "deferred from acceptance by ReviewGate round 1"
+      assert issue.deployment_notes =~ "The dashboard shows the metric after deploy"
+    end
+
+    # The branch's content lands on main by another route and main is merged
+    # back in, so HEAD moves but nets to nothing (G20).
+    defp absorb_into_main(ctx, rig) do
+      git!(["checkout", "-q", "main"], ctx.repo)
+      File.write!(Path.join(ctx.repo, "feature.txt"), "worker work\n")
+      git!(["add", "feature.txt"], ctx.repo)
+      git!(["commit", "-q", "-m", "already squashed onto main"], ctx.repo)
+      git!(["push", "-q", "origin", "main"], ctx.repo)
+      git!(["merge", "-q", "main", "-m", "merge main"], rig.wt)
+      git!(["push", "-q", "origin", rig.branch], rig.wt)
+    end
+
+    test "an approval G20 parks for an empty net diff leaves no deferral on the ticket", ctx do
+      {rig, issue} =
+        deferral_gate(ctx, "feature/defer-g20", @deferred_only, nil, &absorb_into_main/2)
+
+      refute approved_round?(rig)
+      assert issue.attention_cause == :empty_net_diff
+      refute issue.verify_after_deploy
+      assert issue.deployment_notes in [nil, ""]
+    end
+
+    test "an implementer-fixable unmet criterion alongside a deferred one still parks", ctx do
+      findings = @deferred_only <> "- [NOT MET] The guard clause exists — it is missing\n"
+      {rig, issue} = deferral_gate(ctx, "feature/defer-2", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+      assert issue.deployment_notes in [nil, ""]
+    end
+
+    test "a coordinator-only criterion marked pre-merge still parks", ctx do
+      findings = """
+      VERDICT: APPROVE
+      CRITERIA:
+      - [MET] The gate approves — feature.txt:1
+      - [NOT MET] [NEEDS-COORDINATOR-PREMERGE] The operator registers a runner first
+      """
+
+      {rig, issue} = deferral_gate(ctx, "feature/defer-3", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+      assert issue.deployment_notes in [nil, ""]
+    end
+
+    test "an ambiguous bare [NEEDS-COORDINATOR] criterion parks", ctx do
+      findings = String.replace(@deferred_only, "[DEFERRED]", "[NEEDS-COORDINATOR]")
+      {rig, issue} = deferral_gate(ctx, "feature/defer-4", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+    end
+
+    test "review.defer_post_merge_criteria: false restores parking", ctx do
+      ws =
+        new_ws(%{
+          "review" => %{
+            "required" => true,
+            "require_ci_green" => true,
+            "defer_post_merge_criteria" => false
+          }
+        })
+
+      {rig, issue} = deferral_gate(ctx, "feature/defer-5", @deferred_only, ws)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+      assert issue.deployment_notes in [nil, ""]
+    end
+
+    test "without green CI evidence the deferral is not honored", ctx do
+      ws = new_ws(%{"review" => %{"required" => true, "require_ci_green" => false}})
+      {rig, issue} = deferral_gate(ctx, "feature/defer-6", @deferred_only, ws)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+    end
+  end
+
   # ---- AC5: off, and no CI result ------------------------------------------------
 
   describe "off, and falling back (AC5)" do

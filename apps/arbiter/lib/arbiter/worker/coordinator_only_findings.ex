@@ -44,6 +44,12 @@ defmodule Arbiter.Worker.CoordinatorOnlyFindings do
   """
 
   @tag "[NEEDS-COORDINATOR]"
+  # bd-49r9ns: `DeferredCriteria`'s tags are coordinator-only too. A
+  # `[DEFERRED]` line only reaches here when the deferral is switched off, the
+  # CI evidence is missing, or the verdict was not an APPROVE, and a
+  # `[NEEDS-COORDINATOR-PREMERGE]` line always does. Either way no implementer
+  # round can close the gap, so it parks instead of burning a revise round.
+  @park_tags [@tag, "[DEFERRED]", "[NEEDS-COORDINATOR-PREMERGE]"]
   @marker "ReviewGate: every unmet criterion needs coordinator/operator action, not an implementer round"
 
   # A `[NOT MET]` CRITERIA line, same shape as
@@ -77,7 +83,7 @@ defmodule Arbiter.Worker.CoordinatorOnlyFindings do
       |> String.split("\n")
       |> Enum.filter(&Regex.match?(@not_met_line, &1))
 
-    unmet_lines != [] and Enum.all?(unmet_lines, &String.contains?(&1, @tag))
+    unmet_lines != [] and Enum.all?(unmet_lines, &String.contains?(&1, @park_tags))
   end
 
   def only_coordinator_blocked_unmet?(_), do: false
