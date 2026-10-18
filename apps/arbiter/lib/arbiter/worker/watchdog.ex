@@ -5024,7 +5024,7 @@ defmodule Arbiter.Worker.Watchdog do
       not function_exported?(state.adapter, :update_branch, 1) ->
         merge
 
-      not (is_binary(state.mr_base_ref) and is_binary(state.last_head_sha)) ->
+      not MergeFreshness.required?(state.workspace) ->
         merge
 
       true ->
@@ -5034,24 +5034,27 @@ defmodule Arbiter.Worker.Watchdog do
                state.mr_base_ref,
                state.last_head_sha
              ) do
-          :fresh -> merge
-          {:unknown, reason} -> freshness_unknown(merge, reason)
-          {:stale, behind} -> freshness_sync(merge, behind)
+          :fresh ->
+            merge
+
+          {:stale, behind} ->
+            freshness_sync(merge, behind)
+
+          {:unknown, reason} ->
+            # Correctness-critical: "could not tell" is not "fresh". Sync anyway;
+            # `update_branch/1` is harmless on a branch that already has the tip.
+            Logger.warning(
+              "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not tell " <>
+                "whether #{inspect(state.last_head_sha)} contains #{inspect(state.mr_base_ref)} " <>
+                "(#{inspect_short(reason)}); syncing rather than merging unchecked"
+            )
+
+            freshness_sync(merge, nil)
         end
     end
   end
 
   defp freshness_gate(other), do: other
-
-  defp freshness_unknown({:merge, _sha, state} = merge, reason) do
-    Logger.warning(
-      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not tell whether " <>
-        "#{state.last_head_sha} contains #{state.mr_base_ref} (#{inspect_short(reason)}); " <>
-        "merging without the freshness sync"
-    )
-
-    merge
-  end
 
   # The synced head has not shown up yet (the forge applies update-branch
   # asynchronously): wait for it rather than syncing again, but only for a bounded
@@ -5079,26 +5082,34 @@ defmodule Arbiter.Worker.Watchdog do
        when is_binary(head),
        do: {:wait, state}
 
-  # A sync that failed on this head is not retried (no repeat page); a new head
-  # re-enables it. The forge's `conflicting` flag drives the conflict resolver.
-  defp freshness_sync(
-         {:merge, _sha, %{freshness_failed_head: head, last_head_sha: head} = state},
-         _
-       )
-       when is_binary(head),
-       do: {:wait, state}
-
   defp freshness_sync({:merge, _sha, state}, behind), do: freshness_sync_now(state, behind)
 
   defp freshness_sync_now(state, behind) do
     if state.freshness_syncs >= @max_freshness_syncs do
+      # Fail closed: a branch still not (provably) current after the bounded syncs
+      # is never merged untested. Park and page once; a new head re-enables it.
       Logger.warning(
-        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} still behind " <>
-          "#{state.mr_base_ref} after #{state.freshness_syncs} syncs (the target keeps " <>
-          "moving); merging without another sync"
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} still not current with " <>
+          "#{inspect(state.mr_base_ref)} after #{state.freshness_syncs} syncs; parking and " <>
+          "paging instead of merging a head CI never saw combined with the target"
       )
 
-      {:merge, state.last_head_sha, state}
+      safe(fn ->
+        Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+          snapshot(state),
+          state.mr_ref,
+          :behind_base
+        )
+      end)
+
+      {:wait,
+       %{
+         state
+         | last_block_reason: :behind_base,
+           freshness_failed_head: state.last_head_sha,
+           freshness_sync_head: nil,
+           freshness_wait_polls: 0
+       }}
     else
       Logger.info(
         "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head " <>

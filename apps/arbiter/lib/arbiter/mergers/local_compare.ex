@@ -171,7 +171,8 @@ defmodule Arbiter.Mergers.LocalCompare do
           {:ok, non_neg_integer()} | {:error, term()}
   def behind_by(repo_path, base, head) do
     with {:ok, repo} <- usable_repo(repo_path),
-         :ok <- refresh(repo, base, [head]),
+         :ok <- fetch_base_strict(repo, base),
+         :ok <- refresh(repo, nil, [head]),
          {:ok, base_rev} <- resolve_base(repo, base),
          {:ok, [head_rev]} <- resolve_commits(repo, [head]) do
       case run(repo, ["rev-list", "--count", "#{head_rev}..#{base_rev}"]) do
@@ -285,6 +286,22 @@ defmodule Arbiter.Mergers.LocalCompare do
     |> Enum.each(&fetch(repo, &1))
 
     :ok
+  end
+
+  # `behind_by/3` must not answer "0 behind" from a stale `origin/<base>`: unlike
+  # the diff readers, a failed base fetch here is "could not tell".
+  defp fetch_base_strict(repo, base) do
+    if ref_name?(base) do
+      case run(repo, ["fetch", "--quiet", "--no-tags", "origin", base]) do
+        {_out, 0} ->
+          :ok
+
+        {out, code} ->
+          {:error, {:fetch_failed, base, code, String.slice(String.trim(out), 0, 300)}}
+      end
+    else
+      {:error, {:bad_base, base}}
+    end
   end
 
   defp fetch(repo, ref) do

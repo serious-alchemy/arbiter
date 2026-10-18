@@ -1940,7 +1940,10 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
         conn.method == "PUT" and String.ends_with?(path, "/update-branch") ->
           send(test_pid, {:update_branch, number})
-          conn |> Plug.Conn.put_status(202) |> Req.Test.json(%{})
+
+          conn
+          |> Plug.Conn.put_status(Map.get(st, :update_status, 202))
+          |> Req.Test.json(%{"message" => "update-branch"})
 
         conn.method == "PUT" and String.ends_with?(path, "/merge") ->
           send(test_pid, {:merged, number})
@@ -2048,6 +2051,105 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       :ok = MergeQueue.tick(name)
       :ok = MergeQueue.tick(name)
       assert_received {:merged, 231}
+    end
+
+    @tag workspace_config: @ws_github
+    test "bd-5z9yvb: a freshness sync that conflicts goes to the conflict resolver", %{
+      workspace: ws
+    } do
+      Application.put_env(:arbiter, :test_resolver_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_resolver_pid) end)
+
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            232 => %{
+              reviews: "APPROVED",
+              pr: %{"mergeStateStatus" => "clean", "head" => %{"sha" => "abc1234def"}}
+            }
+          }
+        end)
+
+      Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 3} end)
+      on_exit(fn -> Application.delete_env(:arbiter, :merge_freshness_probe) end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#232", 2)
+      {_pid, name} = start_merge_queue(ws, conflict_resolver: RecordingResolver)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      :ok = MergeQueue.tick(name)
+      assert_received {:update_branch, 232}
+
+      # The sync could not apply: the forge now reports the PR conflicting.
+      Agent.update(agent, fn s ->
+        put_in(s, [232, :pr], %{"mergeable" => false, "mergeStateStatus" => "dirty"})
+      end)
+
+      :ok = MergeQueue.tick(name)
+      assert_received {:resolve_called, _}
+      refute_received {:merged, 232}
+    end
+
+    @tag workspace_config: @ws_github
+    test "bd-5z9yvb: a failing freshness sync is not retried and never merges", %{workspace: ws} do
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            233 => %{
+              reviews: "APPROVED",
+              update_status: 500,
+              pr: %{"mergeStateStatus" => "clean", "head" => %{"sha" => "abc1234def"}}
+            }
+          }
+        end)
+
+      Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 3} end)
+      on_exit(fn -> Application.delete_env(:arbiter, :merge_freshness_probe) end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#233", 2)
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      :ok = MergeQueue.tick(name)
+      assert_received {:update_branch, 233}
+
+      for _ <- 1..3, do: :ok = MergeQueue.tick(name)
+      refute_received {:update_branch, 233}
+      refute_received {:merged, 233}
+
+      assert %{items: [item]} = MergeQueue.state(name)
+      assert match?({:update_branch_failed, _}, item.last_error)
+    end
+
+    @tag workspace_config: @ws_github
+    test "bd-5z9yvb: a sync the forge never applies is capped and never merges the stale head",
+         %{workspace: ws} do
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            234 => %{
+              reviews: "APPROVED",
+              pr: %{"mergeStateStatus" => "clean", "head" => %{"sha" => "abc1234def"}}
+            }
+          }
+        end)
+
+      Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 3} end)
+      on_exit(fn -> Application.delete_env(:arbiter, :merge_freshness_probe) end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#234", 2)
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      for _ <- 1..60, do: :ok = MergeQueue.tick(name)
+
+      updates = for {:update_branch, 234} <- Process.info(self(), :messages) |> elem(1), do: 1
+      assert length(updates) == 3
+      refute_received {:merged, 234}
+      assert %{items: [_item]} = MergeQueue.state(name)
     end
 
     @tag workspace_config: @ws_github

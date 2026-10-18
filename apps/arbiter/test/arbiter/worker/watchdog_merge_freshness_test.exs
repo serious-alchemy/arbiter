@@ -160,20 +160,49 @@ defmodule Arbiter.Worker.WatchdogMergeFreshnessTest do
     assert StubMerger.merge_count("!mf2") == 0
   end
 
-  test "a sync that cannot be applied is not merged and is not retried without bound" do
+  test "a sync that fails to apply takes the :conflict path: parked, paged, not merged, not retried" do
     {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-reviewed"})
     probe(%{"sha-reviewed" => 3})
     StubMerger.set_update_branch_result({:error, :conflict})
 
     StubMerger.queue_get("!mf3", [open("sha-reviewed", %{pipeline: :success, ci_clean: true})])
 
-    start_watchdog(task, "!mf3", ws)
+    wpid = start_watchdog(task, "!mf3", ws)
 
-    wait_until(fn -> StubMerger.update_branch_count("!mf3") >= 1 end)
-    Process.sleep(150)
+    wait_until(fn -> :sys.get_state(wpid).last_block_reason == :conflict end)
 
     assert StubMerger.merge_count("!mf3") == 0
-    assert StubMerger.update_branch_count("!mf3") <= 3
+    assert StubMerger.update_branch_count("!mf3") == 1
+    assert :sys.get_state(wpid).freshness_failed_head == "sha-reviewed"
+  end
+
+  test "a sync the forge never applies is capped and fails closed: parked, never merged" do
+    {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-reviewed"})
+    probe(%{"sha-reviewed" => 3})
+
+    StubMerger.queue_get("!mf7", [open("sha-reviewed", %{pipeline: :success, ci_clean: true})])
+
+    wpid = start_watchdog(task, "!mf7", ws)
+
+    wait_until(fn -> :sys.get_state(wpid).last_block_reason == :behind_base end, 10_000)
+
+    assert StubMerger.merge_count("!mf7") == 0
+    assert StubMerger.update_branch_count("!mf7") == 3
+  end
+
+  test "when the check cannot tell, the branch is synced rather than merged unchecked" do
+    {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-reviewed"})
+
+    Application.put_env(:arbiter, :merge_freshness_probe, fn _repo, _base, _head ->
+      {:error, :no_repo_path}
+    end)
+
+    StubMerger.queue_get("!mf8", [open("sha-reviewed", %{pipeline: :success, ci_clean: true})])
+
+    start_watchdog(task, "!mf8", ws)
+
+    wait_until(fn -> StubMerger.update_branch_count("!mf8") >= 1 end)
+    assert StubMerger.merge_count("!mf8") == 0
   end
 
   test "a forge-reported :behind_base keeps the existing path: one update, no extra probe" do
