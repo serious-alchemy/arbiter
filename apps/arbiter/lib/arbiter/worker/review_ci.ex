@@ -187,6 +187,48 @@ defmodule Arbiter.Worker.ReviewCi do
     end
   end
 
+  @doc """
+  Records that `sha` failed `checks`' job set and is about to be re-run, in `sets`
+  (sha => sorted job names) and on the task's `review_gate_state`, so the ReviewGate
+  and the Watchdog share one re-run per SHA and job set. Returns the new `sets`.
+  """
+  @spec note_failed_set(String.t(), %{String.t() => [String.t()]}, String.t() | nil, [map()]) ::
+          %{String.t() => [String.t()]}
+  def note_failed_set(_task_id, sets, sha, checks) when sha in [nil, ""] or checks == [],
+    do: sets
+
+  def note_failed_set(task_id, sets, sha, checks) do
+    sets = Map.put(sets, sha, failed_job_names(checks))
+    save_failed_sets(task_id, sets)
+    sets
+  end
+
+  @doc """
+  The sha => failed job names map persisted on the task by either re-run site.
+  Best-effort: a failed read only loses the cross-gate dedupe.
+  """
+  @spec load_failed_sets(String.t()) :: %{String.t() => [String.t()]}
+  def load_failed_sets(task_id) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
+      {:ok, %{review_gate_state: %{"ci_failed_sets" => %{} = sets}}} ->
+        Map.new(sets, fn {sha, names} -> {sha, Enum.map(names, &to_string/1)} end)
+
+      _ ->
+        %{}
+    end
+  rescue
+    _ -> %{}
+  end
+
+  defp save_failed_sets(task_id, sets) do
+    case PullRequest.record_review_gate(task_id, %{ci_failed_sets: sets}) do
+      :ok -> :ok
+      {:error, why} -> Logger.debug("ReviewCi: ci_failed_sets write failed: #{inspect(why)}")
+    end
+  rescue
+    _ -> :ok
+  end
+
   @doc "The sorted, unique job names of `checks`."
   @spec failed_job_names([map()]) :: [String.t()]
   def failed_job_names(checks),

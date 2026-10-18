@@ -2021,32 +2021,11 @@ defmodule Arbiter.Worker.ReviewGate do
   defp ci_note_failed_set(state, _sha, []), do: state
 
   defp ci_note_failed_set(state, sha, checks) do
-    sets = Map.put(state.ci_failed_sets, sha, ReviewCi.failed_job_names(checks))
-    save_ci_failed_sets(state.task_id, sets)
+    sets = ReviewCi.note_failed_set(state.task_id, state.ci_failed_sets, sha, checks)
     %{state | ci_failed_sets: sets}
   end
 
-  # Best-effort: a failed read or write only loses the cross-gate dedupe.
-  defp load_ci_failed_sets(task_id) do
-    case Ash.get(Issue, task_id) do
-      {:ok, %{review_gate_state: %{"ci_failed_sets" => %{} = sets}}} ->
-        Map.new(sets, fn {sha, names} -> {sha, Enum.map(names, &to_string/1)} end)
-
-      _ ->
-        %{}
-    end
-  rescue
-    _ -> %{}
-  end
-
-  defp save_ci_failed_sets(task_id, sets) do
-    case Arbiter.Tasks.PullRequest.record_review_gate(task_id, %{ci_failed_sets: sets}) do
-      :ok -> :ok
-      {:error, why} -> Logger.debug("ReviewGate: ci_failed_sets write failed: #{inspect(why)}")
-    end
-  rescue
-    _ -> :ok
-  end
+  defp load_ci_failed_sets(task_id), do: ReviewCi.load_failed_sets(task_id)
 
   defp ci_rerun_once(state, wait, checks) do
     case ci_rerun(state) do
