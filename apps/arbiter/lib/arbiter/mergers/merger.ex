@@ -369,6 +369,31 @@ defmodule Arbiter.Mergers.Merger do
   """
   @callback rerun_ci(mr_ref, opts :: map()) :: {:ok, map()} | {:error, term()}
 
+  @typedoc """
+  One pipeline (GitLab) / workflow run (GitHub) on the base branch, as
+  `deploy_pipelines/3` reports it: its `:id`, head `:sha`, overall `:status`
+  and each job's `:name` and `:status`. Statuses use GitLab's words:
+  `success`, `failed`, `canceled`, `skipped`, `manual`, `running`, `pending`,
+  `created`.
+  """
+  @type deploy_pipeline :: %{
+          id: term(),
+          sha: String.t() | nil,
+          status: String.t() | nil,
+          url: String.t() | nil,
+          jobs: [%{name: String.t() | nil, status: String.t() | nil}]
+        }
+
+  @doc """
+  The newest pipelines (newest first) on `branch`, each with its jobs. Feeds the
+  post-merge deploy watch (`Arbiter.Workflows.DeployWatch`, #967), which looks
+  for the watched deploy job(s) on the merge commit's pipeline or a later one.
+  `mr_ref` only locates the project on adapters that need it. Optional; an
+  adapter without it is simply not watchable.
+  """
+  @callback deploy_pipelines(mr_ref, branch :: String.t(), opts :: map()) ::
+              {:ok, [deploy_pipeline()]} | {:error, term()}
+
   @doc """
   List open merge requests / pull requests in the configured repository.
 
@@ -599,6 +624,7 @@ defmodule Arbiter.Mergers.Merger do
                       rerun_ci: 2,
                       ci_job_artifacts: 3,
                       last_green_job_sha: 3,
+                      deploy_pipelines: 3,
                       ref_for_pr: 2,
                       list_open: 0,
                       list_open_review_threads: 1,
