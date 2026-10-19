@@ -6928,6 +6928,7 @@ defmodule Arbiter.Worker do
   @spec manual_resume_prompt(String.t()) :: String.t()
   def manual_resume_prompt(task_id) do
     Arbiter.Worker.CoordinatorDirectives.section(task_id) <>
+      Arbiter.Worker.SendBackBrief.section(task_id) <>
       resume_continue_prompt(:manual_resume, task_id)
   end
 

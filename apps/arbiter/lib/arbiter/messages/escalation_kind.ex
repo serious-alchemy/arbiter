@@ -72,6 +72,7 @@ defmodule Arbiter.Messages.EscalationKind do
     :review_gate_findings,
     :review_loop,
     :review_parked,
+    :send_back_unchanged,
     :spawn_failed,
     :spend_cap_exceeded,
     :ticket_stuck,
