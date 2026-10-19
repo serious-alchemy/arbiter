@@ -188,6 +188,57 @@ defmodule Arbiter.Worker.VisualBaselinesTest do
     refute_received {:artifacts, _, _, _}
   end
 
+  test "GitLab: the config comes from the workspace merge.config, not the Application env",
+       %{ctx: ctx, head: head} do
+    Application.delete_env(:arbiter, :gitlab_default_config)
+    Arbiter.Mergers.Gitlab.Config.clear()
+    System.put_env("VB_GITLAB_TEST_TOKEN", "vb-token")
+
+    on_exit(fn ->
+      System.delete_env("VB_GITLAB_TEST_TOKEN")
+      Arbiter.Mergers.Gitlab.Config.clear()
+    end)
+
+    test_pid = self()
+
+    Req.Test.stub(Arbiter.Mergers.Gitlab.HTTP, fn conn ->
+      send(test_pid, {:gitlab_request, conn.request_path})
+
+      cond do
+        String.ends_with?(conn.request_path, "/pipelines") ->
+          Req.Test.json(conn, [%{"id" => 9, "sha" => head, "status" => "failed"}])
+
+        String.ends_with?(conn.request_path, "/jobs") ->
+          Req.Test.json(conn, [%{"id" => 5, "name" => "visual", "status" => "failed"}])
+
+        true ->
+          Plug.Conn.send_resp(conn, 200, "not-a-zip")
+      end
+    end)
+
+    config =
+      Map.put(ctx.workspace.config, "merge", %{
+        "strategy" => "gitlab",
+        "config" => %{
+          "host" => "gitlab.com",
+          "project_id" => 55_399_962,
+          "credentials_ref" => "env:VB_GITLAB_TEST_TOKEN"
+        }
+      })
+
+    ctx = %{
+      ctx
+      | adapter: Arbiter.Mergers.Gitlab,
+        workspace: %{ctx.workspace | config: config}
+    }
+
+    result = VisualBaselines.refresh(ctx)
+
+    refute match?({:skip, {:artifacts_unreadable, %{kind: :config_missing}}}, result)
+    assert_received {:gitlab_request, "/api/v4/projects/55399962/merge_requests/7/pipelines"}
+    assert_received {:gitlab_request, "/api/v4/projects/55399962/jobs/5/artifacts"}
+  end
+
   test "an adapter without the artifact callbacks is skipped", %{ctx: ctx} do
     assert {:skip, :adapter_unsupported} =
              VisualBaselines.refresh(%{ctx | adapter: NoArtifactsForge})
