@@ -1180,7 +1180,7 @@ defmodule Arbiter.Workers.Reconciler do
 
   # `arb-run-<task>-<hex>.scope` -> does `<task>` have a registered worker?
   defp scope_worker_registered?(unit) do
-    case Regex.run(~r/\Aarb-run-(.+)-[0-9a-f]+\.scope\z/, unit) do
+    case Regex.run(~r/\Aarb-run-i[0-9a-f]{8}-(.+)-[0-9a-f]+\.scope\z/, unit) do
       [_, task_id] -> not is_nil(Worker.whereis(task_id))
       _ -> false
     end

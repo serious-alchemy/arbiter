@@ -310,6 +310,30 @@ defmodule Arbiter.Worker.GitCredentialTest do
       %{ws: ws, key: key}
     end
 
+    test "host token carries actions:write for CI re-runs; the worker token never does",
+         %{ws: ws} do
+      test_pid = self()
+
+      Req.Test.stub(@http, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:mint, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"token" => "ghs_x", "expires_at" => "2099-01-01T00:00:00Z"})
+      end)
+
+      opts = [remote: "acme/tonic"] ++ req_options()
+
+      assert {:ok, _} = GitCredential.materialize(plan(ws, "tonic"), ws, [host?: true] ++ opts)
+      assert_receive {:mint, host_body}
+      assert host_body["permissions"]["actions"] == "write"
+
+      assert {:ok, _} = GitCredential.materialize(plan(ws, "tonic"), ws, opts)
+      assert_receive {:mint, worker_body}
+      refute Map.has_key?(worker_body["permissions"], "actions")
+    end
+
     test "mints an installation token restricted to the one repo, with no gist or delete rights",
          %{ws: ws, key: key} do
       test_pid = self()

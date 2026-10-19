@@ -163,7 +163,7 @@ defmodule Arbiter.Worker.MemoryScope do
     with {:ok, max} <- configured_max(),
          {:ok, probe} <- probe(max, opts),
          systemd_run when is_binary(systemd_run) <- systemd_run_path(opts) do
-      unit = unit_name(task_id)
+      unit = unit_name(task_id, opts)
       {env, unset} = runtime_dir_env(Map.get(port_args, :env, []), probe.runtime_dir)
       inner = unset ++ [exec | rest]
 
@@ -266,7 +266,7 @@ defmodule Arbiter.Worker.MemoryScope do
   end
 
   @doc """
-  Loaded `arb-run-*.scope` units (any state), or `[]` when systemd cannot be
+  Loaded `arb-run-i<id>-*.scope` units of this install (any state), or `[]` when systemd cannot be
   asked.
   """
   @spec list(keyword()) :: [String.t()]
@@ -295,7 +295,7 @@ defmodule Arbiter.Worker.MemoryScope do
       out
       |> String.split("\n", trim: true)
       |> Enum.map(&(&1 |> String.trim() |> String.split(~r/\s+/, parts: 2) |> hd()))
-      |> Enum.filter(&String.match?(&1, ~r/\Aarb-run-[A-Za-z0-9_.-]+\.scope\z/))
+      |> Enum.filter(&own_scope?(&1, opts))
     else
       _ -> []
     end
@@ -303,10 +303,19 @@ defmodule Arbiter.Worker.MemoryScope do
     _ -> []
   end
 
+  # Only this install's scopes: `arb-run-i<id>-…`. Another install's scopes and
+  # legacy untagged `arb-run-<task>-<hex>` ones (whose owner we cannot prove) are
+  # never ours to stop — fail safe toward leaving them running.
+  defp own_scope?(unit, opts) do
+    String.starts_with?(unit, scope_prefix(opts)) and
+      String.match?(unit, ~r/\Aarb-run-[A-Za-z0-9_.-]+\.scope\z/)
+  end
+
   @doc """
-  Boot sweep: stop every `arb-run-*` scope not in `live` (a list of unit names
-  belonging to runs that are live right now). Each stop is logged. Returns the
-  units it stopped. Pass `units:` to sweep a listing taken earlier.
+  Boot sweep: stop every one of THIS install's `arb-run-i<id>-*` scopes not in
+  `live` (a list of unit names belonging to runs that are live right now). Other
+  installs' and legacy untagged scopes are never stopped. Each stop is logged.
+  Returns the units it stopped. Pass `units:` to sweep a listing taken earlier.
   """
   @spec sweep([String.t()], keyword()) :: [String.t()]
   def sweep(live, opts \\ []) do
@@ -314,7 +323,10 @@ defmodule Arbiter.Worker.MemoryScope do
 
     units = Keyword.get_lazy(opts, :units, fn -> list(opts) end)
 
-    for unit <- units, not MapSet.member?(live, unit), reduce: [] do
+    for unit <- units,
+        own_scope?(unit, opts),
+        not MapSet.member?(live, unit),
+        reduce: [] do
       acc ->
         case stop(unit, opts) do
           :ok ->
@@ -378,16 +390,47 @@ defmodule Arbiter.Worker.MemoryScope do
     end
   end
 
+  @doc """
+  This install's id: 8 hex chars, stable across restarts, derived from the
+  database it runs against (`opts[:install_id]` / `opts[:database]` override).
+  It is part of every scope unit name (`arb-run-i<id>-<task>-<hex>`) so that two
+  Arbiter installs sharing one systemd user manager each see only their own
+  scopes (bd-a2e7hk).
+  """
+  @spec install_id(keyword()) :: String.t()
+  def install_id(opts \\ []) do
+    case Keyword.get(opts, :install_id) do
+      id when is_binary(id) ->
+        id
+
+      _ ->
+        db =
+          Keyword.get_lazy(opts, :database, fn ->
+            Application.get_env(:arbiter, Arbiter.Repo, [])[:database]
+          end)
+
+        db = if is_binary(db), do: Path.expand(db), else: inspect(db)
+
+        :crypto.hash(:sha256, "arbiter-install:" <> db)
+        |> Base.encode16(case: :lower)
+        |> binary_part(0, 8)
+    end
+  end
+
   @doc false
-  @spec unit_name(String.t() | nil) :: String.t()
-  def unit_name(task_id) do
+  @spec scope_prefix(keyword()) :: String.t()
+  def scope_prefix(opts \\ []), do: "arb-run-i" <> install_id(opts) <> "-"
+
+  @doc false
+  @spec unit_name(String.t() | nil, keyword()) :: String.t()
+  def unit_name(task_id, opts \\ []) do
     slug =
       (task_id || "run")
       |> to_string()
       |> String.replace(~r/[^A-Za-z0-9_.-]/, "_")
       |> String.slice(0, 40)
 
-    "arb-run-#{slug}-" <> Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
+    scope_prefix(opts) <> "#{slug}-" <> Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
   end
 
   # ---- internals -----------------------------------------------------------
