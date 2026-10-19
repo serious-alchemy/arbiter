@@ -124,6 +124,12 @@ defmodule Arbiter.ReviewGate.Round do
                           left with no disposition. A `:review` APPROVE row with
                           a non-zero count IS the bd-8mtb0q defect, queryable
                           without re-reading the reviewer transcript.
+    * `disposition_source`
+                        — where `dispositions` came from (#925): `"reviewer"` (the
+                          round's own DISPOSITIONS block) or `"targeted_check"` (the
+                          one-shot ADDRESSED-or-OPEN check that ran before an approval
+                          without dispositions was rejected). Nil when nothing was
+                          carried in.
     * `converged`       — true for a `:review` row whose verdict is `:approve`
                           AND whose CRITERIA breakdown left no criterion unmet;
                           false otherwise (including all `:impl` rows, and an
@@ -224,6 +230,7 @@ defmodule Arbiter.ReviewGate.Round do
         :finding_ids,
         :dispositions,
         :undispositioned_count,
+        :disposition_source,
         :converged,
         :commit_gate
       ]
@@ -367,6 +374,12 @@ defmodule Arbiter.ReviewGate.Round do
       constraints min: 0
 
       description "Medium-or-higher carried findings this round left with no disposition."
+    end
+
+    attribute :disposition_source, :string do
+      public? true
+
+      description "Where dispositions came from: reviewer | targeted_check. Nil when none carried in."
     end
 
     attribute :converged, :boolean do

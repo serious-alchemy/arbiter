@@ -50,6 +50,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @rounds_empty_last Path.expand("../../fixtures/review_rounds_empty_last.sh", __DIR__)
   @retry_reset Path.expand("../../fixtures/review_retry_reset.sh", __DIR__)
   @unaddressed Path.expand("../../fixtures/review_unaddressed_finding.sh", __DIR__)
+  @disposition_check Path.expand("../../fixtures/review_disposition_check.sh", __DIR__)
   @revise Path.expand("../../fixtures/revise.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
   @revise_commit_dotfile Path.expand("../../fixtures/revise_commit_dotfile.sh", __DIR__)
@@ -406,6 +407,52 @@ defmodule Arbiter.Worker.ReviewGateTest do
   defp git_sha(repo, ref) do
     {out, 0} = git(["rev-parse", ref], repo)
     String.trim(out)
+  end
+
+  defp run_disposition_check(repo, ws, mode, outcome) do
+    task = new_task(ws)
+    branch = "feature/rev"
+    :ok = seed_feature_branch(repo, branch)
+
+    {:ok, pid} =
+      Worker.start(
+        task_id: task.id,
+        repo: "trib/repo",
+        workspace_id: ws.id,
+        meta: %{
+          branch: branch,
+          repo_path: repo,
+          target_branch: "main",
+          merge_title: "Merge #{task.id}",
+          review_required: true,
+          review_rounds: 2,
+          worktree_path: repo,
+          review_command: [@disposition_check, mode],
+          revise_command: [@revise_commit],
+          review_timeout_ms: 5_000
+        }
+      )
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    :ok = Worker.advance(pid, :claude)
+    send(pid, {:__claude_session_done__, "arb done"})
+
+    wait_until(
+      fn -> match?(%{state: :finished, outcome: ^outcome}, Worker.state(pid)) end,
+      10_000
+    )
+
+    task
+  end
+
+  defp review_rounds(task) do
+    require Ash.Query
+
+    Arbiter.ReviewGate.Round
+    |> Ash.Query.filter(task_id == ^task.id)
+    |> Ash.Query.sort(round: :asc, inserted_at: :asc)
+    |> Ash.read!()
+    |> Enum.filter(&(&1.role == :review))
   end
 
   defp merge_commit_count(repo) do
@@ -3798,6 +3845,38 @@ defmodule Arbiter.Worker.ReviewGateTest do
       )
 
       assert merge_commit_count(repo) == 1
+    end
+
+    # #925: an APPROVE that omitted DISPOSITIONS twice (round + re-prompt) is
+    # not parked outright — one targeted "ADDRESSED or OPEN per id" check runs
+    # first, and an all-ADDRESSED answer accepts the approval.
+    test "a blind APPROVE whose findings the targeted check reports ADDRESSED merges",
+         %{repo: repo, ws: ws} do
+      task = run_disposition_check(repo, ws, "ADDRESSED", :succeeded)
+
+      assert merge_commit_count(repo) == 1
+
+      approve = review_rounds(task) |> Enum.find(&(&1.round == 2 and &1.verdict == :approve))
+      assert approve.converged == true
+      assert approve.dispositions == ~s({"F1.1":"addressed"})
+      assert approve.disposition_source == "targeted_check"
+    end
+
+    test "a blind APPROVE whose findings the targeted check reports OPEN is still parked",
+         %{repo: repo, ws: ws} do
+      task = run_disposition_check(repo, ws, "OPEN", :failed)
+
+      assert merge_commit_count(repo) == 0
+      approve = review_rounds(task) |> Enum.find(&(&1.round == 2 and &1.verdict == :approve))
+      assert approve.converged == false
+      assert approve.dispositions == ~s({"F1.1":"none"})
+      assert approve.disposition_source == "reviewer"
+    end
+
+    test "a blind APPROVE whose targeted check gives no answer is still parked",
+         %{repo: repo, ws: ws} do
+      _task = run_disposition_check(repo, ws, "SILENT", :failed)
+      assert merge_commit_count(repo) == 0
     end
 
     # An approval that openly admits a Medium finding is still open gets the same
