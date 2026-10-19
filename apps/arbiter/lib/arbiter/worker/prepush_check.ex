@@ -86,6 +86,11 @@ defmodule Arbiter.Worker.PrepushCheck do
   steps then run in a container the node's agent builds from the run's spec
   (`Arbiter.NodeAgent.Exec`), where its image and deps are; the primary's copy of
   the worktree has neither (bd-9rrrgk).
+
+  The host executor puts the repo-pinned Elixir/Erlang first on `PATH`
+  (`Arbiter.Worker.Toolchain.env/3`); a pin it cannot provide runs nothing and is
+  an `{:error, {:toolchain_unavailable, _}}`, never a run on the host's Elixir
+  (bd-3fnqi8).
   """
 
   alias Arbiter.Worker.DepsRelocate
@@ -95,6 +100,7 @@ defmodule Arbiter.Worker.PrepushCheck do
   alias Arbiter.Worker.ReleaseEnv
   alias Arbiter.Worker.RunTmp
   alias Arbiter.Worker.SpawnEnv
+  alias Arbiter.Worker.Toolchain
 
   @kill_after_seconds 10
   @max_output_bytes 16_000
@@ -198,7 +204,10 @@ defmodule Arbiter.Worker.PrepushCheck do
             command
           ]
 
-          ReleaseEnv.cmd(timeout_bin, args, cd: worktree, env: env, stderr_to_stdout: true)
+          # bd-3fnqi8: the repo-pinned Elixir/Erlang first on PATH, or no run at all.
+          with {:ok, env} <- Toolchain.env(worktree, env) do
+            ReleaseEnv.cmd(timeout_bin, args, cd: worktree, env: env, stderr_to_stdout: true)
+          end
         end
 
         {:ok, exec, fn -> RunTmp.remove(tmp) end}

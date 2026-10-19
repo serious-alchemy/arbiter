@@ -167,6 +167,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/worker/prepush_check.ex" => :scrubbed,
     # bd-57nhsi: the run_tests tool's host exec (`sh -c` under `timeout`), same shape.
     "apps/arbiter/lib/arbiter/worker/test_run.ex" => :scrubbed,
+    # bd-3fnqi8: `mise install` and `elixir --version` for the repo-pinned host
+    # toolchain, both through `ReleaseEnv.cmd/3`.
+    "apps/arbiter/lib/arbiter/worker/toolchain.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/loop/apply/repo_doc.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mcp/agent_config.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/gitlab.ex" => :pure_tool,

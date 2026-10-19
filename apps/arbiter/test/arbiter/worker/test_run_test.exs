@@ -57,6 +57,29 @@ defmodule Arbiter.Worker.TestRunTest do
 
   defp calls(ctx), do: ctx.calls |> File.read!() |> String.split("\n", trim: true)
 
+  describe "host_exec/2 toolchain (bd-3fnqi8)" do
+    test "a pinned toolchain that cannot be provided runs nothing", %{tmp_dir: dir} do
+      File.write!(Path.join(dir, ".tool-versions"), "elixir 1.20.4-otp-29\n")
+      Application.put_env(:arbiter, :worker_toolchain_roots, [Path.join(dir, "empty")])
+      Application.put_env(:arbiter, :worker_toolchain_provision, false)
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worker_toolchain_roots)
+        Application.delete_env(:arbiter, :worker_toolchain_provision)
+      end)
+
+      marker = Path.join(dir, "ran")
+      exec = TestRun.host_exec(dir, [])
+
+      assert {:error, {:toolchain_unavailable, _}} = exec.("touch #{marker}", 5)
+      refute File.exists?(marker)
+    end
+
+    test "an unpinned worktree runs as before", %{tmp_dir: dir} do
+      assert {"hi\n", 0} = TestRun.host_exec(dir, []).("echo hi", 5)
+    end
+  end
+
   describe "run/3" do
     test "a green run returns counts and the log path, not the output", ctx do
       File.write!(ctx.out, "Compiling 9 files\nwarning: noisy\n.....\n5 tests, 0 failures\n")

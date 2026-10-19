@@ -37,6 +37,11 @@ defmodule Arbiter.Worker.Image do
   branch's `.tool-versions` (`erlang`, `elixir`, `nodejs`), falling back to
   `config :arbiter, :worker_image_default_toolchain`.
 
+  A pin the image cannot honour is an error, not the default: an unsupported
+  `elixir`/`erlang` value, or a Containerfile whose Elixir `FROM` disagrees with
+  `.tool-versions` (`Arbiter.Worker.Toolchain.check_containerfile/2`, bd-3fnqi8;
+  `docs/worker-toolchain.md`).
+
   ## Digest pinning
 
   Every `FROM` that names an external image is rewritten to `ref@sha256:…`
@@ -66,6 +71,7 @@ defmodule Arbiter.Worker.Image do
   alias Arbiter.Worker.Image.Pins
   alias Arbiter.Worker.Image.Prebuilt
   alias Arbiter.Worker.ReleaseEnv
+  alias Arbiter.Worker.Toolchain
 
   require Logger
 
@@ -214,6 +220,8 @@ defmodule Arbiter.Worker.Image do
          {:ok, tool_versions} <- read_file(repo_path, ref, ".tool-versions"),
          {:ok, repo_cf} <- read_file(repo_path, ref, ".arbiter/Containerfile"),
          {:ok, repo_cf} <- choose_source(Keyword.get(opts, :source, :auto), repo_cf),
+         # bd-3fnqi8: a pin the image cannot honour is an error, not the default.
+         :ok <- Toolchain.check_containerfile(tool_versions, repo_cf),
          toolchain = toolchain(tool_versions, opts),
          {:ok, base} <- base_layer(resolver, arb_otp),
          {source, text} = toolchain_source(repo_cf, toolchain),

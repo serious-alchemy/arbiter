@@ -315,6 +315,25 @@ defmodule Arbiter.Worker.ImageTest do
       assert plan.containerfile =~ "docker.io/library/node:20.11.0-bookworm-slim@sha256:"
     end
 
+    test "a pin that is not a plain version is refused, never replaced by the default" do
+      repo = repo_with(%{".tool-versions" => "erlang 29.1.1\nelixir latest\n"})
+      assert {:error, {:unsupported_pin, "elixir", "latest"}} = Image.plan(repo, "main", opts())
+    end
+
+    test "a Containerfile whose Elixir image is not the pinned runtime is refused" do
+      repo =
+        repo_with(%{
+          ".tool-versions" => "erlang 29.1.1\nelixir 1.20.4-otp-29\n",
+          ".arbiter/Containerfile" =>
+            "FROM docker.io/hexpm/elixir:1.19.4-erlang-28.2-debian-bookworm-20240904\n"
+        })
+
+      assert {:error, {:containerfile_pin_mismatch, message}} =
+               Image.plan(repo, "main", opts(source: :containerfile))
+
+      assert message =~ "1.19.4"
+    end
+
     test "falls back to the configured defaults when there is no pin file" do
       repo = repo_with(%{"README.md" => "hi\n"})
 

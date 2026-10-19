@@ -136,6 +136,67 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
                )
     end
 
+    test "a host spawn runs on the repo-pinned toolchain, first on PATH (bd-3fnqi8)" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("cs-toolchain")
+      root = tmp_dir!("cs-toolchain-installs")
+      File.write!(Path.join(cwd, ".tool-versions"), "elixir 1.20.4-otp-29\n")
+      bin = Path.join([root, "elixir", "1.20.4-otp-29", "bin"])
+      File.mkdir_p!(bin)
+
+      File.write!(Path.join(bin, "elixir"), """
+      #!/bin/sh
+      echo "Erlang/OTP 29 [erts-17.1]"
+      echo ""
+      echo "Elixir 1.20.4 (compiled with Erlang/OTP 29) fake-pinned-elixir"
+      """)
+
+      File.chmod!(Path.join(bin, "elixir"), 0o755)
+      Application.put_env(:arbiter, :worker_toolchain_roots, [root])
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_toolchain_roots) end)
+      topic = "worker:#{task_id}"
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+
+      assert {:ok, _port} =
+               ClaudeSession.start(
+                 owner: pid,
+                 worktree_path: cwd,
+                 command: ["sh", "-c", ~s(elixir --version; echo arb done)],
+                 topic: topic
+               )
+
+      eventually(fn ->
+        case Worker.state(pid) do
+          %{meta: %{exit_status: status}} when not is_nil(status) -> status
+          _ -> nil
+        end
+      end)
+
+      assert Enum.any?(Worker.state(pid).meta.output_lines, &(&1 =~ "fake-pinned-elixir"))
+    end
+
+    test "a host spawn whose pinned toolchain cannot be provided is refused, not run on the host's (bd-3fnqi8)" do
+      {pid, _} = start_worker()
+      cwd = tmp_dir!("cs-toolchain-missing")
+      File.write!(Path.join(cwd, ".tool-versions"), "elixir 1.20.4-otp-29\n")
+      Application.put_env(:arbiter, :worker_toolchain_roots, [tmp_dir!("cs-empty-installs")])
+      Application.put_env(:arbiter, :worker_toolchain_provision, false)
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worker_toolchain_roots)
+        Application.delete_env(:arbiter, :worker_toolchain_provision)
+      end)
+
+      assert {:error, {:toolchain_unavailable, message}} =
+               ClaudeSession.start(
+                 owner: pid,
+                 worktree_path: cwd,
+                 command: [@fixture]
+               )
+
+      assert message =~ "elixir 1.20.4-otp-29"
+    end
+
     test "requires :owner pid" do
       assert {:error, :missing_owner} =
                ClaudeSession.start(worktree_path: System.tmp_dir!(), command: [@fixture])
