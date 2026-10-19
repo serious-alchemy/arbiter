@@ -39,7 +39,12 @@ defmodule Arbiter.Workflows.DeployWatch do
        nothing has deployed it within the timeout. The alert is a
        coordinator-owned `:deploy_failing` system alert keyed by workspace and
        repo, so merges during one outage fold into a single alert (naming every
-       affected merge). It clears once nothing unresolved remains.
+       affected merge). It clears whenever no watch of the repo is alerted any more (all deployed,
+       aged out, or `deploy_watch` removed).
+
+  `repo` is the *ticket* repo key (`repo_paths` key): the finalizer maps its
+  forge slug to keys via `MergedPRFinalizerSupervisor.repo_keys/2` and sweeps
+  each. `nil` (no `repo_paths`) covers every ticket in the workspace.
   """
 
   alias Arbiter.Alerts
@@ -63,7 +68,7 @@ defmodule Arbiter.Workflows.DeployWatch do
   unset or invalid (off).
   """
   @spec config(Workspace.t() | nil, String.t() | nil) :: config() | nil
-  def config(workspace, repo) when is_binary(repo) do
+  def config(workspace, repo) when is_binary(repo) or is_nil(repo) do
     case Mergers.merge_config(workspace, repo) do
       %{"deploy_watch" => %{} = dw} -> build_config(dw, workspace, repo)
       _ -> nil
@@ -117,16 +122,19 @@ defmodule Arbiter.Workflows.DeployWatch do
         own -> Enum.take_while(pipelines, &(&1.id != own.id))
       end
 
-    containing =
-      Enum.filter(newer, fn p -> is_binary(p.sha) and ancestor?.(sha, p.sha) end)
+    contains? = fn p -> is_binary(p.sha) and ancestor?.(sha, p.sha) end
 
-    candidates = Enum.reject([own | containing], &is_nil/1)
+    # Cheap local checks (job statuses, in-flight) gate every forge ancestry
+    # call, and the search stops at the first hit.
+    deployed =
+      if(own && watched_ok?(own, jobs), do: own) ||
+        Enum.find(newer, &(watched_ok?(&1, jobs) and contains?.(&1)))
 
-    case Enum.find(candidates, &watched_ok?(&1, jobs)) do
+    case deployed do
       nil ->
         if timed_out?(watch, cfg, now),
-          do: {:failed, own || List.first(candidates)},
-          else: undeployed_verdict(own, candidates)
+          do: {:failed, own || Enum.find(newer, contains?)},
+          else: undeployed_verdict(own, newer, contains?)
 
       deployed ->
         {:deployed, deployed}
@@ -134,9 +142,10 @@ defmodule Arbiter.Workflows.DeployWatch do
   end
 
   # Not timed out and nothing succeeded yet.
-  defp undeployed_verdict(own, candidates) do
+  defp undeployed_verdict(own, newer, contains?) do
     cond do
-      Enum.any?(candidates, &in_flight?/1) -> :pending
+      own && in_flight?(own) -> :pending
+      Enum.any?(newer, &(in_flight?(&1) and contains?.(&1))) -> :pending
       # Auto-canceled by a newer merge: a successor will carry the commit.
       own && own.status == "canceled" -> :pending
       own -> {:failed, own}
@@ -189,7 +198,7 @@ defmodule Arbiter.Workflows.DeployWatch do
   the repo has no `deploy_watch` or the adapter cannot list pipelines. Never
   raises. `opts[:now]` overrides the clock (tests).
   """
-  @spec sweep(Workspace.t(), String.t(), module(), keyword()) :: :off | :ok
+  @spec sweep(Workspace.t(), String.t() | nil, module(), keyword()) :: :off | :ok
   def sweep(%Workspace{} = workspace, repo, adapter, opts \\ []) do
     with %{} = cfg <- config(workspace, repo),
          true <- function_exported?(adapter, :deploy_pipelines, 3) do
@@ -197,7 +206,10 @@ defmodule Arbiter.Workflows.DeployWatch do
       do_sweep(workspace, repo, adapter, cfg, now)
       :ok
     else
-      _ -> :off
+      _ ->
+        # Watch removed from config: don't leave its alert open.
+        _ = Alerts.clear(:deploy_failing, alert_key(workspace.id, repo))
+        :off
     end
   rescue
     e ->
@@ -215,7 +227,12 @@ defmodule Arbiter.Workflows.DeployWatch do
 
     unresolved = Enum.filter(tasks, &(watch(&1)["state"] in ["pending", "alerted"]))
 
-    if unresolved != [] do
+    if unresolved == [] do
+      # Nothing left to watch (including alerted tickets aged out of the
+      # window): the outage alert must not outlive its watches.
+      _ = Alerts.clear(:deploy_failing, alert_key(workspace.id, repo))
+      :ok
+    else
       evaluate_all(workspace, repo, adapter, cfg, unresolved, now)
     end
   end
@@ -225,9 +242,9 @@ defmodule Arbiter.Workflows.DeployWatch do
 
     Issue
     |> Ash.Query.filter(
-      workspace_id == ^workspace_id and repo == ^repo and state in [:closed, :verifying] and
-        not is_nil(pr_ref)
+      workspace_id == ^workspace_id and state in [:closed, :verifying] and not is_nil(pr_ref)
     )
+    |> filter_repo(repo)
     |> Ash.Query.sort(updated_at: :desc)
     |> Ash.Query.limit(200)
     |> Ash.read!()
@@ -235,7 +252,12 @@ defmodule Arbiter.Workflows.DeployWatch do
     |> Enum.sort_by(&merged_at(&1), DateTime)
   end
 
-  defp merged_recently?(%Issue{merger_status: %{"status" => "merged"}} = task, cutoff),
+  # `nil`: a workspace without `repo_paths` — every ticket is the one repo's.
+  defp filter_repo(query, nil), do: query
+  defp filter_repo(query, repo), do: Ash.Query.filter(query, repo == ^repo)
+
+  defp merged_recently?(%Issue{merger_status
+: %{"status" => "merged"}} = task, cutoff),
     do: DateTime.compare(merged_at(task), cutoff) != :lt
 
   defp merged_recently?(_task, _cutoff), do: false
@@ -316,7 +338,7 @@ defmodule Arbiter.Workflows.DeployWatch do
       alerted != [] and Enum.any?(updated, &new_failure?/1) ->
         raise_alert(workspace.id, repo, key, cfg, alerted)
 
-      alerted == [] and Enum.any?(updated, &match?({_, {:deployed, _}}, &1)) ->
+      alerted == [] ->
         _ = Alerts.clear(:deploy_failing, key)
         :ok
 
@@ -385,8 +407,8 @@ defmodule Arbiter.Workflows.DeployWatch do
   # ---- alert ----------------------------------------------------------------
 
   @doc "The system-alert key for `repo`'s deploy outage."
-  @spec alert_key(String.t(), String.t()) :: String.t()
-  def alert_key(workspace_id, repo), do: "#{workspace_id}:#{repo}"
+  @spec alert_key(String.t(), String.t() | nil) :: String.t()
+  def alert_key(workspace_id, repo), do: "#{workspace_id}:#{repo || "default"}"
 
   defp raise_alert(workspace_id, repo, key, cfg, alerted) do
     lines = Enum.map(alerted, &alert_line(&1, cfg))

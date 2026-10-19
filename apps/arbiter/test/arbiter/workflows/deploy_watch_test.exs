@@ -84,6 +84,35 @@ defmodule Arbiter.Workflows.DeployWatchTest do
     assert active_alerts(ws) == []
   end
 
+  test "an open alert is cleared when the alerted ticket ages out or the watch is removed",
+       %{ws: ws} do
+    task = merged_task(ws, "!9")
+    forge(%{"!9" => "ddd"}, [pipeline(40, "ddd", "success", [{"deploy", "skipped"}])])
+    sweep(ws)
+    assert [_] = active_alerts(ws)
+
+    # Aged out of the 7-day window: nothing unresolved, the alert goes.
+    later = DateTime.add(DateTime.utc_now(), 8 * 86_400, :second)
+    sweep(ws, later)
+    assert active_alerts(ws) == []
+    _ = task
+
+    # Watch removed from config: a stale alert is cleared on the :off path.
+    {:ok, _} =
+      Alerts.raise_alert(%{
+        kind: :deploy_failing,
+        key: DeployWatch.alert_key(ws.id, "tonic"),
+        workspace_id: ws.id,
+        subject: "stale",
+        detail: "stale",
+        owner: :coordinator
+      })
+
+    {:ok, ws} = Ash.update(ws, %{config: %{}}, action: :update)
+    assert DeployWatch.sweep(ws, "tonic", FakeForge) == :off
+    assert active_alerts(ws) == []
+  end
+
   test "AC2: the 10-18 case — pipeline success but build/deploy skipped — alerts once", %{ws: ws} do
     task = merged_task(ws, "!367")
 

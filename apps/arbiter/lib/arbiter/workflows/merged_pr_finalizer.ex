@@ -254,7 +254,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         end)
 
         # #967: after the merge sweep, follow the deploy of what merged.
-        _ = DeployWatch.sweep(workspace, state.repo, adapter)
+        # The sweep wants ticket repo keys, not the finalizer's forge slug.
+        for key <- deploy_watch_keys(workspace, state.repo),
+            do: DeployWatch.sweep(workspace, key, adapter)
+
 
         {:ok, next_cursor}
       else
@@ -309,7 +312,16 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   # bare ref belongs to the finalizer whose repo the task was filed in
   # (`task.repo`, a `repo_paths` key); a task whose repo is unknown or maps
   # elsewhere is not guessed at. A single-repo workspace has nothing to confuse.
-  defp own_ref?(workspace, %Issue{} = task, rule, repo) do
+  # `[nil]` when the workspace has no `repo_paths` (one repo, tickets unkeyed).
+  defp deploy_watch_keys(workspace, repo) do
+    case MergedPRFinalizerSupervisor.repo_keys(workspace, repo) do
+      [] -> [nil]
+      keys -> keys
+    end
+  end
+
+  defp own_ref?(workspace,
+ %Issue{} = task, rule, repo) do
     with :bare <- PatrolRepoScope.repo_of_ref(follow_up_ref(task, rule)),
          [_, _ | _] <- MergedPRFinalizerSupervisor.finalizer_repos(workspace) do
       repo_paths = Map.get(workspace.config || %{}, "repo_paths") || %{}
