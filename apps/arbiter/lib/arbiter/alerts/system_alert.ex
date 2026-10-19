@@ -31,6 +31,7 @@ defmodule Arbiter.Alerts.SystemAlert do
   @kinds [
     :budget_exceeded,
     :credential_expired,
+    :deploy_failing,
     :machine_derate,
     :overage_alert,
     :quota_poll_failing,

@@ -423,7 +423,7 @@ defmodule Arbiter.Workers.Run do
     attribute :cgroup_scopes, {:array, :string} do
       public? true
 
-      description "Transient systemd scope unit names (arb-run-<task>-<hex>.scope), one per " <>
+      description "Transient systemd scope unit names (arb-run-i<install>-<task>-<hex>.scope), one per " <>
                     "agent spawn of this run, in spawn order. A kernel OOM / journal line that " <>
                     "names one of these identifies the run. Nil when the run was not spawned " <>
                     "in a scope (memory cap disabled or unavailable) or predates the column."

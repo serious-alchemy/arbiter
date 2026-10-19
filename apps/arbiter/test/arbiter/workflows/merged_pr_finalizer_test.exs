@@ -1250,6 +1250,58 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert refreshed.state not in [:closed, :verifying]
     end
 
+    # #967: the finalizer's slug is a forge slug, the ticket's repo a
+    # repo_paths key — the deploy watch must bridge them.
+    test "the deploy watch runs from the finalizer: a skipped deploy job alerts", %{gl_ws: ws} do
+      config =
+        put_in(ws.config, ["merge", "repos"], %{
+          "tonic" => %{"project_id" => 111, "deploy_watch" => %{"job" => "deploy"}},
+          "tonic_device" => %{"project_id" => 222}
+        })
+
+      {:ok, ws} = Ash.update(ws, %{config: config}, action: :update)
+      task = create_task(ws, "!29", repo: "tonic")
+
+      Req.Test.stub(@gitlab_stub, fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/111/merge_requests/29" ->
+            Req.Test.json(conn, %{
+              "iid" => 29,
+              "state" => "merged",
+              "sha" => "head",
+              "merge_commit_sha" => "msha"
+            })
+
+          "/api/v4/projects/111/pipelines" ->
+            Req.Test.json(conn, [
+              %{"id" => 5, "sha" => "msha", "status" => "success", "web_url" => "https://gl/p/5"}
+            ])
+
+          "/api/v4/projects/111/pipelines/5/jobs" ->
+            Req.Test.json(conn, [
+              %{"name" => "build", "status" => "skipped"},
+              %{"name" => "deploy", "status" => "skipped"}
+            ])
+
+          _ ->
+            Req.Test.json(conn, [])
+        end
+      end)
+
+      tonic = start_gitlab_finalizer(ws, "emricare/tonic")
+      :ok = MergedPRFinalizer.tick(tonic)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.merger_status["deploy_watch"]["state"] == "alerted"
+
+      assert [alert] =
+               Arbiter.Alerts.active(workspace_id: ws.id)
+               |> Enum.filter(&(&1.kind == :deploy_failing))
+
+      assert alert.detail =~ "msha"
+      assert alert.detail =~ "deploy=skipped"
+    end
+
     test "an open MR never moves the ticket, whatever its merge-status fields say",
          %{gl_ws: ws} do
       task = create_task(ws, "!29", repo: "tonic_device", verify_after_deploy: true)

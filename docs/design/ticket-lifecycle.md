@@ -806,7 +806,7 @@ escalation message:
 
 | field | |
 |---|---|
-| `kind` | `credential_expired`, `quota_poll_failing`, `quota_snapshot_stale`, `overage_alert`, `budget_exceeded` |
+| `kind` | `credential_expired`, `deploy_failing`, `quota_poll_failing`, `quota_snapshot_stale`, `overage_alert`, `budget_exceeded` |
 | `key` | which one of the kind (below) |
 | `workspace_id` | where it is shown and announced; not part of the dedupe |
 | `subject`, `detail` | the headline and the full explanation |
@@ -837,6 +837,7 @@ hook where its condition is seen healthy again.
 | `overage_alert` | workspace and provider | `DispatchQueue` on a threshold crossing | the windowed spend is back under the threshold, the threshold is raised or removed (the queue re-reads it on each record), or the gate allows a dispatch on that provider outside overage |
 | `budget_exceeded` | task | `Usage.BudgetPatrol`, every sweep while over | the sweep finds the task no longer over its p90 (the estimate moved) or no longer open; a failed sweep clears nothing |
 | `machine_derate` | machine name (`local` for the primary) | `Machine.Alerting` (bd-6w7usy), when a machine enters a **hard** thermal derate (its own sensing: the primary's monitor, or a node's heartbeat) | the machine leaves hard derate after its readings stay clear for the recovery window; a soft derate raises nothing. Workspace-scoped like every alert: it goes on the oldest workspace. See `docs/machine-derate.md` |
+| `deploy_failing` | workspace and repo | `Workflows.DeployWatch` (#967), coordinator-owned, when a merge's post-merge deploy job is skipped/failed/canceled/missing or undeployed past `deploy_watch.timeout_minutes` | no undeployed merge remains for the repo. See `docs/deploy-watch.md` |
 
 `credential_restored` no longer posts a "restored" message: the clear is the
 signal. `operator_login_lapsed` and `quota_grant_failing`, which fire in place

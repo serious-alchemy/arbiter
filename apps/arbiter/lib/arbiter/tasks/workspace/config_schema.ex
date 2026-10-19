@@ -151,6 +151,10 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                             tests the branch head alone, so this MUST stay on there). A forge
                             that already reports behind_base is handled by the existing
                             update-branch path, with no double sync. (default: true)
+      deploy_watch          map (per repo, merge.repos.<repo>.deploy_watch) — (#967) {"job": "deploy",
+                            "timeout_minutes": 90} or {"jobs": [...]}. After a merge, follow the
+                            base branch pipeline and raise a coordinator alert when the deploy
+                            job(s) are not success. Unset = off. See docs/deploy-watch.md
       up_to_date_tolerance  non-negative integer — commits of the target a branch may lack and
                             still merge unsynced (default: 0 = sync for any). Trade-off: a higher
                             value avoids a sync pipeline per unrelated target commit, at the cost

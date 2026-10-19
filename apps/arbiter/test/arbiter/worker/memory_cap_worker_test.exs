@@ -138,7 +138,7 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
     {_state, run, task_id} = run_agent(["sh", "-c", "echo hi $5; exit 3"])
 
     assert [scope] = run.cgroup_scopes
-    assert scope =~ ~r/\Aarb-run-#{task_id}-[0-9a-f]{8}\.scope\z/
+    assert scope =~ ~r/\Aarb-run-i[0-9a-f]{8}-#{task_id}-[0-9a-f]{8}\.scope\z/
 
     # What the fake `systemd-run` was left to exec: XDG_RUNTIME_DIR stripped
     # again for the agent, then the agent's own argv, untouched.

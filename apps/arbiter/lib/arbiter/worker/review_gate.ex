@@ -1178,6 +1178,13 @@ defmodule Arbiter.Worker.ReviewGate do
       # misleading, since there was nothing to fix) commit-gate-no-changes
       # failure.
       approval_gap_pending: nil,
+      # #925: the one-shot targeted disposition check that runs before an APPROVE
+      # without dispositions is rejected. `%{gap:, findings:}` while that pass is
+      # in flight, `:done` once it has answered (so it never runs twice in a
+      # round), nil otherwise. `disposition_source` is `:targeted_check` once its
+      # ADDRESSED answers stood in for the reviewer's own DISPOSITIONS block.
+      disposition_check: nil,
+      disposition_source: nil,
       # bd-9zuvbh: which verdict guard (G9-G12) turned this round's verdict
       # down, when the reject currently being routed came from `fail_closed/3`
       # rather than from a reviewer that really said REQUEST_CHANGES. Only
@@ -3361,6 +3368,11 @@ defmodule Arbiter.Worker.ReviewGate do
   # implementer.
   defp attempt_finish(%{reported?: true} = state, _status), do: {:done, state}
 
+  # #925: the targeted disposition check answers a narrow question, not a
+  # verdict, so its transcript is read for per-id answers instead.
+  defp attempt_finish(%{disposition_check: %{}} = state, _status),
+    do: finish_disposition_check(state)
+
   # Pre-existing complexity 15 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
@@ -4514,6 +4526,8 @@ defmodule Arbiter.Worker.ReviewGate do
         phase: :reviewing,
         retries_left: state.initial_retries,
         attempt: 0,
+        disposition_check: nil,
+        disposition_source: nil,
         verdict_scan: nil,
         verdict_scans: [],
         # bd-3hb4ih: the reviewer provider pin and the round's timed-out
@@ -5765,10 +5779,152 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp run_verdict_guard(name, state, findings, ctx) do
+  defp run_verdict_guard(
+         :unaddressed_findings = name,
+         %{disposition_check: nil} = state,
+         findings,
+         ctx
+       )
+       when is_map(ctx) do
+    if omitted_only?(ctx) do
+      run_disposition_check(state, findings, ctx)
+    else
+      exhausted_verdict_guard(name, state, findings, ctx)
+    end
+  end
+
+  defp run_verdict_guard(name, state, findings, ctx),
+    do: exhausted_verdict_guard(name, state, findings, ctx)
+
+  defp exhausted_verdict_guard(name, state, findings, ctx) do
     spec = verdict_guard_spec(name, ctx)
     Logger.warning(spec.logs.exhausted.(state))
     fail_closed(spec, state, findings)
+  end
+
+  # ---- targeted disposition check (#925) -----------------------------------
+
+  # The only gap the check may close is an approval that simply OMITTED the
+  # dispositions. A reviewer that wrote `[NOT ADDRESSED]` said the finding is
+  # open, and an `[ADDRESSED]` it could not back is unproven — neither is
+  # something a second opinion should overrule.
+  defp omitted_only?(%{missing: [_ | _], unaddressed: [], unproven: []}), do: true
+  defp omitted_only?(_gap), do: false
+
+  # The verdict re-prompt budget is spent and the APPROVE still names no
+  # disposition for the open findings. Before parking, ask ONE narrow question
+  # — "is each finding addressed? ADDRESSED or OPEN per id" — of a fresh
+  # reviewer, with the findings quoted, rather than a whole new verdict (which
+  # the verdict re-prompt has already failed to get). The check does not draw
+  # on the verdict-retry budget; `disposition_check` makes it one-shot.
+  defp run_disposition_check(state, findings, gap) do
+    stop_worker(state)
+    spec = verdict_guard_spec(:unaddressed_findings, gap)
+
+    case launch_worker(
+           %{state | disposition_check: %{gap: gap, findings: findings}},
+           reprompt_retry_id(state),
+           :reviewer,
+           disposition_check_prompt(state, gap),
+           state.command
+         ) do
+      {:ok, state} ->
+        Logger.info(
+          "ReviewGate: reviewer for task=#{state.task_id} approved without dispositioning " <>
+            "#{length(ReviewFindings.gap_findings(gap))} open finding(s) and the re-prompt " <>
+            "budget is exhausted; running a targeted disposition check (attempt #{state.attempt})"
+        )
+
+        {:reprompt, state}
+
+      {:error, spawn_error} ->
+        Logger.warning(spec.logs.spawn_error.(state, spawn_error))
+        fail_closed(spec, %{state | disposition_check: :done}, findings)
+    end
+  end
+
+  @doc false
+  @spec disposition_check_prompt(map(), ReviewFindings.gap()) :: String.t()
+  def disposition_check_prompt(state, gap) do
+    open = ReviewFindings.gap_findings(gap)
+    ids = Enum.map_join(open, ", ", & &1.id)
+
+    """
+    You are answering ONE narrow question about branch `#{state.branch}` — do not
+    write a new review and do not print a `VERDICT:` line.
+
+    An earlier review pass of this diff approved it, but never said whether the
+    findings below, raised in an earlier round, were addressed. For EACH one,
+    open the CURRENT code at the file:line it cites (and wherever the fix would
+    live) and decide whether the problem is gone.
+
+    #{ReviewFindings.open_findings_block(open, Map.get(state, :revise_touched_files))}
+    #{revision_diff_briefing(state)}
+    Answer with exactly one line per id (#{ids}):
+
+        <id>: ADDRESSED <file:line where the fix landed, and what it does>
+        <id>: OPEN <what is still wrong in the current code>
+
+    `ADDRESSED` means you re-read the current file and the problem is gone; the
+    implementer saying it fixed it is not evidence. If you are unsure, answer
+    `OPEN`. A missing line is treated as `OPEN`. Then print `arb done`.
+    """
+  end
+
+  # The targeted check's pass ended. All gap findings ADDRESSED → fold the
+  # answers in as the DISPOSITIONS block the approval lacked and run the
+  # APPROVE back through the normal guards; anything else (an OPEN, a missing
+  # id, no answer) → reject exactly as the exhausted guard always did.
+  defp finish_disposition_check(%{disposition_check: %{gap: gap, findings: findings}} = state) do
+    answers =
+      state.lines
+      |> Enum.reverse()
+      |> Enum.join("\n")
+      |> parse_disposition_answers()
+
+    state = %{state | disposition_check: :done}
+    open = ReviewFindings.gap_findings(gap)
+
+    if open != [] and Enum.all?(open, &match?({:addressed, _}, Map.get(answers, &1.id))) do
+      Logger.info(
+        "ReviewGate: targeted disposition check for task=#{state.task_id} reports " <>
+          "#{Enum.map_join(open, ", ", & &1.id)} ADDRESSED; accepting the approval"
+      )
+
+      block =
+        Enum.map_join(open, "\n", fn f ->
+          {:addressed, note} = Map.fetch!(answers, f.id)
+          "- [ADDRESSED] #{f.id} — #{note}"
+        end)
+
+      augmented =
+        String.trim_trailing(findings) <>
+          "\n\nDISPOSITIONS (from the targeted disposition check):\n" <> block <> "\n"
+
+      dispatch_verdict(%{state | disposition_source: :targeted_check}, {:approve, augmented})
+    else
+      exhausted_verdict_guard(:unaddressed_findings, state, findings, gap)
+    end
+  end
+
+  @answer_line ~r/^\s*(?:[-*]\s*)?\**(F\d+\.\d+)\**\s*[:\-—]*\s*\**(NOT\s+ADDRESSED|ADDRESSED|OPEN)\**[\s:\-—]*(.*)$/i
+
+  # `%{id => {:addressed | :open, note}}`; the last answer for an id wins.
+  defp parse_disposition_answers(text) do
+    text
+    |> String.split("\n")
+    |> Enum.reduce(%{}, fn line, acc ->
+      case Regex.run(@answer_line, line, capture: :all_but_first) do
+        [id, status, note] ->
+          status = if String.upcase(status) == "ADDRESSED", do: :addressed, else: :open
+          note = String.trim(note)
+          note = if note == "", do: "confirmed by the targeted disposition check", else: note
+          Map.put(acc, id, {status, note})
+
+        _ ->
+          acc
+      end
+    end)
   end
 
   # Terminal handling shared by all four guards: record the HONEST round —
@@ -6294,15 +6450,16 @@ defmodule Arbiter.Worker.ReviewGate do
     {criteria_total, criteria_unmet} =
       if review_outcome?, do: ReviewVerification.criteria_counts(findings), else: {nil, nil}
 
-    {finding_ids, dispositions, undispositioned} =
+    {finding_ids, dispositions, undispositioned, disposition_source} =
       if review_outcome? do
         open = Map.get(state, :open_findings, [])
 
         {ReviewFindings.encode_ids(ReviewFindings.extract(findings, state.round)),
          ReviewFindings.encode_dispositions(open, findings),
-         length(ReviewFindings.approval_gap(open, findings, nil).missing)}
+         length(ReviewFindings.approval_gap(open, findings, nil).missing),
+         disposition_source(open, state)}
       else
-        {nil, nil, nil}
+        {nil, nil, nil, nil}
       end
 
     %{
@@ -6311,9 +6468,16 @@ defmodule Arbiter.Worker.ReviewGate do
       criteria_unmet: criteria_unmet,
       finding_ids: finding_ids,
       dispositions: dispositions,
-      undispositioned_count: undispositioned
+      undispositioned_count: undispositioned,
+      disposition_source: disposition_source
     }
   end
+
+  # #925: how this round's `dispositions` were obtained. Nil when nothing was
+  # carried into the round, so there was nothing to disposition.
+  defp disposition_source([], _state), do: nil
+  defp disposition_source(_open, %{disposition_source: :targeted_check}), do: "targeted_check"
+  defp disposition_source(_open, _state), do: "reviewer"
 
   defp finding_count(role, verdict, findings) do
     cond do

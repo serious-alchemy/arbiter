@@ -99,7 +99,7 @@ defmodule Arbiter.Worker.MemoryScopeTest do
       assert "MemorySwapMax=0" in args
       assert "OOMPolicy=kill" in args
       assert "--unit=" <> unit = Enum.find(args, &String.starts_with?(&1, "--unit="))
-      assert unit =~ ~r/\Aarb-run-bd-abc123-[0-9a-f]{8}\z/
+      assert unit =~ ~r/\Aarb-run-i[0-9a-f]{8}-bd-abc123-[0-9a-f]{8}\z/
       assert scope == %{unit: unit <> ".scope", max: "12G"}
 
       # `env -u XDG_RUNTIME_DIR <exec> <rest…>` is the tail, argument for argument.
@@ -264,9 +264,9 @@ defmodule Arbiter.Worker.MemoryScopeTest do
 
   describe "stop/2, list/1 and sweep/2 (bd-6zm33r)" do
     @listing """
-    arb-run-bd-a-1111.scope   loaded active   running Arbiter worker bd-a
-    arb-run-bd-b-2222.scope   loaded failed   failed  Arbiter worker bd-b
-    arb-run-bd-c-3333.scope   loaded active   running Arbiter worker bd-c
+    arb-run-iaaaaaaaa-bd-a-1111.scope   loaded active   running Arbiter worker bd-a
+    arb-run-iaaaaaaaa-bd-b-2222.scope   loaded failed   failed  Arbiter worker bd-b
+    arb-run-iaaaaaaaa-bd-c-3333.scope   loaded active   running Arbiter worker bd-c
     """
 
     defp scope_cmd(test_pid, stop_exit \\ 0) do
@@ -281,7 +281,13 @@ defmodule Arbiter.Worker.MemoryScopeTest do
       end
     end
 
-    defp ctl_opts(cmd), do: [cmd: cmd, systemctl: "/bin/systemctl", runtime_dir: "/run/user/1"]
+    defp ctl_opts(cmd),
+      do: [
+        cmd: cmd,
+        systemctl: "/bin/systemctl",
+        runtime_dir: "/run/user/1",
+        install_id: "aaaaaaaa"
+      ]
 
     test "stop/2 stops the unit and clears a failed state" do
       assert :ok =
@@ -301,16 +307,94 @@ defmodule Arbiter.Worker.MemoryScopeTest do
 
     test "list/1 returns the loaded arb-run scopes" do
       assert MemoryScope.list(ctl_opts(scope_cmd(self()))) ==
-               ["arb-run-bd-a-1111.scope", "arb-run-bd-b-2222.scope", "arb-run-bd-c-3333.scope"]
+               [
+                 "arb-run-iaaaaaaaa-bd-a-1111.scope",
+                 "arb-run-iaaaaaaaa-bd-b-2222.scope",
+                 "arb-run-iaaaaaaaa-bd-c-3333.scope"
+               ]
     end
 
     test "sweep/2 stops scopes without a live run and never touches a live one" do
-      stopped = MemoryScope.sweep(["arb-run-bd-b-2222.scope"], ctl_opts(scope_cmd(self())))
+      stopped =
+        MemoryScope.sweep(["arb-run-iaaaaaaaa-bd-b-2222.scope"], ctl_opts(scope_cmd(self())))
 
-      assert stopped == ["arb-run-bd-a-1111.scope", "arb-run-bd-c-3333.scope"]
-      assert_received {:systemctl, ["--user", "stop", "arb-run-bd-a-1111.scope"]}
-      assert_received {:systemctl, ["--user", "stop", "arb-run-bd-c-3333.scope"]}
-      refute_received {:systemctl, ["--user", "stop", "arb-run-bd-b-2222.scope"]}
+      assert stopped == ["arb-run-iaaaaaaaa-bd-a-1111.scope", "arb-run-iaaaaaaaa-bd-c-3333.scope"]
+      assert_received {:systemctl, ["--user", "stop", "arb-run-iaaaaaaaa-bd-a-1111.scope"]}
+      assert_received {:systemctl, ["--user", "stop", "arb-run-iaaaaaaaa-bd-c-3333.scope"]}
+      refute_received {:systemctl, ["--user", "stop", "arb-run-iaaaaaaaa-bd-b-2222.scope"]}
+    end
+  end
+
+  describe "install-scoped scopes (bd-a2e7hk)" do
+    @shared_listing """
+    arb-run-iaaaaaaaa-bd-a-1111.scope  loaded active running Arbiter worker bd-a
+    arb-run-iaaaaaaaa-bd-orphan-2222.scope loaded active running Arbiter worker bd-orphan
+    arb-run-ibbbbbbbb-bd-b-3333.scope  loaded active running Arbiter worker bd-b
+    arb-run-ibbbbbbbb-bd-b2-4444.scope loaded active running Arbiter worker bd-b2
+    arb-run-bd-legacy-5555.scope       loaded active running Arbiter worker bd-legacy
+    """
+
+    defp shared_opts(install, test_pid) do
+      [
+        install_id: install,
+        systemctl: "/bin/systemctl",
+        runtime_dir: "/run/user/1",
+        cmd: fn _bin, args, _opts ->
+          send(test_pid, {:systemctl, args})
+
+          case args do
+            ["--user", "list-units" | _] -> {@shared_listing, 0}
+            _ -> {"", 0}
+          end
+        end
+      ]
+    end
+
+    test "unit names carry the install id" do
+      assert MemoryScope.unit_name("bd-x", install_id: "aaaaaaaa") =~
+               ~r/\Aarb-run-iaaaaaaaa-bd-x-[0-9a-f]{8}\z/
+    end
+
+    test "install_id/1 is stable, 8 hex chars and differs per database" do
+      assert MemoryScope.install_id([]) =~ ~r/\A[0-9a-f]{8}\z/
+      assert MemoryScope.install_id([]) == MemoryScope.install_id([])
+
+      assert MemoryScope.install_id(database: "/a/db.sqlite3") !=
+               MemoryScope.install_id(database: "/b/db.sqlite3")
+    end
+
+    test "list/1 returns only this install's scopes" do
+      assert MemoryScope.list(shared_opts("aaaaaaaa", self())) ==
+               ["arb-run-iaaaaaaaa-bd-a-1111.scope", "arb-run-iaaaaaaaa-bd-orphan-2222.scope"]
+    end
+
+    test "install B's sweep never stops install A's scopes, nor legacy untagged ones" do
+      stopped = MemoryScope.sweep([], shared_opts("bbbbbbbb", self()))
+
+      assert stopped == [
+               "arb-run-ibbbbbbbb-bd-b-3333.scope",
+               "arb-run-ibbbbbbbb-bd-b2-4444.scope"
+             ]
+
+      refute_received {:systemctl, ["--user", "stop", "arb-run-iaaaaaaaa-" <> _]}
+      refute_received {:systemctl, ["--user", "stop", "arb-run-bd-legacy-5555.scope"]}
+    end
+
+    test "A's own orphans are still swept, its live scope is kept" do
+      stopped =
+        MemoryScope.sweep(["arb-run-iaaaaaaaa-bd-a-1111.scope"], shared_opts("aaaaaaaa", self()))
+
+      assert stopped == ["arb-run-iaaaaaaaa-bd-orphan-2222.scope"]
+      refute_received {:systemctl, ["--user", "stop", "arb-run-ibbbbbbbb-" <> _]}
+    end
+
+    test "sweep/2 refuses foreign units even when handed a prior listing" do
+      units = ["arb-run-ibbbbbbbb-bd-b-3333.scope", "arb-run-bd-legacy-5555.scope"]
+
+      assert [] =
+               MemoryScope.sweep([], Keyword.put(shared_opts("aaaaaaaa", self()), :units, units))
+
+      refute_received {:systemctl, ["--user", "stop", _]}
     end
   end
 end

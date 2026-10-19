@@ -141,11 +141,14 @@ defmodule Arbiter.Workers.ReconcilerTest do
   describe "sweep_worker_scopes/1 (bd-6zm33r)" do
     defp scope_opts(test_pid) do
       listing = """
-      arb-run-bd-dead-1.scope loaded active running Arbiter worker bd-dead
-      arb-run-bd-live-2.scope loaded active running Arbiter worker bd-live
+      arb-run-iaaaaaaaa-bd-dead-1.scope loaded active running Arbiter worker bd-dead
+      arb-run-iaaaaaaaa-bd-live-2.scope loaded active running Arbiter worker bd-live
+      arb-run-ibbbbbbbb-bd-other-3.scope loaded active running Arbiter worker bd-other
+      arb-run-bd-legacy-4.scope loaded active running Arbiter worker bd-legacy
       """
 
       [
+        install_id: "aaaaaaaa",
         systemctl: "/bin/systemctl",
         runtime_dir: "/run/user/1",
         cmd: fn _bin, args, _opts ->
@@ -171,20 +174,22 @@ defmodule Arbiter.Workers.ReconcilerTest do
         state: :working,
         started_at: DateTime.utc_now(),
         output_lines: [],
-        cgroup_scopes: ["arb-run-bd-live-2.scope"]
+        cgroup_scopes: ["arb-run-iaaaaaaaa-bd-live-2.scope"]
       })
 
-      assert ["arb-run-bd-dead-1.scope"] =
+      assert ["arb-run-iaaaaaaaa-bd-dead-1.scope"] =
                Reconciler.sweep_worker_scopes(scope_opts: scope_opts(self()))
 
-      assert_received {:systemctl, ["--user", "stop", "arb-run-bd-dead-1.scope"]}
-      refute_received {:systemctl, ["--user", "stop", "arb-run-bd-live-2.scope"]}
+      assert_received {:systemctl, ["--user", "stop", "arb-run-iaaaaaaaa-bd-dead-1.scope"]}
+      refute_received {:systemctl, ["--user", "stop", "arb-run-iaaaaaaaa-bd-live-2.scope"]}
+      refute_received {:systemctl, ["--user", "stop", "arb-run-ibbbbbbbb-bd-other-3.scope"]}
+      refute_received {:systemctl, ["--user", "stop", "arb-run-bd-legacy-4.scope"]}
     end
 
     test "a run row without a live worker does not protect its scope" do
       create_run("bd-gone-#{System.unique_integer([:positive])}", :working)
 
-      assert ["arb-run-bd-dead-1.scope", "arb-run-bd-live-2.scope"] =
+      assert ["arb-run-iaaaaaaaa-bd-dead-1.scope", "arb-run-iaaaaaaaa-bd-live-2.scope"] =
                Reconciler.sweep_worker_scopes(scope_opts: scope_opts(self()))
     end
 

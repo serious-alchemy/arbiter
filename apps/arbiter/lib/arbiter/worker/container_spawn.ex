@@ -920,7 +920,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
       {:ok,
        %{
          node_id: node.id,
-         node_kind: Map.get(node, :kind),
+         node_kind: node_kind(node),
          name: name,
          provider: provider,
          image: image,
@@ -1575,6 +1575,17 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # bd-8tg3uv: a cluster node's pod has none of the primary's Unix sockets, so its
   # listeners dial the controller's bridge address (`Jail.pod_network_command/2`). A
   # machine node's agent keeps the primary's socket paths, which the plain command uses.
+  # `Overview.node_row/2` carries the kind as an atom (`:cluster` / `:machine`); the request
+  # carries it as a string so `remote_network_command/3` matches one form.
+  @doc false
+  @spec node_kind(map()) :: String.t() | nil
+  def node_kind(node) do
+    case Map.get(node, :kind) do
+      nil -> nil
+      kind -> to_string(kind)
+    end
+  end
+
   defp remote_network_command(%{node_kind: "cluster"}, jail, argv),
     do: Jail.pod_network_command(jail, argv)
 
