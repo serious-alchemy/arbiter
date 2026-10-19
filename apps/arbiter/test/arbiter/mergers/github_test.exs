@@ -176,8 +176,7 @@ defmodule Arbiter.Mergers.GithubTest do
 
     test "422 'already exists' race (look-before-create missed it) resolves the existing PR" do
       branch = "feature/x"
-      {:ok, get_calls} = Agent.start_link(fn -> 0 end)
-      on_exit(fn -> if Process.alive?(get_calls), do: Agent.stop(get_calls) end)
+      get_calls = start_supervised!({Agent, fn -> 0 end})
 
       stub(fn conn ->
         case {conn.method, conn.request_path} do
