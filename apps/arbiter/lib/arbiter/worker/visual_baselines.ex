@@ -102,6 +102,9 @@ defmodule Arbiter.Worker.VisualBaselines do
   def refresh(%{workspace: workspace, repo: repo} = ctx) do
     case Config.resolve(workspace, repo) do
       {:ok, config} ->
+        # The forge adapter reads its config from the process dict; seed it from the
+        # workspace's merge block (per-repo overrides, credentials_ref) like the merger.
+        Arbiter.Mergers.prepare_with_repo(workspace, repo)
         run(ctx, config)
 
       :none ->
