@@ -258,7 +258,6 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         for key <- deploy_watch_keys(workspace, state.repo),
             do: DeployWatch.sweep(workspace, key, adapter)
 
-
         {:ok, next_cursor}
       else
         _ -> {:noop, state.cursor}
@@ -320,8 +319,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     end
   end
 
-  defp own_ref?(workspace,
- %Issue{} = task, rule, repo) do
+  defp own_ref?(workspace, %Issue{} = task, rule, repo) do
     with :bare <- PatrolRepoScope.repo_of_ref(follow_up_ref(task, rule)),
          [_, _ | _] <- MergedPRFinalizerSupervisor.finalizer_repos(workspace) do
       repo_paths = Map.get(workspace.config || %{}, "repo_paths") || %{}

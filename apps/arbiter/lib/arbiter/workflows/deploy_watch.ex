@@ -116,21 +116,10 @@ defmodule Arbiter.Workflows.DeployWatch do
   def evaluate(%{"sha" => sha} = watch, pipelines, ancestor?, %{jobs: jobs} = cfg, now) do
     own = Enum.find(pipelines, &(&1.sha == sha))
 
-    newer =
-      case own do
-        nil -> pipelines
-        own -> Enum.take_while(pipelines, &(&1.id != own.id))
-      end
-
+    newer = pipelines_after(pipelines, own)
     contains? = fn p -> is_binary(p.sha) and ancestor?.(sha, p.sha) end
 
-    # Cheap local checks (job statuses, in-flight) gate every forge ancestry
-    # call, and the search stops at the first hit.
-    deployed =
-      if(own && watched_ok?(own, jobs), do: own) ||
-        Enum.find(newer, &(watched_ok?(&1, jobs) and contains?.(&1)))
-
-    case deployed do
+    case find_deployed(own, newer, jobs, contains?) do
       nil ->
         if timed_out?(watch, cfg, now),
           do: {:failed, own || Enum.find(newer, contains?)},
@@ -139,6 +128,16 @@ defmodule Arbiter.Workflows.DeployWatch do
       deployed ->
         {:deployed, deployed}
     end
+  end
+
+  defp pipelines_after(pipelines, nil), do: pipelines
+  defp pipelines_after(pipelines, own), do: Enum.take_while(pipelines, &(&1.id != own.id))
+
+  # Cheap local checks (job statuses, in-flight) gate every forge ancestry
+  # call, and the search stops at the first hit.
+  defp find_deployed(own, newer, jobs, contains?) do
+    if(own && watched_ok?(own, jobs), do: own) ||
+      Enum.find(newer, &(watched_ok?(&1, jobs) and contains?.(&1)))
   end
 
   # Not timed out and nothing succeeded yet.
@@ -256,8 +255,7 @@ defmodule Arbiter.Workflows.DeployWatch do
   defp filter_repo(query, nil), do: query
   defp filter_repo(query, repo), do: Ash.Query.filter(query, repo == ^repo)
 
-  defp merged_recently?(%Issue{merger_status
-: %{"status" => "merged"}} = task, cutoff),
+  defp merged_recently?(%Issue{merger_status: %{"status" => "merged"}} = task, cutoff),
     do: DateTime.compare(merged_at(task), cutoff) != :lt
 
   defp merged_recently?(_task, _cutoff), do: false
