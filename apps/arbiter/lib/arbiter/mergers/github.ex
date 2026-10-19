@@ -334,6 +334,9 @@ defmodule Arbiter.Mergers.Github do
          # PR head commit SHA — ReviewPatrol records this into an engagement's
          # `last_reviewed_sha` so it can detect new commits on later ticks.
          head_sha: head_sha,
+         # The commit the merge landed on the base branch — the deploy watch
+         # follows this commit's workflow runs (#967).
+         merge_sha: Map.get(pr, "merge_commit_sha"),
          # The PR's target branch — used to build a local `git diff
          # base_ref..HEAD` against a Tier-2 checkout worktree, sidestepping
          # GitHub's REST diff endpoint 20k-line cap (bd-5yp6yn).
@@ -758,6 +761,69 @@ defmodule Arbiter.Mergers.Github do
       end
     end
   end
+
+  @deploy_run_limit 10
+
+  @impl true
+  def deploy_pipelines(mr_ref, branch, _opts) when is_binary(mr_ref) and is_binary(branch) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, %{"workflow_runs" => runs}} when is_list(runs) <-
+           cfg
+           |> request(:get, "/repos/#{owner}/#{repo}/actions/runs",
+             params: [branch: branch, event: "push", per_page: 20]
+           )
+           |> handle_json() do
+      runs
+      |> Enum.sort_by(&(Map.get(&1, "id") || 0), :desc)
+      |> Enum.take(@deploy_run_limit)
+      |> Enum.reduce_while({:ok, []}, fn run, {:ok, acc} ->
+        path = "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/jobs"
+
+        case cfg |> request(:get, path, params: [per_page: 100]) |> handle_json() do
+          {:ok, %{"jobs" => jobs}} when is_list(jobs) ->
+            entry = %{
+              id: Map.get(run, "id"),
+              sha: Map.get(run, "head_sha"),
+              status: deploy_status(run),
+              url: Map.get(run, "html_url"),
+              jobs: Enum.map(jobs, &%{name: Map.get(&1, "name"), status: deploy_status(&1)})
+            }
+
+            {:cont, {:ok, [entry | acc]}}
+
+          {:ok, _} ->
+            {:halt, {:error, :unexpected_jobs_response}}
+
+          {:error, _} = error ->
+            {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        error -> error
+      end
+    else
+      {:ok, _} -> {:error, :unexpected_runs_response}
+      {:error, _} = error -> error
+    end
+  end
+
+  # A workflow run / job in GitLab's status vocabulary, the one
+  # `Arbiter.Workflows.DeployWatch` reads.
+  defp deploy_status(%{"status" => "completed", "conclusion" => conclusion}) do
+    case conclusion do
+      "success" -> "success"
+      "skipped" -> "skipped"
+      "cancelled" -> "canceled"
+      "action_required" -> "manual"
+      _ -> "failed"
+    end
+  end
+
+  defp deploy_status(%{"status" => "in_progress"}), do: "running"
+  defp deploy_status(%{"status" => "waiting"}), do: "manual"
+  defp deploy_status(_), do: "pending"
 
   @green_walk_limit 30
 

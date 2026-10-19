@@ -106,7 +106,14 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   alias Arbiter.Tasks.Verification
   alias Arbiter.Trackers.Sync
   alias Arbiter.Worker
-  alias Arbiter.Workflows.{MergedPRFinalizerSupervisor, PatrolRepoScope, PatrolServer}
+
+  alias Arbiter.Workflows.{
+    DeployWatch,
+    MergedPRFinalizerSupervisor,
+    PatrolRepoScope,
+    PatrolServer
+  }
+
   require Ash.Query
   require Logger
 
@@ -245,6 +252,9 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
           {task, :pr_ref} -> maybe_finalize(task, adapter, state.repo)
           {task, rule} -> maybe_finalize_follow_up(task, rule, adapter, state.repo)
         end)
+
+        # #967: after the merge sweep, follow the deploy of what merged.
+        _ = DeployWatch.sweep(workspace, state.repo, adapter)
 
         {:ok, next_cursor}
       else
