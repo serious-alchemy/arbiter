@@ -606,9 +606,16 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
     Application.put_env(:arbiter, :systemd_run, Path.join(sandbox.bin, "systemd-run"))
     Application.put_env(:arbiter, :systemctl, Path.join(sandbox.bin, "systemctl"))
     Application.put_env(:arbiter, :worker_memory_max, "512M")
+    # the probe needs a systemd user runtime dir; a sandboxed host has none
+    prev_xdg = System.get_env("XDG_RUNTIME_DIR")
+    System.put_env("XDG_RUNTIME_DIR", sandbox.root)
     Arbiter.Worker.MemoryScope.reset_probe()
 
     on_exit(fn ->
+      if prev_xdg,
+        do: System.put_env("XDG_RUNTIME_DIR", prev_xdg),
+        else: System.delete_env("XDG_RUNTIME_DIR")
+
       for {k, v} <- prev do
         if v, do: Application.put_env(:arbiter, k, v), else: Application.delete_env(:arbiter, k)
       end
