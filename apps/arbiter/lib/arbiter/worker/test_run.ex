@@ -39,6 +39,7 @@ defmodule Arbiter.Worker.TestRun do
   alias Arbiter.Worker.ReleaseEnv
   alias Arbiter.Worker.SpawnEnv
   alias Arbiter.Worker.TestReport
+  alias Arbiter.Worker.Toolchain
 
   @default_timeout_s 600
   @max_timeout_s 1800
@@ -134,7 +135,10 @@ defmodule Arbiter.Worker.TestRun do
             command
           ]
 
-          ReleaseEnv.cmd(timeout_bin, args, cd: worktree, env: cmd_env, stderr_to_stdout: true)
+          # bd-3fnqi8: the repo-pinned Elixir/Erlang first on PATH, or no run at all.
+          with {:ok, env} <- Toolchain.env(worktree, cmd_env) do
+            ReleaseEnv.cmd(timeout_bin, args, cd: worktree, env: env, stderr_to_stdout: true)
+          end
       end
     end
   end

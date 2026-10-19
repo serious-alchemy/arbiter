@@ -135,6 +135,48 @@ defmodule Arbiter.Worker.PrepushCheckTest do
       assert {:error, {:no_worktree, _}} = run("true", "/nonexistent/prepush/dir")
     end
 
+    test "the check runs on the repo-pinned toolchain first on PATH (bd-3fnqi8)",
+         %{tmp_dir: dir} do
+      root = Path.join(dir, "installs")
+      bin = Path.join([root, "elixir", "1.20.4-otp-29", "bin"])
+      File.mkdir_p!(bin)
+
+      File.write!(Path.join(bin, "elixir"), """
+      #!/bin/sh
+      printf 'Erlang/OTP 29 [erts]\\n\\nElixir 1.20.4 (compiled with Erlang/OTP 29)\\n'
+      """)
+
+      File.chmod!(Path.join(bin, "elixir"), 0o755)
+      wt = Path.join(dir, "wt")
+      File.mkdir_p!(wt)
+      File.write!(Path.join(wt, ".tool-versions"), "elixir 1.20.4-otp-29\n")
+      Application.put_env(:arbiter, :worker_toolchain_roots, [root])
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_toolchain_roots) end)
+
+      assert {:failed, 1, output} = run("command -v elixir; elixir --version; exit 1", wt)
+      assert output =~ bin
+    end
+
+    test "a pinned toolchain that cannot be provided runs nothing and is an error (bd-3fnqi8)",
+         %{tmp_dir: dir} do
+      wt = Path.join(dir, "wt")
+      File.mkdir_p!(wt)
+      File.write!(Path.join(wt, ".tool-versions"), "elixir 1.20.4-otp-29\n")
+      Application.put_env(:arbiter, :worker_toolchain_roots, [Path.join(dir, "empty")])
+      Application.put_env(:arbiter, :worker_toolchain_provision, false)
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worker_toolchain_roots)
+        Application.delete_env(:arbiter, :worker_toolchain_provision)
+      end)
+
+      marker = Path.join(dir, "ran")
+
+      assert {:error, {:toolchain_unavailable, message}} = run("touch #{marker}", wt)
+      assert message =~ "elixir 1.20.4-otp-29"
+      refute File.exists?(marker)
+    end
+
     test "the sanitised env keeps server secrets out of the check", %{tmp_dir: dir} do
       System.put_env("ARBITER_CLOAK_KEY", "super-secret")
       on_exit(fn -> System.delete_env("ARBITER_CLOAK_KEY") end)

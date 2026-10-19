@@ -299,13 +299,19 @@ defmodule Arbiter.Worker.ClaudeSession do
             nil
         end
 
-      with {:ok, port_args} <-
+      with {:ok, env} <-
+             host_toolchain_env(
+               opts,
+               worktree_path,
+               env_pairs(opts, task_id, worker_env, tmp_dir)
+             ),
+           {:ok, port_args} <-
              port_args(
                Keyword.put(opts, :git_material, git.material),
                exec,
                argv,
                worktree_path,
-               env_pairs(opts, task_id, worker_env, tmp_dir),
+               env,
                owner: owner,
                task_id: task_id,
                tmp_dir: tmp_dir
@@ -314,6 +320,15 @@ defmodule Arbiter.Worker.ClaudeSession do
         GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
       end
     end
+  end
+
+  # bd-3fnqi8: a spawn that runs on this host (bwrap or unsandboxed; podman and
+  # node runs use the image's toolchain) gets the repo-pinned Elixir/Erlang
+  # first on PATH, or is refused: never the host's own.
+  defp host_toolchain_env(opts, worktree_path, env) do
+    if container_spawn?(Keyword.get(opts, :security)) or Keyword.get(opts, :node),
+      do: {:ok, env},
+      else: Arbiter.Worker.Toolchain.env(worktree_path, env)
   end
 
   # G18: a host-local spawn records the host CLI's version up front
