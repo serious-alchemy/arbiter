@@ -1480,6 +1480,16 @@ defmodule Arbiter.Worker.ReviewGate do
         escalate_pre_review(state, reason)
 
       {:ok, head_sha} ->
+        # bd-bk8kae: a send-back resume that left the head where the send-back
+        # was recorded changed nothing — tell the coordinator before the round.
+        if state.round == 1 and state.fix_round_attempt == 0 and not state.ci_rearmed do
+          Arbiter.Worker.SendBackBrief.flag_unchanged_head(
+            state.task_id,
+            state.workspace_id,
+            head_sha
+          )
+        end
+
         state = %{state | head_sha: head_sha}
 
         # bd-2jkrqu: the head about to be reviewed must be ON the remote branch

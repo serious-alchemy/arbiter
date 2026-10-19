@@ -858,6 +858,31 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp orphan_reason_tag(_), do: :merge_failed
 
   @doc """
+  Tell the coordinator a `--send-back` resume ended on the head the send-back was
+  recorded against (bd-bk8kae, #976): the agent changed nothing, so the ReviewGate
+  is about to re-review the same SHA. Best-effort, returns `:ok`.
+  """
+  @spec send_back_unchanged(map(), String.t(), String.t()) :: :ok
+  def send_back_unchanged(snapshot, head_sha, reasoning) do
+    escalate_event(:send_back_unchanged, snapshot, fn task_id ->
+      subject = "#{task_id} send-back resume produced no new commit (head #{short_sha(head_sha)})"
+
+      body =
+        "#{title_for(task_id)} was sent back with instructions, but the resumed worker " <>
+          "finished with the head unchanged (#{short_sha(head_sha)}), so the ReviewGate " <>
+          "is re-reviewing the same SHA.\n\nSend-back instructions:\n#{reasoning}\n\n" <>
+          "Check the run transcript (`arb worker show #{task_id}`), then re-send the " <>
+          "instructions (`arb message send #{task_id} <text>`) and `arb worker resume " <>
+          "#{task_id}`, or resolve it another way."
+
+      {subject, body}
+    end)
+  end
+
+  defp short_sha(sha) when is_binary(sha), do: String.slice(sha, 0, 8)
+  defp short_sha(_), do: "unknown"
+
+  @doc """
   Escalate a blocked merge to the coordinator (#354, Phase 1).
 
   Fired by `Arbiter.Worker.Watchdog` when an approved/parked PR can't merge and
