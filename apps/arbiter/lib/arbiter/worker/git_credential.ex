@@ -403,6 +403,7 @@ defmodule Arbiter.Worker.GitCredential do
   # and opens, comments on and merges the PR, so it is one token with both sets.
   # Still restricted to the one repo, and never held by a worker.
   @host_permissions %{
+    "actions" => "write",
     "contents" => "write",
     "issues" => "write",
     "metadata" => "read",
