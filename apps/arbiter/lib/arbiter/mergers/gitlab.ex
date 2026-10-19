@@ -159,6 +159,9 @@ defmodule Arbiter.Mergers.Gitlab do
              # MR head commit SHA — ReviewPatrol records this into an
              # engagement's `last_reviewed_sha` to detect new commits later.
              head_sha: Map.get(body, "sha"),
+             # The commit the merge landed on the target branch as — the deploy
+             # watch follows this commit's pipeline (#967).
+             merge_sha: Map.get(body, "merge_commit_sha") || Map.get(body, "squash_commit_sha"),
              # The MR's target branch — used to build a local `git diff
              # base_ref..HEAD` against a Tier-2 checkout worktree, sidestepping
              # a REST diff size cap (bd-5yp6yn).
@@ -190,6 +193,47 @@ defmodule Arbiter.Mergers.Gitlab do
       end
     end
   end
+
+  @deploy_pipeline_limit 10
+
+  @impl true
+  def deploy_pipelines(_mr_ref, branch, _opts) when is_binary(branch) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, pipelines} <-
+           cfg
+           |> request(:get, "/pipelines", params: [ref: branch, per_page: 20])
+           |> deploy_pipeline_list() do
+      pipelines
+      |> Enum.take(@deploy_pipeline_limit)
+      |> Enum.reduce_while({:ok, []}, fn pipeline, {:ok, acc} ->
+        case pipeline_jobs(cfg, Map.get(pipeline, "id")) do
+          {:ok, jobs} ->
+            entry = %{
+              id: Map.get(pipeline, "id"),
+              sha: Map.get(pipeline, "sha"),
+              status: Map.get(pipeline, "status"),
+              url: Map.get(pipeline, "web_url"),
+              jobs: Enum.map(jobs, &%{name: Map.get(&1, "name"), status: Map.get(&1, "status")})
+            }
+
+            {:cont, {:ok, [entry | acc]}}
+
+          {:error, _} = error ->
+            {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        error -> error
+      end
+    end
+  end
+
+  defp deploy_pipeline_list({:ok, %Req.Response{status: status, body: pipelines}})
+       when status in 200..299 and is_list(pipelines),
+       do: {:ok, newest_first(pipelines)}
+
+  defp deploy_pipeline_list(other), do: {:error, request_error(other)}
 
   @impl true
   def update_branch(mr_ref) when is_binary(mr_ref) do
