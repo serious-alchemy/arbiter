@@ -30,4 +30,8 @@ defmodule Arbiter.Worker.NoRealSystemdTest do
     assert MemoryScope.list([]) == []
     assert {:error, _} = MemoryScope.stop("arb-run-nonexistent-0000.scope", [])
   end
+
+  test "the default sweep, with no seams, reaches only the stub and stops nothing" do
+    assert MemoryScope.sweep([], []) == []
+  end
 end

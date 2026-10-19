@@ -521,11 +521,11 @@ defmodule Arbiter.Doctor.SpawnCanaryTest do
         fakes.run_log
         |> File.read!()
         |> String.split("\n", trim: true)
-        |> Enum.filter(&(&1 =~ "arb-run-canary-claude-"))
+        |> Enum.filter(&(&1 =~ ~r/arb-run-i[0-9a-f]{8}-canary-claude-/))
 
       assert [scope_run] = scope_runs
       assert scope_run =~ "MemoryMax=512M"
-      [_, unit] = Regex.run(~r/--unit=(arb-run-canary-claude-[0-9a-f-]+)/, scope_run)
+      [_, unit] = Regex.run(~r/--unit=(arb-run-i[0-9a-f]{8}-canary-claude-[0-9a-f-]+)/, scope_run)
 
       ctl = fakes.ctl_log |> File.read!() |> String.split("\n", trim: true)
       assert "--user stop #{unit}.scope" in ctl, inspect(ctl)
