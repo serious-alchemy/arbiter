@@ -3108,6 +3108,45 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  describe ":no_pipeline park (#918)" do
+    test "an approved MR whose head has no pipeline escalates once and never calls merge" do
+      task_id = new_task_id()
+
+      StubMerger.queue_get("!np1", [
+        %{status: :open, approved: true, block_reason: :no_pipeline, pipeline: nil}
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(task_id, "!np1",
+            auto_merge: true,
+            max_polls: 2,
+            transient_block_polls: 2,
+            interval_ms: 15,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> StubMerger.get_count("!np1") >= 8 end, 2_000)
+        end)
+
+      assert StubMerger.merge_count("!np1") == 0
+      assert length(String.split(log, "merge blocked (no_pipeline)")) == 2
+      refute_ended(task_id)
+    end
+
+    test "a pipeline appearing on the head resumes the normal merge" do
+      task_id = new_task_id()
+
+      StubMerger.queue_get("!np2", [
+        %{status: :open, approved: true, block_reason: :no_pipeline, pipeline: nil},
+        %{status: :open, approved: true, block_reason: nil, pipeline: :success}
+      ])
+
+      start_watchdog(task_id, "!np2", auto_merge: true, transient_block_polls: 1)
+      assert_merged(task_id)
+    end
+  end
+
   describe "transient :blocked_other debounce (bd-6mkyd1)" do
     test "a one-poll :blocked_other that then clears merges without escalating" do
       task_id = new_task_id()
