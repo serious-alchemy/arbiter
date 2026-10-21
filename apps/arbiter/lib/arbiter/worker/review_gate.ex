@@ -3123,6 +3123,37 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  # bd-43iqja: a fix round that ran out its budget (typically inside the full test
+  # suite CI will run anyway) after committing everything is not a stalled review.
+  # Salvage the commits: the next round's push gate delivers them and a reviewer
+  # reads them. Anything else falls through to the timeout park below.
+  def handle_info(
+        {:timeout, round, attempt},
+        %{round: round, attempt: attempt, phase: :revising, reported?: false} = state
+      ) do
+    Logger.warning(
+      "ReviewGate: revising pass timed out for task=#{state.task_id} (round #{state.round})"
+    )
+
+    stop_worker(state)
+
+    case salvageable_revise(state) do
+      :salvage ->
+        state = clear_pass(state)
+
+        case finish_revise(state, salvaged: true) do
+          {:done, state} -> {:stop, :normal, state}
+          {:continue, state} -> {:noreply, state}
+        end
+
+      {:uncommitted, paths} ->
+        escalate_timeout(state, uncommitted_note(paths))
+
+      :none ->
+        escalate_timeout(state)
+    end
+  end
+
   def handle_info({:timeout, round, attempt}, %{round: round, attempt: attempt} = state) do
     Logger.warning(
       "ReviewGate: #{state.phase} pass timed out for task=#{state.task_id} (round #{state.round})"
@@ -4189,9 +4220,11 @@ defmodule Arbiter.Worker.ReviewGate do
   # reviewer round (its prompt carries the prior thread). Returns `{:continue,
   # state}` to keep looping or `{:done, state}` (escalated) if the next reviewer
   # couldn't be spawned.
-  defp finish_revise(%{reported?: true} = state), do: {:done, state}
+  defp finish_revise(state, opts \\ [])
 
-  defp finish_revise(state) do
+  defp finish_revise(%{reported?: true} = state, _opts), do: {:done, state}
+
+  defp finish_revise(state, opts) do
     response =
       state.lines
       |> Enum.reverse()
@@ -4202,6 +4235,8 @@ defmodule Arbiter.Worker.ReviewGate do
       if response == "",
         do: "(implementer produced no output)",
         else: cap_transcript(response)
+
+    response = if opts[:salvaged], do: salvage_note(state) <> response, else: response
 
     # bd-1mksks: detect whether the revise implementer committed new changes.
     # If HEAD is unchanged from when the reviewer last ran, the implementer's
@@ -4216,6 +4251,9 @@ defmodule Arbiter.Worker.ReviewGate do
     # dirty) from "nothing changed at all" (escalate immediately; there is no
     # new diff to re-review).
     {outcome, commit_gate} = no_change_outcome(state, new_head_sha, response)
+
+    commit_gate =
+      if opts[:salvaged] && outcome == :advanced, do: :salvaged_timeout, else: commit_gate
 
     # bd-cb7wpq: `note_head_change/1` just appended a "rebuttal only, no new
     # commits" system entry (HEAD didn't move). On the path that advances to a
@@ -6326,8 +6364,8 @@ defmodule Arbiter.Worker.ReviewGate do
   # `:review_gate_inconclusive` and escalates to the coordinator, where a human
   # decision (raise the budget, shrink the review, re-run) can actually break
   # the cycle.
-  defp escalate_timeout(state) do
-    msg = timeout_message(state)
+  defp escalate_timeout(state, extra \\ "") do
+    msg = timeout_message(state) <> extra
     payload = if state.thread == [], do: msg, else: msg <> "\n\n" <> escalation_payload(state)
 
     # `/api/review_gate_rounds` is the only readable surface for a gate's
@@ -6343,6 +6381,50 @@ defmodule Arbiter.Worker.ReviewGate do
     # exactly where it is for a human to re-run, merge or reject.
     report(state, {:parked, :reviewer_timeout, payload})
     {:stop, :normal, %{state | reported?: true}}
+  end
+
+  # What a timed-out fix round left behind. `:salvage` only when the worktree is
+  # clean and HEAD moved past the head the reviewer last read; a fix round on a
+  # cluster node has no local checkout to trust, so it is never salvaged.
+  defp salvageable_revise(%{worktree_path: wt, fix_node: nil} = state) when is_binary(wt) do
+    case Arbiter.Worker.Worktree.has_uncommitted?(wt) do
+      {:ok, true} ->
+        {:uncommitted, uncommitted_paths(wt)}
+
+      {:ok, false} ->
+        head = current_head_sha(state)
+
+        if is_binary(head) and is_binary(state.head_sha) and head != state.head_sha,
+          do: :salvage,
+          else: :none
+
+      _ ->
+        :none
+    end
+  rescue
+    _ -> :none
+  end
+
+  defp salvageable_revise(_state), do: :none
+
+  defp uncommitted_paths(wt) do
+    case Arbiter.Worker.PrivateClone.cmd(wt, ["status", "--porcelain"], stderr_to_stdout: true) do
+      {out, 0} -> out |> String.split("\n", trim: true) |> Enum.map(&String.trim/1)
+      _ -> []
+    end
+  end
+
+  defp uncommitted_note([]), do: ""
+
+  defp uncommitted_note(paths) do
+    "\n\nThe fix round left UNCOMMITTED changes in the worktree (git status --porcelain):\n" <>
+      Enum.map_join(Enum.take(paths, 50), "\n", &("  " <> &1))
+  end
+
+  defp salvage_note(state) do
+    "[ReviewGate: this fix round hit its #{div(state.timeout_ms, 1000)}s pass cap before " <>
+      "finishing, but left a clean worktree with commits ahead of the reviewed head. " <>
+      "The commits were pushed and go to review as they stand.]\n\n"
   end
 
   # The timeout note. States the budget that was actually in force for the pass

@@ -164,6 +164,10 @@ defmodule Arbiter.ReviewGate.Round do
                           read that head (the fix was already pushed, or CI red
                           on main kept the branch red); the head went to a
                           reviewer instead of parking.
+                          `:salvaged_timeout` — the fix round hit its pass cap
+                          but left a clean worktree with commits ahead of the
+                          reviewed head; the gate pushed them and went straight
+                          to the next review round instead of parking.
                           Nil for a round whose HEAD advanced normally, for a
                           round with no worktree to check, and for every
                           `:review` row.
@@ -189,7 +193,7 @@ defmodule Arbiter.ReviewGate.Round do
   @verdicts ~w(approve request_changes timed_out)a
   @commit_gates ~w(reprompted escalated_uncommitted escalated_no_changes
                    advanced_non_file_fix escalated_no_changes_after_non_file_fix
-                   reran_ci_after_no_changes rereviewed_unreviewed_head)a
+                   reran_ci_after_no_changes rereviewed_unreviewed_head salvaged_timeout)a
 
   sqlite do
     table "review_gate_rounds"
