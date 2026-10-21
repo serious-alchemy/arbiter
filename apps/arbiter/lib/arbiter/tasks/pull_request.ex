@@ -57,7 +57,8 @@ defmodule Arbiter.Tasks.PullRequest do
       :needs_approval,
       :needs_nonauthor_approval,
       :draft,
-      :blocked_other
+      :blocked_other,
+      :no_pipeline
     ],
     pipeline: [
       :success,

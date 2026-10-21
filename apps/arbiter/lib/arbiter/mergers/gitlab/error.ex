@@ -12,6 +12,11 @@ defmodule Arbiter.Mergers.Gitlab.Error do
     * `:validation_failed` — 400/422, GitLab rejected the body
     * `:conflict` — 405/406/409, the merge request can't be merged in its
       current state (conflicts, unresolved discussions, not approved, …)
+    * `:not_mergeable` — a 405/406 merge refusal where the MR reports no
+      conflict (no pipeline, pipeline must succeed, draft, …); the message
+      carries the MR's `detailed_merge_status`
+    * `:pipeline_refused` — GitLab refused to create a pipeline (the
+      project's `workflow:rules` admit none); the message is GitLab's own
     * `:server_error` — 5xx
     * `:http` — any other 4xx not covered above
     * `:network` — transport-level failure
@@ -29,6 +34,8 @@ defmodule Arbiter.Mergers.Gitlab.Error do
           | :not_found
           | :validation_failed
           | :conflict
+          | :not_mergeable
+          | :pipeline_refused
           | :server_error
           | :http
           | :network
