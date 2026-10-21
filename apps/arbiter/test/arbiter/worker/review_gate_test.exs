@@ -57,6 +57,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @revise_commit_once Path.expand("../../fixtures/revise_commit_once.sh", __DIR__)
   @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
   @revise_dirty Path.expand("../../fixtures/revise_dirty.sh", __DIR__)
+  @revise_commit_then_hang Path.expand("../../fixtures/revise_commit_then_hang.sh", __DIR__)
+  @revise_dirty_then_hang Path.expand("../../fixtures/revise_dirty_then_hang.sh", __DIR__)
   @revise_non_file_fix Path.expand("../../fixtures/revise_non_file_fix.sh", __DIR__)
   @revise_commit_once_non_file_fix Path.expand(
                                      "../../fixtures/revise_commit_once_non_file_fix.sh",
@@ -4736,6 +4738,105 @@ defmodule Arbiter.Worker.ReviewGateTest do
         |> Ash.read!()
 
       assert [%{commit_gate: :reprompted}, %{commit_gate: :escalated_uncommitted}] = impl_rounds
+    end
+
+    # A fix round that commits its work and then hangs (a full `mix test`) hits
+    # the pass cap with a clean tree and a commit ahead of the reviewed head.
+    # The commit is salvaged: the next review round starts on it, no park.
+    test "revising-pass timeout with a clean tree and a new commit salvages it and re-reviews",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 3,
+            worktree_path: repo,
+            review_command: [@reject_twice],
+            revise_command: [@revise_commit_then_hang],
+            review_timeout_ms: 2_500
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_run_ended(pid, 15_000)
+      assert merge_commit_count(repo) == 1
+      assert %{state: :finished, outcome: :succeeded} = main_run(task.id)
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#r2")),
+             "the salvaged commit must start a review round without a coordinator"
+
+      require Ash.Query
+
+      impl_rounds =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id and role == :impl)
+        |> Ash.Query.sort(inserted_at: :asc)
+        |> Ash.read!()
+
+      assert [%{commit_gate: :salvaged_timeout} = salvaged | _] = impl_rounds
+      assert salvaged.round == 1
+    end
+
+    test "revising-pass timeout with uncommitted changes still parks, naming the paths",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@rounds, "REQUEST_CHANGES"],
+            revise_command: [@revise_dirty_then_hang],
+            review_timeout_ms: 1_500
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        10_000
+      )
+
+      assert merge_commit_count(repo) == 0
+
+      escalation =
+        "admiral"
+        |> Message.inbox(workspace_id: ws.id)
+        |> Enum.find(&(&1.directive_ref == task.id))
+
+      assert escalation, "expected an escalation to the coordinator"
+      assert escalation.body =~ "dirty.txt"
     end
 
     # Clean tree, HEAD unchanged: @revise fixture only talks, never touches the
