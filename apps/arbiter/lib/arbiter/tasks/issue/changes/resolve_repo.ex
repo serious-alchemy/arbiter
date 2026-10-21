@@ -44,9 +44,23 @@ defmodule Arbiter.Tasks.Issue.Changes.ResolveRepo do
       String.trim(Changeset.get_attribute(changeset, :repo)) != ""
   end
 
+  # A create filed under a `parent_id` with no repo of its own takes the
+  # parent's repo, ahead of the workspace's only/default repo.
+  defp parent_repo(%{action_type: :create} = changeset) do
+    with parent_id when is_binary(parent_id) and parent_id != "" <-
+           Changeset.get_argument(changeset, :parent_id),
+         {:ok, %{repo: repo}} when is_binary(repo) <- Ash.get(Arbiter.Tasks.Issue, parent_id) do
+      repo
+    else
+      _ -> nil
+    end
+  end
+
+  defp parent_repo(_changeset), do: nil
+
   defp resolve(changeset) do
     workspace_id = Changeset.get_attribute(changeset, :workspace_id)
-    explicit = Changeset.get_attribute(changeset, :repo)
+    explicit = Changeset.get_attribute(changeset, :repo) || parent_repo(changeset)
 
     case IssueRepo.resolve(workspace_id, explicit) do
       {:ok, nil} ->

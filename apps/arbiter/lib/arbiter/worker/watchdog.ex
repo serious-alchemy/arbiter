@@ -443,6 +443,8 @@ defmodule Arbiter.Worker.Watchdog do
   # completes). It must be seen on this many consecutive polls (~1 min at the
   # default interval) before it is paged; reasons with a concrete cause page at once.
   @default_transient_block_polls 2
+  # Blocks that may be a momentary read (a pipeline not yet created after a push).
+  @debounced_blocks [:blocked_other, :no_pipeline]
 
   # Registry suffix the Watchdog itself registers under, so an external caller
   # (CLI / MCP tool / dashboard) can find the Watchdog for a task by task_id
@@ -733,6 +735,7 @@ defmodule Arbiter.Worker.Watchdog do
           | :needs_nonauthor_approval
           | :draft
           | :blocked_other
+          | :no_pipeline
 
   @doc """
   Read the merge-block reason a `Arbiter.Mergers.get/1` result carries, or `nil`
@@ -3039,6 +3042,15 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp handle_block(reason, result, state) do
     cond do
+      # #918: the project requires a pipeline but the head has none (its
+      # workflow:rules created none). Merging only earns a 405 and a fresh
+      # pipeline needs a human to fix the CI rules, so page once (debounced like
+      # `:blocked_other`) and park without attempting the merge — indefinitely,
+      # like an exhausted `:ci_failed`, so the poll ceiling can't fail the worker.
+      reason == :no_pipeline ->
+        state = debounce_escalate_block(state, reason)
+        reschedule(%{state | max_polls: :infinity, park_reason: :no_pipeline})
+
       # Not mechanically resolvable here (:conflict → Phase 2b, :needs_approval /
       # :draft / :blocked_other → human), or the adapter can't perform the
       # resolution: fall back to the Phase 1 debounced escalation + normal outcome.
@@ -3169,11 +3181,11 @@ defmodule Arbiter.Worker.Watchdog do
 
     # bd-6mkyd1: a first-seen `:blocked_other` is held back until it has been
     # reported on `transient_block_polls` consecutive polls.
-    streak = if reason == :blocked_other, do: state.blocked_other_streak + 1, else: 0
+    streak = if reason in @debounced_blocks, do: state.blocked_other_streak + 1, else: 0
     state = %{state | blocked_other_streak: streak}
 
     cond do
-      reason == :blocked_other and state.last_block_reason != :blocked_other and
+      reason in @debounced_blocks and state.last_block_reason != reason and
           streak < state.transient_block_polls ->
         state
 
