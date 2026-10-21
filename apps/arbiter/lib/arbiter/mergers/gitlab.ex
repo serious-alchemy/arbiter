@@ -151,6 +151,7 @@ defmodule Arbiter.Mergers.Gitlab do
           merge_status = Map.get(body, "merge_status", "")
           {pipeline, pipeline_id} = fetch_pipeline_status(cfg, iid, Map.get(body, "sha"))
           status = map_state(Map.get(body, "state"))
+          block_reason = block_reason(cfg, body, status, pipeline, pipeline_id)
 
           {:ok,
            %{
@@ -179,9 +180,11 @@ defmodule Arbiter.Mergers.Gitlab do
              latest_review_id: nil,
              pipeline: pipeline,
              pipeline_id: pipeline_id,
-             ci_clean: merge_status == "can_be_merged",
+             # No pipeline on a head that needs one is not green CI, whatever the
+             # legacy `merge_status` says (#918).
+             ci_clean: merge_status == "can_be_merged" and block_reason != :no_pipeline,
              conflicting: settled_conflict?(body),
-             block_reason: block_reason(cfg, body, status, pipeline),
+             block_reason: block_reason,
              url: Map.get(body, "web_url") || link_for(ref_for(iid))
            }}
 
@@ -318,7 +321,7 @@ defmodule Arbiter.Mergers.Gitlab do
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, mr} <- request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json(),
          {:ok, pipelines} <- head_pipelines(cfg, iid, Map.get(mr, "sha")),
-         {:ok, pipeline} <- settled_failed_pipeline(pipelines, Map.get(mr, "sha")) do
+         {:ok, pipeline} <- rerun_base_pipeline(pipelines, requested, Map.get(mr, "sha")) do
       jobs = rerun_jobs(cfg, Map.get(pipeline, "id"))
 
       decision =
@@ -438,6 +441,11 @@ defmodule Arbiter.Mergers.Gitlab do
 
   defp newest_first(pipelines), do: Enum.sort_by(pipelines, &(Map.get(&1, "id") || 0), :desc)
 
+  # `:all_jobs` / `:workflow` start a fresh pipeline, so they need no existing one
+  # (a head whose workflow:rules created none is exactly when they are wanted).
+  defp rerun_base_pipeline([], mode, _sha) when mode in [:all_jobs, :workflow], do: {:ok, %{}}
+  defp rerun_base_pipeline(pipelines, _mode, sha), do: settled_failed_pipeline(pipelines, sha)
+
   defp settled_failed_pipeline([], sha),
     do: {:error, rerun_not_found("no pipeline on head SHA #{sha}")}
 
@@ -465,6 +473,8 @@ defmodule Arbiter.Mergers.Gitlab do
 
   # Best-effort: jobs only feed the granularity policy, so an API error degrades
   # to "no known upstream jobs" (the cheapest re-run).
+  defp rerun_jobs(_cfg, nil), do: []
+
   defp rerun_jobs(cfg, pipeline_id) do
     case request(cfg, :get, "/pipelines/#{pipeline_id}/jobs",
            params: [per_page: 100, include_retried: true]
@@ -531,7 +541,7 @@ defmodule Arbiter.Mergers.Gitlab do
   # `workflow:rules` only admit merge_request_event pipelines reject a branch
   # pipeline ("The pipeline did not run").
   defp post_rerun(cfg, _pipeline, :all_jobs, iid, _ref, inputs) when map_size(inputs) == 0 do
-    request(cfg, :post, "/merge_requests/#{iid}/pipelines", json: %{}) |> handle_json()
+    request(cfg, :post, "/merge_requests/#{iid}/pipelines", json: %{}) |> handle_pipeline_create()
   end
 
   defp post_rerun(_cfg, _pipeline, _mode, _iid, ref, _inputs) when ref in [nil, ""],
@@ -544,8 +554,35 @@ defmodule Arbiter.Mergers.Gitlab do
           do: %{key: key, value: value, variable_type: "env_var"}
 
     body = if variables == [], do: %{ref: ref}, else: %{ref: ref, variables: variables}
-    request(cfg, :post, "/pipeline", json: body) |> handle_json()
+    request(cfg, :post, "/pipeline", json: body) |> handle_pipeline_create()
   end
+
+  # GitLab refuses a pipeline the project's `workflow:rules` don't admit with a
+  # 400/422 ("The pipeline did not run. Review the workflow:rules
+  # configuration"). That is a real answer about the project's CI setup, not a
+  # request fault: surface GitLab's message verbatim under its own kind.
+  defp handle_pipeline_create({:ok, %Req.Response{status: status, body: body}})
+       when status in [400, 422] do
+    {:error,
+     %Error{
+       kind: :pipeline_refused,
+       status: status,
+       message: "cannot re-run CI: " <> refusal_message(body),
+       raw: body
+     }}
+  end
+
+  defp handle_pipeline_create(result), do: handle_json(result)
+
+  defp refusal_message(%{"message" => message}), do: refusal_message(message)
+  defp refusal_message(%{"error" => message}), do: refusal_message(message)
+  defp refusal_message(message) when is_binary(message), do: message
+
+  defp refusal_message(%{} = map),
+    do: map |> Map.values() |> List.flatten() |> Enum.map_join("; ", &refusal_message/1)
+
+  defp refusal_message(list) when is_list(list), do: Enum.map_join(list, "; ", &refusal_message/1)
+  defp refusal_message(other), do: inspect(other)
 
   defp string_inputs(inputs) when is_map(inputs) and map_size(inputs) > 0,
     do: Map.new(inputs, fn {k, v} -> {to_string(k), to_string(v)} end)
@@ -606,7 +643,36 @@ defmodule Arbiter.Mergers.Gitlab do
 
     request(cfg, :put, "/merge_requests/#{iid}/merge", json: payload)
     |> handle_ok()
+    |> reclassify_merge_refusal(cfg, iid)
   end
+
+  # GitLab answers 405/406 for every "can't merge right now" state (no pipeline,
+  # pipeline must succeed, draft, unresolved threads, ...), not only conflicts.
+  # Calling them all `:conflict` mislabelled a missing pipeline as a conflict
+  # (#918), so re-read the MR and keep `:conflict` only when it says so.
+  defp reclassify_merge_refusal({:error, %Error{kind: :conflict, status: status} = err}, cfg, iid)
+       when status in [405, 406] do
+    case request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json() do
+      {:ok, %{"has_conflicts" => true}} ->
+        {:error, err}
+
+      {:ok, %{} = mr} ->
+        detail = Map.get(mr, "detailed_merge_status") || Map.get(mr, "merge_status")
+
+        {:error,
+         %{err | kind: :not_mergeable, message: not_mergeable_message(err.message, detail)}}
+
+      _ ->
+        {:error, %{err | kind: :not_mergeable}}
+    end
+  end
+
+  defp reclassify_merge_refusal(result, _cfg, _iid), do: result
+
+  defp not_mergeable_message(message, detail) when is_binary(detail) and detail != "",
+    do: "#{message} (detailed_merge_status=#{detail})"
+
+  defp not_mergeable_message(message, _detail), do: message
 
   # GitLab's merge endpoint only accepts "squash" as a per-call parameter (boolean).
   # The merge strategy (merge/rebase/ff) is a project-level setting, not per-MR.
@@ -1177,6 +1243,7 @@ defmodule Arbiter.Mergers.Gitlab do
   #   :conflict                  — merge conflict with the target branch
   #   :behind_base               — fast-forward-only target needs a rebase
   #   :ci_failed                 — required pipeline actually failed
+  #   :no_pipeline               — a pipeline is required but the head has none
   #   :needs_approval            — required approvals not yet satisfied
   #   :needs_nonauthor_approval  — `not_approved` on a fleet-authored MR (GitLab's
   #                                approval rules forbid the author self-approving)
@@ -1199,13 +1266,14 @@ defmodule Arbiter.Mergers.Gitlab do
   # true` or the explicit `detailed_merge_status == "conflict"` are trusted;
   # everything else in that family is treated as "not settled yet", same as
   # preparing/checking/unchecked, until a positive signal corroborates it.
-  defp block_reason(_cfg, _body, status, _pipeline) when status in [:merged, :closed], do: nil
+  defp block_reason(_cfg, _body, status, _pipeline, _pipeline_id)
+       when status in [:merged, :closed], do: nil
 
   # Pre-existing complexity 17 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  defp block_reason(cfg, body, _status, pipeline) do
+  defp block_reason(cfg, body, _status, pipeline, pipeline_id) do
     draft? = Map.get(body, "draft") == true or Map.get(body, "work_in_progress") == true
     detailed = Map.get(body, "detailed_merge_status")
     merge_status = Map.get(body, "merge_status")
@@ -1226,6 +1294,13 @@ defmodule Arbiter.Mergers.Gitlab do
       # "ci_still_running" are handled in the in-progress bucket below.
       pipeline == :failed ->
         :ci_failed
+
+      # The project requires a pipeline (`ci_must_pass`) but none exists on the
+      # head and the MR carries no `head_pipeline` — its workflow:rules created
+      # none, so CI can never go green and merging will only be refused (#918).
+      detailed == "ci_must_pass" and is_nil(pipeline_id) and
+          is_nil(Map.get(body, "head_pipeline")) ->
+        :no_pipeline
 
       detailed in ["not_approved", "approvals_syncing", "requested_changes"] ->
         approval_block_reason(cfg, body, detailed)
@@ -1283,7 +1358,7 @@ defmodule Arbiter.Mergers.Gitlab do
   # Trusted, settled conflict signal only: an explicit `has_conflicts: true` or
   # `detailed_merge_status == "conflict"`. `broken_status` and the legacy
   # `merge_status == "cannot_be_merged"` are deliberately excluded — see the
-  # block comment above `block_reason/4` (bd-1x4r25). Shared by `block_reason/4`
+  # block comment above `block_reason/5` (bd-1x4r25). Shared by `block_reason/5`
   # and the `conflicting` field on `get/1` so both paths agree on what counts
   # as a real conflict worth dispatching a resolver for.
   defp settled_conflict?(body) do

@@ -2140,6 +2140,10 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     do: "the latest ReviewGate round did not approve the current head"
 
   defp block_label(:draft), do: "the PR is still a draft"
+
+  defp block_label(:no_pipeline),
+    do: "no pipeline exists on the head commit, and the project requires one"
+
   defp block_label(:blocked_other), do: "a forge merge rule is unsatisfied"
   defp block_label(other), do: "merge is blocked (#{other})"
 
@@ -2209,6 +2213,13 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         after_approval_note(auto_merge?)
 
   defp block_remediation(:draft, _auto_merge?), do: "mark the PR ready for review."
+
+  defp block_remediation(:no_pipeline, _auto_merge?),
+    do:
+      "the project's CI rules (e.g. GitLab workflow:rules) created no pipeline for this " <>
+        "change, so the required check can never pass. Fix the CI rules so a pipeline " <>
+        "runs, or merge/override the requirement manually; `ci_rerun` (mode all_jobs or " <>
+        "workflow) will report the project's refusal if it still creates none."
 
   defp block_remediation(:blocked_other, _auto_merge?),
     do: "inspect the PR's merge requirements on the forge and satisfy them."

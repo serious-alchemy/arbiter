@@ -510,7 +510,41 @@ defmodule Arbiter.Mergers.GitlabTest do
     test "ci_must_pass is non-blocking (CI required but not yet failed)" do
       # ci_must_pass means CI hasn't gone green yet — it may still be running.
       # Only a resolved :failed pipeline is a CI block, so this is nil.
-      assert block_get(%{"detailed_merge_status" => "ci_must_pass"}).block_reason == nil
+      result =
+        block_get(%{"detailed_merge_status" => "ci_must_pass"}, [
+          %{"id" => 3, "status" => "running"}
+        ])
+
+      assert result.block_reason == nil
+    end
+
+    test "ci_must_pass with no pipeline on the head classifies as :no_pipeline (#918)" do
+      # The project's workflow:rules created no pipeline, so CI can never go green.
+      result = block_get(%{"detailed_merge_status" => "ci_must_pass", "head_pipeline" => nil})
+
+      assert result.block_reason == :no_pipeline
+    end
+
+    test ":no_pipeline is never ci_clean, even if the legacy merge_status says can_be_merged" do
+      result =
+        block_get(%{
+          "detailed_merge_status" => "ci_must_pass",
+          "merge_status" => "can_be_merged",
+          "head_pipeline" => nil
+        })
+
+      assert result.block_reason == :no_pipeline
+      refute result.ci_clean
+    end
+
+    test "ci_must_pass whose only pipelines belong to an older head is :no_pipeline too" do
+      result =
+        block_get(
+          %{"detailed_merge_status" => "ci_must_pass", "head_pipeline" => nil, "sha" => "new"},
+          [%{"id" => 1, "sha" => "old", "status" => "success"}]
+        )
+
+      assert result.block_reason == :no_pipeline
     end
 
     test "ci_still_running is non-blocking (pipeline in progress, not failed)" do
@@ -748,6 +782,37 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
   end
 
+  describe "merge/2 405 classification (#918)" do
+    defp merge_405_stub(mr_fields) do
+      stub(fn conn ->
+        case conn.method do
+          "PUT" ->
+            conn
+            |> Plug.Conn.put_status(405)
+            |> Req.Test.json(%{"message" => "405 Method Not Allowed"})
+
+          "GET" ->
+            Req.Test.json(conn, Map.merge(%{"iid" => @iid, "state" => "opened"}, mr_fields))
+        end
+      end)
+    end
+
+    test "a 405 is :not_mergeable, not :conflict, when the MR has no conflicts" do
+      merge_405_stub(%{"has_conflicts" => false, "detailed_merge_status" => "ci_must_pass"})
+
+      assert {:error, %Error{kind: :not_mergeable, status: 405, message: message}} =
+               Gitlab.merge(@ref, "abc")
+
+      assert message =~ "405 Method Not Allowed"
+      assert message =~ "ci_must_pass"
+    end
+
+    test "a 405 stays :conflict when the MR reports has_conflicts" do
+      merge_405_stub(%{"has_conflicts" => true})
+      assert {:error, %Error{kind: :conflict, status: 405}} = Gitlab.merge(@ref, "abc")
+    end
+  end
+
   describe "merge/2" do
     test "200: fetches MR, extracts head SHA, sends it in merge request body" do
       stub(fn conn ->
@@ -833,7 +898,7 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:error, %Error{kind: :validation_failed, status: 422}} = Gitlab.merge(@ref, nil)
     end
 
-    test "405: not mergeable returns {:error, %Error{kind: :conflict}}" do
+    test "405 with no reported conflict returns :not_mergeable, not :conflict (#918)" do
       stub(fn conn ->
         cond do
           conn.method == "GET" and conn.request_path == "#{base_path()}/#{@iid}" ->
@@ -852,7 +917,7 @@ defmodule Arbiter.Mergers.GitlabTest do
         end
       end)
 
-      assert {:error, %Error{kind: :conflict, status: 405}} = Gitlab.merge(@ref, nil)
+      assert {:error, %Error{kind: :not_mergeable, status: 405}} = Gitlab.merge(@ref, nil)
     end
 
     test "sends squash parameter when merge_method=squash is configured" do
@@ -2014,6 +2079,46 @@ defmodule Arbiter.Mergers.GitlabTest do
 
     test "an unknown mode is rejected" do
       assert {:error, %Error{kind: :validation_failed}} = Gitlab.rerun_ci(@ref, %{mode: :bogus})
+    end
+
+    test ":all_jobs creates the first pipeline when the head has none (#918)" do
+      rerun_stub([], [], &created(&1, 101))
+
+      assert {:ok, %{mode: :all_jobs, run_id: 101}} = Gitlab.rerun_ci(@ref, %{mode: :all_jobs})
+      assert_received {:post, @mr_pipeline_path, _}
+    end
+
+    test ":workflow creates a branch pipeline when the head has none (#918)" do
+      rerun_stub([], [], &created(&1, 102))
+
+      assert {:ok, %{mode: :workflow, run_id: 102}} = Gitlab.rerun_ci(@ref, %{mode: :workflow})
+      assert_received {:post, @new_pipeline_path, raw}
+      assert Jason.decode!(raw)["ref"] == "feat/x"
+    end
+
+    test ":auto with no pipeline stays a not_found error" do
+      rerun_stub([], [], & &1)
+      assert {:error, %Error{kind: :not_found}} = Gitlab.rerun_ci(@ref, %{})
+      refute_received {:post, _, _}
+    end
+
+    test "a workflow:rules refusal comes back as :pipeline_refused with GitLab's message" do
+      refuse = fn conn ->
+        conn
+        |> Plug.Conn.put_status(400)
+        |> Req.Test.json(%{
+          "message" => %{
+            "base" => ["The pipeline did not run. Review the workflow:rules configuration"]
+          }
+        })
+      end
+
+      rerun_stub([], [], refuse)
+
+      assert {:error, %Error{kind: :pipeline_refused, message: message}} =
+               Gitlab.rerun_ci(@ref, %{mode: :all_jobs})
+
+      assert message =~ "The pipeline did not run. Review the workflow:rules configuration"
     end
   end
 end
