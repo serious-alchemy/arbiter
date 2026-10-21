@@ -85,6 +85,39 @@ defmodule Arbiter.Tasks.IssueRepoTest do
     end
   end
 
+  describe "Issue create — parent_id repo inheritance" do
+    alias Arbiter.Tasks.Issue
+
+    setup do
+      ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "device" => "/srv/device"}})
+      {:ok, parent} = Ash.create(Issue, %{title: "parent", workspace_id: ws.id, repo: "device"})
+      %{ws: ws, parent: parent}
+    end
+
+    test "a child with parent_id and no repo inherits the parent's repo", %{ws: ws, parent: p} do
+      assert {:ok, child} =
+               Ash.create(Issue, %{title: "child", workspace_id: ws.id, parent_id: p.id})
+
+      assert child.repo == "device"
+    end
+
+    test "an explicit repo wins over the parent's", %{ws: ws, parent: p} do
+      assert {:ok, child} =
+               Ash.create(Issue, %{
+                 title: "child",
+                 workspace_id: ws.id,
+                 parent_id: p.id,
+                 repo: "tonic"
+               })
+
+      assert child.repo == "tonic"
+    end
+
+    test "without parent_id the multi-repo refusal is unchanged", %{ws: ws} do
+      assert {:error, _} = Ash.create(Issue, %{title: "orphan", workspace_id: ws.id})
+    end
+  end
+
   describe "resolve/2 — explicit repo" do
     test "keeps an explicit repo that is a configured key" do
       ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"}})
