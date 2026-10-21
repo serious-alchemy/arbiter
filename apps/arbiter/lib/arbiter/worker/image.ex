@@ -124,7 +124,7 @@ defmodule Arbiter.Worker.Image do
     RUN apt-get update \\
      && apt-get install -y --no-install-recommends \\
           bc build-essential ca-certificates curl git libncurses6 libsctp1 libssl3t64 \\
-          openssh-client procps socat sqlite3 tini \\
+          openssh-client procps socat sqlite3 tini tmux \\
      && rm -rf /var/lib/apt/lists/*
     RUN groupadd --gid 10001 arbiter \\
      && useradd --uid 10001 --gid 10001 --no-log-init --create-home \\

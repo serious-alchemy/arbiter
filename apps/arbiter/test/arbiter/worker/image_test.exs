@@ -86,7 +86,7 @@ defmodule Arbiter.Worker.ImageTest do
     test "tini is installed and the arbiter user is uid/gid 10001 with a passwd entry", %{
       base: base
     } do
-      assert base =~ ~r/openssh-client procps socat sqlite3 tini/
+      assert base =~ ~r/openssh-client procps socat sqlite3 tini tmux/
       assert base =~ "groupadd --gid 10001 arbiter"
       assert base =~ ~r/useradd --uid 10001 --gid 10001 --no-log-init --create-home/
       assert base =~ "--home-dir /home/arbiter"
