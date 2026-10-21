@@ -4225,18 +4225,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp finish_revise(%{reported?: true} = state, _opts), do: {:done, state}
 
   defp finish_revise(state, opts) do
-    response =
-      state.lines
-      |> Enum.reverse()
-      |> Enum.join("\n")
-      |> String.trim()
-
-    response =
-      if response == "",
-        do: "(implementer produced no output)",
-        else: cap_transcript(response)
-
-    response = if opts[:salvaged], do: salvage_note(state) <> response, else: response
+    response = revise_response(state, opts)
 
     # bd-1mksks: detect whether the revise implementer committed new changes.
     # If HEAD is unchanged from when the reviewer last ran, the implementer's
@@ -4252,8 +4241,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # new diff to re-review).
     {outcome, commit_gate} = no_change_outcome(state, new_head_sha, response)
 
-    commit_gate =
-      if opts[:salvaged] && outcome == :advanced, do: :salvaged_timeout, else: commit_gate
+    commit_gate = salvaged_commit_gate(commit_gate, outcome, opts)
 
     # bd-cb7wpq: `note_head_change/1` just appended a "rebuttal only, no new
     # commits" system entry (HEAD didn't move). On the path that advances to a
@@ -4306,6 +4294,26 @@ defmodule Arbiter.Worker.ReviewGate do
          escalate_commit_gate(%{state | head_sha: new_head_sha}, :no_changes_after_non_file_fix)}
     end
   end
+
+  defp revise_response(state, opts) do
+    text =
+      state.lines
+      |> Enum.reverse()
+      |> Enum.join("\n")
+      |> String.trim()
+
+    response =
+      if text == "",
+        do: "(implementer produced no output)",
+        else: cap_transcript(text)
+
+    if opts[:salvaged], do: salvage_note(state) <> response, else: response
+  end
+
+  defp salvaged_commit_gate(commit_gate, :advanced, opts),
+    do: if(opts[:salvaged], do: :salvaged_timeout, else: commit_gate)
+
+  defp salvaged_commit_gate(commit_gate, _outcome, _opts), do: commit_gate
 
   # bd-c6tdbu: a no-op fix round is ambiguous in general (commit_gate_outcome's
   # existing :no_changes case) UNLESS it was launched only to stand in for an
