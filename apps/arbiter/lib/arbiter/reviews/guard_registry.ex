@@ -265,7 +265,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :parked,
       sites: [
         {ReviewGate, :handle_info, 2},
-        {ReviewGate, :escalate_timeout, 1}
+        {ReviewGate, :escalate_timeout, 2}
       ],
       anchors: ["@default_timeout_retries", "timeout_retries_left"],
       summary: "reviewing-pass timeout, with one fresh-mind retry"
@@ -279,7 +279,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       bound: {:evaluations, 1},
       episode: {:task, :review_id, :attempt},
       terminal: :escalated_once,
-      sites: [{ReviewGate, :escalate_timeout, 1}],
+      sites: [{ReviewGate, :escalate_timeout, 2}],
       anchors: [":timed_out", ":no_verdict"],
       summary: "a timeout reports :no_verdict, never a synthetic :request_changes",
       policy_note:
@@ -525,7 +525,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :parked,
       sites: [
         {ReviewGate, :commit_gate_outcome, 3},
-        {ReviewGate, :finish_revise, 1},
+        {ReviewGate, :finish_revise, 2},
         {ReviewGate, :nudge_uncommitted_implementer, 1}
       ],
       anchors: ["commit_gate_outcome"],
