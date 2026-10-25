@@ -238,9 +238,7 @@ defmodule Arbiter.Agents.Codex do
           # `maybe_jail_reviewer/3` wraps under bwrap.
           with {:ok, _sandbox} <- sandbox_for(policy, wrap?),
                {:ok, argv} <- build_argv(codex, prompt, flags) do
-            # A container already confines the reviewer (its private clone is
-            # read-only), and `Sandbox.module/1` would refuse podman for the jail.
-            if wrap?, do: {:ok, argv}, else: maybe_jail_reviewer(argv, policy, opts)
+            jail_unless_wrapped(argv, policy, opts, wrap?)
           end
         end
 
@@ -248,6 +246,11 @@ defmodule Arbiter.Agents.Codex do
         err
     end
   end
+
+  # A container already confines the reviewer (its private clone is
+  # read-only), and `Sandbox.module/1` would refuse podman for the jail.
+  defp jail_unless_wrapped(argv, _policy, _opts, true), do: {:ok, argv}
+  defp jail_unless_wrapped(argv, policy, opts, false), do: maybe_jail_reviewer(argv, policy, opts)
 
   # Base `codex exec` flags shared by every spawn: JSON event stream + tolerate
   # linked worktrees (whose `.git` is a file, which Codex's repo check can trip
