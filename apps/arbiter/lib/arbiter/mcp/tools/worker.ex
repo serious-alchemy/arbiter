@@ -699,6 +699,16 @@ defmodule Arbiter.MCP.Tools.Worker do
   # The dispatch result carries live pids/ports; render the JSON-safe subset (pids
   # inspected to strings), mirroring `ArbiterWeb.Api.WorkerJSON.dispatch/1`. `depth`
   # is the slung worker's scope depth (parent + 1).
+  defp serialize_dispatch(%{ruling_resumed: how, task_id: task_id}, _depth) do
+    %{
+      task_id: task_id,
+      ruling_resumed: how,
+      claude_started: false,
+      message:
+        "covering #{how} ruling on the current head; merge path resumed, no agent dispatched"
+    }
+  end
+
   defp serialize_dispatch(result, depth) do
     %{
       task: Tools.serialize_task_summary(result.task),
