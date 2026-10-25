@@ -394,13 +394,14 @@ defmodule Arbiter.Worker.ReviewGateTest do
     repo
   end
 
-  # Create a feature branch with one commit ahead of main, then return to main.
+  # Create a feature branch with one commit ahead of main and leave it checked out: the gate
+  # reviews the head of `worktree_path` (the repo), so the reviewed SHA is then the branch head
+  # the direct merge integrates (bd-9ahwai). The merger checks out the target itself.
   defp seed_feature_branch(repo, branch) do
     {_, 0} = git(["checkout", "-q", "-b", branch], repo)
     File.write!(Path.join(repo, "feature.txt"), "worker work\n")
     {_, 0} = git(["add", "feature.txt"], repo)
     {_, 0} = git(["commit", "-q", "-m", "feature work"], repo)
-    {_, 0} = git(["checkout", "-q", "main"], repo)
     :ok
   end
 
