@@ -52,7 +52,6 @@ defmodule Arbiter.Worker.ReviewGateSendBackTest do
     {_, 0} = git(["add", file], repo)
     {_, 0} = git(["commit", "-q", "-m", "work: #{file}"], repo)
     {sha, 0} = git(["rev-parse", "HEAD"], repo)
-    {_, 0} = git(["checkout", "-q", "main"], repo)
     String.trim(sha)
   end
 
@@ -61,7 +60,6 @@ defmodule Arbiter.Worker.ReviewGateSendBackTest do
     File.write!(Path.join(repo, "feature.txt"), "worker work\n")
     {_, 0} = git(["add", "feature.txt"], repo)
     {_, 0} = git(["commit", "-q", "-m", "feature work"], repo)
-    {_, 0} = git(["checkout", "-q", "main"], repo)
     :ok
   end
 

@@ -7658,6 +7658,9 @@ defmodule Arbiter.Worker do
   # diff — the branch's PR is very likely open and mergeable already.
   defp merge_failure_subject(task_id, reason) do
     cond do
+      match?({:stale_reviewed_sha, _, _}, reason) ->
+        "Merge refused: #{task_id} branch head is not the reviewed SHA"
+
       Arbiter.Mergers.already_open_error?(reason) ->
         "PR already exists: #{task_id} — could not auto-resolve its number"
 
@@ -7689,6 +7692,17 @@ defmodule Arbiter.Worker do
     ref_line = if is_binary(mr_ref) and mr_ref != "", do: "PR/MR ref: #{mr_ref}\n", else: ""
 
     cond do
+      match?({:stale_reviewed_sha, _, _}, reason) ->
+        {:stale_reviewed_sha, reviewed, head} = reason
+
+        """
+        Branch #{branch} no longer points at the commit the reviewer approved \
+        (reviewed #{short_sha(reviewed)}, branch head #{short_sha(head)}), so \
+        the direct merge was refused: integrating it would ship commits no \
+        reviewer saw. Nothing was merged. Re-run the review on the current \
+        head (or record an explicit accept_as_is for it) and merge again.
+        """
+
       Arbiter.Mergers.already_open_error?(reason) ->
         """
         The forge reports a pull request already exists for branch #{branch}, \
@@ -9886,7 +9900,7 @@ defmodule Arbiter.Worker do
     case resolve_merger(state, opts) do
       {:ok, adapter, workspace} ->
         Arbiter.Mergers.prepare_with_repo(workspace, state.repo)
-        open_opts = build_open_opts(state, opts)
+        open_opts = state |> build_open_opts(opts) |> put_reviewed_sha(adapter, state)
 
         # bd-13thk9: push the worktree branch to origin BEFORE asking a hosted
         # forge (GitHub/GitLab) to open a PR. GitHub returns 422 "field head
@@ -10359,6 +10373,18 @@ defmodule Arbiter.Worker do
     |> maybe_default(:repo_path, Map.get(meta, :repo_path) || Map.get(meta, :worktree_path))
     |> maybe_default(:target_branch, Map.get(meta, :target_branch))
   end
+
+  # bd-9ahwai: the local `Direct` merge integrates the branch ref by name, so it
+  # carries the approved SHA and refuses a branch that moved past it. Forge
+  # adapters have their own head guard (`expected_sha` on `merge/2`).
+  defp put_reviewed_sha(open_opts, Arbiter.Mergers.Direct, %State{task_id: task_id}) do
+    case last_reviewed_sha(task_id) do
+      sha when is_binary(sha) and sha != "" -> Map.put(open_opts, :reviewed_sha, sha)
+      _ -> open_opts
+    end
+  end
+
+  defp put_reviewed_sha(open_opts, _adapter, _state), do: open_opts
 
   defp maybe_default(map, _key, nil), do: map
   defp maybe_default(map, key, value), do: Map.put_new(map, key, value)

@@ -86,7 +86,6 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
     File.write!(Path.join(repo, "feature.txt"), "worker work\n")
     {_, 0} = git(["add", "feature.txt"], repo)
     {_, 0} = git(["commit", "-q", "-m", "feature work"], repo)
-    {_, 0} = git(["checkout", "-q", "main"], repo)
     :ok
   end
 
