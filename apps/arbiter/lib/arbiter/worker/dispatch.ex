@@ -536,6 +536,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_active(task_id),
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, worktree_path} <- resume_worktree(task, repo),
+         :ok <- ensure_no_covering_ruling(task_id, worktree_path),
          target_branch <- resolve_target_branch(task, Keyword.put(opts, :repo, repo)),
          {:ok, context} <- ResumeContext.build(task, worktree_path, target_branch),
          {:ok, opts} <- ensure_collected(task, :resume, opts),
@@ -580,8 +581,29 @@ defmodule Arbiter.Worker.Dispatch do
       # Already inside this resume's Drain.track — skip dispatch/2's own.
       do_dispatch(task_id, resume_opts)
     else
-      {:deferred, result} -> {:ok, result}
-      other -> other
+      {:deferred, result} ->
+        {:ok, result}
+
+      # A merge-permitting ruling covers the worktree's head: the ticket went
+      # back on the merge path and no agent is dispatched. Shaped like a
+      # deferral so callers that handle `deferred: true` need no new clause.
+      {:ruling_resumed, how} ->
+        {:ok, %{deferred: true, task_id: task_id, cap: 0, holders: [], ruling_resumed: how}}
+
+      other ->
+        other
+    end
+  end
+
+  # A standing `accept_as_is` / `amend` ruling on the head being resumed is
+  # honoured (CI wait, merge) rather than re-reviewed as a fresh round 1. A
+  # ruling on an older head, or a `send_back`, falls through to a normal resume.
+  defp ensure_no_covering_ruling(task_id, worktree_path) do
+    head = Worktree.head_sha(worktree_path)
+
+    case Arbiter.ReviewGate.RulingResume.resume_covering(task_id, head) do
+      {:ok, how} -> {:ruling_resumed, how}
+      :none -> :ok
     end
   end
 

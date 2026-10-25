@@ -30,8 +30,9 @@ defmodule Arbiter.ReviewGate.RulingResume do
          * *Merging* with no Watchdog — one is started from the ticket's row.
          * *Merging* with a Watchdog already watching — nothing to start; it
            re-reads the ruling on its next merge attempt.
-         * a worker is resident, or the ticket is not parked on the gate — left
-           alone.
+         * a worker with a live run is resident, or the ticket is not parked on
+           the gate — left alone. A worker left registered but `:finished` does
+           not count as resident.
     4. The Watchdog does the rest: waits for the pipeline on H, merges exactly H,
        closes the ticket and runs the post-merge steps (deploy watch, tracker
        sync, `verify_after_deploy`). A repo with `merge.auto_merge` off stops at
@@ -132,6 +133,24 @@ defmodule Arbiter.ReviewGate.RulingResume do
 
   def resume(_resolution, _opts), do: {:skipped, :not_merge_permitting}
 
+  @doc """
+  A worker resume of `task_id` whose standing merge-permitting ruling covers
+  `head` (the worktree's current head) goes straight back onto the merge path —
+  CI wait, merge, close — instead of starting a fresh review round that would
+  ignore the ruling. `:none` when no ruling covers `head` (none recorded, a
+  `send_back` / `reject` answered the round, or the head moved) or the ticket
+  cannot re-enter the merge path; the caller then resumes normally.
+  """
+  @spec resume_covering(String.t(), String.t() | nil, keyword()) :: {:ok, atom()} | :none
+  def resume_covering(task_id, head, opts \\ []) do
+    with %Resolution{} = ruling <- MergeAuthorization.ruling_covering(task_id, head),
+         {:ok, how} <- resume(ruling, opts) do
+      {:ok, how}
+    else
+      _ -> :none
+    end
+  end
+
   # ---- the paths ------------------------------------------------------------
 
   defp fetch(task_id) do
@@ -144,11 +163,28 @@ defmodule Arbiter.ReviewGate.RulingResume do
   # Where the ticket is on the merge path, and so how to re-enter it.
   defp path_for(%Issue{id: id} = task) do
     cond do
-      Worker.whereis(id) != nil -> {:skip, :worker_resident}
+      agent_live?(id) -> {:skip, :worker_resident}
       task.state == :merging and present?(task.pr_ref) -> {:ok, :merging}
       task.state == :active and gate_parked?(task) -> {:ok, :parked}
       true -> {:skip, {:not_parked_on_the_gate, task.state}}
     end
+  end
+
+  # A registered worker only stands in the ruling's way while its run is live.
+  # One left `:finished` (an escalated gate fails the run and nothing stops the
+  # process) has no agent to hand the ruling to: waiting on it strands the
+  # ticket, so the merge path resumes from the row.
+  defp agent_live?(id) do
+    case Worker.whereis(id) do
+      nil -> false
+      pid -> not Worker.finished?(safe_state(pid))
+    end
+  end
+
+  defp safe_state(pid) do
+    Worker.state(pid)
+  catch
+    :exit, _ -> nil
   end
 
   # The gate recorded its round state (`Worker.enter_review_gate/2`) — without it
