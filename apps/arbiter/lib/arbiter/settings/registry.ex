@@ -181,6 +181,13 @@ defmodule Arbiter.Settings.Registry do
       description:
         "Push to nodes.registry over plain HTTP or with an untrusted certificate " <>
           "(--tls-verify=false); null/false = TLS verified. Operator-only."
+    },
+    %{
+      key: "nodes.registry_public_ok",
+      type: "boolean",
+      description:
+        "Allow nodes.registry to answer anonymous reads (a public registry); null/false = " <>
+          "a registry that answers anonymously is refused. Operator-only."
     }
   ]
 
@@ -197,7 +204,7 @@ defmodule Arbiter.Settings.Registry do
                     nodes.join_token_ttl_minutes nodes.fence_after_s nodes.lost_after_s
                     machine.derate
                     nodes.registry nodes.registry_username nodes.registry_password
-                    nodes.registry_insecure nodes.chart_ref)
+                    nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref)
 
   # Built at compile time from the fixed schema above, so no input ever mints an
   # atom (some keys are dotted: `:"nodes.public_url"`).
@@ -457,6 +464,7 @@ defmodule Arbiter.Settings.Registry do
   defp write("nodes.registry_username", v), do: wrap(Settings.set_nodes_registry_username(v))
   defp write("nodes.registry_password", v), do: wrap(Settings.set_nodes_registry_password(v))
   defp write("nodes.registry_insecure", v), do: wrap(Settings.set_nodes_registry_insecure(v))
+  defp write("nodes.registry_public_ok", v), do: wrap(Settings.set_nodes_registry_public_ok(v))
 
   defp wrap({:ok, updated}), do: {:ok, updated}
   defp wrap({:error, reason}), do: {:error, {:invalid, inspect(reason)}}
@@ -494,6 +502,7 @@ defmodule Arbiter.Settings.Registry do
   def override("nodes.registry"), do: Settings.nodes_registry()
   def override("nodes.registry_username"), do: Settings.nodes_registry_username()
   def override("nodes.registry_insecure"), do: Settings.nodes_registry_insecure()
+  def override("nodes.registry_public_ok"), do: Settings.nodes_registry_public_ok()
 
   # Write-only: a stored password reads as a mask, never as the secret or its ciphertext.
   def override("nodes.registry_password"),
@@ -530,6 +539,7 @@ defmodule Arbiter.Settings.Registry do
   def default("nodes.registry_username"), do: nil
   def default("nodes.registry_password"), do: nil
   def default("nodes.registry_insecure"), do: false
+  def default("nodes.registry_public_ok"), do: false
   def default("nodes.allow_public_endpoint"), do: false
   def default("nodes.join_token_ttl_minutes"), do: Settings.default_join_token_ttl_minutes()
   def default("nodes.fence_after_s"), do: Arbiter.Nodes.Liveness.default_fence_after_s()
