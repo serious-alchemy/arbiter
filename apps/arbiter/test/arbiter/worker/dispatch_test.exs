@@ -3731,6 +3731,65 @@ defmodule Arbiter.Worker.DispatchTest do
              "expected fetch_failed or missing_origin_ref, got: #{inspect(reason)}"
     end
 
+    # bd-b3mud5: a local-only repo (no `origin`) branches from its local base
+    # under the direct strategy and is refused under a forge strategy.
+    defp local_only_repo(tmp) do
+      local = Path.join(tmp, "local-only-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(local)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", local])
+      {_, 0} = System.cmd("git", ["-C", local, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", local, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", local, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(local, "LOCAL.md"), "local\n")
+      {_, 0} = System.cmd("git", ["-C", local, "add", "LOCAL.md"])
+      {_, 0} = System.cmd("git", ["-C", local, "commit", "-q", "-m", "init"])
+      local
+    end
+
+    defp local_only_workspace(local, strategy) do
+      Ash.create!(Workspace, %{
+        name: "local-only-#{strategy}-#{System.unique_integer([:positive])}",
+        prefix: "lo",
+        config: %{
+          "repo_paths" => %{"lo/repo" => local},
+          "merge" => %{"base" => "main", "strategy" => strategy}
+        }
+      })
+    end
+
+    test "direct strategy: a repo with no origin branches from its local base", %{tmp: tmp} do
+      local = local_only_repo(tmp)
+      ws = local_only_workspace(local, "direct")
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "local only", workspace_id: ws.id, repo: "lo/repo"})
+
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id, force: true, repo: "lo/repo", start_driver: false)
+
+      assert File.exists?(Path.join(result.worktree_path, "LOCAL.md"))
+    end
+
+    test "forge strategy: a repo with no origin refuses and leaves the ticket un-started",
+         %{tmp: tmp} do
+      for strategy <- ["github", "gitlab"] do
+        local = local_only_repo(tmp)
+        ws = local_only_workspace(local, strategy)
+
+        {:ok, task} =
+          Ash.create(Issue, %{
+            title: "no origin #{strategy}",
+            workspace_id: ws.id,
+            repo: "lo/repo"
+          })
+
+        assert {:error, {:worktree_failed, {:missing_origin_remote, _}}} =
+                 Dispatch.dispatch(task.id, force: true, repo: "lo/repo", start_driver: false)
+
+        refute Ash.get!(Issue, task.id).state == :active
+      end
+    end
+
     test "per-task target_branch overrides the workspace default", %{repo: repo, remote: remote} do
       # Push a `dolphin` branch to origin so Worktree.create can fetch it.
       {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "dolphin"])
