@@ -71,10 +71,15 @@ defmodule Arbiter.Worker.Image.PrebuiltTest do
   end
 
   # A fake skopeo answering `inspect` with `labels` and recording each call.
-  defp runner(test, labels, digest \\ @digest) do
-    fn "skopeo", args, _opts ->
-      send(test, {:skopeo, args})
-      {Jason.encode!(%{"Digest" => digest, "Labels" => labels}), 0}
+  defp runner(test, labels, digest \\ @digest, config \\ %{}) do
+    fn
+      "skopeo", ["inspect", "--config" | _] = args, _opts ->
+        send(test, {:skopeo_config, args})
+        {Jason.encode!(config), 0}
+
+      "skopeo", args, _opts ->
+        send(test, {:skopeo, args})
+        {Jason.encode!(%{"Digest" => digest, "Labels" => labels}), 0}
     end
   end
 
@@ -289,7 +294,9 @@ defmodule Arbiter.Worker.Image.PrebuiltTest do
       assert {:ok, _} = Prebuilt.plan(repo, "main", opts)
       assert {:ok, _} = Prebuilt.plan(repo, "main", opts)
       assert_received {:skopeo, _}
+      assert_received {:skopeo_config, _}
       refute_received {:skopeo, _}
+      refute_received {:skopeo_config, _}
 
       # The cached labels are re-judged against the clone every time: c2 is not on `feature`.
       assert {:error, {:prebuilt_not_on_default, _}} = Prebuilt.plan(repo, "feature", opts)
@@ -309,8 +316,14 @@ defmodule Arbiter.Worker.Image.PrebuiltTest do
       {repo, sha} = repo!(tmp)
       l = labels(sha.c2, %{"arbiter.seed-lock" => lock_hash(repo)})
 
+      inspector = fn _pinned -> {:ok, ""} end
+
       assert {:ok, plan} =
-               Prebuilt.plan(repo, "main", opts(self(), l, image: image(%{seed: :image})))
+               Prebuilt.plan(
+                 repo,
+                 "main",
+                 opts(self(), l, image: image(%{seed: :image}), seed_inspector: inspector)
+               )
 
       assert plan.prebuilt.seed == :image
       assert plan.prebuilt.seed_note == nil
@@ -364,6 +377,133 @@ defmodule Arbiter.Worker.Image.PrebuiltTest do
         Prebuilt.plan(repo, "main", opts(self(), labels(sha.c2), image: image(%{seed: :none})))
 
       assert a.hash != b.hash
+    end
+  end
+
+  describe "SI12: no credential in a layer" do
+    defp config_opts(test, labels, config, extra \\ []) do
+      Keyword.merge(
+        [
+          image: image(),
+          runner: runner(test, labels, @digest, config),
+          cache_ttl_ms: 0
+        ],
+        extra
+      )
+    end
+
+    test "a credential-shaped token in the image config's Env refuses the image", %{tmp_dir: tmp} do
+      {repo, sha} = repo!(tmp)
+      token = "ghp_" <> String.duplicate("a", 30)
+      config = %{"config" => %{"Env" => ["PATH=/bin", "GH_TOKEN=" <> token]}}
+
+      assert {:error, {:secret_in_image, detail}} =
+               Prebuilt.plan(repo, "main", config_opts(self(), labels(sha.c2), config))
+
+      assert detail =~ "Env"
+      refute detail =~ token
+    end
+
+    test "a known workspace secret value in Env refuses the image", %{tmp_dir: tmp} do
+      {repo, sha} = repo!(tmp)
+      config = %{"config" => %{"Env" => ["HEX_API_KEY=correct-horse-battery"]}}
+
+      opts =
+        config_opts(self(), labels(sha.c2), config, secret_values: ["correct-horse-battery"])
+
+      assert {:error, {:secret_in_image, _}} = Prebuilt.plan(repo, "main", opts)
+    end
+
+    test "a secret in a layer's history refuses the image", %{tmp_dir: tmp} do
+      {repo, sha} = repo!(tmp)
+      token = "sk-ant-" <> String.duplicate("b", 30)
+
+      config = %{
+        "config" => %{"Env" => ["PATH=/bin"]},
+        "history" => [
+          %{"created_by" => "/bin/sh -c #(nop) ADD file:abc in /"},
+          %{"created_by" => "|1 TOKEN=#{token} /bin/sh -c mix deps.get"}
+        ]
+      }
+
+      assert {:error, {:secret_in_image, detail}} =
+               Prebuilt.plan(repo, "main", config_opts(self(), labels(sha.c2), config))
+
+      assert detail =~ "history"
+      refute detail =~ token
+    end
+
+    test "an ordinary Env and history pass", %{tmp_dir: tmp} do
+      {repo, sha} = repo!(tmp)
+
+      config = %{
+        "config" => %{"Env" => ["PATH=/usr/bin", "LANG=C.UTF-8", "MIX_ENV=prod"]},
+        "history" => [%{"created_by" => "RUN /bin/sh -c mix deps.get && mix compile"}]
+      }
+
+      assert {:ok, _} = Prebuilt.plan(repo, "main", config_opts(self(), labels(sha.c2), config))
+    end
+
+    test "the scan applies whatever the seed mode", %{tmp_dir: tmp} do
+      {repo, sha} = repo!(tmp)
+      config = %{"config" => %{"Env" => ["T=ghp_" <> String.duplicate("c", 30)]}}
+
+      for seed <- [:none, :primary, :image] do
+        opts = config_opts(self(), labels(sha.c2), config, image: image(%{seed: seed}))
+        assert {:error, {:secret_in_image, _}} = Prebuilt.plan(repo, "main", opts)
+      end
+    end
+
+    test "seed: image refuses a deps/*/.git/config remote URL that carries userinfo",
+         %{tmp_dir: tmp} do
+      {repo, sha} = repo!(tmp)
+      l = labels(sha.c2, %{"arbiter.seed-lock" => lock_hash(repo)})
+
+      inspector = fn _pinned ->
+        {:ok,
+         "G\tdeps/private/.git/config\thttps://oauth2:glpat-xyz@gitlab.example.com/a/b.git\n"}
+      end
+
+      assert {:error, {:secret_in_image, detail}} =
+               Prebuilt.plan(
+                 repo,
+                 "main",
+                 opts(self(), l, image: image(%{seed: :image}), seed_inspector: inspector)
+               )
+
+      assert detail =~ "deps/private/.git/config"
+      refute detail =~ "glpat-xyz"
+    end
+
+    test "seed: image refuses credential file names", %{tmp_dir: tmp} do
+      {repo, sha} = repo!(tmp)
+      l = labels(sha.c2, %{"arbiter.seed-lock" => lock_hash(repo)})
+      inspector = fn _pinned -> {:ok, "F\t./deps/x/.netrc\n"} end
+
+      assert {:error, {:secret_in_image, detail}} =
+               Prebuilt.plan(
+                 repo,
+                 "main",
+                 opts(self(), l, image: image(%{seed: :image}), seed_inspector: inspector)
+               )
+
+      assert detail =~ ".netrc"
+    end
+
+    test "seed: image that cannot be inspected falls back to the primary seed", %{tmp_dir: tmp} do
+      {repo, sha} = repo!(tmp)
+      l = labels(sha.c2, %{"arbiter.seed-lock" => lock_hash(repo)})
+      inspector = fn _pinned -> {:error, :boom} end
+
+      assert {:ok, plan} =
+               Prebuilt.plan(
+                 repo,
+                 "main",
+                 opts(self(), l, image: image(%{seed: :image}), seed_inspector: inspector)
+               )
+
+      assert plan.prebuilt.seed == :primary
+      assert plan.prebuilt.seed_note =~ "could not inspect"
     end
   end
 
