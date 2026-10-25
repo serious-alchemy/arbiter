@@ -199,6 +199,23 @@ defmodule Arbiter.Worker.DepsCacheTest do
       assert {:ok, %{seeded?: true}} = DepsCache.ensure(ctx.checkout, "main", @image_a, ctx.opts)
     end
 
+    test "the seed job drops the image environment and sets only the allowlist (SI12)", ctx do
+      assert {:ok, %{seeded?: true}} = DepsCache.ensure(ctx.checkout, "main", @image_a, ctx.opts)
+
+      assert [args] = runs()
+      assert "--unsetenv-all" in args
+
+      set =
+        args
+        |> Enum.chunk_every(2, 1, :discard)
+        |> Enum.flat_map(fn
+          ["-e", assignment] -> [assignment |> String.split("=", parts: 2) |> hd()]
+          _ -> []
+        end)
+
+      assert Enum.sort(set) == ~w(HEX_HOME HOME LANG MIX_ENV MIX_HOME PATH)
+    end
+
     test "concurrent callers share one seed job", ctx do
       results =
         1..4

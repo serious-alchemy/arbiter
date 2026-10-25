@@ -127,6 +127,7 @@ defmodule Arbiter.Worker.Container do
           optional(:tmpfs) => [String.t()],
           optional(:env) => [{String.t(), String.t()}],
           optional(:inherit_env) => [String.t()],
+          optional(:unset_env) => boolean(),
           optional(:network) => network(),
           optional(:pod) => String.t() | nil,
           optional(:interactive) => boolean(),
@@ -177,6 +178,7 @@ defmodule Arbiter.Worker.Container do
       if(label_disabled?, do: ["--security-opt", "label=disable"], else: []),
       Enum.flat_map(["/tmp", "/dev/shm"] ++ Map.get(spec, :tmpfs, []), &tmpfs_args/1),
       mounts(spec, label_disabled?),
+      if(Map.get(spec, :unset_env, false), do: ["--unsetenv-all"], else: []),
       env_args(spec, home && mapped(spec, home)),
       secret_args(Map.get(spec, :podman_secrets, [])),
       limit_args(spec),
@@ -317,6 +319,7 @@ defmodule Arbiter.Worker.Container do
   `:cli_mounts` (`[{host path, container path}]`: a provider CLI or `arb` bound
   read-only under `/opt/arbiter/cli`, which the image has on its `PATH`),
   `:tmpfs`, `:env`,
+  `:unset_env` (`--unsetenv-all`: drop every variable the image itself sets, SI12),
   `:inherit_env`, `:network` (`:none` | `:pasta`), `:pod` (join a test-services
   pod, bd-dmcbos; the pod fixes the network, so `:pasta` is refused),
   `:podman_secrets` (`--secret`s: `%{name:, type: :mount | :env, target:, uid:}`, bd-9cygoo),
@@ -353,6 +356,7 @@ defmodule Arbiter.Worker.Container do
         tmpfs: Keyword.get(opts, :tmpfs, []),
         env: Keyword.get(opts, :env, []),
         inherit_env: Keyword.get(opts, :inherit_env, []),
+        unset_env: Keyword.get(opts, :unset_env, false),
         network: network,
         pod: pod,
         interactive: Keyword.get(opts, :interactive, false)

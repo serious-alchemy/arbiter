@@ -78,7 +78,8 @@ defmodule Arbiter.Worker.Image.Registry do
             registry: Settings.nodes_registry(),
             username: Settings.nodes_registry_username(),
             password: Settings.nodes_registry_password(),
-            insecure?: Settings.nodes_registry_insecure?()
+            insecure?: Settings.nodes_registry_insecure?(),
+            public_ok: Settings.nodes_registry_public_ok?()
           }
       end
 
@@ -90,7 +91,8 @@ defmodule Arbiter.Worker.Image.Registry do
            host: host(registry),
            username: blank_to_nil(Map.get(raw, :username)),
            password: blank_to_nil(Map.get(raw, :password)),
-           insecure?: Map.get(raw, :insecure?) == true
+           insecure?: Map.get(raw, :insecure?) == true,
+           public_ok: Map.get(raw, :public_ok) == true
          }}
 
       _ ->

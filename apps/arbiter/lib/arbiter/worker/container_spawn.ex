@@ -1051,13 +1051,30 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # settings and the registry login that reads its `ref` (KH14).
   defp source_opts(%{source: :prebuilt} = image, workspace, repo) do
     case ImageRegistry.resolve(workspace, repo) do
-      {:ok, cfg} -> {:ok, [source: :prebuilt, image: image, registry: cfg, repo_name: repo]}
-      :unset -> {:ok, [source: :prebuilt, image: image, repo_name: repo]}
+      {:ok, cfg} -> {:ok, prebuilt_opts(image, workspace, repo) ++ [registry: cfg]}
+      :unset -> {:ok, prebuilt_opts(image, workspace, repo)}
       {:error, _} = error -> error
     end
   end
 
   defp source_opts(image, _workspace, _repo), do: {:ok, [source: image.source]}
+
+  defp prebuilt_opts(image, workspace, repo),
+    do: [
+      source: :prebuilt,
+      image: image,
+      repo_name: repo,
+      secret_values: workspace_secret_values(workspace)
+    ]
+
+  # The values the workspace hands a worker (SI12: none may sit in a prebuilt image).
+  defp workspace_secret_values(%Arbiter.Tasks.Workspace{} = workspace) do
+    workspace |> WorkerEnv.resolve_workspace("prebuilt-image-scan") |> elem(1)
+  rescue
+    _ -> []
+  end
+
+  defp workspace_secret_values(_), do: []
 
   defp plan_context(plan, workspace, repo, repo_path, base, node, opts) do
     ctx = %{

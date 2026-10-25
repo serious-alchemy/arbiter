@@ -2986,14 +2986,48 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # The spawn kind the primary's cap sees (`LocalCapacity.kinds/0`).
+  #
+  # bd-amm00p, which re-dispatches stay on the primary: a re-dispatch of an
+  # In-progress ticket (`:redispatch`) is bound to the primary (`Placement`'s
+  # `:follow_up`) because the work it continues lives in the primary's worktree.
+  # That is only true once an earlier attempt got as far as the agent. When the
+  # latest main run failed BEFORE the agent started (`pre_agent_failure?/1`: a
+  # prepare, publish or pull failure, a node refusal, a container that never
+  # came up) nothing was done anywhere, so the re-dispatch is a first attempt
+  # again and goes through normal placement (`:implementer`): a cluster or
+  # remote node is eligible. The pin survives where it is deliberate: a retained
+  # primary worktree holding uncommitted work (`local_work?/3` → `:local_work`),
+  # and a re-dispatch after any run that ran the agent.
   defp node_kind(%Issue{id: id, state: state}, opts) do
     cond do
       Keyword.get(opts, :resume) == true -> :resume
       Keyword.get(opts, :review) == true -> :review
       Arbiter.Worker.ReviewGate.base_task_id(id) != id -> :reviewer
-      state == :active -> :redispatch
+      state == :active and not pre_agent_failure?(id) -> :redispatch
       true -> :implementer
     end
+  end
+
+  # Did the ticket's latest main run end before its agent ever started?
+  defp pre_agent_failure?(task_id) do
+    case latest_main_run(task_id) do
+      %Run{state: :finished, stop_category: category} ->
+        category in StopReason.pre_agent_categories()
+
+      _ ->
+        false
+    end
+  end
+
+  defp latest_main_run(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id and kind == :implement)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
   end
 
   # bd-6ypj2y: a task/research dispatch that gets the read-only inspect checkout of

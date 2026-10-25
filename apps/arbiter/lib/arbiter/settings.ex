@@ -851,6 +851,20 @@ defmodule Arbiter.Settings do
 
   def set_nodes_registry_insecure(_), do: {:error, :invalid_value}
 
+  @doc "Whether `nodes.registry` may answer anonymous reads (`nodes.registry_public_ok`, SI12)."
+  @spec nodes_registry_public_ok?() :: boolean()
+  def nodes_registry_public_ok?, do: read_setting(:nodes_registry_public_ok) == true
+
+  @doc "The persisted `nodes.registry_public_ok` override."
+  @spec nodes_registry_public_ok() :: boolean() | nil
+  def nodes_registry_public_ok, do: read_setting(:nodes_registry_public_ok)
+
+  @spec set_nodes_registry_public_ok(boolean() | nil) :: {:ok, boolean() | nil} | {:error, term()}
+  def set_nodes_registry_public_ok(v) when is_nil(v) or is_boolean(v),
+    do: write_setting(:nodes_registry_public_ok, v)
+
+  def set_nodes_registry_public_ok(_), do: {:error, :invalid_value}
+
   @doc """
   The decrypted registry password, or `nil`. For `Arbiter.Worker.Image.Registry`
   only: it is handed to podman through a 0600 auth file, never argv, and no

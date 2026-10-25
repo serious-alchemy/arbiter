@@ -75,9 +75,9 @@ defmodule Arbiter.Worker.Image.Publisher do
   configured, or `{:error, reason}` (`{:timeout, ms}`, `{:push_failed, …}`,
   `{:registry_credentials, ref, reason}`, `{:public_registry, repository}`, …).
 
-  A repository on a registry set in the workspace config (not `nodes.registry`,
-  which keeps its behaviour) that answers anonymous reads is refused, as every
-  image carries the real `claude` binary, unless that registry sets `public_ok`.
+  A repository on any registry (the workspace config's, or the install-wide
+  `nodes.registry`, SI12) that answers anonymous reads is refused, as every
+  image carries the real `claude` binary, unless that registry sets `public_ok` (`nodes.registry_public_ok` for the install-wide one).
   An answer the probe could not give is not a refusal.
   """
   @spec ensure_ready(map(), keyword()) ::
@@ -104,7 +104,7 @@ defmodule Arbiter.Worker.Image.Publisher do
     end
   end
 
-  defp ensure_private(%Registry{origin: :config, public_ok: false} = cfg, ctx, opts) do
+  defp ensure_private(%Registry{public_ok: false} = cfg, ctx, opts) do
     repository = Pipeline.worker_repository(ctx)
 
     probe = Keyword.get_lazy(opts, :anonymous_probe, &anonymous_probe/0)
