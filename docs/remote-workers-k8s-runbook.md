@@ -181,6 +181,20 @@ anything else they keep `hostUsers: false`. For the admission policy, install wi
 
 ## 4. The k3s test-bed rollout checklist
 
+### 4.0 Prerequisites for a first cluster run
+
+Settle these on the **primary** before the checklist below; K16b's first cluster run
+stalled on several of them. Where the doctor has no dedicated row, the check is manual.
+
+| prerequisite | why | confirm with |
+|---|---|---|
+| `nodes.public_url` set to an address the cluster can reach (`arb settings set nodes.public_url https://…`) | pods and the controller call back to the primary here | doctor row `nodes.public_url reachable` (ok = the URL answers `/nodes/ping`) |
+| `nodes.registry` set to a registry **the primary can push to** (`arb settings set nodes.registry …`). GHCR was not pushable in K16b; use one whose credentials the primary holds | the primary publishes the worker/controller image there; the kubelet then pulls it | doctor: `identity` is `:no_registry` while unset, and `registry_pull` (section 1) fails with the kubelet's message if the image was never pushed. Manual: `podman login <registry>` as the Arbiter user and push a test tag |
+| the release `current` symlink exists and points at the running release | image builds and self-update read the release through it | no doctor row. Manual: `readlink -f <releases>/current` matches the version `arb version` reports |
+| the **podman sandbox backend** on the workspace (`agent.security.sandbox.backend: podman`) | the worker image is built and run through rootless podman | doctor row `podman sandbox readiness`; it only runs when a workspace uses podman and otherwise reports that none does |
+| `worker.placement: remote_only` for a canary (`arb config set worker.placement remote_only`) | a canary must not silently fall back to running locally; with no capacity the card is held, not failed | no doctor row. Manual: `arb config get worker.placement`; a held card says no node has capacity |
+| the `claude` CLI on the primary's `PATH`, as the server's own environment sees it (e.g. its systemd unit) | the primary runs Claude for the canary | no doctor row. Manual: `command -v claude` in the server's environment; `arb release deploy` also warns when `claude` is not found on PATH |
+
 Design k8s §13 calls the operator's k3s a sensible **test bed** and not yet a
 production target for sensitive workspaces: one server (`mesanna`) and one worker
 (`aginor`, on Wi-Fi), runc only, no PSA enforcement, **zero NetworkPolicies so far**,
