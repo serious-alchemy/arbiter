@@ -17,6 +17,10 @@ defmodule Arbiter.Worker.Image.KnownHosts do
   <https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints>);
   the test checks the fingerprints. A forge that rotates its key needs this list
   updated, and the base image rebuilt. A self-hosted forge is not covered.
+
+  This fixes images built on the Arbiter base. A repo whose image is built by its
+  own CI (`Arbiter.Worker.Image.Prebuilt`, `FROM ghcr.io/<owner>/arbiter-worker-base:<hash>`)
+  keeps failing until that CI rebuilds on the new base hash.
   """
 
   @path "/etc/ssh/ssh_known_hosts"

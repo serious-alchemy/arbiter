@@ -19,7 +19,7 @@ defmodule Arbiter.Worker.Image.KnownHostsTest do
   end
 
   @tag :tmp_dir
-  test "ssh verifies against the pinned file without disabling host key checking", %{
+  test "ssh resolves the pinned file as its known_hosts without disabling host key checking", %{
     tmp_dir: dir
   } do
     path = Path.join(dir, "ssh_known_hosts")
