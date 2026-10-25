@@ -1508,6 +1508,9 @@ defmodule Arbiter.Board.Autopilot do
   defp failure_detail({:guardrail_ineligible, _provider, phrase}), do: phrase
   defp failure_detail({:no_node_capacity, _}), do: "no node capacity"
 
+  defp failure_detail({:image_publish_failed, %{reason: r}}),
+    do: "image publish failed: #{inspect(r)}"
+
   defp failure_detail({:repo_at_capacity, %{repo: repo, cap: cap}}),
     do: "repo #{repo}: #{cap} of #{cap} implementer runs"
 
