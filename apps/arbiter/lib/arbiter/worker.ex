@@ -9365,7 +9365,7 @@ defmodule Arbiter.Worker do
   # Never raises: this is the worker's terminal path and a mail/DB failure must
   # leave the park attempt behind rather than crash the teardown.
   defp park_review_gate(%State{task_id: task_id} = state, reason, findings) do
-    case Arbiter.Tasks.ReviewPark.park(task_id, reason) do
+    case Arbiter.Tasks.ReviewPark.park(task_id, reason, park_detail(reason, findings)) do
       {:ok, :claimed, _issue} ->
         escalate_review_park(state, reason, findings)
 
@@ -9389,6 +9389,12 @@ defmodule Arbiter.Worker do
         escalate_review_park(state, reason, findings)
     end
   end
+
+  # bd-bkqpp3: a refused APPROVE names the finding(s) that blocked it.
+  defp park_detail(:verdict_guard_exhausted, findings),
+    do: Arbiter.Worker.ReviewFindings.blocked_summary(findings)
+
+  defp park_detail(_reason, _findings), do: nil
 
   # The single page a parked episode is entitled to. It names the reason, says
   # in plain words that the run was NOT failed and the work is intact, and lists

@@ -481,8 +481,10 @@ defmodule Arbiter.Tasks.Issue do
         constraints one_of: @attention_causes
       end
 
+      argument :detail, :string, allow_nil?: true
+
       change set_attribute(:attention_cause, arg(:cause))
-      change set_attribute(:attention_detail, nil)
+      change set_attribute(:attention_detail, arg(:detail))
       change set_attribute(:attention_since, &DateTime.utc_now/0)
       change {Arbiter.Tasks.Issue.Changes.AnnounceAttention, []}
       change {Arbiter.Tasks.Issue.Changes.RecordAttentionSpan, []}
