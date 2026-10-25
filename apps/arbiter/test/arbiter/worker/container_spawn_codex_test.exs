@@ -168,6 +168,45 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
 
   defp mounts(argv), do: for(["-v", spec] <- Enum.chunk_every(argv, 2, 1), do: spec)
 
+  describe "forge credential (bd-1vhect)" do
+    setup do
+      Application.put_env(:arbiter, :worker_container_runner, fn _cmd, _args, _opts -> {"", 0} end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_container_runner) end)
+      :ok
+    end
+
+    # The Claude reviewer's container gets the project token as these two env
+    # secrets (container_spawn_test.exs, "a scoped git credential"); a codex
+    # container is handed exactly the same pair, nothing broader.
+    test "a codex container receives the same scoped secrets as a Claude one", ctx do
+      material = %Arbiter.Worker.GitCredential.Material{
+        kind: :gitlab_project_token,
+        token: "glpat-scoped",
+        host: "gitlab.example.com",
+        remote: "acme/tonic"
+      }
+
+      claude = Path.join(ctx.root, "claude")
+      File.write!(claude, "#!/bin/sh\n")
+      File.chmod!(claude, 0o755)
+      claude_opts = Keyword.merge(ctx.opts, provider: "claude", claude_path: claude)
+
+      claude_secrets = secret_shape(claude_opts, material)
+      codex_secrets = secret_shape(ctx.opts, material)
+
+      assert codex_secrets == claude_secrets
+      assert Enum.sort(codex_secrets) == [{:env, "ARB_GIT_TOKEN"}, {:env, "GITLAB_TOKEN"}]
+    end
+
+    defp secret_shape(opts, material) do
+      case ContainerSpawn.prepare([git_material: material] ++ opts) do
+        {:ok, request} -> for s <- request.git_secrets, do: {s.type, s.target}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
   describe "prepare/1 for codex" do
     test "mounts the native binary (not the node launcher), rg, bwrap and arb", ctx do
       assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
