@@ -4795,6 +4795,130 @@ defmodule Arbiter.Worker.DispatchTest do
       routing = Worker.state(result.worker_pid).meta[:routing_config]
       assert routing.provider == "gemini"
     end
+
+    # bd-1vdunv: a worker resume of a ticket the gate parked, whose latest
+    # ruling is merge-permitting on the worktree's head, goes back on the merge
+    # path (CI wait, merge) instead of starting an agent and a new review round.
+    # Both manual-resume modes honour it; `arb worker resume` is :session.
+    defp parked_with_ruling(decision, head_fun) do
+      alias Arbiter.ReviewGate.Resolutions
+      alias Arbiter.Test.StubMerger
+
+      StubMerger.reset()
+      ref = "!rr-1vdunv"
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ruled-#{System.unique_integer([:positive])}",
+          prefix: "rl",
+          config: %{"review" => %{"required" => true}, "merge" => %{"auto_merge" => true}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "ruled resume", workspace_id: ws.id})
+      first = stop_worker_with_outpost(task.id)
+      head = Worktree.head_sha(first.worktree_path)
+      task = put_state!(task, :active)
+      on_exit(fn -> stop_task_processes(task.id) end)
+
+      {:ok, _} =
+        Ash.create(Round, %{
+          task_id: task.id,
+          round: 1,
+          role: :review,
+          verdict: :request_changes,
+          findings: "[high] a.ex:1 needs a guard",
+          finding_count: 1
+        })
+
+      :ok =
+        Arbiter.Tasks.PullRequest.record_review_gate(task.id, %{
+          branch: "feature/ruled",
+          pr_ref: ref,
+          target_branch: "main",
+          verdict: "request_changes",
+          merge_opts: %{
+            adapter: Atom.to_string(StubMerger),
+            workspace_id: ws.id,
+            interval_ms: 15,
+            initial_delay_ms: 0
+          }
+        })
+
+      Application.put_env(:arbiter, :ruling_resume, :off)
+      on_exit(fn -> Application.put_env(:arbiter, :ruling_resume, :sync) end)
+
+      {:ok, _} =
+        Resolutions.record(%{
+          task_id: task.id,
+          decision: decision,
+          reasoning: "ship it",
+          head_sha: head_fun.(head)
+        })
+
+      Application.put_env(:arbiter, :ruling_resume, :sync)
+
+      StubMerger.queue_get(ref, [
+        %{
+          status: :open,
+          approved: false,
+          ci_clean: true,
+          pipeline: :success,
+          head_sha: head,
+          base_ref: "main"
+        }
+      ])
+
+      {task, head, ref, StubMerger}
+    end
+
+    for decision <- [:accept_as_is, :amend], mode <- [:session, :briefing] do
+      test "#{mode} resume honours a #{decision} ruling on the current head (no agent, no new round)" do
+        {task, head, ref, stub} = parked_with_ruling(unquote(decision), & &1)
+        prior_run_id = latest_run(task.id).id
+
+        assert {:ok, %{ruling_resumed: _}} =
+                 Dispatch.resume_task(task.id,
+                   resume_mode: unquote(mode),
+                   start_driver: false,
+                   preflight: false
+                 )
+
+        eventually(fn -> Ash.get!(Issue, task.id).state == :closed end, 3_000)
+        assert stub.last_merge() == {ref, head}
+        assert [_only] = Enum.filter(Ash.read!(Round), &(&1.task_id == task.id))
+        assert latest_run(task.id).id == prior_run_id
+      end
+    end
+
+    test "a ruling on an older head still resumes normally (re-review)" do
+      {task, _head, ref, stub} =
+        parked_with_ruling(:accept_as_is, fn _ -> "9999999aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" end)
+
+      assert {:ok, result} =
+               Dispatch.resume_task(task.id,
+                 resume_mode: :briefing,
+                 start_driver: false,
+                 claude_command: ["sleep", "2"]
+               )
+
+      refute Map.has_key?(result, :ruling_resumed)
+      assert is_pid(result.worker_pid)
+      assert stub.merge_count(ref) == 0
+    end
+
+    test "a send_back ruling still resumes normally (re-review)" do
+      {task, _head, ref, stub} = parked_with_ruling(:send_back, & &1)
+
+      assert {:ok, result} =
+               Dispatch.resume_task(task.id,
+                 resume_mode: :briefing,
+                 start_driver: false,
+                 claude_command: ["sleep", "2"]
+               )
+
+      refute Map.has_key?(result, :ruling_resumed)
+      assert stub.merge_count(ref) == 0
+    end
   end
 
   describe "resume_session/2 (bd-1z7624)" do

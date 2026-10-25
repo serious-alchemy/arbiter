@@ -585,10 +585,10 @@ defmodule Arbiter.Worker.Dispatch do
         {:ok, result}
 
       # A merge-permitting ruling covers the worktree's head: the ticket went
-      # back on the merge path and no agent is dispatched. Shaped like a
-      # deferral so callers that handle `deferred: true` need no new clause.
+      # back on the merge path and no agent is dispatched. Not a deferral:
+      # nothing is held, so the held-resume marker clears like any success.
       {:ruling_resumed, how} ->
-        {:ok, %{deferred: true, task_id: task_id, cap: 0, holders: [], ruling_resumed: how}}
+        {:ok, %{task_id: task_id, ruling_resumed: how}}
 
       other ->
         other
@@ -599,11 +599,17 @@ defmodule Arbiter.Worker.Dispatch do
   # honoured (CI wait, merge) rather than re-reviewed as a fresh round 1. A
   # ruling on an older head, or a `send_back`, falls through to a normal resume.
   defp ensure_no_covering_ruling(task_id, worktree_path) do
-    head = Worktree.head_sha(worktree_path)
+    # An unreadable head cannot be matched to a ruling (`covers?/2` treats a
+    # nil head as covered), so resume normally rather than skip the re-review.
+    case Worktree.head_sha(worktree_path) do
+      head when is_binary(head) and head != "" ->
+        case Arbiter.ReviewGate.RulingResume.resume_covering(task_id, head) do
+          {:ok, how} -> {:ruling_resumed, how}
+          :none -> :ok
+        end
 
-    case Arbiter.ReviewGate.RulingResume.resume_covering(task_id, head) do
-      {:ok, how} -> {:ruling_resumed, how}
-      :none -> :ok
+      _ ->
+        :ok
     end
   end
 
@@ -828,6 +834,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_active(task_id),
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, worktree_path} <- resume_worktree(task, repo),
+         :ok <- ensure_no_covering_ruling(task_id, worktree_path),
          {:ok, session_id, session_provider} <- latest_session_id(task_id),
          {:ok, opts} <- ensure_collected(task, :resume_session, opts),
          {:ok, opts} <- resume_slot(task, :resume_session, opts),
@@ -907,6 +914,7 @@ defmodule Arbiter.Worker.Dispatch do
       do_dispatch(task_id, resume_opts)
     else
       {:deferred, result} -> {:ok, result}
+      {:ruling_resumed, how} -> {:ok, %{task_id: task_id, ruling_resumed: how}}
       other -> other
     end
   end
