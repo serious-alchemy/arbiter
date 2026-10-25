@@ -29,7 +29,10 @@ defmodule Arbiter.Nodes.Placement do
   is the cap that governs it:
 
     * the spawn kind bound to the primary (`:follow_up`: a re-dispatch of a
-      ticket already under way);
+      ticket already under way, whose earlier attempt reached the agent. A
+      redispatch after a failure BEFORE the agent started (prepare, publish, pull,
+      a node refusal) is placed like a first attempt, `Dispatch.node_kind/2`,
+      bd-amm00p; a retained primary worktree with work in it is `:local_work`);
     * every non-Claude provider (`:non_claude_provider`; the podman backend is
       wired for Claude only);
     * anything not run in a podman container (`:not_podman`: bwrap-jailed or
