@@ -367,9 +367,45 @@ defmodule Arbiter.Worker.Dispatch do
 
           :error ->
             fail_spawned_worker(worker_pid, reason)
-            err
+            image_publish_error(task, reason) || err
         end
     end
+  end
+
+  # An image that could not be published for the node (the registry push, a repo
+  # with no `origin`, ...) fails at the spawn, after the ticket went `:active`.
+  # The run is failed (and escalated) as for any spawn failure, but the ticket goes
+  # back to Ready so Autopilot retries it instead of leaving it `:active` with no
+  # worker, and the caller gets a typed `image_publish_failed` rather than a 500.
+  defp image_publish_error(task, {:claude_start_failed, reason}),
+    do: image_publish_error(task, reason)
+
+  defp image_publish_error(%Issue{id: task_id}, {:image_unavailable, reason}) do
+    requeue_active(task_id)
+
+    {:error,
+     {:image_publish_failed,
+      %{
+        task_id: task_id,
+        reason: reason,
+        message:
+          "the worker image could not be published for #{task_id}: #{inspect(reason)}. " <>
+            "The ticket is back in Ready and will be retried; fix the cause (registry, repo " <>
+            "origin, image config) if it keeps failing."
+      }}}
+  end
+
+  defp image_publish_error(_task, _reason), do: nil
+
+  defp requeue_active(task_id) do
+    with {:ok, %Issue{state: state} = task} when state in [:active, :merging] <-
+           Ash.get(Issue, task_id) do
+      Ash.update(task, %{}, action: :requeue)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   defp refused_node_name(opts) do
@@ -1697,6 +1733,9 @@ defmodule Arbiter.Worker.Dispatch do
            ],
       do: :conflict
 
+  # The registry or the repo's origin failed the image publish: an upstream failure.
+  def refusal_kind(:image_publish_failed), do: :bad_gateway
+
   def refusal_kind(_reason), do: :internal
 
   @doc """
@@ -2947,14 +2986,48 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # The spawn kind the primary's cap sees (`LocalCapacity.kinds/0`).
+  #
+  # bd-amm00p, which re-dispatches stay on the primary: a re-dispatch of an
+  # In-progress ticket (`:redispatch`) is bound to the primary (`Placement`'s
+  # `:follow_up`) because the work it continues lives in the primary's worktree.
+  # That is only true once an earlier attempt got as far as the agent. When the
+  # latest main run failed BEFORE the agent started (`pre_agent_failure?/1`: a
+  # prepare, publish or pull failure, a node refusal, a container that never
+  # came up) nothing was done anywhere, so the re-dispatch is a first attempt
+  # again and goes through normal placement (`:implementer`): a cluster or
+  # remote node is eligible. The pin survives where it is deliberate: a retained
+  # primary worktree holding uncommitted work (`local_work?/3` → `:local_work`),
+  # and a re-dispatch after any run that ran the agent.
   defp node_kind(%Issue{id: id, state: state}, opts) do
     cond do
       Keyword.get(opts, :resume) == true -> :resume
       Keyword.get(opts, :review) == true -> :review
       Arbiter.Worker.ReviewGate.base_task_id(id) != id -> :reviewer
-      state == :active -> :redispatch
+      state == :active and not pre_agent_failure?(id) -> :redispatch
       true -> :implementer
     end
+  end
+
+  # Did the ticket's latest main run end before its agent ever started?
+  defp pre_agent_failure?(task_id) do
+    case latest_main_run(task_id) do
+      %Run{state: :finished, stop_category: category} ->
+        category in StopReason.pre_agent_categories()
+
+      _ ->
+        false
+    end
+  end
+
+  defp latest_main_run(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id and kind == :implement)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
   end
 
   # bd-6ypj2y: a task/research dispatch that gets the read-only inspect checkout of

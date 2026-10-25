@@ -98,4 +98,21 @@ defmodule Arbiter.Worker.DispatchRefusalTest do
              Message.inbox("admiral", workspace_id: ws.id)
              |> Enum.filter(&(&1.directive_ref == task.id))
   end
+
+  test "an image publish failure is a typed error, fails the run and requeues the ticket",
+       %{task: task, sandbox: sandbox} do
+    assert {:error, {:image_publish_failed, %{reason: reason, message: message}}} =
+             dispatch(task, {:image_unavailable, {:push_failed, "no origin"}})
+
+    assert reason == {:push_failed, "no origin"}
+    assert message =~ "no origin"
+
+    pid = Worker.whereis(task.id)
+    TestSandbox.own!(sandbox, pid)
+    assert Worker.state(pid).outcome == :failed
+    assert Worker.state(pid).meta.stop_reason.category == :spawn_failed
+
+    # never `active` with no live worker: back in Ready for Autopilot to retry
+    assert %{state: :queued} = Ash.get!(Issue, task.id)
+  end
 end

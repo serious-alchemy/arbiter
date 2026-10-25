@@ -964,6 +964,20 @@ defmodule Arbiter.Worker.StopReason do
   defp ms(n) when is_integer(n), do: "#{n}ms"
   defp ms(n), do: "#{n}"
 
+  @pre_agent_categories [
+    :spawn_failed,
+    :placement_refused,
+    :container_create_failed,
+    :spawn_exec_failed
+  ]
+
+  @doc """
+  The `stop_category` names (strings, as stored on the run) of a run that ended
+  before its agent started (bd-amm00p): a redispatch after one is placed afresh.
+  """
+  @spec pre_agent_categories() :: [String.t()]
+  def pre_agent_categories, do: Enum.map(@pre_agent_categories, &Atom.to_string/1)
+
   @doc """
   Build a `:spawn_failed` reason (bd-bi5pn0): a `Dispatch.dispatch/2` step
   after `start_worker/3` failed, before any agent subprocess ever ran. Unlike

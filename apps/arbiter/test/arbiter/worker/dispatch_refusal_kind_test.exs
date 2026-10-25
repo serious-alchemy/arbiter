@@ -25,6 +25,7 @@ defmodule Arbiter.Worker.DispatchRefusalKindTest do
     {:repo_unknown, :invalid},
     {{:pending_migrations, 2}, :busy},
     {{:migrations_check_failed, :unreachable}, :busy},
+    {{:image_publish_failed, %{}}, :bad_gateway},
     {:something_else, :internal},
     {{:something_else, 1}, :internal}
   ]

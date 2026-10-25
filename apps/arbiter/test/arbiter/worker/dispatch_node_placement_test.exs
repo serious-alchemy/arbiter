@@ -18,10 +18,10 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
   @repo ResumeSlotFixture.repo()
 
   setup do
-    ResumeSlotFixture.setup_repo!()
+    sandbox = ResumeSlotFixture.setup_repo!()
     ResumeSlotFixture.put_local_cap(nil)
     on_exit(fn -> Settings.set_nodes_local_max_workers(nil) end)
-    %{ws: workspace!()}
+    %{ws: workspace!(), sandbox: sandbox}
   end
 
   defp workspace!(config \\ %{}) do
@@ -248,6 +248,84 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       refute Map.get(info, :reason) == :scoped_git_credential
       assert Worker.whereis(issue.id) == nil
       assert Ash.get!(Issue, issue.id).state == :queued
+    end
+  end
+
+  # bd-amm00p: a re-dispatch of an In-progress ticket stays on the primary only when
+  # its earlier attempt got as far as the agent. A first attempt that failed in
+  # prepare/publish/pull never ran anything, so placement is asked again.
+  describe "a re-dispatch after a first attempt (bd-amm00p)" do
+    setup do
+      for {key, value} <- [
+            worker_container_available: true,
+            worker_container_network_available: true,
+            worker_deps_cache: false
+          ],
+          do: put_app_env(:arbiter, key, value)
+
+      :ok
+    end
+
+    defp redispatchable!(stop_category) do
+      ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
+      issue = ready!(ws, "redispatch #{stop_category}")
+      {:ok, active} = Ash.update(issue, %{}, action: :start)
+
+      Ash.create!(Arbiter.Workers.Run, %{
+        task_id: active.id,
+        workspace_id: ws.id,
+        repo: @repo,
+        kind: :implement,
+        state: :finished,
+        outcome: :failed,
+        stop_category: stop_category,
+        started_at: DateTime.utc_now()
+      })
+
+      active
+    end
+
+    defp spawn_to_test do
+      test = self()
+
+      fn session_opts ->
+        send(test, {:spawned, Keyword.get(session_opts, :node)})
+        {:ok, :captured}
+      end
+    end
+
+    defp redispatch_opts,
+      do: @podman ++ [nodes: [node_row()], start_claude: true, claude_start: spawn_to_test()]
+
+    test "a first attempt that failed before the agent started is placed on a node again" do
+      for category <- ~w(spawn_failed placement_refused container_create_failed) do
+        issue = redispatchable!(category)
+        assert {:ok, %{worker_pid: pid}} = dispatch(issue, redispatch_opts())
+        assert_receive {:spawned, %{id: "n-scoped"}}
+        ref = Process.monitor(pid)
+        :ok = Worker.stop(issue.id, :normal)
+        assert_receive {:DOWN, ^ref, :process, _, _}, 5_000
+      end
+    end
+
+    test "a re-dispatch after an attempt that ran the agent stays on the primary" do
+      issue = redispatchable!("crashed")
+      assert {:ok, %{worker_pid: _pid}} = dispatch(issue, redispatch_opts())
+      assert_receive {:spawned, nil}
+    end
+
+    test "a pre-agent failure with a retained primary worktree holding work stays on the primary",
+         %{sandbox: sandbox} do
+      issue = redispatchable!("spawn_failed")
+      branch = Arbiter.Worker.BranchNamer.derive(issue)
+
+      {:ok, path} =
+        Arbiter.Worker.Worktree.create(sandbox.repo, branch, "main", layout: :private_clone)
+
+      File.write!(Path.join(path, "dirty.txt"), "uncommitted")
+
+      assert {:ok, %{worker_pid: _pid}} = dispatch(issue, redispatch_opts())
+      assert_receive {:spawned, nil}
     end
   end
 
