@@ -112,6 +112,34 @@ defmodule Arbiter.Worker.WorktreeTest do
       assert msg =~ "origin"
     end
 
+    test "local_base: true branches a no-origin repo from its local base branch",
+         %{tmp: tmp} do
+      local_only = Path.join(tmp, "local-only-direct")
+      File.mkdir_p!(local_only)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", local_only])
+      {_, 0} = System.cmd("git", ["-C", local_only, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", local_only, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", local_only, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(local_only, "f"), "x")
+      {_, 0} = System.cmd("git", ["-C", local_only, "add", "f"])
+      {_, 0} = System.cmd("git", ["-C", local_only, "commit", "-q", "-m", "i"])
+
+      assert {:ok, path} =
+               Worktree.create(local_only, "feature/local-direct", "main", local_base: true)
+
+      on_exit(fn -> Worktree.cleanup(path) end)
+      assert File.exists?(Path.join(path, "f"))
+      assert {:ok, "feature/local-direct"} = Worktree.checked_out_branch(path)
+    end
+
+    test "local_base: true still refuses when the repo has an origin that cannot be fetched",
+         %{repo: repo} do
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "set-url", "origin", "/nonexistent/x"])
+
+      assert {:error, {:fetch_failed, _}} =
+               Worktree.create(repo, "feature/bad-origin", "main", local_base: true)
+    end
+
     test "fetches origin: worktree starts from upstream tip, NOT the repo's stale local base",
          %{repo: repo, remote: remote, tmp: tmp} do
       # Simulate the failure case from the task: the repo's local `main` is
@@ -176,6 +204,18 @@ defmodule Arbiter.Worker.WorktreeTest do
   # `reset_if_merged/3` is the pre-check `Dispatch` runs before `create/3` to
   # catch exactly that case.
   describe "reset_if_merged/3" do
+    test "no origin: refuses by default, keeps the branch with local_base: true", %{tmp: tmp} do
+      local_only = Path.join(tmp, "local-only-reset")
+      File.mkdir_p!(local_only)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", local_only])
+
+      assert {:error, {:missing_origin_remote, _}} =
+               Worktree.reset_if_merged(local_only, "feature/x", "main")
+
+      assert {:ok, :kept} =
+               Worktree.reset_if_merged(local_only, "feature/x", "main", local_base: true)
+    end
+
     test "hard-resets a branch whose commits are already merged into the base",
          %{repo: repo, remote: remote} do
       assert {:ok, path} = Worktree.create(repo, "bugfix/already-merged", "main")

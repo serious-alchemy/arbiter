@@ -107,12 +107,19 @@ defmodule Arbiter.Worker.Worktree do
     seed_paths = seed_paths(opts)
 
     case layout(opts) do
-      :private_clone -> create_clone(repo_path, branch_name, base_branch, seed_paths)
-      :linked_worktree -> create_linked(repo_path, branch_name, base_branch, seed_paths)
+      :private_clone ->
+        create_clone(repo_path, branch_name, base_branch, seed_paths)
+
+      :linked_worktree ->
+        create_linked(repo_path, branch_name, base_branch, seed_paths, local_base?(opts))
     end
   end
 
   defp layout(opts), do: Keyword.get(opts, :layout, :linked_worktree)
+
+  # bd-73zv62: `local_base: true` (set by Dispatch for a direct-merge repo) lets a
+  # repo with no `origin` branch from its local base branch instead of refusing.
+  defp local_base?(opts), do: Keyword.get(opts, :local_base, false) == true
 
   # bd-2jerqw: the resolved `worker.repos.<repo>.seed_paths` (`SeedPaths.resolve/2`),
   # or nil for the built-in set. Every provisioning entry point takes it as the
@@ -189,18 +196,23 @@ defmodule Arbiter.Worker.Worktree do
       has_uncommitted?(path) == {:ok, false}
   end
 
-  defp create_linked(repo_path, branch_name, base_branch, seed_paths) do
+  defp create_linked(repo_path, branch_name, base_branch, seed_paths, local_base?) do
     path = worktree_path(branch_name)
 
     case replace_clone(path, branch_name) do
-      :ok -> create_linked_checked(repo_path, branch_name, base_branch, seed_paths, path)
+      :ok ->
+        create_linked_checked(repo_path, branch_name, base_branch, seed_paths, path, local_base?)
+
       # The branch now lives in the main repo (the clone's sync-back): check it out.
-      :replaced -> attach_linked_checked(repo_path, branch_name, seed_paths, path)
-      {:error, _} = refused -> refused
+      :replaced ->
+        attach_linked_checked(repo_path, branch_name, seed_paths, path)
+
+      {:error, _} = refused ->
+        refused
     end
   end
 
-  defp create_linked_checked(repo_path, branch_name, base_branch, seed_paths, path) do
+  defp create_linked_checked(repo_path, branch_name, base_branch, seed_paths, path, local_base?) do
     result =
       if File.dir?(path) do
         case checked_out_branch(path) do
@@ -216,14 +228,9 @@ defmodule Arbiter.Worker.Worktree do
       else
         File.mkdir_p!(Path.dirname(path))
 
-        with :ok <- ensure_origin_remote(repo_path),
-             :ok <- fetch_origin_branch(repo_path, base_branch),
-             :ok <- ensure_origin_ref(repo_path, base_branch),
+        with {:ok, start_point} <- linked_start_point(repo_path, base_branch, local_base?),
              {:ok, _stdout} <-
-               run_git(
-                 ["worktree", "add", path, "-b", branch_name, "origin/" <> base_branch],
-                 cd: repo_path
-               ) do
+               run_git(["worktree", "add", path, "-b", branch_name, start_point], cd: repo_path) do
           :ok = seed_worktree(repo_path, path, seed_paths)
           {:ok, path}
         end
@@ -232,6 +239,30 @@ defmodule Arbiter.Worker.Worktree do
     with {:ok, wt_path} <- result do
       _ = ensure_arbiter_exclude(wt_path)
       {:ok, wt_path}
+    end
+  end
+
+  # The ref a new linked worktree branches from: the freshly fetched
+  # `origin/<base>`. With `local_base?` a repo that has NO `origin` has nothing
+  # upstream to be stale against, so its local base branch is the base; a repo
+  # that does have an origin is still fetched (and fails if it cannot be).
+  defp linked_start_point(repo_path, base_branch, local_base?) do
+    case ensure_origin_remote(repo_path) do
+      :ok ->
+        with :ok <- fetch_origin_branch(repo_path, base_branch),
+             :ok <- ensure_origin_ref(repo_path, base_branch),
+             do: {:ok, "origin/" <> base_branch}
+
+      {:error, {:missing_origin_remote, _}} when local_base? ->
+        Logger.info(
+          "Worktree: #{repo_path} has no origin remote; branching from local #{base_branch} " <>
+            "(nothing upstream to be stale against)"
+        )
+
+        {:ok, base_branch}
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -647,6 +678,7 @@ defmodule Arbiter.Worker.Worktree do
              is_list(opts) do
     path = worktree_path(branch_name)
     force? = Keyword.get(opts, :force, false)
+    local_base? = local_base?(opts)
 
     with :ok <- ensure_origin_remote(repo_path),
          :ok <- fetch_origin_branch(repo_path, base_branch),
@@ -665,6 +697,10 @@ defmodule Arbiter.Worker.Worktree do
         true ->
           {:ok, :kept}
       end
+    else
+      # bd-73zv62: no origin on a direct-merge repo: no upstream to compare with.
+      {:error, {:missing_origin_remote, _}} when local_base? -> {:ok, :kept}
+      {:error, _} = err -> err
     end
   end
 

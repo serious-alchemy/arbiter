@@ -3537,6 +3537,7 @@ defmodule Arbiter.Worker.Dispatch do
             branch = BranchNamer.derive(task)
             target_branch = resolve_target_branch(task, opts)
             layout = git_layout(task, opts)
+            local_base = direct_merge?(task, repo)
             # RW11: the home clone of a run placed on a node is thin (no deps seeding):
             # the node's shadow clone is what the container works in.
             seed_paths = if Keyword.get(opts, :node), do: false, else: seed_paths(task, repo)
@@ -3566,7 +3567,8 @@ defmodule Arbiter.Worker.Dispatch do
                 {:ok, :kept}
               else
                 Worktree.reset_if_merged(repo_path, branch, target_branch,
-                  force: task.verification_outcome == :failed
+                  force: task.verification_outcome == :failed,
+                  local_base: local_base
                 )
               end
 
@@ -3574,7 +3576,8 @@ defmodule Arbiter.Worker.Dispatch do
               {:ok, _} ->
                 case Worktree.create(repo_path, branch, target_branch,
                        layout: layout,
-                       seed_paths: seed_paths
+                       seed_paths: seed_paths,
+                       local_base: local_base
                      ) do
                   {:ok, path} ->
                     {:ok, path}
@@ -3652,6 +3655,18 @@ defmodule Arbiter.Worker.Dispatch do
       _ ->
         {:error, {:worktree_failed, {:git_failed, msg}}}
     end
+  end
+
+  # bd-73zv62: a repo merged with the `direct` strategy is integrated locally, so a
+  # missing `origin` is legitimate (nothing upstream to be stale against). For a
+  # forge strategy it is a misconfiguration and provisioning keeps refusing.
+  defp direct_merge?(%Issue{} = task, repo) do
+    case load_workspace(task) do
+      %Workspace{} = ws -> Arbiter.Mergers.strategy(ws, repo || task.repo) == :direct
+      _ -> false
+    end
+  rescue
+    _ -> false
   end
 
   # bd-2jerqw: `worker.repos.<repo>.seed_paths` for this task's workspace, or
