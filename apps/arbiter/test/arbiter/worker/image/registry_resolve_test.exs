@@ -36,6 +36,31 @@ defmodule Arbiter.Worker.Image.RegistryResolveTest do
       end
     end
 
+    test "a repo-level registry honours the install insecure setting for loopback and the install host" do
+      install = Map.put(@install, :insecure?, true)
+
+      for registry <- ["localhost:5000/arb", "127.0.0.1:5000/arb", "install.example.com/other"] do
+        ws = workspace(image(%{"registry" => registry}))
+        assert {:ok, cfg} = Registry.resolve(ws, "vstim", config: install)
+        assert cfg.insecure?, "expected #{registry} to resolve insecure"
+        assert Registry.tls_flags(cfg) == ["--tls-verify=false"]
+      end
+    end
+
+    test "insecure is refused for a non-loopback registry the install did not name" do
+      install = Map.put(@install, :insecure?, true)
+      ws = workspace(image(%{"registry" => "registry.gitlab.com/vstim"}))
+
+      assert {:ok, cfg} = Registry.resolve(ws, "vstim", config: install)
+      refute cfg.insecure?
+    end
+
+    test "a repo-level registry is secure when the install setting is off" do
+      ws = workspace(image(%{"registry" => "localhost:5000/arb"}))
+      assert {:ok, cfg} = Registry.resolve(ws, "vstim", config: @install)
+      refute cfg.insecure?
+    end
+
     test "no registry anywhere is :unset" do
       assert Registry.resolve(workspace(%{}), "vstim", config: %{}) == :unset
     end
