@@ -231,7 +231,8 @@ defmodule Arbiter.Agents.Codex do
         with {:ok, model_flags} <- model_flag(opts) do
           flags =
             config_isolation_argv(opts, wrap?) ++
-              sandbox_argv(policy, opts) ++ model_flags ++ effort_argv(opts) ++ mcp_argv(opts)
+              sandbox_argv(policy, opts) ++
+              model_flags ++ effort_argv(opts) ++ mcp_argv(opts) ++ shell_env_argv(wrap?)
 
           # bd-btcdrf: refuse a backend with no implementation for every Codex
           # spawn (implementer, strict reviewer included), not just the ones
@@ -278,6 +279,29 @@ defmodule Arbiter.Agents.Codex do
   # wrap point. Anything else under podman stays refused by `Sandbox.module/1`.
   defp container_wrap?(policy, opts),
     do: ContainerSpawn.podman?(policy) and Keyword.get(opts, :sandbox_wrap, false) == true
+
+  # bd-1vhect: by default Codex's shell tool drops every variable whose name
+  # contains KEY, SECRET or TOKEN from the commands it runs. In the container
+  # that stripped the scoped forge credential (`GITLAB_TOKEN`, `GH_TOKEN`,
+  # `ARB_GIT_TOKEN`) that a Claude reviewer's Bash tool inherits, so a codex
+  # reviewer's `glab`/`curl` was unauthenticated (HTTP 404 on a private MR).
+  # Turn the default filter off and exclude exactly the credentials a Claude
+  # reviewer's commands cannot see either: Codex's own model keys and the MCP
+  # bearer (which Codex reads itself, not through a shell). Names only: no
+  # value ever rides in argv. A host spawn keeps the default filtering.
+  @shell_env_excludes ~s(["OPENAI_API_KEY","CODEX_API_KEY","ARBITER_MCP_TOKEN"])
+
+  @doc false
+  def shell_env_argv(true) do
+    [
+      "-c",
+      "shell_environment_policy.ignore_default_excludes=true",
+      "-c",
+      "shell_environment_policy.exclude=" <> @shell_env_excludes
+    ]
+  end
+
+  def shell_env_argv(false), do: []
 
   defp executable_for(_policy, true), do: {:ok, ContainerSpawn.provider_path("codex")}
 

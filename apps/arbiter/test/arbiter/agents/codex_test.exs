@@ -1225,6 +1225,29 @@ defmodule Arbiter.Agents.CodexTest do
       refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "tok\""))
     end
 
+    # bd-1vhect: codex's shell tool drops every env var named like *KEY*/*SECRET*/*TOKEN*
+    # by default, which stripped the container's GITLAB_TOKEN / GH_TOKEN / ARB_GIT_TOKEN
+    # (the same read-only forge credential a Claude reviewer's Bash tool inherits) from
+    # the commands a codex reviewer runs. The wrapped argv lets them through and keeps
+    # stripping codex's own model credentials, which Claude's reviewer cannot see either.
+    test "a container spawn passes the forge credential to shell commands, not model credentials" do
+      assert {:ok, argv} =
+               Codex.default_argv("p", security: podman_policy(), sandbox_wrap: true)
+
+      overrides = for ["-c", v] <- Enum.chunk_every(argv, 2, 1), do: v
+      assert "shell_environment_policy.ignore_default_excludes=true" in overrides
+
+      assert ~s(shell_environment_policy.exclude=["OPENAI_API_KEY","CODEX_API_KEY","ARBITER_MCP_TOKEN"]) in overrides
+
+      # Names only: no forge token is named or valued in argv, and nothing is `set`.
+      refute Enum.any?(argv, &(is_binary(&1) and &1 =~ ~r/GITLAB_TOKEN|GH_TOKEN|ARB_GIT_TOKEN/))
+      refute Enum.any?(overrides, &String.starts_with?(&1, "shell_environment_policy.set"))
+    end
+
+    test "a host spawn keeps codex's default shell environment filtering" do
+      assert Codex.shell_env_argv(false) == []
+    end
+
     test "a reviewer under podman is not also wrapped in the bwrap jail (bd-4k07ke)" do
       policy =
         SecurityPolicy.merge(podman_policy(:auto), %{"permissions" => %{"deny" => ["Write"]}})
