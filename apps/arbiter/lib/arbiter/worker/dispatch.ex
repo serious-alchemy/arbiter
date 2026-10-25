@@ -367,9 +367,45 @@ defmodule Arbiter.Worker.Dispatch do
 
           :error ->
             fail_spawned_worker(worker_pid, reason)
-            err
+            image_publish_error(task, reason) || err
         end
     end
+  end
+
+  # An image that could not be published for the node (the registry push, a repo
+  # with no `origin`, ...) fails at the spawn, after the ticket went `:active`.
+  # The run is failed (and escalated) as for any spawn failure, but the ticket goes
+  # back to Ready so Autopilot retries it instead of leaving it `:active` with no
+  # worker, and the caller gets a typed `image_publish_failed` rather than a 500.
+  defp image_publish_error(task, {:claude_start_failed, reason}),
+    do: image_publish_error(task, reason)
+
+  defp image_publish_error(%Issue{id: task_id}, {:image_unavailable, reason}) do
+    requeue_active(task_id)
+
+    {:error,
+     {:image_publish_failed,
+      %{
+        task_id: task_id,
+        reason: reason,
+        message:
+          "the worker image could not be published for #{task_id}: #{inspect(reason)}. " <>
+            "The ticket is back in Ready and will be retried; fix the cause (registry, repo " <>
+            "origin, image config) if it keeps failing."
+      }}}
+  end
+
+  defp image_publish_error(_task, _reason), do: nil
+
+  defp requeue_active(task_id) do
+    with {:ok, %Issue{state: state} = task} when state in [:active, :merging] <-
+           Ash.get(Issue, task_id) do
+      Ash.update(task, %{}, action: :requeue)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   defp refused_node_name(opts) do
@@ -1696,6 +1732,9 @@ defmodule Arbiter.Worker.Dispatch do
              :slot_cap_full
            ],
       do: :conflict
+
+  # The registry or the repo's origin failed the image publish: an upstream failure.
+  def refusal_kind(:image_publish_failed), do: :bad_gateway
 
   def refusal_kind(_reason), do: :internal
 
