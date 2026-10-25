@@ -68,6 +68,7 @@ defmodule Arbiter.Worker.Image do
   alias Arbiter.NodeAgent.K8s.PodScripts
   alias Arbiter.Worker.ArbCli
   alias Arbiter.Worker.Image.Builder
+  alias Arbiter.Worker.Image.KnownHosts
   alias Arbiter.Worker.Image.Pins
   alias Arbiter.Worker.Image.Prebuilt
   alias Arbiter.Worker.ReleaseEnv
@@ -126,6 +127,8 @@ defmodule Arbiter.Worker.Image do
           bc build-essential ca-certificates curl git libncurses6 libsctp1 libssl3t64 \\
           openssh-client procps socat sqlite3 tini tmux \\
      && rm -rf /var/lib/apt/lists/*
+    # Pinned forge host keys (bd-290vof): `git fetch origin` over ssh verifies strictly.
+    #{KnownHosts.containerfile_run()}
     RUN groupadd --gid 10001 arbiter \\
      && useradd --uid 10001 --gid 10001 --no-log-init --create-home \\
           --home-dir /home/arbiter --shell /bin/sh arbiter
