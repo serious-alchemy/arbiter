@@ -66,6 +66,70 @@ defmodule Arbiter.Mergers.DirectTest do
     end
   end
 
+  # bd-9ahwai: the branch the merger integrates must be the reviewed SHA.
+  describe "open/4 reviewed-SHA guard (bd-9ahwai)" do
+    @tag :tmp_dir
+    test "merges when the branch head is the reviewed SHA", %{tmp_dir: dir} do
+      build_repo(dir)
+      reviewed = rev_parse(dir, "feature/x")
+
+      assert {:ok, _ref} =
+               Direct.open("feature/x", "Merge feature/x", "", %{
+                 repo_path: dir,
+                 target_branch: "main",
+                 reviewed_sha: reviewed
+               })
+
+      assert File.exists?(Path.join(dir, "feature.txt"))
+    end
+
+    @tag :tmp_dir
+    test "refuses an amend-only change after review (same tree, new SHA)", %{tmp_dir: dir} do
+      build_repo(dir)
+      reviewed = rev_parse(dir, "feature/x")
+      main_before = rev_parse(dir, "main")
+
+      {_, 0} = git(dir, ["checkout", "-q", "feature/x"])
+      {_, 0} = git(dir, ["commit", "-q", "--amend", "-m", "add feature (amended message)"])
+      {_, 0} = git(dir, ["checkout", "-q", "main"])
+      amended = rev_parse(dir, "feature/x")
+      refute amended == reviewed
+
+      assert {:error, {:stale_reviewed_sha, ^reviewed, ^amended}} =
+               Direct.open("feature/x", "", "", %{
+                 repo_path: dir,
+                 target_branch: "main",
+                 reviewed_sha: reviewed
+               })
+
+      # Nothing was merged.
+      assert rev_parse(dir, "main") == main_before
+      refute File.exists?(Path.join(dir, "feature.txt"))
+    end
+
+    @tag :tmp_dir
+    test "refuses a file-changing commit added after review", %{tmp_dir: dir} do
+      build_repo(dir)
+      reviewed = rev_parse(dir, "feature/x")
+
+      {_, 0} = git(dir, ["checkout", "-q", "feature/x"])
+      File.write!(Path.join(dir, "extra.txt"), "unreviewed\n")
+      {_, 0} = git(dir, ["add", "extra.txt"])
+      {_, 0} = git(dir, ["commit", "-q", "-m", "unreviewed change"])
+      {_, 0} = git(dir, ["checkout", "-q", "main"])
+      head = rev_parse(dir, "feature/x")
+
+      assert {:error, {:stale_reviewed_sha, ^reviewed, ^head}} =
+               Direct.open("feature/x", "", "", %{
+                 repo_path: dir,
+                 target_branch: "main",
+                 reviewed_sha: reviewed
+               })
+
+      refute File.exists?(Path.join(dir, "extra.txt"))
+    end
+  end
+
   # bd-73zv62: a remote-less repo (e.g. a local infra checkout) merged via a
   # per-repo `merge.repos.<repo>.strategy = "direct"` override. There is
   # nowhere to push, so the push is skipped rather than failing a merge that
@@ -219,6 +283,11 @@ defmodule Arbiter.Mergers.DirectTest do
   # Builds a repo with `main` (one commit) and a `feature/x` branch that adds
   # feature.txt on top of it. Leaves HEAD on main. Sets up a bare "origin"
   # remote so open/4 can push the merged target branch.
+  defp rev_parse(dir, ref) do
+    {sha, 0} = git(dir, ["rev-parse", ref])
+    String.trim(sha)
+  end
+
   defp build_repo(dir) do
     remote = Path.join(dir, "origin.git")
     File.mkdir_p!(remote)

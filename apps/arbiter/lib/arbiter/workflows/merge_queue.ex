@@ -612,6 +612,20 @@ defmodule Arbiter.Workflows.MergeQueue do
     _ -> nil
   end
 
+  # bd-9ahwai: the local Direct merge refuses a branch head that is not the
+  # reviewer-approved SHA; forge adapters guard the head at `merge/2` instead.
+  defp direct_open_opts(adapter, task, base) do
+    opts = %{target_branch: base}
+
+    case task.last_reviewed_sha do
+      sha when adapter == Arbiter.Mergers.Direct and is_binary(sha) and sha != "" ->
+        Map.put(opts, :reviewed_sha, sha)
+
+      _ ->
+        opts
+    end
+  end
+
   defp open_mr_for(state, task, strategy, repo) do
     base = resolve_base(state, task)
 
@@ -629,9 +643,13 @@ defmodule Arbiter.Workflows.MergeQueue do
     # / MergeQueue path can't bypass the graceful-adoption logic either.
     with {:ok, _} <- push_worktree_branch(state.worktree_module, worktree_path, branch),
          {:ok, mr_ref} when is_binary(mr_ref) <-
-           Mergers.open_with_retry(state.adapter, branch, title, description, %{
-             target_branch: base
-           }) do
+           Mergers.open_with_retry(
+             state.adapter,
+             branch,
+             title,
+             description,
+             direct_open_opts(state.adapter, task, base)
+           ) do
       item =
         new_item(task.id, strategy,
           mr_ref: mr_ref,
