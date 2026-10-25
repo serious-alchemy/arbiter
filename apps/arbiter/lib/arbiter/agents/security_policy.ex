@@ -899,8 +899,10 @@ defmodule Arbiter.Agents.SecurityPolicy do
     * `private_clone: true` — the reviewer stands in a private clone
       (`Arbiter.Reviews.Checkout`'s `layout: :private_clone`), the only layout a
       container is handed;
-    * `provider:` is Claude, the one provider the review path has a container
-      wrap point for.
+    * `provider:` is Claude or Codex, the providers the review path has a
+      container wrap point for. A provider left out runs on the host, where the
+      container's per-run test services (`DATABASE_URL` and friends) do not
+      exist, so its reviewer could not run the repo's tests (bd-4k07ke).
 
   Without both, this is exactly `for_review_spawn/1`: the reviewer runs under
   `sandbox.review_backend` as before. A `review_backend` of `:podman` is kept
@@ -910,12 +912,12 @@ defmodule Arbiter.Agents.SecurityPolicy do
   @spec for_review_spawn(t(), keyword()) :: t()
   def for_review_spawn(%__MODULE__{sandbox: sandbox} = policy, opts) when is_list(opts) do
     if sandbox_backend(policy) == :podman and Keyword.get(opts, :private_clone, false) and
-         claude?(Keyword.get(opts, :provider)),
+         container_provider?(Keyword.get(opts, :provider)),
        do: %{policy | sandbox: Map.put(sandbox, :backend, :podman)},
        else: for_review_spawn(policy)
   end
 
-  defp claude?(provider), do: provider in [:claude, "claude"]
+  defp container_provider?(provider), do: provider in [:claude, "claude", :codex, "codex"]
 
   @doc """
   Whether a review spawn under `policy` may run in a container: either backend

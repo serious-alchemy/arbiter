@@ -963,7 +963,7 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       end
     end
 
-    test "the reviewer's policy is podman only for Claude in a private clone",
+    test "the reviewer's policy is podman only for Claude and Codex in a private clone",
          %{repo: repo, tmp: tmp} do
       branch = "feature/container-4"
       wt = pushed_branch(repo, tmp, branch)
@@ -973,7 +973,7 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
 
       podman = fn policy -> SecurityPolicy.sandbox_backend(policy) == :podman end
 
-      for provider <- [:claude, "claude"] do
+      for provider <- [:claude, "claude", :codex, "codex"] do
         policy = ReviewGate.session_security_policy(ws, state, :reviewer, provider)
         assert podman.(policy), "#{provider} reviewer did not get the container"
         # The reviewer keeps Edit/Write denied, as in the worktree.
@@ -981,7 +981,7 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       end
 
       # Any other provider, or none named: the review backend, as before.
-      for provider <- [nil, :codex, :gemini, :grok] do
+      for provider <- [nil, :gemini, :grok] do
         policy = ReviewGate.session_security_policy(ws, state, :reviewer, provider)
         refute podman.(policy), "#{inspect(provider)} reviewer got the container"
       end

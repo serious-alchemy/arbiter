@@ -521,10 +521,10 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
 
     # bd-7ays3v: a ReviewGate reviewer on a `backend: podman` repo runs in the
     # container, when it is Claude and stands in a private clone.
-    test "for_review_spawn/2 keeps podman for a Claude reviewer in a private clone" do
+    test "for_review_spawn/2 keeps podman for a Claude or Codex reviewer in a private clone" do
       podman = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{backend: :podman}})
 
-      for provider <- [:claude, "claude"] do
+      for provider <- [:claude, "claude", :codex, "codex"] do
         review = SecurityPolicy.for_review_spawn(podman, provider: provider, private_clone: true)
         assert SecurityPolicy.sandbox_backend(review) == :podman
         assert review.sandbox == podman.sandbox

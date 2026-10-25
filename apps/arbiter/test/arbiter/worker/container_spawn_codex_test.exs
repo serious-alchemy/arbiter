@@ -247,6 +247,41 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
     end
   end
 
+  # bd-4k07ke: a Codex ReviewGate reviewer on a podman repo runs in the same
+  # container as a Claude one, so it gets the repo's test services env
+  # (`DATABASE_URL`) and nothing else beyond what the container always carries.
+  describe "test services env for a codex reviewer" do
+    setup do
+      previous = Application.get_env(:arbiter, :worker_test_services)
+
+      Application.put_env(:arbiter, :worker_test_services, %{
+        "pgrepo" => [{:postgres, version: 16, database: "pgrepo_test"}]
+      })
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:arbiter, :worker_test_services, previous),
+          else: Application.delete_env(:arbiter, :worker_test_services)
+      end)
+
+      :ok
+    end
+
+    test "carries the services' variables and adds no other variable", ctx do
+      runner = fn _cmd, _args, _opts -> {"", 0} end
+      opts = [{:services_opts, [runner: runner]} | ctx.opts]
+
+      {:ok, plain} = ContainerSpawn.prepare(Keyword.put(opts, :repo, "arbiter"))
+      {:ok, with_db} = ContainerSpawn.prepare(Keyword.put(opts, :repo, "pgrepo"))
+
+      assert {"DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/pgrepo_test"} in with_db.env
+
+      extra = Enum.map(with_db.env, &elem(&1, 0)) -- Enum.map(plain.env, &elem(&1, 0))
+      # Only the throwaway Postgres service's own connection variables.
+      assert Enum.sort(extra) == ~w(DATABASE_URL PGHOST PGPASSWORD PGPORT PGUSER)
+    end
+  end
+
   describe "apply_env/2" do
     test "points CODEX_HOME at the run's home, replacing any other", ctx do
       {:ok, request} = ContainerSpawn.prepare(ctx.opts)

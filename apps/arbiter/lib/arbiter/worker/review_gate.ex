@@ -2753,7 +2753,7 @@ defmodule Arbiter.Worker.ReviewGate do
   There are two exceptions, each keeping a `sandbox.backend: podman` repo's
   podman:
 
-    * (bd-7ays3v) a Claude `:reviewer` whose `provider` is given and whose
+    * (bd-7ays3v, bd-4k07ke) a Claude or Codex `:reviewer` whose `provider` is given and whose
       checkout is a private clone runs in the container;
     * (bd-49l0eo) the `:implementer` — a fix round, its commit-gate resume —
       runs in the container when its `provider` is given and has a container
