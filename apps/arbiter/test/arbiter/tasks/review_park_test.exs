@@ -38,6 +38,13 @@ defmodule Arbiter.Tasks.ReviewParkTest do
     assert ReviewPark.reason(parked) == :inconclusive
   end
 
+  test "a park can carry the detail naming what blocked it (bd-bkqpp3)", %{task: task} do
+    assert {:ok, :claimed, parked} =
+             ReviewPark.park(task.id, :verdict_guard_exhausted, "blocked by F1.2 [high]")
+
+    assert parked.attention_detail == "blocked by F1.2 [high]"
+  end
+
   test "re-parking for the same reason does not re-claim", %{task: task} do
     {:ok, :claimed, _} = ReviewPark.park(task.id, :inconclusive)
 

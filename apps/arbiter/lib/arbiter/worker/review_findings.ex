@@ -372,6 +372,21 @@ defmodule Arbiter.Worker.ReviewFindings do
       "say what is still missing, or explain why the finding no longer applies."
   end
 
+  @doc """
+  The ids (with severity) the missing-dispositions banner in `text` names as
+  unresolved, as a one-line summary for the ticket's attention detail — or nil
+  when `text` carries no such banner.
+  """
+  @spec blocked_summary(String.t() | nil) :: String.t() | nil
+  def blocked_summary(text) when is_binary(text) do
+    case Regex.scan(~r/^\s*• (F\d+\.\d+) \[(\w+)\]/m, text) do
+      [] -> nil
+      rows -> "blocked by " <> Enum.map_join(rows, ", ", fn [_, id, sev] -> "#{id} [#{sev}]" end)
+    end
+  end
+
+  def blocked_summary(_), do: nil
+
   # ---- persistence surfaces ------------------------------------------------
 
   @doc """
@@ -478,7 +493,18 @@ defmodule Arbiter.Worker.ReviewFindings do
     chunks
     |> Enum.reverse()
     |> Enum.map(fn {chunk, section} -> {chunk |> Enum.reverse() |> Enum.join("\n"), section} end)
-    |> Enum.reject(fn {text, _section} -> String.trim(text) == "" end)
+    |> Enum.reject(fn {text, _section} -> String.trim(text) == "" or header_only?(text) end)
+  end
+
+  # A chunk that is nothing but a section header (`FINDINGS:`, `## Findings`,
+  # `**Findings:**`) carries no content or location, so it is not a finding
+  # (bd-bkqpp3 / #989: it became F1.1 and blocked a correct APPROVE).
+  defp header_only?(text) do
+    trimmed = String.trim(text)
+
+    not String.contains?(trimmed, "\n") and not Regex.match?(@item, trimmed) and
+      (Regex.match?(~r/^\#{1,6}\s+\S.*$/, trimmed) or
+         Regex.match?(~r/^[*_]*[A-Za-z][A-Za-z &\/-]{0,60}[*_]*:[*_]*$/, trimmed))
   end
 
   # `:non_blocking` is a declaration, not a label to search for — an item under

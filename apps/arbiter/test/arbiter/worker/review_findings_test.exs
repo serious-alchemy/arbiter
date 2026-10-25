@@ -506,11 +506,10 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
                  "- `log_stream/1` is also used by `run_detail_live.ex:173` and `task_detail_live.ex:2479,2521`."
              end)
 
-      # Instead, each numbered item (plus the bare "Findings:" header, which
-      # is a separate pre-existing quirk this task does not touch) stays a
-      # single finding: 5 numbered items + 1 header = 6, with the real
-      # severities the reviewer actually wrote.
-      assert Enum.map(items, & &1.severity) == [:unknown, :high, :medium, :medium, :low, :low]
+      # Instead, each numbered item stays a single finding, with the real
+      # severities the reviewer actually wrote. The bare "Findings:" header is
+      # not a finding (bd-bkqpp3), so only the 5 numbered items remain.
+      assert Enum.map(items, & &1.severity) == [:high, :medium, :medium, :low, :low]
     end
 
     # The `[ADDRESSED] F1.3` / `[ADDRESSED] F1.20` lines from the real
@@ -562,10 +561,9 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
     @bcroux_round3 """
     VERDICT: APPROVE
     DISPOSITIONS:
-    - [ADDRESSED] F1.1 — This is the empty "Findings:" header from round 1, not a finding in itself. Every item under it is dispositioned below.
-    - [ADDRESSED] F1.2 — PR #2086 body, "## Screenshots" section, now has before/after pairs and two 1280px shots. The images are in `docs/pr-2086-screenshots/before-*.png`, `after-*.png` and `desktop-1280-*.png`. I opened the PNGs: the before shots show the pre-fix wordmark, the ellipsis-truncated line and the Compact/Side/Max strip. The after shots show the icon brandmark, the scrollable pane and the Restore icon. All 12 files have different md5 hashes. The PR's rendered HTML resolves the image `src` to `../blob/<branch>/docs/...?raw=true`.
-    - [ADDRESSED] F1.3 — The implementer ran the browser test with `ARB_MOBILE_TOUCH_SCREENSHOT` set, on this branch and on an `ef2effa5` scratch worktree. The test file needed no edit. The resulting PNGs are committed under `docs/pr-2086-screenshots/`.
-    - [ADDRESSED] F1.4 — The PNGs are committed to the branch (`docs/pr-2086-screenshots/*`) and linked through github.com blob URLs. No paste host was used.
+    - [ADDRESSED] F1.1 — PR #2086 body, "## Screenshots" section, now has before/after pairs and two 1280px shots. The images are in `docs/pr-2086-screenshots/before-*.png`, `after-*.png` and `desktop-1280-*.png`. I opened the PNGs: the before shots show the pre-fix wordmark, the ellipsis-truncated line and the Compact/Side/Max strip. The after shots show the icon brandmark, the scrollable pane and the Restore icon. All 12 files have different md5 hashes. The PR's rendered HTML resolves the image `src` to `../blob/<branch>/docs/...?raw=true`.
+    - [ADDRESSED] F1.2 — The implementer ran the browser test with `ARB_MOBILE_TOUCH_SCREENSHOT` set, on this branch and on an `ef2effa5` scratch worktree. The test file needed no edit. The resulting PNGs are committed under `docs/pr-2086-screenshots/`.
+    - [ADDRESSED] F1.3 — The PNGs are committed to the branch (`docs/pr-2086-screenshots/*`) and linked through github.com blob URLs. No paste host was used.
     - [OBSOLETE] F1.5 — This was the fallback in case attaching proved impossible. It didn't: the screenshots are attached.
     - [ADDRESSED] F1.6 — There is now a Restore button below `sm` while maximized: `session_dock_live.ex:2073-2085` (`id="session-dock-restore-…"`, `size-11 sm:hidden`, `set_size` to `compact`).
     - [ADDRESSED] F1.7 — The Restore button (`session_dock_live.ex:2076`) is the way back. It is visible in `after-375-light-session-dock-maximized.png`.
@@ -635,7 +633,7 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
       open2 =
         ReviewFindings.extract(@bcroux_round2, 2) |> Enum.filter(&ReviewFindings.blocking?/1)
 
-      assert Enum.map(open1, & &1.id) == ["F1.1", "F1.2", "F1.3", "F1.4"]
+      assert Enum.map(open1, & &1.id) == ["F1.1", "F1.2", "F1.3"]
       assert Enum.map(open2, & &1.id) == ["F2.1", "F2.2"]
 
       # The real files `git show --name-only` reports for the merged PR's
