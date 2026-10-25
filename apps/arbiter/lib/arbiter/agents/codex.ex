@@ -238,7 +238,9 @@ defmodule Arbiter.Agents.Codex do
           # `maybe_jail_reviewer/3` wraps under bwrap.
           with {:ok, _sandbox} <- sandbox_for(policy, wrap?),
                {:ok, argv} <- build_argv(codex, prompt, flags) do
-            maybe_jail_reviewer(argv, policy, opts)
+            # A container already confines the reviewer (its private clone is
+            # read-only), and `Sandbox.module/1` would refuse podman for the jail.
+            if wrap?, do: {:ok, argv}, else: maybe_jail_reviewer(argv, policy, opts)
           end
         end
 

@@ -1225,6 +1225,20 @@ defmodule Arbiter.Agents.CodexTest do
       refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "tok\""))
     end
 
+    test "a reviewer under podman is not also wrapped in the bwrap jail (bd-4k07ke)" do
+      policy =
+        SecurityPolicy.merge(podman_policy(:auto), %{"permissions" => %{"deny" => ["Write"]}})
+
+      wt =
+        Path.join(System.tmp_dir!(), "arb-codex-reviewer-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(wt)
+      on_exit(fn -> File.rm_rf!(wt) end)
+
+      assert {:ok, ["sh", "-c", _, "sh", @container_codex, "exec" | _]} =
+               Codex.default_argv("p", security: policy, sandbox_wrap: true, worktree_path: wt)
+    end
+
     test "the sandbox flags still follow the policy mode" do
       for {mode, flag} <- [
             bypass: "--dangerously-bypass-approvals-and-sandbox",
