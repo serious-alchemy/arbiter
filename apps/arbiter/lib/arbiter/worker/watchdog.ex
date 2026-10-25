@@ -308,6 +308,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Mergers.PendingMerge
   alias Arbiter.ReviewGate.MergeAuthorization
+  alias Arbiter.ReviewGate.RulingResume
   alias Arbiter.Reviews.ConflictReview
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
@@ -1444,6 +1445,9 @@ defmodule Arbiter.Worker.Watchdog do
       visual_refresher: Keyword.get(opts, :visual_refresher, &VisualBaselines.refresh/1),
       visual_tried_heads: [],
       visual_pending: nil,
+      # `{event, head}` ruling events already announced (`note_ruling/3`), so a
+      # red head is announced once, not once per poll.
+      ruling_noted: [],
       # The per-task fix-pass cap (bd-2l0hzm) — see `@default_max_fix_passes`.
       # `fix_passes_dispatched` is this Watchdog's own lifetime count (never
       # reset per episode); `fix_pass_history` reads the durable count, which
@@ -2729,7 +2733,28 @@ defmodule Arbiter.Worker.Watchdog do
         )
     end
 
+    note_ruling(state, "merged", state.last_head_sha)
     announce(state, {:merged, state.mr_ref})
+  end
+
+  # The merge path a merge-permitting ruling resumed (`Arbiter.ReviewGate.RulingResume`)
+  # reached `event`. Announces nothing for a ticket no ruling stands for.
+  defp note_ruling(state, event, head) do
+    key = {event, head}
+
+    if key in state.ruling_noted do
+      state
+    else
+      safe(fn ->
+        RulingResume.note(state.task_id, workspace_id(state), event, %{
+          head_sha: head,
+          mr_ref: state.mr_ref,
+          message: "#{state.task_id}: #{event} on the ruled head #{head}"
+        })
+      end)
+
+      %{state | ruling_noted: [key | state.ruling_noted]}
+    end
   end
 
   # bd-741sid: write the reviewed-SHA baseline this poll left latched onto the
@@ -3349,6 +3374,7 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp resolve_ci_failed_by_fix(state, head) do
+    state = note_ruling(state, "ci_failed", head)
     checks = safe_failing_checks(state)
 
     case flake_step(state, checks, head) do
@@ -5751,6 +5777,14 @@ defmodule Arbiter.Worker.Watchdog do
         )
 
         record_content_equal_coverage(state, live)
+
+        carry_ruling(
+          state,
+          reviewed,
+          live,
+          "net diff against #{state.mr_base_ref} is identical (patch-id style fingerprint)"
+        )
+
         {:merge, live, %{state | reviewed_sha: live}}
 
       # bd-954ym8 / #134: a head that is exactly the approved commit with the
@@ -5758,6 +5792,13 @@ defmodule Arbiter.Worker.Watchdog do
       # equality above cannot see once the integration shifted a hunk's
       # context. Covered by the approval; no review round.
       cover_clean_integration(state, live) == :covered ->
+        carry_ruling(
+          state,
+          reviewed,
+          live,
+          "the head is the ruled commit with the target integrated cleanly and nothing else"
+        )
+
         {:merge, live, %{state | reviewed_sha: live}}
 
       true ->
@@ -5770,6 +5811,15 @@ defmodule Arbiter.Worker.Watchdog do
 
         {:stale, reviewed, live, state}
     end
+  end
+
+  # A merge-permitting ruling on `reviewed` still covers `live` when `live` is
+  # that commit rebased or merged onto the base with the same net diff — checked
+  # mechanically by the caller. Records a system-authored ruling row for `live`
+  # and says so in the event; a ticket with no such ruling is untouched.
+  defp carry_ruling(state, reviewed, live, proof) do
+    safe(fn -> RulingResume.carry_forward(state.task_id, reviewed, live, proof) end)
+    :ok
   end
 
   # Re-read the PR head from the forge. Keeps the previous reading on any
@@ -5925,6 +5975,29 @@ defmodule Arbiter.Worker.Watchdog do
   # files, from local git — in the log and, when it pages, in the page, so the
   # coordinator does not have to reconstruct it by hand.
   defp resolve_stale_reviewed_head(state, reviewed, head) do
+    case MergeAuthorization.head_changed(state.task_id, head) do
+      {:changed, ruling} -> park_ruling_head_changed(state, ruling, head)
+      :none -> route_stale_reviewed_head(state, reviewed, head)
+    end
+  end
+
+  # The coordinator ruled on one head and the PR now sits at another: no review
+  # round is bought (the gate already failed to converge on this work), nothing
+  # merges, and the coordinator is paged once naming both SHAs. A new ruling on
+  # the new head resumes the merge path (`Arbiter.ReviewGate.RulingResume`).
+  defp park_ruling_head_changed(state, ruling, head) do
+    Logger.warning(
+      "Worker.Watchdog: refusing auto-merge for task=#{state.task_id} mr=#{state.mr_ref}; " <>
+        "head changed since ruling: #{ruling.head_sha} -> #{head}"
+    )
+
+    PendingMerge.clear(state.task_id)
+    announce(state, {:unreviewed_head, head})
+    safe(fn -> RulingResume.head_changed(snapshot(state), state.mr_ref, ruling, head) end)
+    {:stop, :normal, %{state | pending_merge_stamp: nil}}
+  end
+
+  defp route_stale_reviewed_head(state, reviewed, head) do
     snap = snapshot(state)
     attempts = max(awaiting_review_resume_attempts(snap), state.resume_attempts_seen)
     delta = unreviewed_delta(state, reviewed, head)
@@ -5959,6 +6032,15 @@ defmodule Arbiter.Worker.Watchdog do
   # re-enters the gate, bounded by the same auto-resume budget, with one page —
   # never a per-poll retry — when there is no path back to review.
   defp route_unapproved_head_to_review(state, {:review_not_approved, detail} = refusal) do
+    head = detail.head || state.last_head_sha
+
+    case MergeAuthorization.head_changed(state.task_id, head) do
+      {:changed, ruling} -> park_ruling_head_changed(state, ruling, head)
+      :none -> route_refused_head_to_review(state, refusal)
+    end
+  end
+
+  defp route_refused_head_to_review(state, {:review_not_approved, detail} = refusal) do
     snap = snapshot(state)
     attempts = max(awaiting_review_resume_attempts(snap), state.resume_attempts_seen)
     head = detail.head || state.last_head_sha
