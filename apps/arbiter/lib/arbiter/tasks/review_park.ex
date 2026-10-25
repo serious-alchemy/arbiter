@@ -206,9 +206,9 @@ defmodule Arbiter.Tasks.ReviewPark do
   Best-effort by design: this runs on the worker's terminal path, and a DB
   hiccup here must not turn a park back into a crash. Callers log and continue.
   """
-  @spec park(String.t(), reason()) ::
+  @spec park(String.t(), reason(), String.t() | nil) ::
           {:ok, :claimed | :already_parked, Issue.t()} | {:error, term()}
-  def park(task_id, reason) when is_binary(task_id) and is_atom(reason) do
+  def park(task_id, reason, detail \\ nil) when is_binary(task_id) and is_atom(reason) do
     with :ok <- known_reason(reason),
          {:ok, task} <- Ash.get(Issue, task_id) do
       if Map.get(task, :attention_cause) == reason do
@@ -221,7 +221,7 @@ defmodule Arbiter.Tasks.ReviewPark do
         # there is nothing to write.
         {:ok, :already_parked, task}
       else
-        case Ash.update(task, %{cause: reason}, action: :park_review) do
+        case Ash.update(task, %{cause: reason, detail: detail}, action: :park_review) do
           {:ok, parked} -> {:ok, :claimed, parked}
           {:error, _} = err -> err
         end
