@@ -146,7 +146,9 @@ defmodule Arbiter.Mergers.Gitlab do
   def get(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref) do
-      case request(cfg, :get, "/merge_requests/#{iid}", []) do
+      case cfg
+           |> request(:get, "/merge_requests/#{iid}", [])
+           |> recheck_phantom_conflict(cfg, iid) do
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
           merge_status = Map.get(body, "merge_status", "")
           {pipeline, pipeline_id} = fetch_pipeline_status(cfg, iid, Map.get(body, "sha"))
@@ -1119,6 +1121,29 @@ defmodule Arbiter.Mergers.Gitlab do
 
   # The behaviour callbacks receive the canonical "!<iid>" form, but tolerate
   # a bare integer string too in case a caller hands one through directly.
+  # `detailed_merge_status == "conflict"` while `has_conflicts == false` is
+  # GitLab's cached mergeability disagreeing with itself (bd-9kfdkf): ask it to
+  # recompute (`with_merge_status_recheck`) and read that answer instead of
+  # escalating the stale one. A failed recheck keeps the first response.
+  defp recheck_phantom_conflict(
+         {:ok, %Req.Response{status: status, body: %{} = body}} = first,
+         cfg,
+         iid
+       )
+       when status in 200..299 do
+    if Map.get(body, "detailed_merge_status") == "conflict" and
+         Map.get(body, "has_conflicts") == false do
+      case request(cfg, :get, "/merge_requests/#{iid}", params: [with_merge_status_recheck: true]) do
+        {:ok, %Req.Response{status: s, body: %{}}} = rechecked when s in 200..299 -> rechecked
+        _ -> first
+      end
+    else
+      first
+    end
+  end
+
+  defp recheck_phantom_conflict(response, _cfg, _iid), do: response
+
   defp iid_from_ref(ref) do
     case parse_ref(ref) do
       {:ok, "!" <> iid} ->

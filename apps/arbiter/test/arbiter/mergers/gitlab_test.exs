@@ -503,6 +503,36 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert block_get(%{"detailed_merge_status" => "conflict"}).block_reason == :conflict
     end
 
+    test "detailed conflict with has_conflicts=false is rechecked, not trusted (bd-9kfdkf)" do
+      test_pid = self()
+
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            recheck? = conn.query_string =~ "with_merge_status_recheck=true"
+            send(test_pid, {:mr_get, recheck?})
+
+            mr =
+              if recheck? do
+                %{"detailed_merge_status" => "ci_still_running", "has_conflicts" => false}
+              else
+                %{"detailed_merge_status" => "conflict", "has_conflicts" => false}
+              end
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(Map.merge(%{"iid" => @iid, "state" => "opened"}, mr))
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+        end
+      end)
+
+      assert {:ok, %{block_reason: nil}} = Gitlab.get(@ref)
+      assert_received {:mr_get, false}
+      assert_received {:mr_get, true}
+    end
+
     test "need_rebase classifies as :behind_base" do
       assert block_get(%{"detailed_merge_status" => "need_rebase"}).block_reason == :behind_base
     end

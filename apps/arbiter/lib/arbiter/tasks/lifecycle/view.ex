@@ -470,12 +470,31 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
   # The PR's last poll: `ctx` wins, then what the ticket's Watchdog recorded on
   # its row (bd-741sid).
+  #
+  # A status read for a head the PR has since moved off (bd-9kfdkf) says
+  # nothing about the current head, so it reads as no status until the
+  # Watchdog's next poll refreshes it — a phantom conflict on a superseded head
+  # must not raise `:merge_blocked`.
   defp merger_status(ticket, ctx) do
-    case Map.get(ctx, :merger_status) do
-      %{} = status -> status
-      _ -> PullRequest.merger_status(ticket) || %{}
-    end
+    status =
+      case Map.get(ctx, :merger_status) do
+        %{} = status -> status
+        _ -> PullRequest.merger_status(ticket) || %{}
+      end
+
+    if stale_head?(status, ticket), do: %{}, else: status
   end
+
+  defp stale_head?(status, ticket) do
+    current = ticket |> Map.get(:merge_watch) |> current_head()
+    seen = Map.get(status, :head_sha)
+    is_binary(current) and is_binary(seen) and current != "" and seen != "" and seen != current
+  end
+
+  defp current_head(%{} = watch),
+    do: Map.get(watch, "local_head_sha") || Map.get(watch, :local_head_sha)
+
+  defp current_head(_), do: nil
 
   defp ci_pending?(status, pending_merge) do
     Map.get(status, :pipeline) in @ci_pending or pending_reason(pending_merge) == "ci_pending"
