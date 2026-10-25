@@ -259,8 +259,12 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_repo_capacity(task, opts),
          opts = put_security_policy(task, opts),
          :ok <- maybe_preflight(task, opts),
-         {:ok, task} <- transition_to_active(task, opts),
+         # bd-b3mud5: provision before the ticket goes active — a failure
+         # (e.g. a forge repo with no `origin`) then leaves it where it was and
+         # returns the real cause, instead of stranding an `:active` ticket with
+         # no run that the attention sweep reads as `run_crashed`.
          {:ok, worktree_path} <- maybe_provision_worktree(task, opts),
+         {:ok, task} <- transition_to_active(task, opts),
          {:ok, worker_pid} <- start_worker(task, worktree_path, opts) do
       task
       |> finish_dispatch(worker_pid, worktree_path, opts)
@@ -3605,7 +3609,8 @@ defmodule Arbiter.Worker.Dispatch do
                           target_branch,
                           msg,
                           layout,
-                          seed_paths
+                          seed_paths,
+                          local_base
                         )
 
                       true ->
@@ -3630,7 +3635,15 @@ defmodule Arbiter.Worker.Dispatch do
   # doesn't match "different branch", and nothing else reclaims the directory), so
   # recover instead of stranding the dispatch. Safe by inspection: a detached tree
   # has no branch and therefore no commits only reachable from it.
-  defp recover_from_detached_worktree(repo_path, branch, target_branch, msg, layout, seed_paths) do
+  defp recover_from_detached_worktree(
+         repo_path,
+         branch,
+         target_branch,
+         msg,
+         layout,
+         seed_paths,
+         local_base
+       ) do
     require Logger
 
     path = Worktree.worktree_path(branch)
@@ -3646,7 +3659,8 @@ defmodule Arbiter.Worker.Dispatch do
 
         case Worktree.create(repo_path, branch, target_branch,
                layout: layout,
-               seed_paths: seed_paths
+               seed_paths: seed_paths,
+               local_base: local_base
              ) do
           {:ok, path} -> {:ok, path}
           {:error, reason} -> {:error, {:worktree_failed, reason}}
