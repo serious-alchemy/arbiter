@@ -637,6 +637,8 @@ defmodule Arbiter.MCP.Tools.Worker do
   defp dispatch_error_message({:no_node_capacity, info}),
     do: Arbiter.Nodes.Placement.refusal_message(info)
 
+  defp dispatch_error_message({:image_publish_failed, info}), do: info.message
+
   # bd-13pqcp: the ticket's provider constraint refused the provider (or left
   # none eligible with capacity). The phrase already reads `held — provider
   # constraint (<detail>)`.

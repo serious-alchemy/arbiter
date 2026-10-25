@@ -1081,6 +1081,8 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp dispatch_failure({:no_node_capacity, info}),
     do: Arbiter.Nodes.Placement.refusal_message(info)
 
+  defp dispatch_failure({:image_publish_failed, info}), do: info.message
+
   # bd-13pqcp: the ticket's provider constraint refused the dispatch.
   defp dispatch_failure({:provider_constraint, _provider, phrase}),
     do: "#{phrase} — edit the ticket's provider constraint, or wait for an eligible account."
