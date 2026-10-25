@@ -329,6 +329,9 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   # bd-13pqcp: the ticket's provider constraint leaves no eligible provider (or
   # the one named is excluded).
+  defp refusal_text({:image_publish_failed, info}, task_id, _verb),
+    do: {info.message, %{task_id: task_id, reason: inspect(info.reason)}}
+
   defp refusal_text({:provider_constraint, provider, phrase}, task_id, verb),
     do:
       {"#{phrase} — #{noun(verb)} refused; it never runs on an excluded provider",

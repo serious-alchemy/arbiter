@@ -29,6 +29,7 @@ defmodule ArbiterWeb.Api.FallbackControllerTest do
     {{:forbidden, "nope"}, 403, "forbidden"},
     {{:unauthenticated, "who are you"}, 401, "unauthenticated"},
     {{:server_error, "dispatch failed", %{reason: ":boom"}}, 500, "internal_error"},
+    {{:bad_gateway, "image publish failed", %{reason: ":push_failed"}}, 502, "bad_gateway"},
     {{:internal, "kaboom"}, 500, "internal_error"},
     {%Ash.Error.Forbidden{}, 403, "forbidden"},
     {%Ash.Error.Unknown{errors: []}, 500, "internal_error"},
