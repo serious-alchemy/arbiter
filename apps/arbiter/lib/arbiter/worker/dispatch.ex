@@ -176,6 +176,12 @@ defmodule Arbiter.Worker.Dispatch do
           holders: [String.t()]
         }
 
+  @typedoc """
+  A resume answered by a covering merge-permitting ruling (bd-1vdunv): the
+  ticket went back on the merge path and no agent was dispatched.
+  """
+  @type ruling_resumed_result :: %{task_id: String.t(), ruling_resumed: atom()}
+
   @type dispatch_result :: %{
           task: Issue.t(),
           worker_pid: pid(),
@@ -509,7 +515,8 @@ defmodule Arbiter.Worker.Dispatch do
   `{:error, {:worker_active, status}}`, `{:error, :repo_unknown}`.
   """
   @spec resume(String.t(), dispatch_opts()) ::
-          {:ok, dispatch_result() | deferred_result()} | {:error, term()}
+          {:ok, dispatch_result() | deferred_result() | ruling_resumed_result()}
+          | {:error, term()}
   def resume(task_id, opts \\ []) when is_binary(task_id) do
     # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
     # invisible to the worker supervisor — track it so a drain report sees it.
@@ -536,6 +543,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_active(task_id),
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, worktree_path} <- resume_worktree(task, repo),
+         :ok <- ensure_no_covering_ruling(task_id, worktree_path),
          target_branch <- resolve_target_branch(task, Keyword.put(opts, :repo, repo)),
          {:ok, context} <- ResumeContext.build(task, worktree_path, target_branch),
          {:ok, opts} <- ensure_collected(task, :resume, opts),
@@ -580,8 +588,35 @@ defmodule Arbiter.Worker.Dispatch do
       # Already inside this resume's Drain.track — skip dispatch/2's own.
       do_dispatch(task_id, resume_opts)
     else
-      {:deferred, result} -> {:ok, result}
-      other -> other
+      {:deferred, result} ->
+        {:ok, result}
+
+      # A merge-permitting ruling covers the worktree's head: the ticket went
+      # back on the merge path and no agent is dispatched. Not a deferral:
+      # nothing is held, so the held-resume marker clears like any success.
+      {:ruling_resumed, how} ->
+        {:ok, %{task_id: task_id, ruling_resumed: how}}
+
+      other ->
+        other
+    end
+  end
+
+  # A standing `accept_as_is` / `amend` ruling on the head being resumed is
+  # honoured (CI wait, merge) rather than re-reviewed as a fresh round 1. A
+  # ruling on an older head, or a `send_back`, falls through to a normal resume.
+  defp ensure_no_covering_ruling(task_id, worktree_path) do
+    # An unreadable head cannot be matched to a ruling (`covers?/2` treats a
+    # nil head as covered), so resume normally rather than skip the re-review.
+    case Worktree.head_sha(worktree_path) do
+      head when is_binary(head) and head != "" ->
+        case Arbiter.ReviewGate.RulingResume.resume_covering(task_id, head) do
+          {:ok, how} -> {:ruling_resumed, how}
+          :none -> :ok
+        end
+
+      _ ->
+        :ok
     end
   end
 
@@ -634,7 +669,8 @@ defmodule Arbiter.Worker.Dispatch do
   `{:error, :repo_unknown}`.
   """
   @spec resume_session(String.t(), dispatch_opts()) ::
-          {:ok, dispatch_result() | deferred_result()} | {:error, term()}
+          {:ok, dispatch_result() | deferred_result() | ruling_resumed_result()}
+          | {:error, term()}
   def resume_session(task_id, opts \\ []) when is_binary(task_id) do
     # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
     # invisible to the worker supervisor — track it so a drain report sees it.
@@ -651,7 +687,8 @@ defmodule Arbiter.Worker.Dispatch do
   the explicit opt-in for `resume/2`'s fresh agent briefed from git state.
   """
   @spec resume_task(String.t(), dispatch_opts()) ::
-          {:ok, dispatch_result() | deferred_result()} | {:error, term()}
+          {:ok, dispatch_result() | deferred_result() | ruling_resumed_result()}
+          | {:error, term()}
   def resume_task(task_id, opts \\ []) when is_binary(task_id) do
     case Keyword.pop(opts, :resume_mode, :session) do
       {:briefing, rest} -> resume(task_id, rest)
@@ -806,6 +843,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_active(task_id),
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, worktree_path} <- resume_worktree(task, repo),
+         :ok <- ensure_no_covering_ruling(task_id, worktree_path),
          {:ok, session_id, session_provider} <- latest_session_id(task_id),
          {:ok, opts} <- ensure_collected(task, :resume_session, opts),
          {:ok, opts} <- resume_slot(task, :resume_session, opts),
@@ -885,6 +923,7 @@ defmodule Arbiter.Worker.Dispatch do
       do_dispatch(task_id, resume_opts)
     else
       {:deferred, result} -> {:ok, result}
+      {:ruling_resumed, how} -> {:ok, %{task_id: task_id, ruling_resumed: how}}
       other -> other
     end
   end

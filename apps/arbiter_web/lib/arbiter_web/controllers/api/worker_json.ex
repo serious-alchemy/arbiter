@@ -9,6 +9,18 @@ defmodule ArbiterWeb.Api.WorkerJSON do
   alias ArbiterWeb.Api.IssueJSON
   alias ArbiterWeb.Api.WorkspaceParam
 
+  # bd-1vdunv: a resume that a covering ruling answered by resuming the merge
+  # path starts no agent, so there is no task/pid/machine to render.
+  def dispatch(%{result: %{ruling_resumed: how, task_id: task_id}}) do
+    %{
+      task_id: task_id,
+      ruling_resumed: how,
+      claude_started: false,
+      message:
+        "covering #{how} ruling on the current head; merge path resumed, no agent dispatched"
+    }
+  end
+
   def dispatch(%{result: result}) do
     %{
       task: IssueJSON.data(result.task),

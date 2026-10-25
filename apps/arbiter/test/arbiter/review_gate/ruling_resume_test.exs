@@ -412,6 +412,72 @@ defmodule Arbiter.ReviewGate.RulingResumeTest do
     end
   end
 
+  describe "a worker is registered but finished" do
+    test "accept_as_is resumes the merge path with no new review round", _ctx do
+      ws = workspace(%{"auto_merge" => true})
+      task = parked_ticket(ws)
+      StubMerger.queue_get(@ref, [green()])
+
+      {:ok, pid} =
+        Arbiter.Worker.start(task_id: task.id, repo: "rr/repo", workspace_id: ws.id)
+
+      on_exit(fn -> stop(pid) end)
+      :ok = Arbiter.Worker.fail(pid, "gate escalated")
+      assert Arbiter.Worker.finished?(Arbiter.Worker.state(pid))
+
+      rule(task, :accept_as_is)
+
+      wait_until(fn -> ticket(task.id).state == :closed end)
+      assert StubMerger.last_merge() == {@ref, @head}
+      assert [_only_round] = Enum.filter(Ash.read!(Round), &(&1.task_id == task.id))
+    end
+  end
+
+  describe "resume_covering/2 (a worker resume of a ruled ticket)" do
+    for decision <- [:accept_as_is, :amend] do
+      test "a #{decision} ruling on the current head goes to the merge path", _ctx do
+        ws = workspace(%{"auto_merge" => true})
+        task = parked_ticket(ws)
+        StubMerger.queue_get(@ref, [green()])
+        Application.put_env(:arbiter, :ruling_resume, :off)
+        on_exit(fn -> Application.put_env(:arbiter, :ruling_resume, :sync) end)
+        rule(task, unquote(decision))
+        assert ticket(task.id).state == :active
+
+        assert {:ok, _how} = Arbiter.ReviewGate.RulingResume.resume_covering(task.id, @head)
+
+        wait_until(fn -> ticket(task.id).state == :closed end)
+        assert StubMerger.last_merge() == {@ref, @head}
+        assert [_only_round] = Enum.filter(Ash.read!(Round), &(&1.task_id == task.id))
+      end
+    end
+
+    test "a ruling on an older head is not honoured (re-review)", _ctx do
+      ws = workspace(%{"auto_merge" => true})
+      task = parked_ticket(ws)
+      Application.put_env(:arbiter, :ruling_resume, :off)
+      on_exit(fn -> Application.put_env(:arbiter, :ruling_resume, :sync) end)
+      rule(task, :accept_as_is)
+
+      assert :none =
+               Arbiter.ReviewGate.RulingResume.resume_covering(task.id, "9999999aaaaaaaaaaaaa")
+
+      assert StubMerger.merge_count(@ref) == 0
+      assert ticket(task.id).state == :active
+    end
+
+    test "send_back still re-reviews", _ctx do
+      ws = workspace(%{"auto_merge" => true})
+      task = parked_ticket(ws)
+      Application.put_env(:arbiter, :ruling_resume, :off)
+      on_exit(fn -> Application.put_env(:arbiter, :ruling_resume, :sync) end)
+      rule(task, :send_back)
+
+      assert :none = Arbiter.ReviewGate.RulingResume.resume_covering(task.id, @head)
+      assert StubMerger.merge_count(@ref) == 0
+    end
+  end
+
   # `rule/3` goes through `Resolutions.record/1`, which already resumes; this
   # reads the row back so a test can drive `resume/2` with its own watch opts.
   defp rule_record(task, decision) do
