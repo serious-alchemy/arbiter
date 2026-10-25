@@ -323,10 +323,17 @@ defmodule Arbiter.Nodes.CheckoutTest do
       full = seed!(c)
       assert full.seed.thin? == false
 
+      # the target has moved past what the node holds, so its tip is a ref the thin
+      # bundle still carries
+      git!(c.home, ["checkout", "-q", "main"])
+      File.write!(Path.join(c.home, "lib/newer.txt"), "newer\n")
+      _ = commit_all!(c.home, "newer")
+      git!(c.home, ["checkout", "-q", @branch])
+
       File.write!(Path.join(c.home, "lib/more.txt"), "more\n")
       tip = commit_all!(c.home, "more")
 
-      # the same node, which already holds the base
+      # the same node, which already holds the old base
       thin = seed!(c, [c.base])
 
       assert thin.seed.thin?
@@ -359,6 +366,22 @@ defmodule Arbiter.Nodes.CheckoutTest do
       assert %{seed: %{thin?: false, refs: refs}, info: %{head: head}} = seed!(c, [held])
       assert refs["refs/heads/#{@branch}"] == c.base
       assert head == c.base
+    end
+
+    # bd-15vnqm: a node that already holds the base tip (an earlier run on the same
+    # repo) is seeded thin, and git leaves a ref whose tip the `^have` prerequisites
+    # reach out of the bundle. The shadow then had `<branch>` but no `origin/<base>`,
+    # and a conflict pass could not rebase ("clone has no origin/main").
+    test "carries the base ref when the node already holds the base tip", c do
+      _ = seed!(c)
+      File.write!(Path.join(c.home, "lib/more.txt"), "more\n")
+      tip = commit_all!(c.home, "more")
+
+      assert %{seed: %{refs: refs}, shadow: shadow, info: info} = seed!(c, [c.base])
+      assert refs["refs/heads/#{@branch}"] == tip
+      assert refs["refs/heads/main"] == c.base
+      assert info.head == tip
+      assert git!(shadow, ["rev-parse", "refs/remotes/origin/main"]) == c.base
     end
 
     test "when the node already has every tip it still gets a usable bundle", c do

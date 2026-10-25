@@ -138,7 +138,7 @@ defmodule Arbiter.Nodes.Checkout do
            checkpoint_work_tree(home, git_dir, tip, Keyword.put(opts, :branch_ref, branch_ref)),
          refs = seed_refs(git_dir, run, branch_ref, Keyword.get(opts, :base)),
          have = known_shas(git_dir, Keyword.get(opts, :have, [])),
-         {:ok, thin?} <- create_seed(git_dir, branch_ref, refs, have, dest),
+         {:ok, thin?} <- create_seed(git_dir, refs, have, dest),
          {:ok, bytes} <- seed_size(dest, Keyword.get(opts, :max_bytes, seed_max_bytes())),
          {:ok, heads} <- list_heads(git_dir, dest) do
       {:ok,
@@ -309,8 +309,10 @@ defmodule Arbiter.Nodes.Checkout do
   # branch out: git omits a ref whose tip the `^have` prerequisites already reach
   # (a re-dispatched branch with no commits of its own, cut from a base the node
   # has since moved past), and the node refuses a seed with no branch head
-  # (`:no_branch_in_seed`).
-  defp create_seed(git_dir, branch_ref, refs, have, dest) do
+  # (`:no_branch_in_seed`). The same goes for the base ref (a node that already
+  # holds the base tip): the shadow would get no `origin/<base>` and a conflict pass
+  # could not rebase (bd-15vnqm). So a thin bundle must carry every ref asked for.
+  defp create_seed(git_dir, refs, have, dest) do
     File.rm(dest)
     File.mkdir_p!(Path.dirname(dest))
 
@@ -319,7 +321,7 @@ defmodule Arbiter.Nodes.Checkout do
            Git.run(["bundle", "create", dest] ++ refs ++ Enum.map(have, &("^" <> &1)),
              git_dir: git_dir
            ),
-         true <- carries_ref?(git_dir, dest, branch_ref) do
+         true <- carries_refs?(git_dir, dest, refs) do
       {:ok, true}
     else
       _ ->
@@ -346,10 +348,13 @@ defmodule Arbiter.Nodes.Checkout do
     end
   end
 
-  defp carries_ref?(git_dir, bundle, ref) do
+  defp carries_refs?(git_dir, bundle, refs) do
     case list_heads(git_dir, bundle) do
-      {:ok, heads} -> Enum.any?(heads, fn {_sha, name} -> name == ref end)
-      _ -> false
+      {:ok, heads} ->
+        Enum.all?(refs, fn ref -> Enum.any?(heads, fn {_sha, name} -> name == ref end) end)
+
+      _ ->
+        false
     end
   end
 
