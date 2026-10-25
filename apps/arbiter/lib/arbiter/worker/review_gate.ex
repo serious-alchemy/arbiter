@@ -2451,12 +2451,39 @@ defmodule Arbiter.Worker.ReviewGate do
     # rebased the branch. PushState delivers that as a lease-pinned rewrite when
     # the remote still holds what this gate last saw there, and refuses it when
     # someone else has pushed.
-    with {:ok, credential} <- host_credential(state, wt) do
-      push_gate(state, wt, branch, credential)
+    with {:ok, credential} <- host_credential(state, wt),
+         {:ok, state} <- push_gate(state, wt, branch, credential),
+         :ok <- sync_primary_branch(state, wt, branch) do
+      {:ok, state}
     end
   end
 
   defp push_gate(state), do: {:ok, state}
+
+  # bd-9ahwai: a fix round in a private clone (git layout B) commits or amends
+  # in the clone only, and the push above reaches the forge, never the primary
+  # checkout. The Direct merger integrates the branch the primary holds by
+  # name, so carry the clone's head back before the next review: the branch it
+  # merges is then the head the reviewer sees. A no-op for a linked worktree
+  # (its ref IS the primary's). A branch that cannot be synced is refused: the
+  # merge would otherwise integrate a head no reviewer saw.
+  defp sync_primary_branch(state, wt, branch) do
+    case Arbiter.Worker.Worktree.sync_back(wt) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewGate: could not sync `#{branch}` back to the primary checkout for " <>
+            "task=#{state.task_id}: #{inspect(reason)}"
+        )
+
+        {:error,
+         "ReviewGate could not carry `#{branch}` from its private clone back to the " <>
+           "primary checkout before review (#{inspect(reason)}); the merge would integrate " <>
+           "a head the reviewer did not see."}
+    end
+  end
 
   # bd-bsmkfu: the host pushes for a podman fix round, and does it with the repo's
   # scoped credential when it has one (`HostCredential`), never the operator's. A

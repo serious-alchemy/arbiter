@@ -112,7 +112,8 @@ defmodule Arbiter.Mergers.Direct do
       path when is_binary(path) ->
         target = Map.get(opts, :target_branch) || "main"
 
-        with {:ok, _} <- run_git(["checkout", target], path) do
+        with :ok <- check_reviewed_sha(path, branch, Map.get(opts, :reviewed_sha)),
+             {:ok, _} <- run_git(["checkout", target], path) do
           case run_git(["merge", "--no-ff"] ++ message_args(title) ++ [branch], path) do
             {:ok, _} ->
               # Pre-existing nesting 4 — baselined when bd-4x2yhq first
@@ -371,6 +372,27 @@ defmodule Arbiter.Mergers.Direct do
       {:error, _} -> []
     end
   end
+
+  # bd-9ahwai: the stale-reviewed-SHA guard forge merges have. With a reviewed
+  # SHA on file, the branch the merge integrates must still be that commit — a
+  # fix round that amended or added commits the reviewer never saw must not
+  # ship. No reviewed SHA (review not required) merges unguarded, as in
+  # `Arbiter.Mergers.ReviewedSha.check/2`. An unreadable branch falls through
+  # to the merge, which reports the git failure itself.
+  defp check_reviewed_sha(path, branch, reviewed) when is_binary(reviewed) and reviewed != "" do
+    case run_git(["rev-parse", "--verify", "--quiet", "refs/heads/" <> branch], path) do
+      {:ok, head} ->
+        case Arbiter.Mergers.ReviewedSha.check(reviewed, String.trim(head)) do
+          {:ok, _expected} -> :ok
+          {:error, _stale} = error -> error
+        end
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  defp check_reviewed_sha(_path, _branch, _reviewed), do: :ok
 
   defp message_args(title) when is_binary(title) and title != "", do: ["-m", title]
   defp message_args(_), do: ["--no-edit"]

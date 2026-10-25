@@ -26,6 +26,7 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
 
   @two_rounds Path.expand("../../fixtures/review_two_rounds.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
+  @revise_amend Path.expand("../../fixtures/revise_amend_message.sh", __DIR__)
   @revise_rewrite Path.expand("../../fixtures/revise_rewrite.sh", __DIR__)
   @revise_hang Path.expand("../../fixtures/revise_hang.sh", __DIR__)
 
@@ -484,6 +485,47 @@ defmodule Arbiter.Worker.ReviewGateRemoteFixRoundTest do
       # work is what gets reviewed.
       assert forge_head(ctx, rig.branch) == before_push
       wait_until(fn -> Ash.get!(Issue, rig.task.id).last_reviewed_sha != nil end, 60_000)
+    end
+  end
+
+  # bd-9ahwai: the fix round runs in the author's private clone, so the primary
+  # checkout's branch (what the Direct merger integrates by name) only moves if
+  # the gate carries the clone's head back before the next review.
+  describe "the primary checkout's branch follows the fix round's head (bd-9ahwai)" do
+    test "an amend-only fix round", ctx do
+      ctx = %{ctx | ws: workspace!("local_only")}
+      rig = rig(ctx, "feature/rf-amend")
+      reviewed_before = sha(ctx.repo, "refs/heads/" <> rig.branch)
+
+      # The amend touches no file, so the reviewer fixture's disposition guard may
+      # reject the next round; the property is that the primary's branch already
+      # carries the amended head by the time that review runs.
+      gate = start_gate(rig, ctx, revise_command: [@revise_amend], rounds: 2)
+
+      wait_until(
+        fn ->
+          head = sha(rig.wt, "HEAD")
+          head != reviewed_before and sha(ctx.repo, "refs/heads/" <> rig.branch) == head
+        end,
+        30_000
+      )
+
+      stop_gate(gate)
+    end
+
+    test "a file-changing fix round", ctx do
+      ctx = %{ctx | ws: workspace!("local_only")}
+      rig = rig(ctx, "feature/rf-files")
+      reviewed_before = sha(ctx.repo, "refs/heads/" <> rig.branch)
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 2)
+      wait_until(fn -> Ash.get!(Issue, rig.task.id).last_reviewed_sha != nil end, 60_000)
+
+      approved = Ash.get!(Issue, rig.task.id).last_reviewed_sha
+      refute approved == reviewed_before
+      assert sha(rig.wt, "HEAD") == approved
+      assert sha(ctx.repo, "refs/heads/" <> rig.branch) == approved
+      stop_gate(gate)
     end
   end
 

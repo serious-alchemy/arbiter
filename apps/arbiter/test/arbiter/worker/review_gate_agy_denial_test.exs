@@ -100,7 +100,10 @@ defmodule Arbiter.Worker.ReviewGateAgyDenialTest do
     File.write!(Path.join(repo, "feature.txt"), "worker work\n")
     {_, 0} = git(["add", "feature.txt"], repo)
     {_, 0} = git(["commit", "-q", "-m", "feature work"], repo)
-    {_, 0} = git(["checkout", "-q", "main"], repo)
+    # The gate reviews the head of `worktree_path` (here the repo itself), so
+    # leave the feature branch checked out: the reviewed SHA is then the
+    # branch head the direct merge integrates (bd-9ahwai). The merger checks
+    # out the target itself.
     :ok
   end
 
