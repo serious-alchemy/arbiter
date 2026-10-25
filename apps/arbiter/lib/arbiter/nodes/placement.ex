@@ -394,6 +394,48 @@ defmodule Arbiter.Nodes.Placement do
   end
 
   defp none(%{mode: :remote_only} = request, rows) do
+    case registry_mismatch(request, rows) do
+      nil -> none_full(request, rows)
+      mismatch -> {:error, {:no_node_capacity, mismatch}}
+    end
+  end
+
+  defp none(_request, _rows), do: {:ok, {:local, :no_node}}
+
+  # The hold when the registry check is what excluded every node: some online node
+  # advertises `caps.registries`, and none of those prefixes covers the request's registry.
+  defp registry_mismatch(request, rows) do
+    registry = Map.get(request, :registry)
+
+    advertised =
+      for row <- rows,
+          row.state == :online,
+          list = get_in(Map.get(row, :caps) || %{}, ["registries"]),
+          is_list(list),
+          do: list
+
+    if is_binary(registry) and registry != "" and advertised != [] and
+         not Enum.any?(rows, &(&1.state == :online and registry_covered?(&1, registry))) do
+      node_registries = advertised |> List.flatten() |> Enum.uniq()
+
+      %{
+        task_id: request.task_id,
+        node: nil,
+        mode: :remote_only,
+        reason: :registry_mismatch,
+        repo_registry: registry,
+        node_registries: node_registries,
+        nodes_known: length(rows),
+        message:
+          "held — registry_mismatch{repo_registry=#{registry}, node_registries=" <>
+            "[#{Enum.join(node_registries, ", ")}]}: #{request.task_id}'s images live in a " <>
+            "registry no node can pull from. Add its prefix to a node's registries, or point " <>
+            "the repo's image.registry at one they cover."
+      }
+    end
+  end
+
+  defp none_full(request, rows) do
     info = %{
       task_id: request.task_id,
       node: nil,
@@ -404,8 +446,6 @@ defmodule Arbiter.Nodes.Placement do
 
     {:error, {:no_node_capacity, Map.put(info, :message, refusal_message(info))}}
   end
-
-  defp none(_request, _rows), do: {:ok, {:local, :no_node}}
 
   # bd-6w7usy: the online nodes that have derated themselves (thermal or memory pressure),
   # for the hold: "held — ryan-oryx-pro thermal 96 °C".

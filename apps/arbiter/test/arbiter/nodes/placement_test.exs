@@ -614,6 +614,21 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:ok, {:local, :no_node}} = place(%{registry: "registry.gitlab.com/vstim"}, rows)
     end
 
+    test "a registry mismatch hold names the repo registry and the nodes' registries" do
+      rows = [cluster("a", ["ghcr.io/ryan/"]), cluster("b", ["quay.io/x/"])]
+
+      assert {:error, {:no_node_capacity, info}} =
+               place(%{mode: :remote_only, registry: "registry.gitlab.com/vstim"}, rows)
+
+      assert info.reason == :registry_mismatch
+      assert info.repo_registry == "registry.gitlab.com/vstim"
+      assert info.node_registries == ["ghcr.io/ryan/", "quay.io/x/"]
+      assert info.message =~ "registry_mismatch"
+      assert info.message =~ "registry.gitlab.com/vstim"
+      assert info.message =~ "ghcr.io/ryan/"
+      refute Placement.refusal_message(info) =~ "no node has capacity"
+    end
+
     test "the node whose prefixes cover the registry is the candidate" do
       rows = [
         cluster("a", ["ghcr.io/ryan/"]),
