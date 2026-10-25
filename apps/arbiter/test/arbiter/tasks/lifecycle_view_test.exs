@@ -312,6 +312,18 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
                merging_with(%{status: :open, approved: true, block_reason: :needs_approval})
     end
 
+    test "a status for a superseded head does not raise merge_blocked (bd-9kfdkf)" do
+      stale = %{status: :open, block_reason: :conflict, conflicting: true, head_sha: "931c4ce"}
+      extra = %{merge_watch: %{"local_head_sha" => "776e673c"}}
+
+      assert %{step: step, attention: nil} = merging_with(stale, extra)
+      refute step == :merge_blocked
+
+      # The same status on the current head still blocks.
+      current = %{stale | head_sha: "776e673c"}
+      assert %{step: :merge_blocked} = merging_with(current, extra)
+    end
+
     test "an unapproved PR awaiting its review is not merge_blocked" do
       assert %{step: :in_merge_queue} =
                merging_with(%{status: :open, approved: false, block_reason: :needs_approval})
