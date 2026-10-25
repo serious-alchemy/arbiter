@@ -951,6 +951,35 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   @doc """
+  Re-escalate a PR whose head moved after the coordinator's merge-permitting
+  ruling (`accept_as_is` / `amend`): the ruling covers `ruled_head` only, so
+  nothing merges, and the page names both SHAs. `snapshot` carries `:task_id` +
+  `:workspace_id`. Best-effort, returns `:ok`.
+  """
+  @spec ruling_head_changed(map(), String.t() | nil, atom(), String.t() | nil, String.t()) :: :ok
+  def ruling_head_changed(snapshot, mr_ref, decision, ruled_head, head) do
+    escalate_event(:merge_blocked, snapshot, fn task_id ->
+      subject = "#{task_id}: head changed since ruling: #{ruled_head} -> #{head}"
+
+      body =
+        [
+          "#{title_for(task_id)} was not merged. You ruled `#{decision}` on head " <>
+            "#{ruled_head}; the PR is now at #{head}, which that ruling does not cover.",
+          mr_ref && "PR/MR: #{mr_ref}",
+          "A ruling permits a merge of the head it was recorded against and no other, so the " <>
+            "Watchdog stopped instead of merging unreviewed commits.",
+          "Review #{head} and, if it should ship, record the ruling again against it " <>
+            "(`review_gate_resolve #{task_id}` / `arb review resolve #{task_id} --accept-as-is " <>
+            "\"<why>\"`): the merge path then resumes by itself — wait for CI, merge that head, close."
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
+
+      {subject, body}
+    end)
+  end
+
+  @doc """
   Raise a quota-overage spend crossing as a system alert (bd-7cd38f,
   bd-7gt8rm).
 
