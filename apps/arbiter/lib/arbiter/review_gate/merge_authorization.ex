@@ -76,6 +76,7 @@ defmodule Arbiter.ReviewGate.MergeAuthorization do
              verdict: atom() | nil,
              round: pos_integer() | nil,
              resolution: atom() | nil,
+             ruled_head: String.t() | nil,
              head: String.t() | nil
            }}
 
@@ -105,6 +106,7 @@ defmodule Arbiter.ReviewGate.MergeAuthorization do
               verdict: latest.verdict,
               round: latest.round,
               resolution: answer && answer.decision,
+              ruled_head: answer && answer.head_sha,
               head: head
             }}}
         end
@@ -121,6 +123,59 @@ defmodule Arbiter.ReviewGate.MergeAuthorization do
 
   def check(_task_id, _head), do: :ok
 
+  @doc """
+  The merge-permitting ruling currently standing for `task_id`: the newest
+  `accept_as_is` / `amend` answering a reviewer round that did not approve, or
+  nil when the gate approved, never argued the ticket, or the newest answer is a
+  `send_back` / `reject`. Whether it covers a given head is `ruling_covering/2`.
+  """
+  @spec standing_ruling(String.t() | nil) :: Resolution.t() | nil
+  def standing_ruling(task_id) when is_binary(task_id) do
+    case latest_review(task_id) do
+      nil ->
+        nil
+
+      %{verdict: :approve} ->
+        nil
+
+      latest ->
+        answer = latest_answer(task_id, latest)
+        if answer && answer.decision in @authorising, do: answer
+    end
+  rescue
+    _ -> nil
+  end
+
+  def standing_ruling(_task_id), do: nil
+
+  @doc "`standing_ruling/1`, when it covers `head` (see the moduledoc), else nil."
+  @spec ruling_covering(String.t() | nil, String.t() | nil) :: Resolution.t() | nil
+  def ruling_covering(task_id, head) do
+    case standing_ruling(task_id) do
+      nil -> nil
+      ruling -> if covers?(ruling, head), do: ruling
+    end
+  end
+
+  @doc """
+  `{:changed, ruling}` when a merge-permitting ruling stands but was recorded
+  against a different head than `head` — the head moved after the coordinator
+  ruled — else `:none`. A ruling recorded against no head covers any head and so
+  never reports a change.
+  """
+  @spec head_changed(String.t() | nil, String.t() | nil) :: {:changed, Resolution.t()} | :none
+  def head_changed(task_id, head) when is_binary(head) and head != "" do
+    case standing_ruling(task_id) do
+      %{head_sha: ruled} = ruling when is_binary(ruled) and ruled != "" and ruled != head ->
+        {:changed, ruling}
+
+      _ ->
+        :none
+    end
+  end
+
+  def head_changed(_task_id, _head), do: :none
+
   @doc "One line for a log or an escalation: why `check/2` refused."
   @spec describe(refusal()) :: String.t()
   def describe({:review_not_approved, detail}) do
@@ -136,6 +191,10 @@ defmodule Arbiter.ReviewGate.MergeAuthorization do
         :send_back ->
           "; the `send_back` resolution is not a pass — another review round must follow " <>
             "the implementer's completion"
+
+        decision when decision in @authorising ->
+          "; the `#{decision}` ruling covers head #{short(detail[:ruled_head])}, not this one " <>
+            "(head changed since ruling)"
 
         decision ->
           "; the `#{decision}` resolution does not authorise a merge"
@@ -171,6 +230,9 @@ defmodule Arbiter.ReviewGate.MergeAuthorization do
 
   defp answers?(resolution, latest),
     do: DateTime.compare(resolution.inserted_at, latest.inserted_at) != :lt
+
+  defp short(sha) when is_binary(sha), do: String.slice(sha, 0, 12)
+  defp short(_), do: "?"
 
   defp covers?(%{head_sha: nil}, _head), do: true
   defp covers?(%{head_sha: ""}, _head), do: true

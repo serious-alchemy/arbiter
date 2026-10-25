@@ -219,6 +219,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   alias Arbiter.Mergers
   alias Arbiter.Mergers.LocalCompare
   alias Arbiter.ReviewGate.MergeAuthorization
+  alias Arbiter.ReviewGate.RulingResume
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
   alias Arbiter.Tasks.Issue
@@ -1616,9 +1617,25 @@ defmodule Arbiter.Workflows.MergeQueue do
         " — paging the coordinator once and making no merge call until the record changes"
     )
 
-    safe_notify_review_refusal(state, item)
+    notify_review_refusal(state, item, key)
 
     %{item | review_refused_head: key}
+  end
+
+  # A head that moved after a merge-permitting ruling gets the page that names
+  # both SHAs (`RulingResume.head_changed/4`); any other refusal the generic one.
+  defp notify_review_refusal(state, item, head) do
+    with true <- is_binary(head),
+         {:changed, ruling} <- MergeAuthorization.head_changed(item.task_id, head) do
+      RulingResume.head_changed(
+        %{task_id: item.task_id, workspace_id: state.workspace_id},
+        item.mr_ref,
+        ruling,
+        head
+      )
+    else
+      _ -> safe_notify_review_refusal(state, item)
+    end
   end
 
   defp safe_notify_review_refusal(%State{} = state, item) do

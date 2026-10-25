@@ -486,3 +486,8 @@ config :arbiter,
 
 # K8: the controller-image boot publish is driven by `Publisher.publish_controller/1` in tests.
 config :arbiter, :image_publisher, boot: false
+
+# A merge-permitting ReviewGate ruling resumes the ticket's merge path
+# (`Arbiter.ReviewGate.RulingResume`). Production does it off the recording
+# caller's process; the suite runs it inline so a test can assert the outcome.
+config :arbiter, :ruling_resume, :sync

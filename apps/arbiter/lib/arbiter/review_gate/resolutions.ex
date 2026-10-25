@@ -11,7 +11,7 @@ defmodule Arbiter.ReviewGate.Resolutions do
   require Ash.Query
   require Logger
 
-  alias Arbiter.ReviewGate.{Resolution, Round}
+  alias Arbiter.ReviewGate.{Resolution, RulingResume, Round}
   alias Arbiter.Tasks.Issue
 
   @type error :: {:invalid, String.t()} | {:not_found, String.t()}
@@ -37,10 +37,14 @@ defmodule Arbiter.ReviewGate.Resolutions do
       known. An `accept_as_is` / `amend` authorises a merge of this head only
       (`Arbiter.ReviewGate.MergeAuthorization`).
 
-  Broadcasts a `gate_resolved` event on the task's workspace stream.
+  Broadcasts a `gate_resolved` event on the task's workspace stream. A
+  merge-permitting `:review_gate` ruling (`accept_as_is` / `amend`) then puts the
+  ticket back on the merge path (`Arbiter.ReviewGate.RulingResume`); pass
+  `resume: false` to record without resuming (the carried-forward row
+  `RulingResume` itself writes).
   """
-  @spec record(map()) :: {:ok, Resolution.t()} | {:error, error()}
-  def record(attrs) when is_map(attrs) do
+  @spec record(map(), keyword()) :: {:ok, Resolution.t()} | {:error, error()}
+  def record(attrs, opts \\ []) when is_map(attrs) and is_list(opts) do
     with {:ok, task_id} <- required_string(attrs, :task_id),
          {:ok, decision} <- parse_enum(fetch(attrs, :decision), @decision_names, "decision"),
          {:ok, gate} <- parse_gate(fetch(attrs, :gate)),
@@ -66,6 +70,7 @@ defmodule Arbiter.ReviewGate.Resolutions do
       |> case do
         {:ok, resolution} ->
           broadcast(resolution)
+          if Keyword.get(opts, :resume, true), do: RulingResume.resume_async(resolution)
           {:ok, resolution}
 
         {:error, err} ->
@@ -233,8 +238,27 @@ defmodule Arbiter.ReviewGate.Resolutions do
     status = task.merger_status || %{}
     lane = task.merge_watch || %{}
 
-    [Map.get(status, "head_sha"), Map.get(status, :head_sha), Map.get(lane, "local_head_sha")]
+    [
+      Map.get(status, "head_sha"),
+      Map.get(status, :head_sha),
+      Map.get(lane, "local_head_sha"),
+      worktree_head(task)
+    ]
     |> Enum.find(&(is_binary(&1) and &1 != ""))
+  end
+
+  # A ticket with no PR on record (a `direct`-strategy repo merges locally) still
+  # has the head its worktree holds; the round state names the worktree.
+  defp worktree_head(task) do
+    case task.review_gate_state do
+      %{"worktree_path" => path} when is_binary(path) and path != "" ->
+        Arbiter.Worker.Worktree.head_sha(path)
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp fetch_task(task_id) do

@@ -127,7 +127,9 @@ defmodule Arbiter.Worker do
   alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
   alias Arbiter.Agents.Qwen.RetryHold
   alias Arbiter.Quota.Gate.Snapshot, as: GateSnapshot
+  alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.ReviewGate.Resolutions
+  alias Arbiter.ReviewGate.RulingResume
   alias Arbiter.Worker.ConflictAbortFindings
   alias Arbiter.Worker.ConflictPassOutcome
   alias Arbiter.Worker.CoordinatorOnlyFindings
@@ -1155,6 +1157,29 @@ defmodule Arbiter.Worker do
       when is_binary(task_id) and is_map(ctx) do
     with {:ok, state} <- ticket_round_state(task_id, ctx) do
       apply_ticket_verdict(state, verdict)
+    end
+  end
+
+  @doc """
+  Put ticket `task_id` back on the merge path after the coordinator ruled that
+  its work ships without a reviewer APPROVE (`accept_as_is` / `amend`,
+  `Arbiter.ReviewGate.RulingResume`).
+
+  The same hand-off a late APPROVE takes when no author is resident
+  (`apply_review_gate_verdict_to_ticket/3`): the PR is opened or adopted and
+  handed to the ticket's Watchdog (CI wait, merge pinned to the ruled head,
+  close), or merged locally for a `direct` repo — but nothing here records a
+  reviewer approval that never happened. The park and the rejection that
+  stopped the run are overturned, and the notes say who permitted the merge.
+
+  `ruling` carries `:decision`, `:actor`, `:head_sha` and `:reasoning`. Only an
+  In-progress ticket takes it: `{:error, {:not_in_review, state}}` otherwise.
+  """
+  @spec resume_merge_after_ruling(String.t(), map()) :: :ok | {:error, term()}
+  def resume_merge_after_ruling(task_id, ruling) when is_binary(task_id) and is_map(ruling) do
+    with {:ok, state} <- ticket_round_state(task_id, %{}) do
+      state = %State{state | meta: Map.put(state.meta, :merge_ruling, ruling)}
+      apply_ticket_verdict(state, {:approve, Map.get(ruling, :reasoning) || ""})
     end
   end
 
@@ -7632,6 +7657,8 @@ defmodule Arbiter.Worker do
          reason
        )
        when is_binary(ws_id) do
+    note_head_changed_since_ruling(task_id, ws_id, reason)
+
     Arbiter.Messages.Escalation.post(%{
       kind: :merge_failed,
       from_ref: task_id,
@@ -7650,6 +7677,24 @@ defmodule Arbiter.Worker do
 
   defp escalate_merge_failure(_state, _branch, _reason), do: :ok
 
+  # A direct merge refused because the branch moved past the head a
+  # merge-permitting ruling covered: the `review_gate` event the forge lanes get
+  # from the Watchdog (`RulingResume.head_changed/4`).
+  defp note_head_changed_since_ruling(task_id, ws_id, {:stale_reviewed_sha, _reviewed, head}) do
+    case MergeAuthorization.head_changed(task_id, head) do
+      {:changed, ruling} ->
+        RulingResume.note(task_id, ws_id, "head_changed", %{
+          head_sha: head,
+          message: "head changed since ruling: #{ruling.head_sha} -> #{head}"
+        })
+
+      :none ->
+        :ok
+    end
+  end
+
+  defp note_head_changed_since_ruling(_task_id, _ws_id, _reason), do: :ok
+
   # bd-28l6im: an "already exists" 422 that survives the full open_with_retry
   # budget unresolved is not an ordinary merge failure — GitHub's own error
   # confirms a PR is sitting there for this branch, arbiter just couldn't
@@ -7659,7 +7704,15 @@ defmodule Arbiter.Worker do
   defp merge_failure_subject(task_id, reason) do
     cond do
       match?({:stale_reviewed_sha, _, _}, reason) ->
-        "Merge refused: #{task_id} branch head is not the reviewed SHA"
+        {:stale_reviewed_sha, _reviewed, head} = reason
+
+        case MergeAuthorization.head_changed(task_id, head) do
+          {:changed, ruling} ->
+            "#{task_id}: head changed since ruling: #{ruling.head_sha} -> #{head}"
+
+          :none ->
+            "Merge refused: #{task_id} branch head is not the reviewed SHA"
+        end
 
       Arbiter.Mergers.already_open_error?(reason) ->
         "PR already exists: #{task_id} — could not auto-resolve its number"
@@ -7688,20 +7741,33 @@ defmodule Arbiter.Worker do
   defp diverged_detail({:push_failed, inner}), do: diverged_detail(inner)
   defp diverged_detail({:diverged, detail}), do: detail
 
-  defp merge_failure_body(%State{mr_ref: mr_ref}, branch, reason) do
+  defp merge_failure_body(%State{mr_ref: mr_ref} = state, branch, reason) do
     ref_line = if is_binary(mr_ref) and mr_ref != "", do: "PR/MR ref: #{mr_ref}\n", else: ""
 
     cond do
       match?({:stale_reviewed_sha, _, _}, reason) ->
         {:stale_reviewed_sha, reviewed, head} = reason
 
-        """
-        Branch #{branch} no longer points at the commit the reviewer approved \
-        (reviewed #{short_sha(reviewed)}, branch head #{short_sha(head)}), so \
-        the direct merge was refused: integrating it would ship commits no \
-        reviewer saw. Nothing was merged. Re-run the review on the current \
-        head (or record an explicit accept_as_is for it) and merge again.
-        """
+        case MergeAuthorization.head_changed(state.task_id, head) do
+          {:changed, ruling} ->
+            """
+            Head changed since ruling: #{ruling.head_sha} -> #{head}. You ruled \
+            `#{ruling.decision}` on #{ruling.head_sha}; branch #{branch} now points at \
+            #{head}, which that ruling does not cover, so the direct merge was refused \
+            and nothing was merged. Review the current head and, if it should ship, \
+            record the ruling again against it (`review_gate_resolve #{state.task_id}`): \
+            the merge then resumes by itself.
+            """
+
+          :none ->
+            """
+            Branch #{branch} no longer points at the commit the reviewer approved \
+            (reviewed #{short_sha(reviewed)}, branch head #{short_sha(head)}), so \
+            the direct merge was refused: integrating it would ship commits no \
+            reviewer saw. Nothing was merged. Re-run the review on the current \
+            head (or record an explicit accept_as_is for it) and merge again.
+            """
+        end
 
       Arbiter.Mergers.already_open_error?(reason) ->
         """
@@ -8236,8 +8302,7 @@ defmodule Arbiter.Worker do
 
   # Apply a ReviewGate verdict to a run waiting on the review gate.
   defp apply_review_gate_verdict(%State{} = state, {:approve, findings}) do
-    record_review_gate_outcome(state, :approve, findings)
-    record_review_gate(state, %{verdict: :approve})
+    record_approve_or_ruling(state, findings)
     branch = Map.get(state.meta, :review_gate_branch) || mergeable_branch(state.meta)
     # Tell the Watchdog the gate approved this MR. Without via_review_gate,
     # hosted-forge adapters (Github) wait forever for a PR-level approval the ReviewGate never posts (bd-66ey1o) — a
@@ -8292,6 +8357,38 @@ defmodule Arbiter.Worker do
       "Reviewer produced no parseable VERDICT line.",
       :inconclusive
     )
+  end
+
+  # A merge-permitting ruling (`resume_merge_after_ruling/2`) rides the approve
+  # path but is not an approval: the note names the coordinator's decision and
+  # the round state says `ruled`, so nothing downstream reads it as a reviewer
+  # APPROVE (`MergeAuthorization` reads `Round` rows, which this never writes).
+  defp record_approve_or_ruling(%State{meta: meta} = state, findings) do
+    case Map.get(meta, :merge_ruling) do
+      %{} = ruling ->
+        record_ruling_note(state, ruling)
+        record_review_gate(state, %{verdict: "ruled", ruling: to_string(ruling.decision)})
+
+      _ ->
+        record_review_gate_outcome(state, :approve, findings)
+        record_review_gate(state, %{verdict: :approve})
+    end
+  end
+
+  defp record_ruling_note(%State{task_id: task_id}, ruling) do
+    block =
+      "ReviewGate: merge permitted by #{ruling.decision} ruling " <>
+        "(#{ruling[:actor] || "coordinator"}, #{DateTime.to_iso8601(DateTime.utc_now())}) " <>
+        "on head #{ruling[:head_sha] || "n/a"} — merge path resumed"
+
+    with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, task_id) do
+      notes = [task.notes, block] |> Enum.reject(&(&1 in [nil, ""])) |> Enum.join("\n\n")
+      Ash.update(task, %{notes: notes}, action: :update)
+    end
+
+    :ok
+  rescue
+    e -> log_review_gate_warning(task_id, e)
   end
 
   # What the parked outcome is RECORDED as. The park finishes the run and sets
@@ -8810,7 +8907,12 @@ defmodule Arbiter.Worker do
       )
 
     clear_run_rejection_if_parked(merged)
-    notify_review_gate_reconciled(merged, prior)
+
+    # A ruling is announced by `RulingResume`, which knows the decision and the
+    # head; "reconciled to APPROVE" would be false.
+    if not Map.has_key?(state.meta, :merge_ruling),
+      do: notify_review_gate_reconciled(merged, prior)
+
     merged
   end
 
