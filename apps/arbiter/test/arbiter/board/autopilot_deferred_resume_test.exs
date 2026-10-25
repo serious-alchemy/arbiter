@@ -140,10 +140,20 @@ defmodule Arbiter.Board.AutopilotDeferredResumeTest do
   end
 
   test "deferring schedules a pass by itself, so a free slot is taken without a tick" do
-    {pid, _free} = start(slots_free: 1, debounce_ms: 5)
+    {pid, _free} = start(slots_free: 1)
     :ok = Autopilot.defer_resume(pid, "bd-parked", :resume, [])
 
-    assert_receive {:resumed, "bd-parked", :resume, _}
+    # Deferring armed the debounce timer itself (no tick, no other trigger).
+    # Deliver that timer's message by hand instead of racing a real 5ms timer
+    # against `assert_receive`'s default 100ms window, which a loaded CI
+    # scheduler can blow through before the pass even starts.
+    timer = :sys.get_state(pid).plan_timer
+    assert is_reference(timer)
+    Process.cancel_timer(timer)
+    send(pid, :run_plan)
+    _ = :sys.get_state(pid)
+
+    assert_receive {:resumed, "bd-parked", :resume, _}, 5_000
   end
 
   test "a replay that fails for a lasting reason is escalated and dropped, not retried" do
