@@ -126,12 +126,35 @@ defmodule Arbiter.Worker.Image.Registry do
              host: host(registry),
              username: user,
              password: password,
+             insecure?: repo_insecure?(host(registry), opts),
              public_ok: image.public_ok,
              origin: :config
            }}
         end
     end
   end
+
+  # A repo-level registry follows `nodes.registry_insecure`, but only where that setting can
+  # be read as meant for it: a loopback host, or the very host `nodes.registry` names. Any
+  # other host stays TLS-verified, so the flag never silently drops verification elsewhere.
+  defp repo_insecure?(host, opts) do
+    raw = install_raw(opts)
+
+    Map.get(raw, :insecure?) == true and
+      (Arbiter.NodeAgent.Config.loopback_host?(hostname(host)) or
+         (match?(%{registry: r} when is_binary(r) and r != "", raw) and host == host(raw.registry)))
+  end
+
+  defp install_raw(opts) do
+    case Keyword.get(opts, :config) do
+      %{} = config -> config
+      _ -> %{registry: Settings.nodes_registry(), insecure?: Settings.nodes_registry_insecure?()}
+    end
+  end
+
+  # `host:port` -> `host` (bracketed IPv6 kept intact).
+  defp hostname("[" <> _ = host), do: host |> String.split("]") |> hd() |> Kernel.<>("]")
+  defp hostname(host), do: host |> String.split(":", parts: 2) |> hd()
 
   defp credentials(nil, _workspace), do: {:ok, {nil, nil}}
 
