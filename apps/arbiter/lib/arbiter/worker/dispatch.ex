@@ -176,6 +176,12 @@ defmodule Arbiter.Worker.Dispatch do
           holders: [String.t()]
         }
 
+  @typedoc """
+  A resume answered by a covering merge-permitting ruling (bd-1vdunv): the
+  ticket went back on the merge path and no agent was dispatched.
+  """
+  @type ruling_resumed_result :: %{task_id: String.t(), ruling_resumed: atom()}
+
   @type dispatch_result :: %{
           task: Issue.t(),
           worker_pid: pid(),
@@ -509,7 +515,8 @@ defmodule Arbiter.Worker.Dispatch do
   `{:error, {:worker_active, status}}`, `{:error, :repo_unknown}`.
   """
   @spec resume(String.t(), dispatch_opts()) ::
-          {:ok, dispatch_result() | deferred_result()} | {:error, term()}
+          {:ok, dispatch_result() | deferred_result() | ruling_resumed_result()}
+          | {:error, term()}
   def resume(task_id, opts \\ []) when is_binary(task_id) do
     # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
     # invisible to the worker supervisor — track it so a drain report sees it.
@@ -662,7 +669,8 @@ defmodule Arbiter.Worker.Dispatch do
   `{:error, :repo_unknown}`.
   """
   @spec resume_session(String.t(), dispatch_opts()) ::
-          {:ok, dispatch_result() | deferred_result()} | {:error, term()}
+          {:ok, dispatch_result() | deferred_result() | ruling_resumed_result()}
+          | {:error, term()}
   def resume_session(task_id, opts \\ []) when is_binary(task_id) do
     # bd-9fgg04: until `Worker.start/1` registers, a dispatch in progress is
     # invisible to the worker supervisor — track it so a drain report sees it.
@@ -679,7 +687,8 @@ defmodule Arbiter.Worker.Dispatch do
   the explicit opt-in for `resume/2`'s fresh agent briefed from git state.
   """
   @spec resume_task(String.t(), dispatch_opts()) ::
-          {:ok, dispatch_result() | deferred_result()} | {:error, term()}
+          {:ok, dispatch_result() | deferred_result() | ruling_resumed_result()}
+          | {:error, term()}
   def resume_task(task_id, opts \\ []) when is_binary(task_id) do
     case Keyword.pop(opts, :resume_mode, :session) do
       {:briefing, rest} -> resume(task_id, rest)
