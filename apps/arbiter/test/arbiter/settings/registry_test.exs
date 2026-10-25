@@ -12,7 +12,7 @@ defmodule Arbiter.Settings.RegistryTest do
            scheduler_admission machine.derate
            nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
            nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.chart_ref nodes.registry_username
-           nodes.registry_password nodes.registry_insecure)
+           nodes.registry_password nodes.registry_insecure nodes.registry_public_ok)
 
   test "keys/0 lists every installation setting" do
     assert Registry.keys() == @keys
@@ -81,7 +81,7 @@ defmodule Arbiter.Settings.RegistryTest do
 
     test "all four keys are operator-only" do
       for key <- ~w(nodes.registry nodes.registry_username nodes.registry_password
-                    nodes.registry_insecure) do
+                    nodes.registry_insecure nodes.registry_public_ok) do
         assert key in Registry.operator_only_keys()
 
         assert {:error, {:unauthorized, _}} = Registry.put(key, "x", authority: :coordinator)
@@ -379,7 +379,7 @@ defmodule Arbiter.Settings.RegistryTest do
     @operator_only ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight machine.derate
                       nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
                       nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
-                      nodes.registry_password nodes.registry_insecure nodes.chart_ref)
+                      nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref)
 
     test "operator_only_keys/0 is the schema's operator-only set" do
       assert Enum.sort(Registry.operator_only_keys()) == Enum.sort(@operator_only)

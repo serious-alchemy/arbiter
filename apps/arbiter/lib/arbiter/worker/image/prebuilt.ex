@@ -30,6 +30,20 @@ defmodule Arbiter.Worker.Image.Prebuilt do
   mismatch or a missing label falls back to `seed: primary` and the plan's
   `prebuilt.seed_note` says why (a stale seed is a slow run, not a wrong one).
 
+  ## Repo-CI contract: no credential in a layer (SI12)
+
+  The image reaches every worker, so the repo's CI must pass credentials only through
+  build-secret mounts (`RUN --mount=type=secret,id=…`), never `ARG` or `ENV`: an `ARG`
+  used in a `RUN` is recorded in clear in the image history. For **every** `prebuilt`
+  plan the image config's `Env` and each history `created_by` are scanned for the
+  values the workspace hands a worker (`:secret_values`) and for credential-shaped
+  tokens (`Arbiter.Redaction.redact_patterns/1`); a hit refuses the image for every run
+  (`{:secret_in_image, where}`, surfaced as `image_unavailable`). For `seed: image` the
+  image's `/opt/arbiter/seed` is also inspected (`Arbiter.Worker.Image.SeedScan`): no
+  `hex.config`, `.netrc`, `.git-credentials`, SSH private key or private-key `.pem`, and no
+  `deps/*/.git/config` remote URL with userinfo; an image that cannot be inspected is
+  seeded by the primary instead. Options: `:secret_values`, `:seed_inspector`.
+
   Credentials: the repo's resolved registry login (`Registry.resolve/3`,
   `credentials_ref`) is the credential to read `ref` too, passed to skopeo as a
   0600 auth file, never argv. A `ref` on a different host than the push registry
@@ -43,11 +57,13 @@ defmodule Arbiter.Worker.Image.Prebuilt do
   alias Arbiter.Config.Paths
   alias Arbiter.Mergers
   alias Arbiter.Mergers.LocalCompare
+  alias Arbiter.Redaction
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.Image.Registry
   alias Arbiter.Worker.Image.RegistryReport
   alias Arbiter.Worker.Image.RepoConfig
+  alias Arbiter.Worker.Image.SeedScan
 
   {contract_label, contract_version} = Image.contract_label()
   @contract_label contract_label
@@ -57,6 +73,8 @@ defmodule Arbiter.Worker.Image.Prebuilt do
   @commit_re ~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/
   @cache_ttl_ms 300_000
   @inspect_timeout_ms 120_000
+  # A shorter value (`true`, `1`) is a flag, not a credential; matching it would refuse every image.
+  @min_secret_bytes 8
 
   @type plan :: map()
 
@@ -82,11 +100,15 @@ defmodule Arbiter.Worker.Image.Prebuilt do
     with {:ok, ref} <- require_ref(image),
          {:ok, git_ref} <- Image.default_ref(repo_path, default_branch),
          {:ok, info} <- inspect_ref(ref, opts),
+         :ok <- verify_no_secrets(info, opts),
          :ok <- verify_contract(info.labels),
          {:ok, revision} <- revision(info.labels),
          :ok <- verify_ancestor(repo_path, git_ref, default_branch, revision) do
       {seed, note} = seed(Map.get(image, :seed, :primary), info.labels, repo_path, git_ref)
-      {:ok, build_plan(ref, info.digest, revision, seed, note, git_ref, opts)}
+
+      with {:ok, seed, note} <- verify_seed(seed, note, ref, info.digest, opts) do
+        {:ok, build_plan(ref, info.digest, revision, seed, note, git_ref, opts)}
+      end
     end
   end
 
@@ -133,6 +155,27 @@ defmodule Arbiter.Worker.Image.Prebuilt do
   end
 
   # -- contract and ancestry --------------------------------------------------------
+
+  # SI12: a credential in the image config's `Env` or in any layer's `created_by` is in
+  # every run's image, so it refuses the image for every run, whatever `seed` is.
+  # Matches the values `WorkerEnv` knows (`:secret_values`) and credential-shaped tokens.
+  defp verify_no_secrets(info, opts) do
+    values =
+      opts
+      |> Keyword.get(:secret_values, [])
+      |> Enum.filter(&(is_binary(&1) and byte_size(&1) >= @min_secret_bytes))
+
+    leaked = fn entries -> Enum.any?(entries, &secret?(&1, values)) end
+
+    cond do
+      leaked.(Map.get(info, :env, [])) -> {:error, {:secret_in_image, "the image config's Env"}}
+      leaked.(Map.get(info, :history, [])) -> {:error, {:secret_in_image, "the image history"}}
+      true -> :ok
+    end
+  end
+
+  defp secret?(text, values),
+    do: Redaction.redact(Redaction.redact_patterns(text), values) != text
 
   defp verify_contract(labels) do
     case labels[@contract_label] do
@@ -199,6 +242,81 @@ defmodule Arbiter.Worker.Image.Prebuilt do
 
   defp seed(mode, _labels, _repo_path, _git_ref), do: {mode, nil}
 
+  # SI12: an image seed is trusted only if `/opt/arbiter/seed` holds no credential
+  # (`SeedScan`). A hit refuses the image; an image that cannot be inspected is not
+  # trusted for its seed and the primary seeds instead. `opts[:seed_inspector]`
+  # (`pinned_ref -> {:ok, output} | {:error, reason}`) replaces the `podman run`.
+  defp verify_seed(:image, note, ref, digest, opts) do
+    pinned = repository(ref) <> "@" <> digest
+    inspector = Keyword.get(opts, :seed_inspector) || (&inspect_seed(&1, opts))
+    ttl = Keyword.get(opts, :cache_ttl_ms, @cache_ttl_ms)
+    key = {__MODULE__, :seed_scan, digest}
+
+    case scan_seed(inspector, pinned, key, ttl) do
+      :ok ->
+        {:ok, :image, note}
+
+      {:error, hits} ->
+        {:error, {:secret_in_image, "/opt/arbiter/seed: " <> describe_hits(hits)}}
+
+      {:uninspectable, reason} ->
+        {:ok, :primary,
+         "could not inspect the image's /opt/arbiter/seed (#{inspect(reason)}): " <>
+           "the primary seeds deps instead"}
+    end
+  end
+
+  defp verify_seed(seed, note, _ref, _digest, _opts), do: {:ok, seed, note}
+
+  defp scan_seed(inspector, pinned, key, ttl) do
+    case cached(key, ttl) do
+      {:ok, result} ->
+        result
+
+      :miss ->
+        result =
+          case inspector.(pinned) do
+            {:ok, out} -> SeedScan.check(out)
+            {:error, reason} -> {:uninspectable, reason}
+          end
+
+        # A digest is immutable, so a verdict is kept; a failed inspection is retried.
+        if match?({:uninspectable, _}, result), do: :ok, else: store(key, result, ttl)
+        result
+    end
+  end
+
+  defp describe_hits(hits) do
+    Enum.map_join(hits, ", ", fn
+      {:credential_file, path} -> "credential file #{path}"
+      {:userinfo_url, path} -> "remote URL with userinfo in #{path}"
+    end)
+  end
+
+  defp inspect_seed(pinned, opts) do
+    cfg = Keyword.get(opts, :registry)
+
+    scratch =
+      Keyword.get_lazy(opts, :scratch, fn -> Path.join(Paths.scratch_root(), "images") end)
+
+    Registry.with_authfile(List.wrap(cfg), scratch, fn authfile ->
+      flags = tls(cfg) ++ if(authfile, do: ["--authfile", authfile], else: [])
+
+      args =
+        ["run", "--rm", "--network=none", "--read-only", "--cap-drop=all", "--pull=missing"] ++
+          flags ++ ["--entrypoint", "sh", pinned, "-c", SeedScan.script()]
+
+      case Image.run(
+             "podman",
+             args,
+             Keyword.take(opts, [:runner]) ++ [timeout: @inspect_timeout_ms]
+           ) do
+        {out, 0} -> {:ok, out}
+        {out, status} -> {:error, "podman exited #{status}: #{reason(out, cfg)}"}
+      end
+    end)
+  end
+
   defp lock_hash(repo_path, git_ref) do
     case Image.git(repo_path, ["cat-file", "blob", "#{git_ref}:mix.lock"]) do
       {body, 0} -> :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
@@ -261,9 +379,14 @@ defmodule Arbiter.Worker.Image.Prebuilt do
                ["inspect", "--no-tags"] ++ flags ++ ["docker://" <> ref],
                run_opts
              ) do
-          {out, 0} -> parse_skopeo(out)
-          {_, 127} -> with_podman(ref, flags, run_opts)
-          {out, _} -> {:error, out}
+          {out, 0} ->
+            with {:ok, info} <- parse_skopeo(out), do: add_config(info, ref, flags, run_opts)
+
+          {_, 127} ->
+            with_podman(ref, flags, run_opts)
+
+          {out, _} ->
+            {:error, out}
         end
 
       case result do
@@ -288,7 +411,8 @@ defmodule Arbiter.Worker.Image.Prebuilt do
   defp parse_skopeo(out) do
     case Jason.decode(out) do
       {:ok, %{"Digest" => digest} = body} ->
-        {:ok, %{digest: digest, labels: labels(body["Labels"])}}
+        {:ok,
+         %{digest: digest, labels: labels(body["Labels"]), env: strings(body["Env"]), history: []}}
 
       _ ->
         {:error, "skopeo inspect returned unparsable output"}
@@ -299,12 +423,51 @@ defmodule Arbiter.Worker.Image.Prebuilt do
     case Jason.decode(out) do
       {:ok, [%{"Digest" => digest} = body | _]} ->
         {:ok,
-         %{digest: digest, labels: labels(body["Labels"] || get_in(body, ["Config", "Labels"]))}}
+         %{
+           digest: digest,
+           labels: labels(body["Labels"] || get_in(body, ["Config", "Labels"])),
+           env: strings(get_in(body, ["Config", "Env"])),
+           history: created_by(body["History"])
+         }}
 
       _ ->
         {:error, "podman image inspect returned unparsable output"}
     end
   end
+
+  # skopeo's plain `inspect` has no history; `--config` is the image config itself.
+  defp add_config(info, ref, flags, run_opts) do
+    case Image.run(
+           "skopeo",
+           ["inspect", "--config", "--no-tags"] ++ flags ++ ["docker://" <> ref],
+           run_opts
+         ) do
+      {out, 0} ->
+        case Jason.decode(out) do
+          {:ok, %{} = config} ->
+            {:ok,
+             %{
+               info
+               | env: info.env ++ strings(get_in(config, ["config", "Env"])),
+                 history: created_by(config["history"])
+             }}
+
+          _ ->
+            {:error, "skopeo inspect --config returned unparsable output"}
+        end
+
+      {out, _} ->
+        {:error, out}
+    end
+  end
+
+  defp strings(list) when is_list(list), do: Enum.filter(list, &is_binary/1)
+  defp strings(_), do: []
+
+  defp created_by(list) when is_list(list),
+    do: for(%{"created_by" => cmd} <- list, is_binary(cmd), do: cmd)
+
+  defp created_by(_), do: []
 
   defp labels(%{} = labels), do: labels
   defp labels(_), do: %{}

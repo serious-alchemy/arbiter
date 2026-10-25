@@ -103,6 +103,7 @@ defmodule Arbiter.Settings.Installation do
     :nodes_registry_username,
     :nodes_registry_password,
     :nodes_registry_insecure,
+    :nodes_registry_public_ok,
     :machine_derate,
     :dashboard_dismissed_update_version,
     :dashboard_dismissed_deploy
@@ -367,6 +368,13 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description "nodes.registry_insecure: push to a plain-HTTP or self-signed registry (K8); nil/false = TLS verified."
+    end
+
+    attribute :nodes_registry_public_ok, :boolean do
+      public? true
+      allow_nil? true
+
+      description "nodes.registry_public_ok: accept a nodes.registry that answers anonymous reads (SI12); nil/false = refused."
     end
 
     attribute :machine_derate, :map do

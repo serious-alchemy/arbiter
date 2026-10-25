@@ -88,6 +88,11 @@ defmodule Arbiter.Worker.DepsCache do
   MIX_ENV=dev mix deps.compile
   """
 
+  # SI12 [S10]: the seed job runs with the image's own environment dropped (`--unsetenv-all`)
+  # and only this allowlist set: PATH, LANG, MIX_ENV, HEX_HOME, MIX_HOME. A prebuilt image
+  # that keeps its toolchain elsewhere sets `:seed_path`.
+  @seed_path "/opt/arbiter/cli:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
   @type key :: %{lock_hash: String.t(), image_tag: String.t(), dir: String.t(), ref: String.t()}
 
   @doc "The mix invocation the seed job runs (exposed for the docs and tests)."
@@ -232,7 +237,9 @@ defmodule Arbiter.Worker.DepsCache do
         image: key.image_tag,
         name: name,
         network: :pasta,
+        unset_env: true,
         env: [
+          {"PATH", Keyword.get(opts, :seed_path, @seed_path)},
           {"LANG", "C.UTF-8"},
           {"MIX_ENV", "test"},
           {"HEX_HOME", Path.join(home, ".hex")},

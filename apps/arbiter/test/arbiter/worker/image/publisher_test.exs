@@ -473,10 +473,18 @@ defmodule Arbiter.Worker.Image.PublisherTest do
                )
     end
 
-    test "nodes.registry is not probed for the refusal (existing installs unchanged)",
+    test "a public nodes.registry is refused unless registry_public_ok is set",
          %{opts: opts, ctx: ctx} do
-      probe = fn _cfg, _repository -> flunk("must not probe nodes.registry") end
-      assert {:ok, _} = Publisher.ensure_ready(ctx, Keyword.put(opts, :anonymous_probe, probe))
+      probe = fn _cfg, _repository -> :public end
+      opts = Keyword.put(opts, :anonymous_probe, probe)
+
+      assert {:error, {:public_registry, "registry.example.com/arbiter/vstim/worker"}} =
+               Publisher.ensure_ready(ctx, opts)
+
+      refute_received {:push, _}
+
+      config = Map.put(opts[:config], :public_ok, true)
+      assert {:ok, _} = Publisher.ensure_ready(ctx, Keyword.put(opts, :config, config))
     end
   end
 
