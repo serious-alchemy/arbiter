@@ -7748,26 +7748,7 @@ defmodule Arbiter.Worker do
       match?({:stale_reviewed_sha, _, _}, reason) ->
         {:stale_reviewed_sha, reviewed, head} = reason
 
-        case MergeAuthorization.head_changed(state.task_id, head) do
-          {:changed, ruling} ->
-            """
-            Head changed since ruling: #{ruling.head_sha} -> #{head}. You ruled \
-            `#{ruling.decision}` on #{ruling.head_sha}; branch #{branch} now points at \
-            #{head}, which that ruling does not cover, so the direct merge was refused \
-            and nothing was merged. Review the current head and, if it should ship, \
-            record the ruling again against it (`review_gate_resolve #{state.task_id}`): \
-            the merge then resumes by itself.
-            """
-
-          :none ->
-            """
-            Branch #{branch} no longer points at the commit the reviewer approved \
-            (reviewed #{short_sha(reviewed)}, branch head #{short_sha(head)}), so \
-            the direct merge was refused: integrating it would ship commits no \
-            reviewer saw. Nothing was merged. Re-run the review on the current \
-            head (or record an explicit accept_as_is for it) and merge again.
-            """
-        end
+        stale_reviewed_body(state, branch, reviewed, head)
 
       Arbiter.Mergers.already_open_error?(reason) ->
         """
@@ -7809,6 +7790,29 @@ defmodule Arbiter.Worker do
         approved and mergeable but stranded, and needs manual attention.
         #{ref_line}
         Error: #{inspect(reason)}
+        """
+    end
+  end
+
+  defp stale_reviewed_body(state, branch, reviewed, head) do
+    case MergeAuthorization.head_changed(state.task_id, head) do
+      {:changed, ruling} ->
+        """
+        Head changed since ruling: #{ruling.head_sha} -> #{head}. You ruled \
+        `#{ruling.decision}` on #{ruling.head_sha}; branch #{branch} now points at \
+        #{head}, which that ruling does not cover, so the direct merge was refused \
+        and nothing was merged. Review the current head and, if it should ship, \
+        record the ruling again against it (`review_gate_resolve #{state.task_id}`): \
+        the merge then resumes by itself.
+        """
+
+      :none ->
+        """
+        Branch #{branch} no longer points at the commit the reviewer approved \
+        (reviewed #{short_sha(reviewed)}, branch head #{short_sha(head)}), so \
+        the direct merge was refused: integrating it would ship commits no \
+        reviewer saw. Nothing was merged. Re-run the review on the current \
+        head (or record an explicit accept_as_is for it) and merge again.
         """
     end
   end

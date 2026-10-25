@@ -55,7 +55,7 @@ defmodule Arbiter.Events do
   | Topic           | Fires when                                             |
   |-----------------|--------------------------------------------------------|
   | `inbox`         | A message arrives in the coordinator's mailbox          |
-  | `review_gate`      | A review_gate escalation requires coordinator ruling           |
+  | `review_gate`      | A review_gate escalation requires coordinator ruling; also the outcomes of a merge-permitting ruling resuming the merge path (`ruling_event`: `resumed`, `merged`, `ci_failed`, `head_changed`, `carried`; `Arbiter.ReviewGate.RulingResume`) |
   | `worker_failed`| A worker stops unexpectedly (status → failed)         |
   | `worker_done`  | A worker completes (status → completed)               |
   | `task_state`    | Any task FSM transition (noisier — opt-in only). Carries `state`, `column`, `attention` and `close_reason` (bd-6fkgvo) |

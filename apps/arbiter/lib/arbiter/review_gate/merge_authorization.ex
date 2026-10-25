@@ -184,22 +184,23 @@ defmodule Arbiter.ReviewGate.MergeAuthorization do
 
     "the latest reviewer round (#{detail.round || "?"}) is #{verdict || "not an approval"}" <>
       if(head, do: " and head #{head} has no APPROVE", else: " and the head has no APPROVE") <>
-      case detail.resolution do
-        nil ->
-          ""
-
-        :send_back ->
-          "; the `send_back` resolution is not a pass — another review round must follow " <>
-            "the implementer's completion"
-
-        decision when decision in @authorising ->
-          "; the `#{decision}` ruling covers head #{short(detail[:ruled_head])}, not this one " <>
-            "(head changed since ruling)"
-
-        decision ->
-          "; the `#{decision}` resolution does not authorise a merge"
-      end
+      describe_resolution(detail)
   end
+
+  defp describe_resolution(%{resolution: nil}), do: ""
+
+  defp describe_resolution(%{resolution: :send_back}),
+    do:
+      "; the `send_back` resolution is not a pass — another review round must follow " <>
+        "the implementer's completion"
+
+  defp describe_resolution(%{resolution: decision} = detail) when decision in @authorising,
+    do:
+      "; the `#{decision}` ruling covers head #{short(detail[:ruled_head])}, not this one " <>
+        "(head changed since ruling)"
+
+  defp describe_resolution(%{resolution: decision}),
+    do: "; the `#{decision}` resolution does not authorise a merge"
 
   # ---- helpers --------------------------------------------------------------
 

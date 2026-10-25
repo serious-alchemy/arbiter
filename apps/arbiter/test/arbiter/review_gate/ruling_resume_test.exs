@@ -190,6 +190,21 @@ defmodule Arbiter.ReviewGate.RulingResumeTest do
       end
     end
 
+    test "the production (async) path resumes off the recording caller", _ctx do
+      Application.put_env(:arbiter, :ruling_resume, :async)
+      on_exit(fn -> Application.put_env(:arbiter, :ruling_resume, :sync) end)
+
+      ws = workspace(%{"auto_merge" => true})
+      task = parked_ticket(ws)
+      StubMerger.next_open_ref(@ref)
+      StubMerger.queue_get(@ref, [green()])
+
+      rule(task, :accept_as_is)
+
+      wait_until(fn -> ticket(task.id).state == :closed end)
+      assert StubMerger.last_merge() == {@ref, @head}
+    end
+
     test "send_back and reject do not resume the ticket", _ctx do
       ws = workspace(%{"auto_merge" => true})
       task = parked_ticket(ws)

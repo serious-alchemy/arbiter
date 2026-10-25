@@ -11,7 +11,7 @@ defmodule Arbiter.ReviewGate.Resolutions do
   require Ash.Query
   require Logger
 
-  alias Arbiter.ReviewGate.{Resolution, RulingResume, Round}
+  alias Arbiter.ReviewGate.{Resolution, Round, RulingResume}
   alias Arbiter.Tasks.Issue
 
   @type error :: {:invalid, String.t()} | {:not_found, String.t()}
@@ -134,7 +134,8 @@ defmodule Arbiter.ReviewGate.Resolutions do
 
     (MCP: `review_gate_resolve`.) It records the decision against the ticket;
     act on it with the usual tools. Only --accept-as-is / --amend permit a
-    merge without a fresh reviewer APPROVE; --send-back means another review
+    merge without a fresh reviewer APPROVE, and they resume the merge path by themselves
+    (wait for CI on the ruled head, merge exactly it, close); --send-back means another review
     round follows the implementer's next completion.
     """
   end
