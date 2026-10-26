@@ -361,6 +361,14 @@ defmodule Arbiter.Worker.ImageTest do
       assert plan.containerfile =~ "FROM ${ARBITER_BASE}"
     end
 
+    test "the generated toolchain installs Hex and rebar into a MIX_HOME outside any checkout" do
+      repo = repo_with(%{"README.md" => "hi\n"})
+      assert {:ok, plan} = Image.plan(repo, "main", opts())
+      assert plan.containerfile =~ "ENV MIX_HOME=/opt/toolchain/mix HEX_HOME=/opt/toolchain/hex"
+      assert plan.containerfile =~ "mix local.hex --force"
+      assert plan.containerfile =~ "mix local.rebar --force"
+    end
+
     test "a repo Containerfile gets a per-repo image name, a generated one a toolchain name" do
       repo = repo_with(%{".arbiter/Containerfile" => @repo_containerfile})
       assert {:ok, plan} = Image.plan(repo, "main", opts(repo_name: "My_Repo"))

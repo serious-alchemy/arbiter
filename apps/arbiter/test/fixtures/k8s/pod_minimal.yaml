@@ -45,10 +45,14 @@ spec:
           value: 10.43.98.199
         - name: ARB_WORKER_BEAD_ID
           value: bd-1nfuq5
+        - name: HEX_HOME
+          value: /opt/toolchain/hex
         - name: HOME
           value: /var/lib/arb/run/home
         - name: LANG
           value: C.UTF-8
+        - name: MIX_HOME
+          value: /opt/toolchain/mix
       image: registry.example.test/arbiter/beam@sha256:abababababababababababababababababababababababababababababababab
       imagePullPolicy: IfNotPresent
       name: worker

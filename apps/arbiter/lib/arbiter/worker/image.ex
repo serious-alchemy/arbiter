@@ -93,6 +93,11 @@ defmodule Arbiter.Worker.Image do
   @git_timeout_ms 30_000
   @podman_timeout_ms 60_000
 
+  # Hex and rebar live here, outside any checkout, so a first `mix` never stops on
+  # the "Shall I install Hex?" prompt (bd-40njjj). The k8s pod spec sets the same.
+  @mix_home "/opt/toolchain/mix"
+  @hex_home "/opt/toolchain/hex"
+
   @default_toolchain %{erlang: "29.1.1", elixir: "1.20.4"}
 
   @doc """
@@ -402,6 +407,12 @@ defmodule Arbiter.Worker.Image do
     #{if node, do: "FROM docker.io/library/node:#{node}-bookworm-slim AS node\n", else: ""}\
     FROM ${ARBITER_BASE}
     COPY --from=beam /usr/local/ /usr/local/
+    ENV MIX_HOME=#{@mix_home} HEX_HOME=#{@hex_home}
+    RUN mkdir -p $MIX_HOME $HEX_HOME \\
+     && mix local.hex --force \\
+     && mix local.rebar --force \\
+     && chmod -R a+rX $MIX_HOME $HEX_HOME \\
+     && mix hex.info
     #{if node, do: node_layer(), else: ""}\
     """
   end

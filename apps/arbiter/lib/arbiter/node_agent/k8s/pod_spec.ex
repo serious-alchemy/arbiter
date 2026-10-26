@@ -808,7 +808,9 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   defp worker_env(run, cfg) do
     service_env = for s <- run.services, {k, v} <- s.worker_env, into: %{}, do: {k, v}
 
-    run.env
+    # Hex lives in the image, outside the checkout (bd-40njjj); a run's own env wins.
+    %{"MIX_HOME" => "/opt/toolchain/mix", "HEX_HOME" => "/opt/toolchain/hex"}
+    |> Map.merge(run.env)
     |> Map.merge(service_env)
     |> Map.put("ARB_BRIDGE_ADDR", cfg.bridge_addr)
     |> Map.put("ARB_BRIDGES", Enum.join(run.bridges, " "))
