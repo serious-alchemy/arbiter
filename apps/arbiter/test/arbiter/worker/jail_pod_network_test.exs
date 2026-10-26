@@ -49,9 +49,10 @@ defmodule Arbiter.Worker.JailPodNetworkTest do
   test "the start-up readiness wait reads /proc/net/tcp and never dials a listener (bd-8midj6)" do
     assert ["sh", "-c", script | _] = Jail.pod_network_command(@network, ["claude"])
 
-    # A dialled probe would fork a socat child that opens TLS to the controller and
-    # logs `SSL_write(): unexpected eof` when the probe hangs up. The loop only
-    # greps the listening-socket table, so the start-up window makes no connection.
+    # bd-8midj6 ruled this out: the wait has read /proc/net/tcp since #901, so it
+    # opens no TLS-bound connection (a dialled probe would fork a socat child that
+    # logs `SSL_write(): unexpected eof` on hang-up). The 3-7 first-second eof lines
+    # come from something else dialling a bridge port, not from these probes.
     assert script =~ "/proc/net/tcp"
     refute script =~ ~r/\bnc\b|\/dev\/tcp|socat[^\n]*TCP:/
   end
