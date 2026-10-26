@@ -554,12 +554,21 @@ defmodule Arbiter.Worker.ContainerSpawn do
   @spec cli_mounts(String.t(), keyword()) :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
   def cli_mounts(provider, opts) do
     with {:ok, set} <- CliSet.resolve(opts),
-         :ok <- CliSet.require_cli(set, provider),
+         :ok <- require_cached(set, provider, opts),
          {:ok, set} <- CliSet.materialize(set) do
       unless CliSet.cli(set, "arb"),
         do: Logger.warning("ContainerSpawn: no cached `arb`; the container has no arb CLI")
 
       CliSet.mounts(set, provider)
+    end
+  end
+
+  # An empty or unpinned cache is an install state, not a bug: say what it is and
+  # how to fill it, beside the `{:cli_not_cached, provider}` the caller gets.
+  defp require_cached(set, provider, opts) do
+    with {:error, _} = error <- CliSet.require_cli(set, provider) do
+      Logger.error("ContainerSpawn: " <> CliSet.not_cached_message(provider, opts))
+      error
     end
   end
 

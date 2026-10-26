@@ -96,18 +96,27 @@ defmodule Arbiter.Worker.ArbCli do
 
   @doc """
   The OTP release of the runtime Arbiter's worker base image gives arb: the
-  one the host's escript was built on (`built_otp/1` of `host_escript/1`, which
-  takes `opts`), else, for an escript that predates the stamp or a host with
-  none, the server's own.
+  one the `arb` that ships in the container was built on (`built_otp/1`). That
+  is the cached upstream escript of `Arbiter.Worker.CliSet` (SI1), never the
+  host's own `arb`, which may be a different build; only when the set has no
+  `arb` is it the host's (`host_escript/1`, which takes `opts`; an explicit
+  `:arb_path` always wins). For an escript that predates the stamp or no escript
+  at all, it is the server's own OTP.
   """
   @spec runtime_otp(keyword()) :: String.t()
   def runtime_otp(opts \\ []) do
-    with path when is_binary(path) <- host_escript(opts),
+    with path when is_binary(path) <- shipped_escript(opts),
          {:ok, otp} <- built_otp(path) do
       otp
     else
       _ -> System.otp_release()
     end
+  end
+
+  defp shipped_escript(opts) do
+    if Keyword.has_key?(opts, :arb_path),
+      do: host_escript(opts),
+      else: Arbiter.Worker.CliSet.arb_escript(opts) || host_escript(opts)
   end
 
   @doc """

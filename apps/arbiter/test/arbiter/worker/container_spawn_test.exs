@@ -537,9 +537,27 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert {:error, {:podman_network_unavailable, _}} = ContainerSpawn.prepare(ctx.opts)
     end
 
-    test "refuses when the cache has no claude to mount", ctx do
+    test "refuses when the cache has no claude to mount, saying how to fill it", ctx do
       opts = Keyword.merge(ctx.opts, CliSetFixture.put(Path.join(ctx.dir, "empty"), claude: nil))
-      assert {:error, {:cli_not_cached, "claude"}} = ContainerSpawn.prepare(opts)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:cli_not_cached, "claude"}} = ContainerSpawn.prepare(opts)
+        end)
+
+      assert log =~ "mix arbiter.fetch_clis"
+      assert log =~ "never one installed on this host"
+    end
+
+    test "an unpinned provider is reported as unpinned, not as a fetch pending", ctx do
+      opts = Keyword.merge(ctx.opts, cli_pins: %{})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:cli_not_cached, "claude"}} = ContainerSpawn.prepare(opts)
+        end)
+
+      assert log =~ "no version of claude is pinned"
     end
 
     test "never mounts a CLI installed on the host, whatever is on PATH", ctx do

@@ -72,6 +72,34 @@ defmodule Arbiter.Worker.CliSetTest do
     end
   end
 
+  describe "arb with more than one cached file" do
+    test "only the entry's main file is the escript, never two arb.escript targets", ctx do
+      opts = ctx |> root() |> CliSetFixture.put(arb: nil)
+      cache = Keyword.fetch!(opts, :cli_cache_root)
+      staged = Path.join(ctx.tmp_dir, "staged-arb")
+      File.mkdir_p!(staged)
+      File.write!(Path.join(staged, "arb"), CliSetFixture.escript("28", "1.2.3"))
+      File.write!(Path.join(staged, "arb-extra"), "something else")
+
+      {:ok, _} =
+        Arbiter.Worker.CliFetcher.Cache.put(
+          "arb",
+          "1.2.3",
+          staged,
+          [{"arb", 0o755}, {"arb-extra", 0o755}],
+          %{source: "https://upstream.test/arb", integrity: "sha256-x", main: "arb"},
+          root: cache,
+          platform: "linux-x64"
+        )
+
+      opts = Keyword.put(opts, :cli_arb_version, "1.2.3")
+      assert {:ok, set} = CliSet.resolve(opts)
+      arb = CliSet.cli(set, "arb")
+      assert Enum.map(arb.files, & &1.name) == ["arb", "arb.escript"]
+      assert CliSet.arb_escript(opts) |> File.read!() =~ "arb-otp=28"
+    end
+  end
+
   describe "materialize/2 and mounts/2" do
     test "writes the manifest and one directory per CLI under the cli-sets root", ctx do
       set = CliSetFixture.set!(root(ctx))
@@ -149,6 +177,29 @@ defmodule Arbiter.Worker.CliSetTest do
 
       assert {:ok, _} = CliSet.materialize(set, verify: true)
       refute File.read!(path) == "tampered"
+    end
+  end
+
+  describe "materialize/2 on a spawn" do
+    test "re-verifies a copy whose stats changed, even at the same size", ctx do
+      opts = CliSetFixture.put(root(ctx))
+      materialize = fn -> with {:ok, set} <- CliSet.resolve(opts), do: CliSet.materialize(set) end
+      long_ago = {{2020, 1, 1}, {0, 0, 0}}
+
+      {:ok, set} = materialize.()
+      paths = file_paths(set)
+      Enum.each(paths, &File.touch!(&1, long_ago))
+      # Settled files: this pass hashes them and remembers their stats.
+      {:ok, _} = materialize.()
+
+      path = Enum.find(paths, &(Path.basename(&1) == "claude"))
+      good = File.read!(path)
+      File.write!(path, String.duplicate("x", byte_size(good)))
+      File.touch!(path, {{2021, 1, 1}, {0, 0, 0}})
+
+      assert {:ok, set} = materialize.()
+      assert File.read!(path) == good
+      assert Enum.sort(file_paths(set)) == Enum.sort(paths)
     end
   end
 

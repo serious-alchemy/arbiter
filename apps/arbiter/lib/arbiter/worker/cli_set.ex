@@ -200,28 +200,50 @@ defmodule Arbiter.Worker.CliSet do
     end
   end
 
-  # `arb` is the launcher plus the release's escript beside it.
+  # `arb` is the launcher plus the release's escript beside it. Only the entry's
+  # main file is the escript, so two cached files can never both land on
+  # `arb.escript`.
   defp container_files("arb", entry) do
-    launcher = ArbCli.launcher()
+    case Enum.find(entry.files, &(&1.path == entry.main)) do
+      nil ->
+        {:error, {:cli_main_missing, "arb", entry.main}}
 
-    escripts =
-      Enum.map(entry.files, fn f -> cache_file("arb.escript", f, entry) end)
+      escript ->
+        launcher = ArbCli.launcher()
 
-    {:ok,
-     Enum.sort_by(
-       [
-         %{
-           name: "arb",
-           sha256: sha256(launcher),
-           size: byte_size(launcher),
-           mode: 0o755,
-           source: {:launcher, launcher},
-           path: nil
-         }
-         | escripts
-       ],
-       & &1.name
-     )}
+        {:ok,
+         Enum.sort_by(
+           [
+             %{
+               name: "arb",
+               sha256: sha256(launcher),
+               size: byte_size(launcher),
+               mode: 0o755,
+               source: {:launcher, launcher},
+               path: nil
+             },
+             cache_file("arb.escript", escript, entry)
+           ],
+           & &1.name
+         )}
+    end
+  end
+
+  @doc """
+  The cached `arb` escript (the object in the verified cache, read-only) the
+  set `opts` resolve, or `nil` when the set has no `arb`. It is what ships in
+  the image, so `ArbCli.runtime_otp/1` reads the OTP release it was built on
+  from it.
+  """
+  @spec arb_escript(keyword()) :: Path.t() | nil
+  def arb_escript(opts \\ []) do
+    with {:ok, set} <- resolve(opts),
+         %{files: files} <- cli(set, "arb"),
+         %{source: {:cache, entry, rel}} <- Enum.find(files, &(&1.name == "arb.escript")) do
+      Cache.object_path(entry, rel)
+    else
+      _ -> nil
+    end
   end
 
   # Every other CLI is flat in `/opt/arbiter/cli`; two files may not share a name.
@@ -291,6 +313,28 @@ defmodule Arbiter.Worker.CliSet do
     end
   end
 
+  @doc """
+  What to tell an operator whose spawn failed with `{:cli_not_cached, name}`:
+  whether the version is unpinned or pinned but not fetched yet, and how to
+  fill the cache. `opts` are the options `resolve/1` took.
+  """
+  @spec not_cached_message(String.t(), keyword()) :: String.t()
+  def not_cached_message(name, opts \\ []) do
+    opts = Keyword.merge(Application.get_env(:arbiter, :cli_set_opts, []), opts)
+
+    state =
+      case CliFetcher.pin(name, fetcher_opts(opts)) do
+        nil -> "no version of #{name} is pinned"
+        version -> "#{name} #{version} is pinned but not in the verified cache yet"
+      end
+
+    state <>
+      ". Workers run only the verified upstream CLIs from that cache, never one installed " <>
+      "on this host. Fill it with `mix arbiter.fetch_clis` (a release: " <>
+      "`bin/arbiter eval 'Arbiter.Release.fetch_clis()'`), or set the pin " <>
+      "(`arb settings set worker.cli.versions`); `arb doctor` shows each CLI's state."
+  end
+
   @doc "`{:error, {:cli_not_cached, name}}` unless the set has `name`."
   @spec require_cli(t(), String.t()) :: :ok | {:error, {:cli_not_cached, String.t()}}
   def require_cli(%__MODULE__{} = set, name),
@@ -351,8 +395,10 @@ defmodule Arbiter.Worker.CliSet do
   Copy the set to `<sets root>/<set8>/<cli>/<file>` with the right modes, write
   `manifest.json`, and return the set with each file's `:path` and the set's
   `:dir`. Idempotent: a file already there with the right size and mode is kept.
-  `verify: true` re-hashes the cache's objects and the copies (the publisher
-  does; a spawn does not hash 300 MB).
+  The first materialization of a set in this VM, and any after a copy's size,
+  mtime or inode has changed, re-hashes the cache's objects and the copies;
+  otherwise a spawn only re-checks those stats (it does not hash 300 MB each
+  time). `verify: true` (the publisher) always re-hashes.
   """
   @spec materialize(t(), keyword()) :: {:ok, t()} | {:error, term()}
   def materialize(set, opts \\ [])
@@ -364,14 +410,51 @@ defmodule Arbiter.Worker.CliSet do
   def materialize(%__MODULE__{} = set, opts), do: do_materialize(set, opts)
 
   defp do_materialize(set, opts) do
-    verify? = Keyword.get(opts, :verify, false)
     dir = Path.join(set.root, set.set8)
+    verify? = Keyword.get(opts, :verify, false) or not verified?(set, dir)
 
     with :ok <- verify_sources(set, verify?),
          {:ok, clis} <- place(set.clis, dir, verify?),
          set = %{set | dir: dir, clis: clis},
          :ok <- write_manifest(set, dir) do
+      if verify?, do: remember_verified(set, dir)
       {:ok, set}
+    end
+  end
+
+  # A spawn does not hash 300 MB every time, but it does hash them once: the first
+  # materialization of a set in this VM re-hashes the cache's objects and the
+  # copies, and records each copy's size, mtime and inode. Later spawns re-check
+  # only those stats, so a file edited or replaced under the set dir since (a
+  # same-size corruption included) is re-verified and rewritten, not mounted.
+  defp verified?(set, dir) do
+    case :persistent_term.get({__MODULE__, :verified, dir, set.hash}, nil) do
+      nil -> false
+      stamps -> stamps == stamps(set, dir)
+    end
+  end
+
+  # File mtimes have whole-second resolution, so a copy modified in the same
+  # second as its stamp would look untouched. A set with a file that fresh is not
+  # remembered; the next materialization hashes it again.
+  defp remember_verified(set, dir) do
+    stamps = stamps(set, dir)
+    settled = System.os_time(:second) - 1
+
+    if Enum.all?(stamps, &match?({_, _, mtime, _} when mtime < settled, &1)),
+      do: :persistent_term.put({__MODULE__, :verified, dir, set.hash}, stamps)
+
+    :ok
+  end
+
+  defp stamps(set, dir) do
+    for cli <- set.clis, f <- cli.files do
+      path = f.path || Path.join([dir, cli.name, f.name])
+
+      case File.stat(path, time: :posix) do
+        {:ok, %File.Stat{} = st} -> {path, st.size, st.mtime, st.inode}
+        _ -> {path, nil}
+      end
     end
   end
 

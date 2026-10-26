@@ -36,6 +36,21 @@ defmodule Arbiter.Worker.ArbCliTest do
       assert ArbCli.runtime_otp(arb_path: arb) == "31"
     end
 
+    test "is the release the cached upstream arb was built on, not the host's", %{tmp_dir: dir} do
+      host = ArbEscriptFixture.build!(dir, stamp: "31")
+      opts = Arbiter.Worker.CliSetFixture.put(dir)
+
+      assert ArbCli.runtime_otp(opts ++ [find_executable: fn _ -> host end]) == "28"
+      assert ArbCli.runtime_otp(arb_path: host) == "31"
+    end
+
+    test "is the host arb's release when the cache has no arb", %{tmp_dir: dir} do
+      host = ArbEscriptFixture.build!(dir, stamp: "31")
+      opts = Arbiter.Worker.CliSetFixture.put(Path.join(dir, "c"), arb: nil)
+
+      assert ArbCli.runtime_otp(opts ++ [find_executable: fn _ -> host end]) == "31"
+    end
+
     test "is the server's own release for an arb without the stamp, or no arb", %{tmp_dir: dir} do
       arb = ArbEscriptFixture.build!(dir, stamp: nil)
       assert ArbCli.runtime_otp(arb_path: arb) == System.otp_release()
