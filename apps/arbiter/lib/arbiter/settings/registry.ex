@@ -194,7 +194,7 @@ defmodule Arbiter.Settings.Registry do
       type: "cli_versions",
       description:
         "The upstream CLI versions published worker images carry (SI1a, OD13), a JSON object " <>
-          "over claude and codex to a stable x.y.z, e.g. {\"claude\": \"2.1.310\", \"codex\": \"0.164.0\"}. " <>
+          "over claude and codex to a stable x.y.z, e.g. claude 2.1.310 and codex 0.164.0. " <>
           "The daily auto-bump rewrites a pin to the newest stable upstream version unless the CLI " <>
           "is in worker.cli.manual or worker.cli_set.hold is set; null = no pins (nothing is " <>
           "fetched). Operator-only."

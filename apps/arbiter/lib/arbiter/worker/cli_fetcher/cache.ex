@@ -18,6 +18,7 @@ defmodule Arbiter.Worker.CliFetcher.Cache do
 
   alias Arbiter.Config.Paths
   alias Arbiter.Worker.CliFetcher.Integrity
+  alias Arbiter.Worker.CliFetcher.Semver
 
   @type file :: %{
           path: String.t(),
@@ -89,7 +90,7 @@ defmodule Arbiter.Worker.CliFetcher.Cache do
           []
       end
 
-    Arbiter.Worker.CliFetcher.Semver.newest_stable(versions)
+    Semver.newest_stable(versions)
   end
 
   @doc """
@@ -176,10 +177,9 @@ defmodule Arbiter.Worker.CliFetcher.Cache do
   defp host_platform do
     arch = :erlang.system_info(:system_architecture) |> to_string()
 
-    cond do
-      String.starts_with?(arch, "aarch64") or String.starts_with?(arch, "arm64") -> "linux-arm64"
-      true -> "linux-x64"
-    end
+    if String.starts_with?(arch, "aarch64") or String.starts_with?(arch, "arm64"),
+      do: "linux-arm64",
+      else: "linux-x64"
   end
 
   # ---- internals --------------------------------------------------------

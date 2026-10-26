@@ -26,6 +26,7 @@ defmodule Arbiter.Settings do
   alias Arbiter.Settings.CliVersionEvent
   alias Arbiter.Settings.Installation
   alias Arbiter.Settings.SchedulerChange
+  alias Arbiter.Worker.CliFetcher.Semver
 
   @topic "installation_settings"
 
@@ -749,7 +750,7 @@ defmodule Arbiter.Settings do
   @spec cli_names() :: [String.t()]
   def cli_names, do: @cli_names
 
-  @doc "`worker.cli.versions`: `%{\"claude\" => \"x.y.z\", ...}` as stored, or `nil`."
+  @doc "`worker.cli.versions`: a map of CLI name to its pinned x.y.z, as stored, or `nil`."
   @spec worker_cli_versions() :: %{optional(String.t()) => String.t()} | nil
   def worker_cli_versions, do: read_setting(:worker_cli_versions)
 
@@ -769,7 +770,7 @@ defmodule Arbiter.Settings do
   @spec valid_cli_versions?(term()) :: boolean()
   def valid_cli_versions?(%{} = map) do
     Enum.all?(map, fn {name, version} ->
-      name in @cli_names and Arbiter.Worker.CliFetcher.Semver.stable?(version)
+      name in @cli_names and Semver.stable?(version)
     end)
   end
 
