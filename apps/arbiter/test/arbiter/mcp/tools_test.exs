@@ -3086,7 +3086,10 @@ defmodule Arbiter.MCP.ToolsTest do
       "nodes.registry_password": nil,
       "nodes.registry_insecure": nil,
       "nodes.registry_public_ok": nil,
-      "nodes.chart_ref": nil
+      "nodes.chart_ref": nil,
+      "worker.cli.versions": nil,
+      "worker.cli.manual": nil,
+      "worker.cli_set.hold": nil
     }
 
     test "the coordinator tunes finish-first but not the operator-only floor switches", ctx do

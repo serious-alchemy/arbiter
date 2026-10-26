@@ -167,6 +167,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     "/api/server/agy_write_jail",
     "/api/server/bind_address",
     "/api/server/claude_credentials",
+    "/api/server/cli_versions",
     "/api/server/dashboard_auth",
     "/api/server/egress_jail",
     "/api/server/grok_auth",

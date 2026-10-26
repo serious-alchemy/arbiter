@@ -105,6 +105,9 @@ defmodule Arbiter.Settings.Installation do
     :nodes_registry_insecure,
     :nodes_registry_public_ok,
     :machine_derate,
+    :worker_cli_versions,
+    :worker_cli_manual,
+    :worker_cli_set_hold,
     :dashboard_dismissed_update_version,
     :dashboard_dismissed_deploy
   ]
@@ -382,6 +385,27 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description "machine.derate: the primary's self-derate thresholds (bd-6w7usy), a JSON object over thermal_soft_c, thermal_hard_c, thermal_delta_c, thermal_entry_samples, psi_some_avg10, psi_delta, mem_floor_gib, mem_delta_gib, recover_s and enabled; nil = every default."
+    end
+
+    attribute :worker_cli_versions, :map do
+      public? true
+      allow_nil? true
+
+      description "worker.cli.versions: the pinned upstream CLI versions (SI1a, OD13), a JSON object over claude and codex to a stable x.y.z; nil = no pin yet."
+    end
+
+    attribute :worker_cli_manual, {:array, :string} do
+      public? true
+      allow_nil? true
+
+      description "worker.cli.manual: the CLIs whose pin the daily auto-bump leaves alone (SI1a); nil/[] = every pin follows upstream."
+    end
+
+    attribute :worker_cli_set_hold, :string do
+      public? true
+      allow_nil? true
+
+      description "worker.cli_set.hold: freezes the CLI set and every auto-bump (SI1a, SI2); nil = no hold."
     end
 
     create_timestamp :created_at

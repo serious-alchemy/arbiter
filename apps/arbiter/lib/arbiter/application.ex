@@ -249,6 +249,8 @@ defmodule Arbiter.Application do
         # refresh + prune (inert until an image has been built).
         Arbiter.Worker.Image.Builder,
         Arbiter.Worker.Image.Refresher,
+        # SI1a (OD13): daily upstream CLI version bump + verified fetch into the cli-cache.
+        Arbiter.Worker.CliFetcher.Scheduler,
         # K8 (bd-9vrbx7): publishes images to `nodes.registry` (inert while it is unset).
         Arbiter.Worker.Image.Publisher,
         # bd-50d5j6: persists a podman Codex run's rotated auth.json when its

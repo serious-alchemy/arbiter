@@ -280,6 +280,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/server/grok_auth"} => :coordinator,
     {:get, "/api/server/provider_accounts"} => :coordinator,
     {:get, "/api/server/merge_routing"} => :coordinator,
+    {:get, "/api/server/cli_versions"} => :coordinator,
     {:get, "/api/server/tmux"} => :coordinator,
     {:get, "/api/server/worker_tmp"} => :coordinator,
     {:get, "/api/server/worker_jail_unmask"} => :coordinator,

@@ -65,6 +65,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {"restart_safety", :core, nil, :always, plain(&check_restart_safety/0)},
       {"merge_routing", :core, nil, :always, plain(&check_merge_routing/0)},
       {"nodes", :core, nil, :always, plain(&check_nodes/0)},
+      {"cli_versions", :core, nil, :always, plain(&check_cli_versions/0)},
       {"pr_patrol", :core, nil, :always, plain(&check_pr_patrol/0)},
       {"claude_worker_credentials", :auth, nil, :always,
        plain(&check_claude_worker_credentials/0)},
@@ -1977,6 +1978,89 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         unknown_result("migrations up to date", other)
     end
   end
+
+  # ---- upstream CLI versions (SI1a, OD13) -------------------------------------
+  #
+  # Fed by `GET /api/server/cli_versions` (`Arbiter.Worker.CliFetcher.Status`):
+  # the CLI bytes in a published worker image come from upstream at pinned
+  # versions. One row per CLI (pinned and latest-available version, last bump),
+  # and one for the `worker.cli_set.hold`. Every problem is a `[warn]`: a CLI
+  # that is behind, unpinned or uncached costs a stale image, not the deploy.
+
+  @doc """
+  The upstream CLI rows: `cli claude`, `cli codex`, `cli arb` and `cli set hold`.
+  """
+  @spec check_cli_versions() :: [Result.t()]
+  def check_cli_versions do
+    case Client.get("/api/server/cli_versions") do
+      {:ok, %{"clis" => clis, "hold" => hold} = resp} when is_list(clis) ->
+        Enum.map(clis, &cli_row/1) ++ [cli_hold_row(hold, resp["scheduler"])]
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
+        [server_error_result("cli versions", err)]
+
+      other ->
+        [unknown_result("cli versions", other)]
+    end
+  end
+
+  defp cli_row(%{"name" => name, "pinned" => nil}) do
+    nodes_result(
+      "cli #{name}",
+      :warn,
+      "no version pinned",
+      "Published worker images carry no #{name}. The daily bump pins the newest stable " <>
+        "version, or set it: arb settings set worker.cli.versions '{\"#{name}\": \"x.y.z\"}'"
+    )
+  end
+
+  defp cli_row(%{"name" => name, "pinned" => pinned, "cached" => false}) do
+    nodes_result(
+      "cli #{name}",
+      :warn,
+      "pinned #{pinned}#{cli_latest(name, pinned, nil)}, not yet in the verified cache",
+      "The scheduler fetches and verifies it on its next run (daily); until then " <>
+        "images cannot carry #{name} #{pinned}."
+    )
+  end
+
+  defp cli_row(%{"name" => name, "pinned" => pinned} = cli) do
+    detail =
+      "pinned #{pinned}#{cli_latest(name, pinned, cli["latest"])}" <>
+        cli_last_bump(cli["last_bump"]) <>
+        if(cli["manual"] == true, do: ", manual (auto-bump off)", else: "")
+
+    nodes_result("cli #{name}", :ok, detail)
+  end
+
+  defp cli_latest("arb", _pinned, _latest), do: " (the running release)"
+  defp cli_latest(_name, _pinned, nil), do: ", latest available unknown"
+  defp cli_latest(_name, pinned, pinned), do: ", latest available #{pinned} (current)"
+  defp cli_latest(_name, _pinned, latest), do: ", latest available #{latest}"
+
+  defp cli_last_bump(%{"from" => from, "to" => to, "at" => at}),
+    do: ", last bump #{from || "unpinned"} -> #{to} (#{at})"
+
+  defp cli_last_bump(_), do: ", never bumped"
+
+  defp cli_hold_row(nil, scheduler) do
+    nodes_result("cli set hold", :ok, "no hold" <> cli_scheduler_note(scheduler))
+  end
+
+  defp cli_hold_row(hold, _scheduler) do
+    nodes_result(
+      "cli set hold",
+      :warn,
+      "held at #{hold}: CLI version bumps are frozen",
+      "Clear it to resume bumps: arb settings set worker.cli_set.hold null"
+    )
+  end
+
+  defp cli_scheduler_note(%{"enabled" => false}),
+    do: " (daily bump job off: ARBITER_CLI_FETCHER=0 or not a release install)"
+
+  defp cli_scheduler_note(%{"checked_at" => at}) when is_binary(at), do: " (last checked #{at})"
+  defp cli_scheduler_note(_), do: ""
 
   # ---- nodes (RW7, docs/design/remote-workers.md §4.3, §14) ------------------
   #
