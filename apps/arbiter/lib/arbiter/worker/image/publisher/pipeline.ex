@@ -177,6 +177,13 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   @doc false
   @spec cli_files(keyword()) :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
   def cli_files(opts) do
+    with {:ok, files} <- resolve_cli_files(opts),
+         :ok <- require_arb(files) do
+      {:ok, files}
+    end
+  end
+
+  defp resolve_cli_files(opts) do
     case Keyword.fetch(opts, :cli) do
       {:ok, files} ->
         {:ok, files}
@@ -189,6 +196,16 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
           {:error, reason} -> {:error, {:cli_unavailable, reason}}
         end
     end
+  end
+
+  # bd-czvxfs: a pod has no host bind mount to fall back on, so the image IS the agent's
+  # `arb`. `ContainerSpawn.cli_mounts/2` only warns when the host has none (right for a
+  # local container, which can still run its agent); an image published without it leaves
+  # every pod unable to print `arb done`.
+  defp require_arb(files) do
+    if Enum.any?(files, fn {_host, dest} -> dest == @cli_dest <> "arb" end),
+      do: :ok,
+      else: {:error, {:cli_unavailable, {:executable_not_found, "arb"}}}
   end
 
   defp seed_layer(ctx, plan, repository, cli_suffix, parent, work, cfg, opts) do

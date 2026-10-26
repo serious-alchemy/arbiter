@@ -27,7 +27,11 @@ defmodule Arbiter.Worker.Image.PublisherSettingsTest do
     {:ok, _} = Settings.put("nodes.registry_password", @password)
 
     ctx = %{plan: plan(), repo: "arb-app", repo_path: nil, base: "main", seed_paths: []}
-    cli = [{write(tmp, "claude"), "/opt/arbiter/cli/claude"}]
+
+    cli = [
+      {write(tmp, "claude"), "/opt/arbiter/cli/claude"},
+      {write(tmp, "arb"), "/opt/arbiter/cli/arb"}
+    ]
 
     assert {:ok, %{ref: ref}} =
              Publisher.ensure_ready(ctx,
