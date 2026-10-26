@@ -227,6 +227,7 @@ defmodule Arbiter.Worker.Image do
          {:ok, tool_versions} <- read_file(repo_path, ref, ".tool-versions"),
          {:ok, repo_cf} <- read_file(repo_path, ref, ".arbiter/Containerfile"),
          {:ok, repo_cf} <- choose_source(Keyword.get(opts, :source, :auto), repo_cf),
+         :ok <- check_final_user(repo_cf),
          # bd-3fnqi8: a pin the image cannot honour is an error, not the default.
          :ok <- Toolchain.check_containerfile(tool_versions, repo_cf),
          toolchain = toolchain(tool_versions, opts),
@@ -455,10 +456,32 @@ defmodule Arbiter.Worker.Image do
     end
   end
 
+  # Only the final stage's USER counts: the text after the last FROM line.
   defp declared_user(text) do
-    case Regex.scan(~r/^\s*USER\s+(\S+)/mi, text) do
+    case Regex.scan(~r/^\s*USER\s+(\S+)/mi, final_stage(text)) do
       [] -> nil
       users -> users |> List.last() |> List.last()
+    end
+  end
+
+  defp final_stage(text) do
+    case Regex.split(~r/^\s*FROM\s/mi, text) do
+      [_only] -> text
+      stages -> List.last(stages)
+    end
+  end
+
+  # An explicit final `USER root` / `USER 0` runs the agent as uid 0 under
+  # `--userns=keep-id` and hits the v0.2.84 EACCES on the host-owned run dirs.
+  defp check_final_user(nil), do: :ok
+
+  defp check_final_user(text) do
+    with user when is_binary(user) <- declared_user(text),
+         uid = user |> String.split(":") |> hd() |> String.downcase(),
+         true <- uid in ["root", "0"] do
+      {:error, {:final_user_root, user}}
+    else
+      _ -> :ok
     end
   end
 
