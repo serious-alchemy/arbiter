@@ -17,6 +17,7 @@ defmodule Arbiter.Release do
   alias Arbiter.Loop.Scarcity.Draw
   alias Arbiter.Quota.BudgetCalibration
   alias Arbiter.Settings
+  alias Arbiter.Worker.CliFetcher.Fill
 
   @app :arbiter
 
@@ -807,6 +808,29 @@ defmodule Arbiter.Release do
 
   defp banner(label, false, hint) do
     "Backfilling #{label} — DRY RUN, no writes. Pass #{hint || "apply?: true / --apply"} to write.\n"
+  end
+
+  @doc """
+  Fill the verified CLI cache now (SI1a/SI1): fetch, checksum-verify and store
+  every pinned upstream CLI (`claude`, `codex`) and the running release's `arb`
+  that is not cached yet (`Arbiter.Worker.CliFetcher.Fill`).
+
+  Local and remote workers run only these cached bytes
+  (`Arbiter.Worker.CliSet`), never a CLI installed on the host, so an install
+  whose daily CLI fetcher job is off (`ARBITER_CLI_FETCHER=0`)
+  or has not run yet fills the cache once, here:
+  `bin/arbiter eval 'Arbiter.Release.fetch_clis()'` or `mix arbiter.fetch_clis`.
+  Touches the network only for a version that is not cached. Starts only Ash +
+  `Arbiter.Repo` (the pins live in settings) and `:req`, never the full
+  application. Returns `%{name => :ok | :unpinned | {:error, reason}}` and
+  prints one line per CLI.
+  """
+  @spec fetch_clis(keyword()) :: %{String.t() => :ok | :unpinned | {:error, term()}}
+  def fetch_clis(opts \\ []) do
+    start_release_repo!()
+    {:ok, _} = Application.ensure_all_started(:req)
+
+    Fill.run(opts)
   end
 
   @doc """

@@ -98,6 +98,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   alias Arbiter.Guardrails.Events, as: GuardrailEvents
   alias Arbiter.Guardrails.Scan
   alias Arbiter.Worker
+  alias Arbiter.Worker.CliSet
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.OutputLog
@@ -117,6 +118,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   # reviewer emitted no verdict. Lower this and the fallback still holds; remove
   # the durable transcript and it does not.
   @line_cap 1000
+  @cli_set_opts CliSet.option_keys()
   # bd-7a0pi8 / bd-c27m5o: the marker must be a line on its own (only
   # whitespace/punctuation/decoration around it). The per-line check sees one line; the split-delta safety
   # net sees a rolling buffer, so the anchor is "start of buffer or after a
@@ -395,31 +397,30 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
-  # `:claude_path`, `:codex_path` and `:arb_path` name the host CLIs the container
-  # mounts, as for a run placed on a node; unset (every real spawn), ContainerSpawn
-  # finds them on this host. A test that names its stand-ins never mounts the
-  # host's own, nor fails on a host that has none (bd-59m96o).
+  # The CLIs are `Arbiter.Worker.CliSet`'s, resolved from the pinned upstream cache;
+  # `@cli_set_opts` select that cache (unset on every real spawn), so a test names
+  # its own stand-ins and never mounts a host install.
   defp prepare_container(opts, policy, port_args, ctx) do
     provider = Keyword.get(opts, :provider) || "claude"
 
     with {:ok, _sandbox} <- Arbiter.Worker.Sandbox.module(policy, provider),
          {:ok, request} <-
            ContainerSpawn.prepare(
-             Keyword.take(opts, [
-               :arb_token,
-               :workspace,
-               :repo,
-               :image,
-               :podman,
-               :egress,
-               :projection,
-               :git_material,
-               :research_transcripts,
-               :claude_path,
-               :codex_path,
-               :codex_source_home,
-               :arb_path
-             ]) ++
+             Keyword.take(
+               opts,
+               [
+                 :arb_token,
+                 :workspace,
+                 :repo,
+                 :image,
+                 :podman,
+                 :egress,
+                 :projection,
+                 :git_material,
+                 :research_transcripts,
+                 :codex_source_home
+               ] ++ @cli_set_opts
+             ) ++
                [
                  provider: provider,
                  policy: policy,
@@ -470,19 +471,20 @@ defmodule Arbiter.Worker.ClaudeSession do
          {:ok, _sandbox} <- Arbiter.Worker.Sandbox.module(policy, provider),
          {:ok, request} <-
            ContainerSpawn.prepare_remote(
-             Keyword.take(opts, [
-               :arb_token,
-               :workspace,
-               :repo,
-               :base_branch,
-               :image,
-               :podman,
-               :egress,
-               :services,
-               :claude_path,
-               :arb_path,
-               :git_material
-             ]) ++
+             Keyword.take(
+               opts,
+               [
+                 :arb_token,
+                 :workspace,
+                 :repo,
+                 :base_branch,
+                 :image,
+                 :podman,
+                 :egress,
+                 :services,
+                 :git_material
+               ] ++ @cli_set_opts
+             ) ++
                [
                  provider: provider,
                  policy: policy,

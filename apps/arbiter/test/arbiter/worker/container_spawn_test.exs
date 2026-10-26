@@ -19,6 +19,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.ContainerSpawn
+  alias Arbiter.Worker.CliSetFixture
   alias Arbiter.Worker.PrivateClone
 
   @branch "feature/bd-p7-claude"
@@ -37,13 +38,9 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     File.write!(proxy, "")
     File.write!(bridge, "")
 
-    real_claude = Path.join(dir, "claude-2.1.999")
-    File.write!(real_claude, "#!/bin/sh\n")
-    File.chmod!(real_claude, 0o755)
-    claude_link = Path.join(dir, "claude")
-    File.ln_s!("claude-2.1.999", claude_link)
-    arb = Path.join(dir, "arb")
-    File.write!(arb, "#!/bin/sh\n")
+    cli_opts = CliSetFixture.put(Path.join(dir, "cli"))
+    real_claude = CliSetFixture.host_path(cli_opts, "claude", "claude")
+    arb = CliSetFixture.host_path(cli_opts, "arb", "arb.escript")
 
     tmp_dir = Path.join(dir, "run-tmp")
     File.mkdir_p!(tmp_dir)
@@ -71,19 +68,18 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       {:ok, [proxy_socket: proxy, proxy_port: proxy_port, bridges: [{arb_port, bridge}]], "rtest"}
     end
 
-    base_opts = [
-      policy: podman_policy(),
-      worktree_path: clone,
-      owner: self(),
-      task_id: "bd-p7test",
-      arb_token: "arb-secret-token",
-      tmp_dir: tmp_dir,
-      image: @image,
-      podman: "/usr/bin/podman",
-      claude_path: claude_link,
-      arb_path: arb,
-      egress: egress
-    ]
+    base_opts =
+      [
+        policy: podman_policy(),
+        worktree_path: clone,
+        owner: self(),
+        task_id: "bd-p7test",
+        arb_token: "arb-secret-token",
+        tmp_dir: tmp_dir,
+        image: @image,
+        podman: "/usr/bin/podman",
+        egress: egress
+      ] ++ cli_opts
 
     Map.merge(ctx, %{
       clone: clone,
@@ -438,7 +434,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert request.mounts[:git_dir] == Path.join(ctx.clone, ".git")
       assert request.mounts[:objects] != nil
 
-      # The CLI mounts bind the resolved binary, not the symlink.
+      # The CLI mounts bind the materialized set file, not the cache object.
       assert {ctx.real_claude, "/opt/arbiter/cli/claude"} in request.cli_mounts
 
       # bd-59m96o: `arb` is the launcher that runs the escript beside it on an
@@ -541,62 +537,70 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert {:error, {:podman_network_unavailable, _}} = ContainerSpawn.prepare(ctx.opts)
     end
 
-    test "refuses when there is no claude to mount", ctx do
-      opts = Keyword.merge(ctx.opts, claude_path: nil, find_executable: fn _ -> nil end)
-      assert {:error, {:executable_not_found, "claude"}} = ContainerSpawn.prepare(opts)
+    test "refuses when the cache has no claude to mount, saying how to fill it", ctx do
+      opts = Keyword.merge(ctx.opts, CliSetFixture.put(Path.join(ctx.dir, "empty"), claude: nil))
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:cli_not_cached, "claude"}} = ContainerSpawn.prepare(opts)
+        end)
+
+      assert log =~ "mix arbiter.fetch_clis"
+      assert log =~ "never one installed on this host"
     end
 
-    test "a host with no arb still gets a worker, minus the CLI", ctx do
-      opts = Keyword.merge(ctx.opts, arb_path: nil, find_executable: fn _ -> nil end)
-      assert {:ok, request} = ContainerSpawn.prepare(opts)
-      assert [{_, "/opt/arbiter/cli/claude"}] = request.cli_mounts
+    test "an unpinned provider is reported as unpinned, not as a fetch pending", ctx do
+      opts = Keyword.merge(ctx.opts, cli_pins: %{})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:cli_not_cached, "claude"}} = ContainerSpawn.prepare(opts)
+        end)
+
+      assert log =~ "no version of claude is pinned"
     end
 
-    test "falls back to the installed arb when none is on PATH", ctx do
-      installed = Path.join(ctx.dir, "installed-arb")
-      File.write!(installed, "#!/bin/sh\n")
-
-      find = fn
-        "claude" -> ctx.opts[:claude_path]
-        _ -> nil
-      end
+    test "never mounts a CLI installed on the host, whatever is on PATH", ctx do
+      host_claude = Path.join(ctx.dir, "host-claude")
+      File.write!(host_claude, "#!/bin/sh\n")
+      File.chmod!(host_claude, 0o755)
 
       opts =
-        ctx.opts
-        |> Keyword.delete(:arb_path)
-        |> Keyword.merge(find_executable: find, installed_arb_path: installed)
-
-      assert {:ok, request} = ContainerSpawn.prepare(opts)
-
-      assert {resolved, "/opt/arbiter/cli/arb.escript"} =
-               List.keyfind(request.cli_mounts, "/opt/arbiter/cli/arb.escript", 1)
-
-      assert Path.basename(resolved) == "installed-arb"
-    end
-
-    test "a launcher that cannot be staged yields no arb mount, not a refused spawn", ctx do
-      blocker = Path.join(ctx.dir, "not-a-dir")
-      File.write!(blocker, "")
-      opts = Keyword.put(ctx.opts, :launcher_dir, Path.join(blocker, "cli"))
-
-      assert {:ok, request} = ContainerSpawn.prepare(opts)
-      assert [{_, "/opt/arbiter/cli/claude"}] = request.cli_mounts
-    end
-
-    test "a missing installed arb yields no arb mount", ctx do
-      opts =
-        ctx.opts
-        |> Keyword.delete(:arb_path)
-        |> Keyword.merge(
-          find_executable: fn
-            "claude" -> ctx.opts[:claude_path]
-            _ -> nil
-          end,
-          installed_arb_path: Path.join(ctx.dir, "nope")
+        Keyword.merge(
+          ctx.opts,
+          CliSetFixture.put(Path.join(ctx.dir, "empty"), claude: nil, arb: nil) ++
+            [
+              claude_path: host_claude,
+              arb_path: host_claude,
+              find_executable: fn _ -> host_claude end
+            ]
         )
 
+      assert {:error, {:cli_not_cached, "claude"}} = ContainerSpawn.prepare(opts)
+
+      # With the cache filled, every mount is a materialized set file, none the host's.
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      assert request.cli_mounts != []
+      sets_root = Keyword.fetch!(ctx.opts, :cli_sets_root)
+
+      assert Enum.all?(request.cli_mounts, fn {host, _} ->
+               String.starts_with?(host, sets_root)
+             end)
+    end
+
+    test "a set with no arb still gets a worker, minus the CLI", ctx do
+      opts = Keyword.merge(ctx.opts, CliSetFixture.put(Path.join(ctx.dir, "noarb"), arb: nil))
       assert {:ok, request} = ContainerSpawn.prepare(opts)
       assert [{_, "/opt/arbiter/cli/claude"}] = request.cli_mounts
+    end
+
+    test "a set directory that cannot be written refuses the spawn", ctx do
+      blocker = Path.join(ctx.dir, "not-a-dir")
+      File.write!(blocker, "")
+      opts = Keyword.put(ctx.opts, :cli_sets_root, Path.join(blocker, "cli-sets"))
+      opts = Keyword.put(opts, :cli_cache_root, Keyword.fetch!(ctx.opts, :cli_cache_root))
+
+      assert {:error, _} = ContainerSpawn.prepare(opts)
     end
 
     test "needs the run's temp dir", ctx do
@@ -1317,7 +1321,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
                      provider: "claude",
                      podman: fake_podman!(ctx.dir)
                    ] ++
-                     Keyword.take(ctx.opts, [:arb_token, :image, :claude_path, :arb_path, :egress])
+                     Keyword.take(ctx.opts, [:arb_token, :image, :egress] ++ CliSetFixture.keys())
                  )
 
         assert is_port(port)
@@ -1353,7 +1357,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
                    worktree_path: ctx.checkout,
                    command: ["sh", "-c", "echo should-not-run"],
                    security: podman_policy()
-                 ] ++ Keyword.take(ctx.opts, [:image, :claude_path, :arb_path, :egress])
+                 ] ++ Keyword.take(ctx.opts, [:image, :egress] ++ CliSetFixture.keys())
                )
     end
 

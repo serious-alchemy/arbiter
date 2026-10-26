@@ -61,10 +61,9 @@ defmodule Arbiter.Worker.ContainerSpawn do
       at every port re-open, at `teardown/1`, and when the owning worker dies by
       any means (`AuthSync.Reaper`, flushed by `RunTmp.Reaper` before it removes
       the directory). A re-opened run also takes a newer login a sibling rotated.
-    * **The CLI** is the vendored static binary, not the `codex` node launcher
-      the host has on `PATH` (a container has no node): found beside the launcher
-      in the npm package, mounted with its `rg` and `bwrap` so the CLI's own
-      helpers resolve on the image's `PATH`.
+    * **The CLI** is the vendored static binary from the pinned upstream release
+      (`Arbiter.Worker.CliSet`; a container has no node), mounted with its `rg`
+      and `bwrap` so the CLI's own helpers resolve on the image's `PATH`.
     * **Egress infra** is the OpenAI hosts (`chatgpt.com`, `api.openai.com`,
       `auth.openai.com`) rather than Anthropic's.
 
@@ -132,7 +131,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Mergers
   alias Arbiter.Nodes.Checkout, as: NodeCheckout
   alias Arbiter.Nodes.Files
-  alias Arbiter.Worker.ArbCli
+  alias Arbiter.Worker.CliSet
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.DepsCache
   alias Arbiter.Worker.Egress.JailRun
@@ -264,8 +263,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
       `:provider` (`"claude"` default, or `"codex"`);
     * `:image` (a ready tag; else `config :arbiter, :worker_container_image`,
       else the repo's default-branch image from `Image.ensure/3`);
-    * `:podman`, `:claude_path`, `:codex_path` and `:arb_path` (host binaries;
-      default found with `:find_executable`, `System.find_executable/1`),
+    * `:podman`; the CLIs are `Arbiter.Worker.CliSet`'s (pinned upstream releases
+      from SI1a's cache, never a host install; its options select the cache),
       `:codex_source_home` (the operator's codex home the login is copied from;
       default `Codex.ConfigDir.source_home/0`), `:egress`
       (`(opts -> {:ok, network, run_id} | {:error, reason})`, default
@@ -545,138 +544,31 @@ defmodule Arbiter.Worker.ContainerSpawn do
     end
   end
 
-  # The provider CLI and `arb` are mounted from the host, so the image carries
-  # no CLI that can drift from the one Arbiter probed. The provider CLI is
-  # mandatory; a host with no `arb` on PATH still gets a worker, minus the CLI.
+  # The provider CLI and `arb` come from `Arbiter.Worker.CliSet`: the verified,
+  # pinned upstream releases in SI1a's cache, never a CLI installed on this
+  # host (SI1). The same set feeds the remote file shelf (`remote_cli/2`) and
+  # the published image's CLI layers, so a local run and a remote one run the
+  # same bytes. The provider CLI is mandatory; a set without `arb` still gets
+  # a worker, minus the CLI.
   @doc false
+  @spec cli_mounts(String.t(), keyword()) :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
   def cli_mounts(provider, opts) do
-    find = Keyword.get(opts, :find_executable, &System.find_executable/1)
+    with {:ok, set} <- CliSet.resolve(opts),
+         :ok <- require_cached(set, provider, opts),
+         {:ok, set} <- CliSet.materialize(set) do
+      unless CliSet.cli(set, "arb"),
+        do: Logger.warning("ContainerSpawn: no cached `arb`; the container has no arb CLI")
 
-    with {:ok, provider_mounts} <- provider_mounts(provider, opts, find) do
-      {:ok, provider_mounts ++ arb_mounts(opts)}
+      CliSet.mounts(set, provider)
     end
   end
 
-  # bd-59m96o: `arb` in the container is `ArbCli`'s launcher, which runs the
-  # host's escript (mounted beside it) on an Erlang that can load it, whatever
-  # Erlang the repo's image pins.
-  defp arb_mounts(opts) do
-    with path when is_binary(path) <- ArbCli.host_escript(opts),
-         {:ok, mounts} <- ArbCli.mounts(resolve_links(path), opts) do
-      mounts
-    else
-      nil ->
-        Logger.warning("ContainerSpawn: no `arb` on PATH; the container has no arb CLI")
-        []
-
-      {:error, reason} ->
-        Logger.warning(
-          "ContainerSpawn: cannot stage the arb launcher (#{inspect(reason)}); " <>
-            "the container has no arb CLI"
-        )
-
-        []
-    end
-  end
-
-  defp provider_mounts("claude", opts, find) do
-    case Keyword.get_lazy(opts, :claude_path, fn -> find.("claude") end) do
-      path when is_binary(path) -> {:ok, [{resolve_links(path), claude_path()}]}
-      _ -> {:error, {:executable_not_found, "claude"}}
-    end
-  end
-
-  defp provider_mounts("codex", opts, find) do
-    case Keyword.get_lazy(opts, :codex_path, fn -> codex_on_host(find) end) do
-      path when is_binary(path) -> codex_mounts(resolve_links(path))
-      _ -> {:error, {:executable_not_found, "codex"}}
-    end
-  end
-
-  defp codex_on_host(find) do
-    case Application.get_env(:arbiter, :worker_container_codex_path) do
-      path when is_binary(path) and path != "" -> path
-      _ -> find.("codex")
-    end
-  end
-
-  # The npm `codex` on PATH is a node script: a container has no node. The
-  # package vendors a static binary (with `rg`, and `bwrap` for the CLI's own
-  # sandbox) beside it; mount that, and the helpers where the image's PATH has
-  # them. A binary that already is an executable (a cargo or brew install) is
-  # mounted as it is, with whatever vendor siblings it has.
-  defp codex_mounts(resolved) do
-    case native_codex(resolved) do
-      {:ok, native} ->
-        vendor = native |> Path.dirname() |> Path.dirname()
-
-        helpers =
-          for {rel, name} <- [{"codex-path/rg", "rg"}, {"codex-resources/bwrap", "bwrap"}],
-              path = Path.join(vendor, rel),
-              File.regular?(path),
-              do: {path, @cli_dir <> "/" <> name}
-
-        # The CLI spawns its sibling executables (the code-mode host) by path
-        # beside itself; the container finds them on its PATH dir.
-        siblings =
-          for path <- Path.wildcard(Path.join(Path.dirname(native), "*")),
-              path != native,
-              File.regular?(path),
-              executable?(path),
-              do: {path, @cli_dir <> "/" <> Path.basename(path)}
-
-        {:ok, [{native, provider_path("codex")} | helpers ++ siblings]}
-
-      :error ->
-        {:error, {:codex_native_binary_not_found, resolved}}
-    end
-  end
-
-  defp native_codex(path) do
-    if elf?(path) do
-      {:ok, path}
-    else
-      package = path |> Path.dirname() |> Path.dirname()
-      arch = :erlang.system_info(:system_architecture) |> to_string() |> String.split("-") |> hd()
-
-      candidates =
-        (Path.wildcard(
-           Path.join(package, "node_modules/@openai/codex-linux-*/vendor/*/bin/codex")
-         ) ++
-           Path.wildcard(Path.join(package, "vendor/*/bin/codex")))
-        |> Enum.filter(&elf?/1)
-
-      case Enum.find(candidates, &String.contains?(&1, "/" <> arch <> "-")) ||
-             List.first(candidates) do
-        nil -> :error
-        native -> {:ok, native}
-      end
-    end
-  end
-
-  defp executable?(path) do
-    case File.stat(path) do
-      {:ok, %File.Stat{mode: mode}} -> Bitwise.band(mode, 0o111) != 0
-      _ -> false
-    end
-  end
-
-  defp elf?(path) do
-    case File.open(path, [:read, :binary], &IO.binread(&1, 4)) do
-      {:ok, <<0x7F, "ELF">>} -> true
-      _ -> false
-    end
-  end
-
-  # `~/.local/bin/claude` is a symlink into a versioned directory; binding the
-  # link would bind a dangling target.
-  defp resolve_links(path, depth \\ 0)
-  defp resolve_links(path, depth) when depth > 8, do: path
-
-  defp resolve_links(path, depth) do
-    case File.read_link(path) do
-      {:ok, target} -> target |> Path.expand(Path.dirname(path)) |> resolve_links(depth + 1)
-      {:error, _} -> path
+  # An empty or unpinned cache is an install state, not a bug: say what it is and
+  # how to fill it, beside the `{:cli_not_cached, provider}` the caller gets.
+  defp require_cached(set, provider, opts) do
+    with {:error, _} = error <- CliSet.require_cli(set, provider) do
+      Logger.error("ContainerSpawn: " <> CliSet.not_cached_message(provider, opts))
+      error
     end
   end
 

@@ -241,8 +241,6 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
         SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}}),
       provider: "claude",
       image: "localhost/arbiter-dev/beam:abc123",
-      claude_path: ctx.cli,
-      arb_path: ctx.cli,
       egress: egress,
       arb_token: "arb-tok",
       node: %{id: ctx.node.id, capacity: %{"mem_total" => 8 * 1024 * 1024 * 1024}},
@@ -616,9 +614,7 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
       preflight: false,
       nodes: [row],
       image: "localhost/arbiter-dev/beam:abc123",
-      egress: egress,
-      claude_path: ctx.cli,
-      arb_path: ctx.cli
+      egress: egress
     )
   end
 

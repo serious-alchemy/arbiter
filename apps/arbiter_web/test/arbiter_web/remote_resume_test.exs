@@ -442,9 +442,7 @@ defmodule ArbiterWeb.RemoteResumeTest do
       preflight: false,
       nodes: [row],
       image: "localhost/arbiter-dev/beam:abc123",
-      egress: egress,
-      claude_path: ctx.cli,
-      arb_path: ctx.cli
+      egress: egress
     ]
   end
 

@@ -35,7 +35,14 @@ defmodule Arbiter.Worker.CliFetcher.SchedulerTest do
 
   defp start(ctx, extra \\ []) do
     opts =
-      [name: nil, enabled: true, initial_delay_ms: :infinity, fetch_opts: ctx.fetch_opts] ++ extra
+      extra ++
+        [
+          name: nil,
+          enabled: true,
+          initial_delay_ms: :infinity,
+          fill_delay_ms: :infinity,
+          fetch_opts: ctx.fetch_opts
+        ]
 
     start_supervised!({Scheduler, opts})
   end
@@ -63,6 +70,29 @@ defmodule Arbiter.Worker.CliFetcher.SchedulerTest do
     assert %DateTime{} = status.checked_at
   end
 
+  test "the boot fill caches the pinned CLIs without waiting for the daily run", ctx do
+    {:ok, _} = Settings.set_worker_cli_versions(%{"claude" => "2.1.308", "codex" => "0.164.0"})
+    pid = start(ctx)
+
+    # The boot timer's message, sent by hand; the task it starts is awaited by its pid.
+    send(pid, :fill)
+    %Task{pid: task} = :sys.get_state(pid).task
+    ref = Process.monitor(task)
+    assert_receive {:DOWN, ^ref, :process, ^task, _}, 5_000
+    _ = :sys.get_state(pid)
+
+    assert Scheduler.status(pid).ensured == %{"claude" => :ok, "codex" => :ok, "arb" => :ok}
+
+    for {name, version} <- [{"claude", "2.1.308"}, {"codex", "0.164.0"}, {"arb", "1.2.3"}] do
+      assert {:ok, _} = Cache.lookup(name, version, ctx.fetch_opts)
+    end
+
+    # It is not the daily job: nothing was bumped and no check is recorded.
+    status = Scheduler.status(pid)
+    assert status.checked_at == nil
+    assert Settings.worker_cli_versions()["claude"] == "2.1.308"
+  end
+
   test "while held it still reports what is available but changes nothing", ctx do
     {:ok, _} = Settings.set_worker_cli_versions(%{"claude" => "2.1.308", "codex" => "0.164.0"})
     {:ok, _} = Settings.set_worker_cli_set_hold("a1b2c3d4")
@@ -84,7 +114,8 @@ defmodule Arbiter.Worker.CliFetcher.SchedulerTest do
     assert Scheduler.status(pid).latest == %{"claude" => nil, "codex" => nil}
   end
 
-  test "status/1 of a scheduler that is not running is a disabled placeholder" do
+  test "status/1 of a scheduler that is not running
+ is a disabled placeholder" do
     assert %{enabled: false, checked_at: nil} = Scheduler.status(:nonexistent_cli_scheduler)
   end
 end

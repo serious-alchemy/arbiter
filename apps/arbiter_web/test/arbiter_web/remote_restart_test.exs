@@ -279,8 +279,6 @@ defmodule ArbiterWeb.RemoteRestartTest do
         SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}}),
       provider: "claude",
       image: "localhost/arbiter-dev/beam:abc123",
-      claude_path: ctx.cli,
-      arb_path: ctx.cli,
       egress: egress,
       arb_token: "arb-tok",
       node: %{id: ctx.node.id, capacity: %{}}
@@ -833,8 +831,6 @@ defmodule ArbiterWeb.RemoteRestartTest do
                  security: policy,
                  provider: "claude",
                  image: "localhost/arbiter-dev/beam:abc123",
-                 claude_path: ctx.cli,
-                 arb_path: ctx.cli,
                  egress: egress,
                  arb_token: "arb-tok",
                  node: %{id: ctx.node.id, capacity: %{}}

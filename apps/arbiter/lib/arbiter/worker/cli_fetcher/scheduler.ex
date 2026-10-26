@@ -22,7 +22,14 @@ defmodule Arbiter.Worker.CliFetcher.Scheduler do
     * `:enabled` — master switch. `ARBITER_CLI_FETCHER=0` also disables it, for
       air-gapped installs.
     * `:interval_ms` — default 24 hours.
-    * `:initial_delay_ms` — delay before the first run (default 5 minutes).
+    * `:initial_delay_ms` — delay before the first full run (default 5 minutes).
+    * `:fill_delay_ms` — delay before the boot fill (default 10 seconds): the
+      cache fill alone, with no upstream check or bump, so workers can spawn
+      right after a start or an upgrade instead of waiting out the first run.
+      A pinned version already cached costs no network. `:infinity` skips it.
+
+  Where the scheduler is off, `mix arbiter.fetch_clis` (a release:
+  `Arbiter.Release.fetch_clis/0`) fills the cache by hand.
   """
 
   use GenServer
@@ -34,6 +41,7 @@ defmodule Arbiter.Worker.CliFetcher.Scheduler do
 
   @default_interval_ms :timer.hours(24)
   @default_initial_delay_ms :timer.minutes(5)
+  @default_fill_delay_ms :timer.seconds(10)
   @run_timeout_ms :timer.minutes(30)
 
   @empty %{enabled: false, checked_at: nil, latest: %{}, bump: %{}, ensured: %{}}
@@ -85,6 +93,11 @@ defmodule Arbiter.Worker.CliFetcher.Scheduler do
       ms -> Process.send_after(self(), :tick, ms)
     end
 
+    case Keyword.get(opts, :fill_delay_ms, config(:fill_delay_ms, @default_fill_delay_ms)) do
+      :infinity -> :ok
+      ms -> Process.send_after(self(), :fill, ms)
+    end
+
     {:ok, state}
   end
 
@@ -98,6 +111,15 @@ defmodule Arbiter.Worker.CliFetcher.Scheduler do
   def handle_info(:tick, state) do
     Process.send_after(self(), :tick, state.interval_ms)
     {:noreply, start_run(state)}
+  end
+
+  def handle_info(:fill, state), do: {:noreply, start_run(state, :fill)}
+
+  # The boot fill reports only what it cached; it is not the daily job, so it
+  # leaves `checked_at` and the upstream view alone.
+  def handle_info({ref, {:fill, ensured}}, %{task: %Task{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, %{state | report: %{state.report | ensured: ensured}, task: nil}}
   end
 
   def handle_info({ref, report}, %{task: %Task{ref: ref}} = state) do
@@ -115,16 +137,40 @@ defmodule Arbiter.Worker.CliFetcher.Scheduler do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
-  defp start_run(%{task: nil} = state) do
+  defp start_run(state, mode \\ :full)
+
+  defp start_run(%{task: nil} = state, mode) do
     fetch_opts = state.fetch_opts
-    %{state | task: Task.async(fn -> run(fetch_opts) end)}
+    %{state | task: Task.async(fn -> run(fetch_opts, mode) end)}
   end
 
-  defp start_run(state), do: state
+  defp start_run(state, _mode), do: state
 
-  defp run(fetch_opts) do
-    checks = Bump.check(fetch_opts)
+  # `:full` bumps the pins and fills the cache; `:fill` (the boot run) only fills it.
+  defp run(fetch_opts, mode) do
+    checks = if mode == :full, do: Bump.check(fetch_opts), else: %{}
+    ensured = ensure(fetch_opts)
 
+    case mode do
+      :fill ->
+        {:fill, ensured}
+
+      :full ->
+        %{
+          enabled: true,
+          checked_at: DateTime.utc_now(),
+          latest: Map.new(checks, fn {name, %{latest: l}} -> {name, latest_version(l)} end),
+          bump: Map.new(checks, fn {name, %{action: a}} -> {name, a} end),
+          ensured: ensured
+        }
+    end
+  rescue
+    e ->
+      Logger.warning("CliFetcher.Scheduler: run raised: #{Exception.message(e)}")
+      %{@empty | enabled: true, checked_at: DateTime.utc_now()}
+  end
+
+  defp ensure(fetch_opts) do
     ensured =
       Map.new(CliFetcher.ensure_pinned(fetch_opts), fn
         {name, {:ok, _}} -> {name, :ok}
@@ -139,17 +185,7 @@ defmodule Arbiter.Worker.CliFetcher.Scheduler do
         :ok
     end)
 
-    %{
-      enabled: true,
-      checked_at: DateTime.utc_now(),
-      latest: Map.new(checks, fn {name, %{latest: l}} -> {name, latest_version(l)} end),
-      bump: Map.new(checks, fn {name, %{action: a}} -> {name, a} end),
-      ensured: ensured
-    }
-  rescue
-    e ->
-      Logger.warning("CliFetcher.Scheduler: run raised: #{Exception.message(e)}")
-      %{@empty | enabled: true, checked_at: DateTime.utc_now()}
+    ensured
   end
 
   defp latest_version({:ok, version}), do: version

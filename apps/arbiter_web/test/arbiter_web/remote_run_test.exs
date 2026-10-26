@@ -358,8 +358,6 @@ defmodule ArbiterWeb.RemoteRunTest do
           security: policy,
           provider: "claude",
           image: "localhost/arbiter-dev/beam:abc123",
-          claude_path: ctx.cli,
-          arb_path: ctx.cli,
           egress: egress,
           arb_token: "arb-tok",
           node: %{id: ctx.node.id, capacity: %{"mem_total" => 8 * 1024 * 1024 * 1024}}
@@ -381,10 +379,19 @@ defmodule ArbiterWeb.RemoteRunTest do
 
       # The stashed spawn carries the request (not the consumed handle), so a
       # re-open places the run again.
-      assert %{remote: %{prepared: nil, request: %{name: name}}} =
+      assert %{remote: %{prepared: nil, request: %{name: name} = request}} =
                Worker.state(pid).meta.claude_spawn
 
       assert String.starts_with?(name, "arb-bd-rw9e2e")
+
+      # The shelf the node fetches from is the CliSet (SI1): the hashes handed to
+      # the node are the set's claude and arb files, nothing from the host.
+      {:ok, set} = Arbiter.Worker.CliSet.resolve([])
+
+      expected =
+        for cli <- set.clis, cli.name in ["claude", "arb"], f <- cli.files, do: f.sha256
+
+      assert Enum.sort(for {sha, _name, _dest} <- request.cli, do: sha) == Enum.sort(expected)
 
       GenServer.stop(pid, :normal)
       _ = handle
@@ -448,8 +455,6 @@ defmodule ArbiterWeb.RemoteRunTest do
                  security: policy,
                  provider: "claude",
                  image: "localhost/arbiter-dev/beam:abc123",
-                 claude_path: ctx.cli,
-                 arb_path: ctx.cli,
                  egress: egress,
                  arb_token: "arb-tok",
                  node: %{id: ctx.node.id, capacity: %{"mem_total" => 8 * 1024 * 1024 * 1024}}
@@ -522,8 +527,6 @@ defmodule ArbiterWeb.RemoteRunTest do
                  security: policy,
                  provider: "claude",
                  image: "localhost/arbiter-dev/beam:abc123",
-                 claude_path: ctx.cli,
-                 arb_path: ctx.cli,
                  egress: egress,
                  node: %{id: ctx.node.id, capacity: %{}}
                )

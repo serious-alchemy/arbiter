@@ -1,3 +1,13 @@
+# SI1: the CLIs a container spawn mounts and a publish layers come from the
+# pinned upstream cache (`Arbiter.Worker.CliSet`), never from a CLI installed on
+# the host. The suite gets a fixture cache by default; a test about an empty or
+# different cache passes its own `:cli_cache_root` (a call's options win).
+cli_fixture_root =
+  Path.join(System.tmp_dir!(), "arbiter-cli-set-#{System.unique_integer([:positive])}")
+
+Application.put_env(:arbiter, :cli_set_opts, Arbiter.Worker.CliSetFixture.put(cli_fixture_root))
+System.at_exit(fn _ -> File.rm_rf(cli_fixture_root) end)
+
 # bd-5z9yvb: the merge-time freshness check shells out to a local checkout; with
 # no repo path it can't tell and syncs. Suites that aren't about freshness get a
 # probe that says "up to date"; the freshness tests override and restore it.

@@ -64,3 +64,8 @@ config :phoenix_live_view,
   enable_expensive_runtime_checks: true
 
 config :phoenix, :stacktrace_depth, 20
+
+# SI1: workers run only the verified, pinned upstream CLIs (Arbiter.Worker.CliSet), and the
+# scheduler is what fills that cache, so the dogfooded dev coordinator needs it on too.
+# `ARBITER_CLI_FETCHER=0` still turns it off; `mix arbiter.fetch_clis` fills the cache by hand.
+config :arbiter, :cli_fetcher, enabled: true

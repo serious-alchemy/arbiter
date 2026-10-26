@@ -2019,8 +2019,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       "cli #{name}",
       :warn,
       "pinned #{pinned}#{cli_latest(name, pinned, nil)}, not yet in the verified cache",
-      "The scheduler fetches and verifies it on its next run (daily); until then " <>
-        "images cannot carry #{name} #{pinned}."
+      "The scheduler fetches and verifies it on its next run; until then workers cannot " <>
+        "spawn with #{name} #{pinned} and images cannot carry it. Fill the cache now: " <>
+        "mix arbiter.fetch_clis (a release: bin/arbiter eval 'Arbiter.Release.fetch_clis()')."
     )
   end
 
