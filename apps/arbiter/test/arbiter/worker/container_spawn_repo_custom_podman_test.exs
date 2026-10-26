@@ -31,6 +31,7 @@ defmodule Arbiter.Worker.ContainerSpawnRepoCustomPodmanTest do
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.Image.Builder
   alias Arbiter.Worker.PrivateClone
+  alias Arbiter.Worker.RunTmp
 
   @moduletag :podman
   @moduletag timeout: 900_000
@@ -38,6 +39,7 @@ defmodule Arbiter.Worker.ContainerSpawnRepoCustomPodmanTest do
   # What codex does first: load $CODEX_HOME/config.toml, then a scratch file in $TMPDIR.
   @codex_stand_in """
   #!/bin/sh
+  : "${TMPDIR:?TMPDIR is not set in the container}"
   echo "codex uid=$(id -u)"
   cat "$CODEX_HOME/config.toml" > /dev/null || { echo "codex: config.toml unreadable"; exit 13; }
   : > "$TMPDIR/codex-probe" || { echo "codex: TMPDIR unwritable"; exit 14; }
@@ -47,6 +49,7 @@ defmodule Arbiter.Worker.ContainerSpawnRepoCustomPodmanTest do
   # What claude does first: its per-uid scratch dir under $TMPDIR, then its config dir.
   @claude_stand_in """
   #!/bin/sh
+  : "${TMPDIR:?TMPDIR is not set in the container}"
   echo "claude uid=$(id -u)"
   mkdir "$TMPDIR/claude-$(id -u)" || { echo "claude: mkdir EACCES"; exit 13; }
   : > "$CLAUDE_CONFIG_DIR/claude-probe" || { echo "claude: config dir unwritable"; exit 14; }
@@ -176,7 +179,10 @@ defmodule Arbiter.Worker.ContainerSpawnRepoCustomPodmanTest do
       exec: "/bin/sh",
       argv: ["sh", "-c", provider],
       cd: ctx.clone,
-      env: ContainerSpawn.apply_env([], request),
+      # Dispatch's env carries the run's TMPDIR/TMP/TEMP (`RunTmp.env_pairs/1`);
+      # `apply_env/2` repoints them for a codex container. An empty env would leave
+      # TMPDIR unset in the container and the stand-ins would write to `/`.
+      env: ContainerSpawn.apply_env(RunTmp.env_pairs(tmp_dir), request),
       sandbox: request
     }
 
@@ -195,6 +201,7 @@ defmodule Arbiter.Worker.ContainerSpawnRepoCustomPodmanTest do
       {_request, out, status} = spawn_and_run(ctx, unquote(provider))
 
       assert status == 0, out
+      refute out =~ "Read-only file system"
       refute out =~ "Permission denied"
       refute out =~ "EACCES"
       assert out =~ "#{unquote(provider)} uid=#{host_uid}"

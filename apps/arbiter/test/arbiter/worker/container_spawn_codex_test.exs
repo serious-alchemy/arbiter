@@ -414,6 +414,18 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
       refute Enum.any?(wrapped.argv, &String.contains?(&1, "sk-secret"))
     end
 
+    test "TMPDIR reaches the container as the writable temp subdir, not dropped", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      env = ContainerSpawn.apply_env(Arbiter.Worker.RunTmp.env_pairs(ctx.tmp_dir), request)
+
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request, env))
+
+      {"TMPDIR", tmp} = List.keyfind(wrapped.env, "TMPDIR", 0)
+      assert tmp == Path.join(ctx.tmp_dir, "tmp")
+      assert has_inherit?(wrapped.argv, "TMPDIR")
+      assert "#{ctx.tmp_dir}:#{ctx.tmp_dir}:rw" in mounts(wrapped.argv)
+    end
+
     test "ARB_HOST and the proxy are set, so the -c MCP url and arb work unchanged", ctx do
       {:ok, request} = ContainerSpawn.prepare(ctx.opts)
       env = Map.new(request.env)
