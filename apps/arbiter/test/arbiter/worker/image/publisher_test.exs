@@ -360,32 +360,19 @@ defmodule Arbiter.Worker.Image.PublisherTest do
 
     # bd-czvxfs: a pod has no host bind mount, so an image whose CLI layer lacks `arb`
     # leaves the agent unable to run `arb done` (the first cluster run, bd-bmymrp, ended
-    # without it). `ContainerSpawn.cli_mounts/2` treats a missing host `arb` as a warning
+    # without it). The local bind mount treats a missing `arb` as a warning
     # for a local container; for a published image it must refuse.
     test "a CLI layer that would ship no arb is refused and no CLI layer is built",
          %{opts: opts, ctx: ctx, tmp: tmp} do
-      claude = Path.join(tmp, "claude-only")
-      File.write!(claude, "#!/bin/sh\n")
+      no_arb = CliSetFixture.put(Path.join(tmp, "no-arb"), arb: nil)
 
-      no_arb =
-        opts
-        |> Keyword.delete(:cli)
-        |> Keyword.put(:claude_path, claude)
-        |> Keyword.put(:find_executable, fn _ -> nil end)
-
-      assert {:error, {:cli_unavailable, {:executable_not_found, "arb"}}} =
-               Publisher.ensure_ready(ctx, no_arb)
+      assert {:error, {:cli_unavailable, {:cli_not_cached, "arb"}}} =
+               Publisher.ensure_ready(ctx, Keyword.merge(opts, no_arb))
 
       refute Enum.any?(drain(), fn
                {:build, _, cf, _, _} -> cf =~ "/opt/arbiter/cli"
                _ -> false
              end)
-
-      assert {:error, {:cli_unavailable, {:executable_not_found, "arb"}}} =
-               Publisher.ensure_ready(
-                 ctx,
-                 Keyword.put(opts, :cli, [{claude, "/opt/arbiter/cli/claude"}])
-               )
     end
 
     test "credentials travel by 0600 auth file only: never argv, and the file is gone after",
