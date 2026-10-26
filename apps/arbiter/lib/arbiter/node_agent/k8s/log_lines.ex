@@ -20,6 +20,16 @@ defmodule Arbiter.NodeAgent.K8s.LogLines do
   @ts ~r/\A(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z\z/
   @epoch "0001-01-01T00:00:00Z"
 
+  # The container runtime cuts a line longer than its read buffer (16 KiB for containerd and
+  # docker, 8 KiB for CRI-O) into partial records, and a kubelet that stamps every record
+  # (older ones do; newer ones stamp only the first) writes `<timestamp> ` into the middle of
+  # the line, where the record ended: a multiple of the buffer size from the line's start.
+  # `unsplice/4` removes those, and only those: a fixed-width kubelet timestamp plus the
+  # delimiter, at a 4 KiB boundary, not earlier than the line's own timestamp.
+  @chunk 4096
+  @stamp_size 30
+  @stamp ~r/\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z\z/
+
   @type cursor :: String.t()
   @type line :: {cursor(), binary()}
   @type t :: %{
@@ -76,6 +86,7 @@ defmodule Arbiter.NodeAgent.K8s.LogLines do
 
   defp take(reader, raw) do
     {ts, at, text} = split(reader, raw)
+    text = unsplice(text, @chunk, at, [])
     n = if at == reader.at, do: reader.n + 1, else: 1
     reader = %{reader | ts: ts, at: at, n: n}
 
@@ -92,6 +103,27 @@ defmodule Arbiter.NodeAgent.K8s.LogLines do
       {ts, at, text}
     else
       _ -> {reader.ts || @epoch, reader.at || {0, 0}, raw}
+    end
+  end
+
+  defp unsplice(rest, off, _at, acc) when byte_size(rest) < off + @stamp_size + 1,
+    do: IO.iodata_to_binary([acc, rest])
+
+  defp unsplice(rest, off, at, acc) do
+    <<head::binary-size(off), stamp::binary-size(@stamp_size), delim, tail::binary>> = rest
+
+    if delim == ?\s and spliced_stamp?(stamp, at),
+      do: unsplice(tail, @chunk, at, [acc, head]),
+      else: unsplice(rest, off + @chunk, at, acc)
+  end
+
+  # The kubelet's fixed `2006-01-02T15:04:05.000000000Z` form, at or after the line's own.
+  defp spliced_stamp?(stamp, {secs, _} = at) do
+    with true <- Regex.match?(@stamp, stamp),
+         {:ok, {s, _} = stamped} <- parse_ts(stamp) do
+      stamped >= at and s - secs < 3600
+    else
+      _ -> false
     end
   end
 
