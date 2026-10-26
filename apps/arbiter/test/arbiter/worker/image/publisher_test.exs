@@ -8,6 +8,8 @@ defmodule Arbiter.Worker.Image.PublisherTest do
 
   use ExUnit.Case, async: true
 
+  alias Arbiter.Worker.CliSet
+  alias Arbiter.Worker.CliSetFixture
   alias Arbiter.Worker.Image.Builder
   alias Arbiter.Worker.Image.Publisher
 
@@ -19,11 +21,6 @@ defmodule Arbiter.Worker.Image.PublisherTest do
   setup %{tmp_dir: tmp} do
     builder = start_supervised!({Builder, name: nil})
     server = start_supervised!({Publisher, name: nil, boot: false})
-
-    claude = Path.join(tmp, "claude")
-    arb = Path.join(tmp, "arb")
-    File.write!(claude, "claude-binary")
-    File.write!(arb, "arb-binary")
 
     cache = Path.join(tmp, "cache")
     for dir <- ["deps", "_build", "mix_home"], do: File.mkdir_p!(Path.join(cache, dir))
@@ -59,12 +56,13 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       anonymous_probe: fn _cfg, _repository -> :private end,
       runner: runner(self()),
       scratch: Path.join(tmp, "scratch"),
-      cli: [{claude, "/opt/arbiter/cli/claude"}, {arb, "/opt/arbiter/cli/arb"}],
       deps_ensure: fn _repo, _base, _tag, _opts ->
         {:ok, %{dir: cache, seeded?: false, lock_hash: @lock}}
       end,
       resolver: fn _ref -> {:ok, "sha256:" <> String.duplicate("d", 64)} end
     ]
+
+    opts = opts ++ CliSetFixture.put(Path.join(tmp, "cli"))
 
     ctx = %{plan: plan, repo: "vstim", repo_path: "/repo", base: "main", seed_paths: nil}
     {:ok, opts: opts, ctx: ctx, server: server, tmp: tmp, cache: cache}
@@ -94,7 +92,8 @@ defmodule Arbiter.Worker.Image.PublisherTest do
 
     send(
       test,
-      {:build, tag, File.read!(file), File.ls!(context) |> Enum.sort(), cli_files(context)}
+      {:build, tag, File.read!(file), File.ls!(context) |> Enum.sort(),
+       %{args: args, context: context_files(context)}}
     )
 
     {"", 0}
@@ -123,10 +122,13 @@ defmodule Arbiter.Worker.Image.PublisherTest do
 
   defp file_mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
 
-  defp cli_files(context) do
-    case File.ls(Path.join(context, "cli")) do
-      {:ok, files} -> Enum.sort(files)
-      _ -> []
+  # `{name, sha256, mode}` of the files at the top of a build context.
+  defp context_files(context) do
+    for name <- context |> File.ls!() |> Enum.sort(),
+        File.regular?(Path.join(context, name)) do
+      path = Path.join(context, name)
+      sha = :crypto.hash(:sha256, File.read!(path)) |> Base.encode16(case: :lower)
+      {name, sha, Bitwise.band(File.stat!(path).mode, 0o777)}
     end
   end
 
@@ -139,7 +141,7 @@ defmodule Arbiter.Worker.Image.PublisherTest do
   end
 
   describe "ensure_ready/2 with the full image" do
-    test "pushes toolchain, CLI and seed layers and returns the seed layer, digest-pinned",
+    test "pushes toolchain, seed and the CLI run image, in that order, digest-pinned",
          %{opts: opts, ctx: ctx} do
       assert {:ok, result} = Publisher.ensure_ready(ctx, opts)
 
@@ -147,39 +149,213 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       assert result.ref == "registry.example.com/arbiter/vstim/worker@sha256:" <> expected_digest
       assert Arbiter.Worker.Image.Registry.digest_pinned?(result.ref)
 
-      assert [:toolchain, :cli, :seed] = Enum.map(result.layers, & &1.layer)
+      assert [:toolchain, :seed, :cli] = Enum.map(result.layers, & &1.layer)
       assert Enum.all?(result.layers, &Arbiter.Worker.Image.Registry.digest_pinned?(&1.ref))
+      assert List.last(result.layers).ref == result.ref
 
       pushes = for {:push, remote} <- drain(), do: remote
+      lock12 = String.slice(@lock, 0, 12)
 
       assert [
                "registry.example.com/arbiter/vstim/worker:abc123def456",
-               "registry.example.com/arbiter/vstim/worker:abc123def456-cli" <> cli_rest,
-               "registry.example.com/arbiter/vstim/worker:abc123def456-cli" <> seed_rest
+               "registry.example.com/arbiter/vstim/worker:abc123def456-seed" <> seed_rest,
+               "registry.example.com/arbiter/vstim/worker:abc123def456-seed" <> run_rest
              ] = pushes
 
-      assert cli_rest =~ ~r/\A[0-9a-f]{8}\z/
-      assert seed_rest =~ ~r/\A[0-9a-f]{8}-seed#{String.slice(@lock, 0, 12)}-[0-9a-f]{8}\z/
+      assert seed_rest =~ ~r/\A#{lock12}-[0-9a-f]{8}\z/
+      assert run_rest =~ ~r/\A#{lock12}-[0-9a-f]{8}-cli[0-9a-f]{8}\z/
+      assert result.cli_set == run_rest |> String.split("-cli") |> List.last()
     end
 
-    test "the CLI layer ships claude and arb; the seed layer ships DepsCache output",
+    test "one COPY per CLI in churn order, above the seed, each built with --timestamp 0",
          %{opts: opts, ctx: ctx} do
       assert {:ok, _} = Publisher.ensure_ready(ctx, opts)
       builds = for {:build, _, _, _, _} = b <- drain(), do: b
 
-      assert {:build, _, cli_cf, _ctx_entries, ["arb", "claude"]} =
-               Enum.find(builds, fn {:build, _, cf, _, _} -> cf =~ "/opt/arbiter/cli" end)
+      assert [seed, codex, claude, arb] =
+               Enum.map(builds, fn {:build, tag, cf, _entries, extra} -> {tag, cf, extra} end)
 
-      assert cli_cf =~ "FROM localhost/arbiter-dev/generated-x:abc123def456"
-      assert cli_cf =~ "COPY cli/ /opt/arbiter/cli/"
-
-      assert {:build, _, seed_cf, entries, _} =
-               Enum.find(builds, fn {:build, _, cf, _, _} -> cf =~ "/opt/arbiter/seed" end)
-
+      {seed_tag, seed_cf, _} = seed
+      assert seed_cf =~ "FROM localhost/arbiter-dev/generated-x:abc123def456"
       assert seed_cf =~ "COPY deps/ /opt/arbiter/seed/deps/"
       assert seed_cf =~ "COPY _build/ /opt/arbiter/seed/_build/"
       assert seed_cf =~ "COPY mix_home/ /opt/arbiter/seed/mix_home/"
-      assert "deps" in entries
+
+      {codex_tag, codex_cf, codex_extra} = codex
+      {claude_tag, claude_cf, claude_extra} = claude
+      {_arb_tag, arb_cf, arb_extra} = arb
+
+      assert codex_cf =~ "FROM #{seed_tag}\n"
+      assert claude_cf =~ "FROM #{codex_tag}\n"
+      assert arb_cf =~ "FROM #{claude_tag}\n"
+
+      assert codex_cf =~ "COPY bwrap codex codex-code-mode-host rg /opt/arbiter/cli/\n"
+      assert claude_cf =~ "COPY claude /opt/arbiter/cli/\n"
+      assert arb_cf =~ "COPY arb arb.escript /opt/arbiter/cli/\n"
+
+      for extra <- [codex_extra, claude_extra, arb_extra] do
+        assert Enum.chunk_every(extra.args, 2, 1) |> Enum.member?(["--timestamp", "0"])
+      end
+
+      refute Enum.chunk_every(elem(seed, 2).args, 2, 1) |> Enum.member?(["--timestamp", "0"])
+
+      # Only the CLI contexts are the set's own directories, and no file in them
+      # is a host install: every one is a materialized copy of the cache.
+      assert Enum.map(claude_extra.context, &elem(&1, 0)) == ["claude"]
+      assert Enum.all?(claude_extra.context, fn {_, _, mode} -> mode == 0o755 end)
+    end
+
+    test "the run image carries the set's labels, with per-CLI version and integrity",
+         %{opts: opts, ctx: ctx} do
+      assert {:ok, result} = Publisher.ensure_ready(ctx, opts)
+      builds = for {:build, _, cf, _, _} <- drain(), do: cf
+      final = List.last(builds)
+      {:ok, set} = CliSet.resolve(opts)
+
+      assert result.cli_set == set.set8
+
+      for {key, value} <- CliSet.labels(set) do
+        assert final =~ "LABEL #{Jason.encode!(key)}=#{Jason.encode!(value)}\n"
+      end
+
+      assert final =~ ~s(LABEL "arbiter.cli-set"="#{set.set8}")
+      assert final =~ ~s(LABEL "arbiter.cli-providers"="claude,codex")
+      assert final =~ ~s(LABEL "arbiter.cli.claude.version"="2.1.310")
+      assert final =~ ~s(LABEL "arbiter.cli.claude.integrity"="sha512-fixture")
+      assert final =~ ~s(LABEL "arbiter.cli.codex.version"="0.130.0")
+      assert final =~ ~s(LABEL "arbiter.cli.arb.version"="1.2.3")
+    end
+
+    test "identical pinned CLI files give an identical set hash and byte-identical layers",
+         %{opts: opts, ctx: ctx, tmp: tmp} do
+      assert {:ok, one} = Publisher.ensure_ready(ctx, opts)
+      first = drain()
+
+      # A second publisher (no shared cache) over an independently filled cache.
+      other = Keyword.merge(opts, CliSetFixture.put(Path.join(tmp, "other-cache")))
+      other = Keyword.put(other, :scratch, Path.join(tmp, "scratch-2"))
+
+      other =
+        Keyword.put(
+          other,
+          :server,
+          start_supervised!({Publisher, name: nil, boot: false}, id: :other)
+        )
+
+      assert {:ok, two} = Publisher.ensure_ready(ctx, other)
+      second = drain()
+
+      assert one.cli_set == two.cli_set
+      assert one.tag_ref == two.tag_ref
+
+      cli_builds = fn msgs ->
+        for {:build, _, cf, _, %{context: files}} <- msgs,
+            cf =~ "/opt/arbiter/cli",
+            do: {cf, files}
+      end
+
+      assert [_, _, _] = cli_builds.(first)
+      # Same Containerfiles and the same bytes and modes in each layer's context.
+      assert cli_builds.(first) == cli_builds.(second)
+    end
+
+    test "changed claude bytes change the set hash and the run tag, and only claude's layer",
+         %{opts: opts, ctx: ctx, tmp: tmp} do
+      assert {:ok, one} = Publisher.ensure_ready(ctx, opts)
+      first = drain()
+
+      bumped =
+        CliSetFixture.put(Path.join(tmp, "bumped"),
+          claude: "2.1.311",
+          content: %{"claude" => "a newer claude"}
+        )
+
+      assert {:ok, two} = Publisher.ensure_ready(ctx, Keyword.merge(opts, bumped))
+      second = drain()
+
+      refute one.cli_set == two.cli_set
+      refute one.tag_ref == two.tag_ref
+
+      contexts = fn msgs ->
+        for {:build, _, cf, _, %{context: files}} <- msgs, cf =~ "/opt/arbiter/cli", do: files
+      end
+
+      [codex1, claude1, arb1] = contexts.(first)
+      [codex2, claude2, arb2] = contexts.(second)
+      assert codex1 == codex2
+      assert arb1 == arb2
+      refute claude1 == claude2
+    end
+
+    test "tags the old layer graph used are never rewritten, and nothing remote is deleted",
+         %{opts: opts, ctx: ctx} do
+      assert {:ok, result} = Publisher.ensure_ready(ctx, opts)
+      msgs = drain()
+      pushes = for {:push, remote} <- msgs, do: remote
+      lock12 = String.slice(@lock, 0, 12)
+
+      # The scheme before SI1: CLI layer `<hash12>-cli<sha8>` below the seed
+      # `<hash12>-cli<sha8>-seed...`. A digest a pod holds from then names those
+      # blobs; republishing under the new scheme must not push over those tags.
+      legacy = ~r/worker:abc123def456-cli[0-9a-f]{8}(-seed#{lock12}-[0-9a-f]{8})?\z/
+      refute Enum.any?(pushes, &Regex.match?(legacy, &1))
+      assert result.ref =~ ~r/@sha256:[0-9a-f]{64}\z/
+
+      # Nothing is removed from the registry: `rmi` only ever names local images.
+      for {:podman, ["rmi" | rest]} <- msgs do
+        refute Enum.any?(rest, &String.starts_with?(&1, "registry.example.com"))
+      end
+    end
+
+    test "republishing the same set returns the same refs a pod was handed",
+         %{opts: opts, ctx: ctx, server: server} do
+      assert {:ok, one} = Publisher.ensure_ready(ctx, opts)
+      _ = drain()
+
+      # A fresh publisher process (a restart): nothing cached, the set unchanged.
+      fresh = start_supervised!({Publisher, name: nil, boot: false}, id: :fresh)
+      assert fresh != server
+      assert {:ok, two} = Publisher.ensure_ready(ctx, Keyword.put(opts, :server, fresh))
+
+      assert two.ref == one.ref
+      assert Enum.map(two.layers, & &1.ref) == Enum.map(one.layers, & &1.ref)
+    end
+
+    test "a publish with no cached claude fails before a seed is built", %{
+      opts: opts,
+      ctx: ctx,
+      tmp: tmp
+    } do
+      empty = CliSetFixture.put(Path.join(tmp, "empty"), claude: nil)
+
+      assert {:error, {:cli_unavailable, {:cli_not_cached, "claude"}}} =
+               Publisher.ensure_ready(ctx, Keyword.merge(opts, empty))
+
+      assert for({:build, _, _, _, _} = b <- drain(), do: b) == []
+    end
+
+    test "the cached image is keyed on the set hash: new bytes publish again, the same bytes do not",
+         %{opts: opts, ctx: ctx, tmp: tmp} do
+      assert {:ok, one} = Publisher.ensure_ready(ctx, opts)
+      _ = drain()
+
+      assert {:ok, ^one} = Publisher.ensure_ready(ctx, opts)
+      assert drain() == []
+
+      # The same bytes under another version string: still the cached image.
+      renamed =
+        CliSetFixture.put(Path.join(tmp, "renamed"),
+          claude: "2.1.311",
+          content: %{"claude" => "claude-binary-2.1.310"}
+        )
+
+      assert {:ok, ^one} = Publisher.ensure_ready(ctx, Keyword.merge(opts, renamed))
+      assert drain() == []
+
+      changed = CliSetFixture.put(Path.join(tmp, "changed"), content: %{"claude" => "new bytes"})
+      assert {:ok, two} = Publisher.ensure_ready(ctx, Keyword.merge(opts, changed))
+      refute two.ref == one.ref
+      assert for({:push, _} = p <- drain(), do: p) != []
     end
 
     # bd-czvxfs: a pod has no host bind mount, so an image whose CLI layer lacks `arb`
@@ -305,7 +481,7 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       assert {:ok, result} = Publisher.ensure_ready(prebuilt_ctx(ctx), opts)
       msgs = drain()
 
-      assert [:cli, :seed] = Enum.map(result.layers, & &1.layer)
+      assert [:seed, :cli] = Enum.map(result.layers, & &1.layer)
       assert Arbiter.Worker.Image.Registry.digest_pinned?(result.ref)
       assert result.ref =~ "registry.example.com/arbiter/vstim/worker@sha256:"
 
@@ -315,15 +491,16 @@ defmodule Arbiter.Worker.Image.PublisherTest do
 
       refute :exists in msgs
       builds = for {:build, tag, cf, _, _} <- msgs, do: {tag, cf}
-      assert [{_, cli_cf}, {_, seed_cf}] = builds
-      assert cli_cf =~ "FROM #{@ci_ref}"
+      assert [{_, seed_cf}, {_, codex_cf}, {_, _claude_cf}, {_, _arb_cf}] = builds
+      assert seed_cf =~ "FROM #{@ci_ref}"
       assert seed_cf =~ "COPY deps/ /opt/arbiter/seed/deps/"
+      assert codex_cf =~ "FROM localhost/"
 
       pushes = for {:push, remote} <- msgs, do: remote
 
       assert [
-               "registry.example.com/arbiter/vstim/worker:feedfacecafe-cli" <> _,
-               "registry.example.com/arbiter/vstim/worker:feedfacecafe-cli" <> _
+               "registry.example.com/arbiter/vstim/worker:feedfacecafe-seed" <> _,
+               "registry.example.com/arbiter/vstim/worker:feedfacecafe-seed" <> _
              ] = pushes
     end
 
@@ -559,8 +736,13 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       assert {:ok, ^first} = Publisher.ensure_ready(ctx, opts)
       refute_received {:podman, _}
 
-      File.write!(Path.join(tmp, "claude"), "claude-binary-v2-with-a-different-size")
-      assert {:ok, second} = Publisher.ensure_ready(ctx, opts)
+      changed =
+        CliSetFixture.put(Path.join(tmp, "cli"),
+          claude: "2.1.311",
+          content: %{"claude" => "claude-binary-v2-with-a-different-size"}
+        )
+
+      assert {:ok, second} = Publisher.ensure_ready(ctx, Keyword.merge(opts, changed))
       refute second.ref == first.ref
       assert_received {:podman, ["push" | _]}
     end

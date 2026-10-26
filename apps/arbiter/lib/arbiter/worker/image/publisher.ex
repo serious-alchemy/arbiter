@@ -14,8 +14,8 @@ defmodule Arbiter.Worker.Image.Publisher do
 
   ## What it publishes
 
-    * `ensure_ready/2` — the **run image** for a plan: toolchain, CLI layer
-      (`claude` + `arb`) and warm `deps/_build` seed layer from `DepsCache`
+    * `ensure_ready/2` — the **run image** for a plan: toolchain, warm `deps/_build`
+      seed layer from `DepsCache`, then one layer per CLI of `Arbiter.Worker.CliSet`
       (`Pipeline`'s moduledoc has the layer and `seed_paths` rules);
     * `publish_controller/1` — the controller image, built from the retained
       release tarball and tagged with the server version. A boot task runs it
@@ -41,8 +41,8 @@ defmodule Arbiter.Worker.Image.Publisher do
   `:server`, `:timeout_ms`, `:config` (install registry map, see `Registry.fetch/1`),
   `:anonymous_probe` (`(Registry.t, repository -> :public | :private | {:unknown, _})`,
   the private-registry check, see `ensure_ready/2`),
-  `:runner` (podman, see `Image.run/3`), `:builder`, `:scratch`, `:cli`
-  (`[{host_path, container_path}]`), `:deps_ensure`
+  `:runner` (podman, see `Image.run/3`), `:builder`, `:scratch`, `:cli_set` and the other
+  `Arbiter.Worker.CliSet.option_keys/0` (which pinned CLI cache the layers come from), `:deps_ensure`
   (`(repo, base, image_tag, opts -> {:ok, %{dir:, lock_hash:}} | {:error, _})`),
   `:resolver`, `:artifact`, `:fingerprint` (`(ctx -> term)`, what invalidates a cached image), `:probe` (status reachability, `(Registry.t() -> :ok
   | {:error, term})`).
@@ -50,6 +50,7 @@ defmodule Arbiter.Worker.Image.Publisher do
 
   use GenServer
 
+  alias Arbiter.Worker.CliSet
   alias Arbiter.Worker.Image.Prebuilt
   alias Arbiter.Worker.Image.Publisher.Pipeline
   alias Arbiter.Worker.Image.Registry
@@ -132,7 +133,7 @@ defmodule Arbiter.Worker.Image.Publisher do
   # repository) whose
   # `DepsCache` seeds it (two repos can share a toolchain tag), the seed rules
   # and base, and a fingerprint of the inputs that change under a running server
-  # (the `claude`/`arb` binaries, `mix.lock`), so an update publishes again
+  # (the CLI set's content hash, `mix.lock`), so an update publishes again
   # rather than serving a stale `ref`. An entry for an older fingerprint is
   # dropped when the new one lands (`record_success/4`).
   defp image_key(%{plan: plan} = ctx, cfg, opts) do
@@ -147,18 +148,13 @@ defmodule Arbiter.Worker.Image.Publisher do
     end
   end
 
+  # The CLI set's content hash (`Arbiter.Worker.CliSet`), not path, size and mtime:
+  # a CLI bump with new bytes publishes again, and the same bytes under a new
+  # file never do. Read from the cache manifests, so cheap.
   defp cli_stamp(opts) do
-    case Pipeline.cli_files(opts) do
-      {:ok, files} ->
-        for {host, _dest} <- files do
-          case File.stat(host, time: :posix) do
-            {:ok, stat} -> {host, stat.size, stat.mtime}
-            {:error, reason} -> {host, reason}
-          end
-        end
-
-      {:error, reason} ->
-        reason
+    case CliSet.resolve(opts) do
+      {:ok, set} -> set.hash
+      {:error, reason} -> reason
     end
   end
 
@@ -389,12 +385,12 @@ defmodule Arbiter.Worker.Image.Publisher do
   end
 
   # An image entry is superseded by the same image under a newer fingerprint.
-  defp drop_superseded(cache, {:image, _, _, _, _, _, _} = key) do
-    prefix = key |> Tuple.delete_at(6) |> Tuple.to_list()
+  defp drop_superseded(cache, {:image, _, _, _, _, _, _, _} = key) do
+    prefix = key |> Tuple.delete_at(7) |> Tuple.to_list()
 
     Map.reject(cache, fn
-      {{:image, _, _, _, _, _, _} = other, _} ->
-        other != key and other |> Tuple.delete_at(6) |> Tuple.to_list() == prefix
+      {{:image, _, _, _, _, _, _, _} = other, _} ->
+        other != key and other |> Tuple.delete_at(7) |> Tuple.to_list() == prefix
 
       _ ->
         false

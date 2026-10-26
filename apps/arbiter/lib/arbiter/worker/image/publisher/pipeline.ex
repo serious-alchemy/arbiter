@@ -8,21 +8,30 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   ## Layers (§11)
 
   A `prebuilt` plan (KH14, `Arbiter.Worker.Image.Prebuilt`) has no toolchain
-  layer: the repo's CI image is pulled by its digest and layers 2 and 3 are
-  overlaid on it (the seed layer only for `seed: primary`).
+  layer: the repo's CI image is pulled by its digest and the seed and CLI layers
+  are overlaid on it (the seed layer only for `seed: primary`).
 
-  The run image is the last of three, each `FROM` the one before and pushed to
+  The run image is the last of these, each `FROM` the one before and pushed to
   `<registry>/<repo>/worker` (KH11, `RepoConfig.repository_name/1`: one repository
   per repo, no shared `<registry>/worker`):
 
     1. **toolchain** — `Image.Builder.ensure/3`'s image, tag `<hash12>`;
-    2. **CLI** — `claude` and `arb` copied to `/opt/arbiter/cli` (replacing the
-       host bind mount), tag `<hash12>-cli<sha8>` where `sha8` covers both
-       binaries, so a Claude update pushes one layer;
-    3. **seed** — `DepsCache` output copied to `/opt/arbiter/seed`, tag
-       `<hash12>-cli<sha8>-seed<lock12>-<seedpaths8>`. Best-effort: a repo with
-       no lockfile, or a cache that cannot be seeded, publishes the CLI layer
-       as the run image and says why.
+    2. **seed** — `DepsCache` output copied to `/opt/arbiter/seed`, tag
+       `<hash12>-seed<lock12>-<seedpaths8>`. Best-effort: a repo with no
+       lockfile, or a cache that cannot be seeded, publishes the CLI layers
+       straight over the toolchain and says why;
+    3. **CLI** — one `COPY` per CLI of `Arbiter.Worker.CliSet` in churn order
+       (`codex`, `claude`, `arb`) into `/opt/arbiter/cli`, built with
+       `--timestamp 0` so identical files are identical blobs, and tagged
+       `<seed tag>-cli<set8>` (`<hash12>-cli<set8>` with no seed), `set8` being
+       the set's content hash. The last image carries the `arbiter.cli-set`,
+       `arbiter.cli-providers` and `arbiter.cli.<name>.*` labels and is the run
+       image. A Claude update rebuilds the `claude` and `arb` layers and pushes
+       one new blob; the toolchain and seed are reused by tag.
+
+  The CLI layers sit above the seed (they used to sit below it, tagged
+  `<hash12>-cli<sha8>[-seed...]`). The old tags are never rewritten or removed,
+  so a digest handed to a pod before the change keeps resolving.
 
   Each layer is a `podman build` of a Containerfile written by this module (not
   by a worker) over a context that holds only what the layer ships. The
@@ -47,7 +56,7 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
 
   alias Arbiter.Config.Paths
   alias Arbiter.Nodes.Agent
-  alias Arbiter.Worker.ContainerSpawn
+  alias Arbiter.Worker.CliSet
   alias Arbiter.Worker.DepsCache
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.Image.Builder
@@ -57,6 +66,8 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
 
   @cli_dest "/opt/arbiter/cli/"
   @seed_dest "/opt/arbiter/seed"
+  # Every CLI layer is built at this instant, so identical files are identical blobs.
+  @cli_timestamp "0"
   @seed_artifacts ["deps", "_build"]
   @mix_home "mix_home"
   @controller_base "FROM docker.io/library/debian:trixie-slim"
@@ -107,26 +118,37 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
     end
   end
 
-  # The CLI layer over the toolchain, then the best-effort seed layer over that.
+  # The best-effort seed layer over the toolchain, then one CLI layer per CLI over
+  # that (SI1, OD14): the CLIs change far more often than the seed, so they sit on
+  # top and a CLI update pushes only the layers above it. The set is resolved
+  # first: a missing claude fails the publish before a seed is built.
   defp upper_layers(%{plan: plan} = ctx, repository, toolchain, work, cfg, opts) do
-    with {:ok, cli, cli_suffix} <- cli_layer(plan, repository, work, cfg, opts) do
-      {seed, seed_report} =
-        seed_layer(ctx, plan, repository, cli_suffix, cli.local, work, cfg, opts)
+    with {:ok, set} <- cli_set(opts) do
+      {seed, seed_report} = seed_layer(ctx, plan, repository, work, cfg, opts)
+      parent = if seed, do: seed.local, else: plan.tag
+      tag = if(seed, do: seed.tag, else: plan.hash) <> "-cli" <> set.set8
 
-      layers = toolchain ++ [cli] ++ List.wrap(seed)
-      cleanup_local(Enum.reverse(for l <- layers, l.layer != :toolchain, do: l.local), opts)
-      final = List.last(layers)
+      with {:ok, cli} <- cli_layers(set, parent, tag, repository, work, cfg, opts) do
+        layers = toolchain ++ List.wrap(seed) ++ [cli]
+        cleanup_local(Enum.reverse(Enum.flat_map(layers, &chain/1)), opts)
 
-      {:ok,
-       %{
-         ref: final.ref,
-         tag_ref: final.tag_ref,
-         tag: plan.tag,
-         layers: Enum.map(layers, &Map.delete(&1, :local)),
-         seed: seed_report
-       }}
+        {:ok,
+         %{
+           ref: cli.ref,
+           tag_ref: cli.tag_ref,
+           tag: plan.tag,
+           layers: Enum.map(layers, &Map.drop(&1, [:local, :chain])),
+           seed: seed_report,
+           cli_set: set.set8
+         }}
+      end
     end
   end
+
+  # The local images a layer left behind (the CLI layer is a chain of them).
+  defp chain(%{chain: chain}), do: chain
+  defp chain(%{local: local}), do: [local]
+  defp chain(_toolchain), do: []
 
   # `<repo-slug>/worker`: the repo the context names, else the checkout's directory.
   @doc false
@@ -144,84 +166,78 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
     )
   end
 
-  defp cli_layer(plan, repository, work, cfg, opts) do
-    with {:ok, files} <- cli_files(opts) do
-      context = Path.join(work, "cli-context")
-      File.mkdir_p!(Path.join(context, "cli"))
+  # One `COPY` per CLI, each `FROM` the one before it, built with a fixed
+  # `--timestamp` so identical files give identical layer blobs (SI0, S2). Only
+  # the last image is pushed (a push uploads every layer under it); it carries
+  # the set's labels and is the run image.
+  defp cli_layers(set, parent, tag, repository, work, cfg, opts) do
+    last = List.last(set.clis)
 
-      sums =
-        for {host, dest} <- files do
-          name = Path.basename(dest)
-          target = Path.join([context, "cli", name])
-          File.cp!(host, target)
-          File.chmod!(target, 0o755)
-          {name, sha256_file(target)}
+    set.clis
+    |> Enum.reduce_while({:ok, parent, []}, fn cli, {:ok, from, chain} ->
+      local = local_tag("cli-" <> cli.name, tag)
+
+      containerfile =
+        "FROM #{from}\n" <>
+          "COPY #{Enum.map_join(cli.files, " ", & &1.name)} #{@cli_dest}\n" <>
+          if(cli == last, do: label_lines(CliSet.labels(set)), else: "")
+
+      context = Path.join(set.dir, cli.name)
+
+      case build(local, containerfile, context, work, opts, ["--timestamp", @cli_timestamp]) do
+        :ok -> {:cont, {:ok, local, [local | chain]}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, local, chain} ->
+        with {:ok, layer} <- push(local, repository, tag, :cli, cfg, opts) do
+          {:ok,
+           layer
+           |> Map.put(:local, local)
+           |> Map.put(:chain, chain)
+           |> Map.put(:clis, Enum.map(set.clis, & &1.name))}
         end
 
-      sha8 = sums |> Enum.sort() |> inspect() |> sha256() |> binary_part(0, 8)
-      tag = "#{plan.hash}-cli#{sha8}"
-      local = local_tag("cli", tag)
+      {:error, _} = error ->
+        error
+    end
+  end
 
-      containerfile = """
-      FROM #{plan.tag}
-      COPY cli/ #{@cli_dest}
-      """
+  defp label_lines(labels),
+    do:
+      Enum.map_join(labels, "", fn {k, v} -> "LABEL #{Jason.encode!(k)}=#{Jason.encode!(v)}\n" end)
 
-      with :ok <- build(local, containerfile, context, work, opts),
-           {:ok, layer} <- push(local, repository, tag, :cli, cfg, opts) do
-        {:ok, Map.put(layer, :local, local), "cli" <> sha8}
-      end
+  @doc """
+  The resolved, materialized and re-verified CLI set the layers are built from
+  (`Arbiter.Worker.CliSet`), or `{:error, {:cli_unavailable, reason}}`. claude
+  is mandatory; codex and arb are in the image when their pins are cached.
+  """
+  @spec cli_set(keyword()) :: {:ok, CliSet.t()} | {:error, term()}
+  def cli_set(opts) do
+    with {:ok, set} <- CliSet.resolve(opts),
+         :ok <- CliSet.require_cli(set, "claude"),
+         {:ok, set} <- CliSet.materialize(set, verify: true) do
+      {:ok, set}
+    else
+      {:error, reason} -> {:error, {:cli_unavailable, reason}}
     end
   end
 
   @doc false
   @spec cli_files(keyword()) :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
   def cli_files(opts) do
-    with {:ok, files} <- resolve_cli_files(opts),
-         :ok <- require_arb(files) do
-      {:ok, files}
+    with {:ok, set} <- cli_set(opts) do
+      {:ok, Enum.flat_map(set.clis, &CliSet.cli_mounts(set, &1.name))}
     end
   end
 
-  defp resolve_cli_files(opts) do
-    case Keyword.fetch(opts, :cli) do
-      {:ok, files} ->
-        {:ok, files}
-
-      :error ->
-        cli_opts = Keyword.take(opts, [:claude_path, :arb_path, :find_executable])
-
-        case ContainerSpawn.cli_mounts("claude", cli_opts) do
-          {:ok, files} -> {:ok, files}
-          {:error, reason} -> {:error, {:cli_unavailable, reason}}
-        end
-    end
-  end
-
-  # bd-czvxfs: a pod has no host bind mount to fall back on, so the image IS the agent's
-  # `arb`. `ContainerSpawn.cli_mounts/2` only warns when the host has none (right for a
-  # local container, which can still run its agent); an image published without it leaves
-  # every pod unable to print `arb done`.
-  defp require_arb(files) do
-    if Enum.any?(files, fn {_host, dest} -> dest == @cli_dest <> "arb" end),
-      do: :ok,
-      else: {:error, {:cli_unavailable, {:executable_not_found, "arb"}}}
-  end
-
-  defp seed_layer(ctx, plan, repository, cli_suffix, parent, work, cfg, opts) do
+  defp seed_layer(ctx, plan, repository, work, cfg, opts) do
     {shipped, excluded} = partition_seed_paths(Map.get(ctx, :seed_paths))
 
     case seed_mode(plan) do
       :primary ->
-        primary_seed(
-          ctx,
-          plan,
-          {repository, cli_suffix, parent},
-          {shipped, excluded},
-          work,
-          cfg,
-          opts
-        )
+        primary_seed(ctx, plan, repository, {shipped, excluded}, work, cfg, opts)
 
       mode ->
         skipped("seed: #{mode}, #{seed_skip_reason(mode)}", excluded)
@@ -239,23 +255,15 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   defp seed_note(%{prebuilt: %{seed_note: note}}) when is_binary(note), do: note
   defp seed_note(_plan), do: nil
 
-  defp primary_seed(
-         ctx,
-         plan,
-         {repository, cli_suffix, parent},
-         {shipped, excluded},
-         work,
-         cfg,
-         opts
-       ) do
+  defp primary_seed(ctx, plan, repository, {shipped, excluded}, work, cfg, opts) do
     case seed_source(ctx, plan, shipped, opts) do
       {:ok, dir, lock_hash, artifacts} ->
         sp8 = artifacts |> Enum.join(",") |> sha256() |> binary_part(0, 8)
-        tag = "#{plan.hash}-#{cli_suffix}-seed#{binary_part(lock_hash, 0, 12)}-#{sp8}"
+        tag = "#{plan.hash}-seed#{binary_part(lock_hash, 0, 12)}-#{sp8}"
         local = local_tag("seed", tag)
 
         containerfile =
-          "FROM #{parent}\n" <>
+          "FROM #{plan.tag}\n" <>
             Enum.map_join(artifacts, "", fn a -> "COPY #{a}/ #{@seed_dest}/#{a}/\n" end)
 
         with :ok <- build(local, containerfile, dir, work, opts),
@@ -403,20 +411,20 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
 
   # -- podman -------------------------------------------------------------------
 
-  defp build(tag, containerfile, context, work, opts) do
+  defp build(tag, containerfile, context, work, opts, extra \\ []) do
     file = Path.join(work, "Containerfile.#{short(tag)}")
     File.write!(file, containerfile)
 
-    args = [
-      "build",
-      "--file",
-      file,
-      "--tag",
-      tag,
-      "--label",
-      "#{Image.label()}.publish=1",
-      context
-    ]
+    args =
+      [
+        "build",
+        "--file",
+        file,
+        "--tag",
+        tag,
+        "--label",
+        "#{Image.label()}.publish=1"
+      ] ++ extra ++ [context]
 
     case podman(args, opts, @build_timeout_ms) do
       {_, 0} -> :ok
@@ -532,14 +540,6 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   defp short(tag), do: tag |> sha256() |> binary_part(0, 12)
 
   defp sha256(data), do: :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
-
-  defp sha256_file(path) do
-    path
-    |> File.stream!(65_536)
-    |> Enum.reduce(:crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))
-    |> :crypto.hash_final()
-    |> Base.encode16(case: :lower)
-  end
 
   defp tail(output) do
     output = String.trim(output)

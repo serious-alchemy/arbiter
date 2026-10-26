@@ -4941,8 +4941,8 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # `:egress`, `:podman` and `:image` are the spawn's own injection points
   # (`ContainerSpawn.prepare/1`), threaded so a test can drive a real dispatch or
-  # resume against a stand-in egress run and `podman` (bd-dh1gg1); `:claude_path`
-  # and `:arb_path` name the CLI files a run placed on a node is handed (bd-4ic681).
+  # resume against a stand-in egress run and `podman` (bd-dh1gg1); `:cli_*`
+  # select the CLI cache a run is handed its CLIs from (`Worker.CliSet`).
   # `:adopt` (bd-4p1vui) tells the spawn the run to adopt instead of a container to
   # start.
   defp sandbox_session_opts(policy, workspace, opts),
@@ -4950,16 +4950,17 @@ defmodule Arbiter.Worker.Dispatch do
       ContainerSpawn.session_opts(
         policy,
         workspace,
-        Keyword.take(opts, [
-          :repo,
-          :node,
-          :egress,
-          :podman,
-          :image,
-          :claude_path,
-          :arb_path,
-          :adopt
-        ])
+        Keyword.take(
+          opts,
+          [
+            :repo,
+            :node,
+            :egress,
+            :podman,
+            :image,
+            :adopt
+          ] ++ Arbiter.Worker.CliSet.option_keys()
+        )
       )
 
   defp resolve_session_agent_type(opts, %Issue{id: id} = task, workspace) do
