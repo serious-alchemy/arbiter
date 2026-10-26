@@ -429,23 +429,37 @@ defmodule Arbiter.Worker.Image do
     |> String.trim_trailing()
   end
 
-  # A repo Containerfile gets the same layer appended (as root, then back to its last
-  # USER), because the pod always sets MIX_HOME. Skipped when the image has no mix.
+  # A repo Containerfile gets the same layer appended, because the pod always sets
+  # MIX_HOME. Skipped when the image has no mix.
+  #
+  # The layer needs root. A file that declares a USER gets `USER root` for the layer
+  # and its own USER back. A file with none inherits the base's (root by default,
+  # with no USER recorded in the image config), so it gets no USER line at all: an
+  # explicit `USER root` can never be undone, and a final USER of `root` in the
+  # image config makes podman run the agent as uid 0 instead of the
+  # `--userns=keep-id` host uid, so it cannot read or write the host-owned 0600 run
+  # dirs under `--cap-drop=all` (bd-83gbsh, #1040: codex "config.toml Permission
+  # denied", claude "EACCES mkdir …/claude-0"). `base_containerfile/1` never sets a
+  # USER for the same reason.
   defp with_hex_layer(text) do
-    user =
-      case Regex.scan(~r/^\s*USER\s+(\S+)/mi, text) do
-        [] -> nil
-        users -> users |> List.last() |> List.last()
-      end
-
     layer =
       String.replace(hex_layer(), "RUN mkdir", "RUN command -v mix >/dev/null || exit 0; mkdir",
         global: false
       )
 
-    String.trim_trailing(text) <>
-      "\n\n# Added by Arbiter (bd-40njjj): Hex and rebar outside the checkout.\nUSER root\n" <>
-      layer <> "\n" <> if(user, do: "USER #{user}\n", else: "")
+    header = "\n\n# Added by Arbiter (bd-40njjj): Hex and rebar outside the checkout.\n"
+
+    case declared_user(text) do
+      nil -> String.trim_trailing(text) <> header <> layer <> "\n"
+      user -> String.trim_trailing(text) <> header <> "USER root\n" <> layer <> "\nUSER #{user}\n"
+    end
+  end
+
+  defp declared_user(text) do
+    case Regex.scan(~r/^\s*USER\s+(\S+)/mi, text) do
+      [] -> nil
+      users -> users |> List.last() |> List.last()
+    end
   end
 
   defp node_layer do
