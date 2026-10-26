@@ -187,4 +187,34 @@ defmodule Arbiter.Worker.NodeLostTest do
     refute snap.outcome == :interrupted
     refute_receive {:resumed, _}, 200
   end
+
+  # bd-czvxfs: the first cluster run (bd-bmymrp) ended `end_turn`, exit 0, no `arb done`,
+  # its own prose mentioning 401 / expired tokens. On a node that outcome (exit_code 0)
+  # must classify like any clean no-done exit, never as an auth death, and the checkout
+  # the node delivered is left where it is.
+  test "a pod's clean end_turn with no `arb done` and auth-shaped prose is not an auth death",
+       %{pid: pid, dir: dir} do
+    File.write!(Path.join(dir, "runbook.md"), "the committed work\n")
+
+    script = """
+    sleep 1
+    echo '{"type":"system","subtype":"init","model":"sonnet-5-5"}'
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Added the 401 row: the join token is expired or revoked."}]}}'
+    echo '{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.159}'
+    """
+
+    {:ok, port} =
+      ClaudeSession.start(owner: pid, worktree_path: dir, command: ["sh", "-c", script])
+
+    outcome = %{oom?: false, exit_code: 0, cancelled?: false, node_lost?: false}
+
+    :sys.replace_state(pid, fn st ->
+      update_in(st.claude_sessions[port], &Map.put(&1, :remote_outcome, outcome))
+    end)
+
+    snap = wait_finished(pid)
+    assert snap.meta.stop_reason.category == :exited_without_done
+    assert Arbiter.Agents.AuthHold.status(Arbiter.Agents.Claude).deaths == 0
+    assert File.read!(Path.join(dir, "runbook.md")) == "the committed work\n"
+  end
 end
