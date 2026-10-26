@@ -253,6 +253,8 @@ defmodule Arbiter.Application do
         Arbiter.Worker.CliFetcher.Scheduler,
         # K8 (bd-9vrbx7): publishes images to `nodes.registry` (inert while it is unset).
         Arbiter.Worker.Image.Publisher,
+        # SI2 (OD13): republishes recently published repos when the CLI set moves.
+        Arbiter.Worker.CliSet.Watcher,
         # bd-50d5j6: persists a podman Codex run's rotated auth.json when its
         # worker dies. Before RunTmp.Reaper, which flushes it ahead of removal.
         Arbiter.Agents.Codex.AuthSync.Reaper,
