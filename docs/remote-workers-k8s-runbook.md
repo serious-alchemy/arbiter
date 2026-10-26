@@ -349,7 +349,7 @@ existing objects into a release is possible but optional.
 
 ### Known pitfalls (first enrollment)
 
-The first real enrollment (mesaana k3s, 2026-10-26) hit these four.
+The first real enrollment (mesaana k3s, 2026-10-26) hit these (the last was found right after).
 
 1. **tailscale sidecar crash-loops.** Symptom: `missing get permission on secret
    "tailscale"`. containerboot wants a `tailscale` Secret unless `TS_KUBE_SECRET=""`.
@@ -367,6 +367,8 @@ The first real enrollment (mesaana k3s, 2026-10-26) hit these four.
    not from `nodes[0]`, or the controller → API egress rule allows the wrong /32 and
    checks report false FAILs. Fix: bd-6vlqu8 (`k2-operator-check.sh`). mesaana's is
    192.168.1.169.
+5. **Run ids rejected as `bad_name`.** Synthetic `#review` run ids are not valid k8s
+   object names, so the Job/Pod create is rejected with `bad_name` (bd-1chty2).
 
 ## 5. Running the end-to-end suite on a disposable cluster
 
