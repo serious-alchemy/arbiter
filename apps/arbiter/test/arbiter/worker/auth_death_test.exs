@@ -153,6 +153,46 @@ defmodule Arbiter.Worker.AuthDeathTest do
       assert AuthHold.status(Claude).deaths == 0
     end
 
+    # bd-czvxfs: the first cluster run (bd-bmymrp) edited the k8s runbook, committed,
+    # ended on `end_turn` and exited 0 without `arb done`; its own prose about "401" and
+    # "token ... expired" got it labelled `:auth_expired`, which requeued the task. The
+    # final checkout (here the worktree the agent committed in; on a node, the home clone
+    # the controller's held `exit` delivered) must survive, and the task must not be
+    # reopened as an auth death.
+    test "a clean end_turn with no `arb done` and auth-shaped prose keeps the commit and " <>
+           "the task, and is not an auth death",
+         %{ws: ws, tmp: tmp, repo: repo} do
+      stub_claude!(tmp, """
+      #!/bin/sh
+      echo '{"type":"system","subtype":"init","model":"sonnet-5-5"}'
+      echo work > runbook.md
+      git add runbook.md
+      git -c user.email=t@e.com -c user.name=T -c commit.gpgsign=false commit -q -m runbook
+      echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Added the primary_facts 401 row: the join token is expired or revoked."}]}}'
+      echo '{"type":"result","subtype":"success","is_error":false,"duration_ms":78200,"total_cost_usd":0.159}'
+      exit 0
+      """)
+
+      task = ready_task!(ws, "clean end_turn without arb done")
+
+      assert {:ok, %{worker_pid: pid}} = dispatch(task.id)
+      worktree = Worktree.worktree_path(BranchNamer.derive(task))
+      branch = BranchNamer.derive(task)
+
+      eventually(fn -> Worker.state(pid).outcome == :failed end)
+      assert Worker.state(pid).meta.stop_reason.category == :exited_without_done
+
+      assert_stays(fn -> reload(task).state == :active end)
+      assert AuthHold.status(Claude).deaths == 0
+      refute CredentialWatchdog.expired?(Claude)
+
+      assert File.dir?(worktree)
+      assert branch_list(repo, branch) != ""
+      assert {:ok, true} = Worktree.has_commits_ahead?(worktree, "origin/main")
+      assert [%{stop_category: category}] = runs(task.id)
+      refute category == "auth_expired"
+    end
+
     # bd-8praoz: a worker SIGTERMed by the unit's cgroup kill (e.g. a server
     # restart) must never be treated as an auth death just because its own
     # transcript happens to contain auth-shaped vocabulary (a worker touching
