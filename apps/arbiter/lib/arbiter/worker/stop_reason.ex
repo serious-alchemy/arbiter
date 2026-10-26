@@ -1434,7 +1434,7 @@ defmodule Arbiter.Worker.StopReason do
 
   defp signature_haystack(output_lines) do
     output_lines
-    |> Enum.reject(&tool_result_line?/1)
+    |> Enum.reject(&(tool_result_line?(&1) or bridge_noise_line?(&1)))
     |> Enum.take(-@tail_lines)
     |> Enum.join("\n")
   end
@@ -1443,6 +1443,15 @@ defmodule Arbiter.Worker.StopReason do
     do: String.starts_with?(line, @tool_result_prefix)
 
   defp tool_result_line?(_line), do: false
+
+  # bd-1ppeua: the pod bridge's `socat[<pid>] <level> …` diagnostics share the agent's
+  # merged stdout/stderr stream, but they are transport chatter (every cluster run ends
+  # with `SSL_write(): … unexpected eof`), never the agent CLI failing. They carry no
+  # signature; a real failure surfaces as the CLI's own `result` event or stderr.
+  defp bridge_noise_line?(line) when is_binary(line),
+    do: Regex.match?(~r/^socat\[\d+\] [EWNID] /, line)
+
+  defp bridge_noise_line?(_line), do: false
 
   # bd-11abk2: an exec() failure (bad argv, E2BIG, missing binary) happens
   # before the child process runs, so it can produce no stdout/stderr at

@@ -137,6 +137,48 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "classify/2 — non-agent lines after a successful result (bd-1ppeua)" do
+    @socat "socat[611] E SSL_write(): error:0A000126:SSL routines::unexpected eof while reading"
+    @success "⚙ claude session success · 78.2s · $0.159"
+    @started "⚙ claude session started (model sonnet-5-5)"
+
+    for {name, noise} <- [
+          gateway: [@socat, @socat],
+          rate_limit: ["sidecar: 429 Too Many Requests", "API Error: 529 overloaded_error"],
+          credit: ["bridge: Credit balance is too low", "insufficient_quota"],
+          auth: ["bridge: API Error: 401 authentication_error", "OAuth token has expired"]
+        ] do
+      test "#{name} noise after a success result is not an infra failure" do
+        lines = [@started, "Done.", @success] ++ unquote(noise)
+
+        assert StopReason.classify(0, lines).category == :exited_without_done
+        assert StopReason.classify(0, lines, "claude").category == :exited_without_done
+      end
+
+      test "#{name} noise before a success result is not an infra failure" do
+        lines = unquote(noise) ++ [@started, @success]
+        assert StopReason.classify(0, lines).category == :exited_without_done
+      end
+    end
+
+    test "bridge/socat lines never carry a signature, even with no result marker" do
+      lines = [
+        @started,
+        "socat[611] E connection reset by peer",
+        "socat[611] E SSL_write(): bad gateway 502 429 rate_limit_error"
+      ]
+
+      assert StopReason.classify(0, lines).category == :exited_without_done
+    end
+
+    test "a real gateway failure (error result + signature) is still a gateway error" do
+      lines = [@started, @socat, "API Error: 502 Bad Gateway", "⚙ claude session error · 1.2s"]
+
+      assert StopReason.classify(1, lines).category == :gateway_error
+      assert StopReason.classify(0, lines).category == :gateway_error
+    end
+  end
+
   describe "classify/2 — credit / rate limit" do
     test "insufficient credit balance" do
       reason = StopReason.classify(1, ["Your credit balance is too low to run this request."])
