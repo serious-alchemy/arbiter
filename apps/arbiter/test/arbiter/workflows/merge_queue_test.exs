@@ -66,6 +66,9 @@ defmodule Arbiter.Workflows.MergeQueueTest do
   }
 
   # P4 (bd-df3zlo / #1736): the same GitHub workspace with the read-path flip on.
+  @ws_github_relaxed put_in(@ws_github, ["merge", "require_up_to_date"], false)
+  @ws_github_tolerant put_in(@ws_github, ["merge", "up_to_date_tolerance"], 5)
+
   @ws_github_coverage %{
     "merge" => %{
       "strategy" => "github",
@@ -2161,6 +2164,81 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert length(updates) == 3
       refute_received {:merged, 234}
       assert %{items: [_item]} = MergeQueue.state(name)
+    end
+
+    @tag workspace_config: @ws_github_relaxed
+    test "bd-9wl4vu: require_up_to_date=false merges a mergeable, behind-main PR without a re-sync",
+         %{workspace: ws} do
+      assert_merges_behind_without_sync(ws, 241)
+    end
+
+    @tag workspace_config: @ws_github_tolerant
+    test "bd-9wl4vu: up_to_date_tolerance above the gap merges without a re-sync", %{
+      workspace: ws
+    } do
+      assert_merges_behind_without_sync(ws, 243)
+    end
+
+    @tag workspace_config: @ws_github_relaxed
+    test "bd-9wl4vu: a relaxed policy still never merges a conflicting PR", %{workspace: ws} do
+      Application.put_env(:arbiter, :test_resolver_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_resolver_pid) end)
+
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            242 => %{
+              reviews: "APPROVED",
+              pr: %{
+                "mergeable" => false,
+                "mergeStateStatus" => "dirty",
+                "head" => %{"sha" => "abc1234def"}
+              }
+            }
+          }
+        end)
+
+      Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 3} end)
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 0} end)
+      end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#242", 2)
+      {_pid, name} = start_merge_queue(ws, conflict_resolver: RecordingResolver)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      for _ <- 1..2, do: :ok = MergeQueue.tick(name)
+      assert_received {:resolve_called, _}
+      refute_received {:merged, 242}
+    end
+
+    defp assert_merges_behind_without_sync(ws, number) do
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            number => %{
+              reviews: "APPROVED",
+              pr: %{"mergeStateStatus" => "clean", "head" => %{"sha" => "abc1234def"}}
+            }
+          }
+        end)
+
+      Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 3} end)
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 0} end)
+      end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "##{number}", 2)
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      for _ <- 1..2, do: :ok = MergeQueue.tick(name)
+      refute_received {:update_branch, ^number}
+      assert_received {:merged, ^number}
     end
 
     @tag workspace_config: @ws_github
