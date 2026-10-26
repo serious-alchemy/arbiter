@@ -110,7 +110,8 @@ defmodule Arbiter.NodeAgent.K8s.LogLines do
     do: IO.iodata_to_binary([acc, rest])
 
   defp unsplice(rest, off, at, acc) do
-    <<head::binary-size(off), stamp::binary-size(@stamp_size), delim, tail::binary>> = rest
+    head = binary_part(rest, 0, off)
+    <<_::binary-size(^off), stamp::binary-size(@stamp_size), delim, tail::binary>> = rest
 
     if delim == ?\s and spliced_stamp?(stamp, at),
       do: unsplice(tail, @chunk, at, [acc, head]),
