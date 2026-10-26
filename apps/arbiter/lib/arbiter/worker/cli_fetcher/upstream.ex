@@ -25,7 +25,8 @@ defmodule Arbiter.Worker.CliFetcher.Upstream do
   def registry(opts), do: opts |> Keyword.get(:registry, @registry) |> String.trim_trailing("/")
 
   @doc "GET `url` as JSON."
-  @spec get_json(String.t(), keyword(), keyword()) :: {:ok, term()} | {:error, term()}
+  @spec get_json(String.t(), keyword(), [{String.t(), String.t()}]) ::
+          {:ok, term()} | {:error, term()}
   def get_json(url, opts, extra_headers \\ []) do
     req =
       [
@@ -52,7 +53,8 @@ defmodule Arbiter.Worker.CliFetcher.Upstream do
   @doc """
   Download `url` to `dest` (a file path), capped at 1 GiB. https URLs only; `headers` are sent as given.
   """
-  @spec download(String.t(), Path.t(), keyword(), keyword()) :: :ok | {:error, term()}
+  @spec download(String.t(), Path.t(), keyword(), [{String.t(), String.t()}]) ::
+          :ok | {:error, term()}
   def download(url, dest, opts, headers \\ []) do
     with :ok <- https(url) do
       File.mkdir_p!(Path.dirname(dest))
