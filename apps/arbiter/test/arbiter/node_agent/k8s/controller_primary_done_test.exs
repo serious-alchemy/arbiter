@@ -313,6 +313,34 @@ defmodule Arbiter.NodeAgent.K8s.ControllerPrimaryDoneTest do
       assert Worker.state(pid).meta.done_seen == true
     end
 
+    test "a final line over the runtime's record size, stamped per record by the kubelet: done",
+         env do
+      controller = start_controller(env)
+      run = running!(env, controller, 1)
+      %{pid: pid, handle: handle} = start_worker()
+      table = RunStreams.open(%RunStreams{}, run, handle, pid, nil)
+
+      # containerd cuts a line over 16 KiB into partial records; a kubelet that stamps every
+      # record writes `<timestamp> ` where the first one ended. Here that is inside the
+      # closing `arb done`, which is what the agent's message ends with
+      text = "\n\narb done"
+      {at, _} = :binary.match(assistant(text), "arb done")
+      final = assistant(String.duplicate("x", 16_384 - at - 5) <> text)
+      assert byte_size(final) > 16_384 + 10
+      <<first::binary-size(16_384), rest::binary>> = final
+      assert String.ends_with?(first, "arb d")
+      spliced = first <> "2026-10-10T12:00:00.999999999Z " <> rest
+
+      FakeK8sApi.push_log(env.api, pod_name(1), spliced)
+      FakeK8sApi.push_log(env.api, pod_name(1), result_event())
+      set_status(env, 1, exited_status(:complete))
+      observed(run, :exit)
+      _ = finish_run(controller, run, table)
+
+      assert %{state: :finished, outcome: :succeeded} = Worker.state(pid)
+      assert Worker.state(pid).meta.done_seen == true
+    end
+
     test "a run with no `arb done` anywhere is still exited_without_done", env do
       controller = start_controller(env)
       run = running!(env, controller, 1)
