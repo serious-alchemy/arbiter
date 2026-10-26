@@ -295,7 +295,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       end)
 
     if parsed != [] and Enum.all?(parsed, &registry_entry?/1) and
-         length(Enum.uniq_by(parsed, & &1.prefix)) == length(parsed),
+         length(Enum.uniq_by(parsed, &String.trim_trailing(&1.prefix, "/"))) == length(parsed),
        do: {:ok, parsed},
        else:
          {:error,
@@ -570,7 +570,11 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
       end
 
     default = %{"prefix" => registry}
-    if Enum.any?(extra, &(&1["prefix"] == registry)), do: extra, else: [default | extra]
+    norm = String.trim_trailing(registry, "/")
+
+    if Enum.any?(extra, &(String.trim_trailing(&1["prefix"], "/") == norm)),
+      do: extra,
+      else: [default | extra]
   end
 
   defp registry_values(%{admission: false, pull_secret: nil}, _registry), do: nil
