@@ -412,6 +412,21 @@ defmodule Arbiter.Worker.ImageTest do
       assert final_user(plan.containerfile) == "1234:1234"
     end
 
+    test "only the final stage's USER is restored" do
+      multi = "FROM debian AS build\nUSER builder\nRUN true\n" <> @repo_containerfile
+      repo = repo_with(%{".arbiter/Containerfile" => multi})
+      assert {:ok, plan} = Image.plan(repo, "main", opts())
+      refute plan.containerfile =~ ~r/^USER root/m
+      refute plan.containerfile =~ ~r/^USER builder\n\z/m
+    end
+
+    test "a final USER root or USER 0 is refused at plan time" do
+      for u <- ["root", "0", "0:0"] do
+        repo = repo_with(%{".arbiter/Containerfile" => @repo_containerfile <> "\nUSER #{u}\n"})
+        assert {:error, {:final_user_root, ^u}} = Image.plan(repo, "main", opts())
+      end
+    end
+
     test "the generated default image never sets a USER either" do
       repo = repo_with(%{"README.md" => "hi\n"})
       assert {:ok, plan} = Image.plan(repo, "main", opts())
