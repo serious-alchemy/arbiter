@@ -293,6 +293,85 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
     end
   end
 
+  # bd-83gbsh (GitHub #1040): the v0.2.84 reviewer crashed in 14s with codex
+  # 0.164.0's "Refusing to create helper binaries under temporary dir" and then
+  # "Failed to read config file …/codex-home/config.toml". The run's TMPDIR was
+  # the run dir, which holds `codex-home`, so the CLI judged its own home to be
+  # temp space. The container's TMPDIR must not contain CODEX_HOME.
+  describe "CODEX_HOME vs the container's TMPDIR (bd-83gbsh)" do
+    @tmp_names ~w(TMPDIR TMP TEMP)
+
+    defp run_env(tmp_dir),
+      do: [{"HOME", "/h"}] ++ Enum.map(@tmp_names, &{&1, tmp_dir})
+
+    defp inside?(path, dir), do: path == dir or String.starts_with?(path, dir <> "/")
+
+    test "no temp variable names a directory that holds CODEX_HOME", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      env = ContainerSpawn.apply_env(run_env(ctx.tmp_dir), request)
+
+      {"CODEX_HOME", home} = List.keyfind(env, "CODEX_HOME", 0)
+
+      for name <- @tmp_names do
+        {^name, tmp} = List.keyfind(env, name, 0)
+        refute inside?(home, tmp), "#{name}=#{tmp} contains CODEX_HOME=#{home}"
+      end
+    end
+
+    test "the temp dir is still disk-backed, inside the writable run dir and created", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      env = ContainerSpawn.apply_env(run_env(ctx.tmp_dir), request)
+
+      {"TMPDIR", tmp} = List.keyfind(env, "TMPDIR", 0)
+      assert inside?(tmp, ctx.tmp_dir)
+      assert tmp != ctx.tmp_dir
+      assert File.dir?(tmp)
+      assert ctx.tmp_dir in request.writable_paths
+      assert Enum.all?(@tmp_names, &(List.keyfind(env, &1, 0) == {&1, tmp}))
+    end
+
+    test "a claude container keeps the run dir as its TMPDIR", ctx do
+      {:ok, request} = ContainerSpawn.prepare(Keyword.merge(ctx.opts, provider: "claude"))
+      env = ContainerSpawn.apply_env(run_env(ctx.tmp_dir), request)
+
+      for name <- @tmp_names, do: assert({name, ctx.tmp_dir} in env)
+    end
+
+    test "a codex env with no temp variable gains none", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      env = ContainerSpawn.apply_env([{"X", "1"}], request)
+
+      refute Enum.any?(env, &(elem(&1, 0) in @tmp_names))
+    end
+  end
+
+  # The read itself: the container runs as the host uid (`--userns=keep-id`, no
+  # other identity flag, no relabel once the bridge sockets disable SELinux
+  # labels), so the 0600 files the primary wrote are the container user's own.
+  describe "CODEX_HOME is readable by the container user (bd-83gbsh)" do
+    test "config.toml is owned by the uid keep-id maps in, mode 0600, in a mounted dir", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      assert {:ok, %{argv: argv}} = ContainerSpawn.wrap_port(port_args(ctx, request))
+
+      assert "--userns=keep-id" in argv
+      refute Enum.any?(argv, &(&1 == "--user" or String.starts_with?(&1, "--user=")))
+
+      # CODEX_HOME's parent is a read-write mount, with no relabel needed
+      # (SELinux labels are disabled by the bridge sockets).
+      assert "label=disable" in argv
+      assert "#{ctx.tmp_dir}:#{ctx.tmp_dir}:rw" in mounts(argv)
+
+      config = Path.join(request.config_dir, "config.toml")
+      {:ok, %File.Stat{uid: uid, mode: mode}} = File.stat(config)
+      {:ok, %File.Stat{uid: own_uid}} = File.stat("/proc/self")
+      assert uid == own_uid
+      assert Bitwise.band(mode, 0o400) == 0o400
+
+      {:ok, %File.Stat{mode: dir_mode}} = File.stat(request.config_dir)
+      assert Bitwise.band(dir_mode, 0o500) == 0o500
+    end
+  end
+
   describe "wrap_port/1 for codex" do
     test "the real auth.json (and the operator's home) is never bind-mounted", ctx do
       {:ok, request} = ContainerSpawn.prepare(ctx.opts)

@@ -53,7 +53,10 @@ defmodule Arbiter.Worker.ContainerSpawn do
       (`ConfigDir.seed_run_home/2`: generated `config.toml`, `AGENTS.md`, the
       execpolicy deny rules, and a *copy* of the operator's `auth.json`). The
       operator's home, and the real `auth.json`, are never mounted: the host
-      side copies the file in before the container exists.
+      side copies the file in before the container exists. The container's
+      `TMPDIR`/`TMP`/`TEMP` is `<run dir>/tmp`, not the run dir: codex refuses
+      to start its helpers when `CODEX_HOME` is under the temp dir
+      (bd-83gbsh, #1040; `apply_env/2`).
     * **Refresh-token rotation.** The CLI refreshing its ChatGPT token rotates
       the refresh token in the copy only, which would leave the real login
       holding a retired one. `Arbiter.Agents.Codex.AuthSync` carries it back
@@ -176,6 +179,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   @client_names ~w(PATH HOME USER LOGNAME SHELL LD_LIBRARY_PATH LD_PRELOAD
                    HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
                    http_proxy https_proxy all_proxy no_proxy)
+  @temp_names ~w(TMPDIR TMP TEMP)
   @client_prefixes ["XDG_", "CONTAINERS_", "DOCKER_", "PODMAN_", "DBUS_"]
 
   @type request :: %{
@@ -195,6 +199,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
           required(:network) => keyword(),
           required(:env) => [{String.t(), String.t()}],
           optional(:codex_auth) => {Path.t(), Path.t()} | nil,
+          optional(:temp_dir) => Path.t() | nil,
           optional(:pod) => String.t() | nil,
           optional(:deps_cache) => map() | nil,
           optional(:git_secrets) => [map()]
@@ -288,6 +293,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, image} <- fetch_image(opts, worktree),
          {:ok, set, cli_mounts} <- resolve_cli(provider, opts),
          {:ok, home, config_dir, codex_auth} <- run_dirs(provider, tmp_dir, policy, opts),
+         {:ok, temp_dir} <- container_temp_dir(provider, tmp_dir),
          # Before the egress run starts: a cold seed takes minutes.
          deps_cache = seed_deps(opts, worktree, image, home),
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree),
@@ -319,7 +325,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
          git_secrets: git_secrets,
          pod: services && services.pod,
          deps_cache: deps_cache,
-         codex_auth: codex_auth
+         codex_auth: codex_auth,
+         temp_dir: temp_dir
        }}
     end
   end
@@ -714,6 +721,23 @@ defmodule Arbiter.Worker.ContainerSpawn do
     end
   end
 
+  # A Codex container's `TMPDIR` is a subdirectory of the run dir, not the run
+  # dir itself. The CLI (0.164.0) refuses to create its helper binaries when
+  # `CODEX_HOME` is under the temp dir, and `CODEX_HOME` is `<run dir>/codex-home`:
+  # with `TMPDIR` the run dir the reviewer died at start-up (bd-83gbsh, #1040).
+  # Still disk-backed and inside the run's writable mount, so still removed with
+  # the run. Claude has no such guard and keeps the run dir.
+  defp container_temp_dir("codex", tmp_dir) do
+    temp_dir = Path.join(tmp_dir, "tmp")
+
+    case File.mkdir_p(temp_dir) do
+      :ok -> {:ok, temp_dir}
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
+  defp container_temp_dir(_provider, _tmp_dir), do: {:ok, nil}
+
   defp source_home_opt(opts) do
     case Keyword.get(opts, :codex_source_home) do
       dir when is_binary(dir) and dir != "" -> [source_home: dir]
@@ -803,7 +827,15 @@ defmodule Arbiter.Worker.ContainerSpawn do
         ]
   def apply_env(env, %{config_dir: config_dir} = request) do
     name = config_env_name(request)
-    Enum.reject(env, &(elem(&1, 0) == name)) ++ [{name, config_dir}]
+    env = Enum.reject(env, &(elem(&1, 0) == name)) ++ [{name, config_dir}]
+
+    case request do
+      %{temp_dir: temp_dir} when is_binary(temp_dir) ->
+        for {k, v} <- env, do: {k, if(k in @temp_names and is_binary(v), do: temp_dir, else: v)}
+
+      _ ->
+        env
+    end
   end
 
   defp config_env_name(%{provider: "codex"}), do: "CODEX_HOME"
