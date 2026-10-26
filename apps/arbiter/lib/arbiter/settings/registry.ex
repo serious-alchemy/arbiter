@@ -188,6 +188,30 @@ defmodule Arbiter.Settings.Registry do
       description:
         "Allow nodes.registry to answer anonymous reads (a public registry); null/false = " <>
           "a registry that answers anonymously is refused. Operator-only."
+    },
+    %{
+      key: "worker.cli.versions",
+      type: "cli_versions",
+      description:
+        "The upstream CLI versions published worker images carry (SI1a, OD13), a JSON object " <>
+          "over claude and codex to a stable x.y.z, e.g. {\"claude\": \"2.1.310\", \"codex\": \"0.164.0\"}. " <>
+          "The daily auto-bump rewrites a pin to the newest stable upstream version unless the CLI " <>
+          "is in worker.cli.manual or worker.cli_set.hold is set; null = no pins (nothing is " <>
+          "fetched). Operator-only."
+    },
+    %{
+      key: "worker.cli.manual",
+      type: "cli_name_list",
+      description:
+        "CLIs (claude, codex) whose worker.cli.versions pin the auto-bump never touches; " <>
+          "null/[] = every pin follows upstream. Operator-only."
+    },
+    %{
+      key: "worker.cli_set.hold",
+      type: "cli_set_hold",
+      description:
+        "Freezes the published CLI set: while set, the auto-bump fetches and pins nothing " <>
+          "(the rollback for a bad CLI release); null = no hold. Operator-only."
     }
   ]
 
@@ -204,14 +228,15 @@ defmodule Arbiter.Settings.Registry do
                     nodes.join_token_ttl_minutes nodes.fence_after_s nodes.lost_after_s
                     machine.derate
                     nodes.registry nodes.registry_username nodes.registry_password
-                    nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref)
+                    nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref
+                    worker.cli.versions worker.cli.manual worker.cli_set.hold)
 
   # Built at compile time from the fixed schema above, so no input ever mints an
   # atom (some keys are dotted: `:"nodes.public_url"`).
   # Values that are strings whatever they look like: a password of "12345" must not
   # be unwrapped to an integer.
   @secret_mask "********"
-  @string_types ~w(registry_ref registry_user secret chart_ref)
+  @string_types ~w(registry_ref registry_user secret chart_ref cli_set_hold)
 
   @key_atoms Map.new(@keys, &{&1, String.to_atom(&1)})
 
@@ -239,6 +264,7 @@ defmodule Arbiter.Settings.Registry do
   defp allowed("agent_type_list"), do: Arbiter.Agents.valid_agent_types()
   defp allowed("quota_provider_list"), do: Arbiter.Quota.Visibility.provider_codes()
   defp allowed("admission_mode"), do: Settings.scheduler_admission_modes()
+  defp allowed("cli_name_list"), do: Settings.cli_names()
   defp allowed(_), do: nil
 
   @doc """
@@ -337,6 +363,26 @@ defmodule Arbiter.Settings.Registry do
   defp do_cast("derate_config", _),
     do: {:error, "value must be a JSON object of derate thresholds, or null"}
 
+  defp do_cast("cli_versions", %{} = map) do
+    if Settings.valid_cli_versions?(map),
+      do: {:ok, map},
+      else:
+        {:error,
+         "value must be a JSON object over #{Enum.join(Settings.cli_names(), ", ")} to a stable " <>
+           "x.y.z version (no prerelease), or null"}
+  end
+
+  defp do_cast("cli_versions", _),
+    do: {:error, "value must be a JSON object of CLI name to x.y.z version, or null"}
+
+  defp do_cast("cli_set_hold", v) when is_binary(v) do
+    if Settings.valid_cli_set_hold?(v),
+      do: {:ok, v},
+      else: {:error, "value must be a short token (letters, digits, . _ -), or null"}
+  end
+
+  defp do_cast("cli_set_hold", _), do: {:error, "value must be a short token string, or null"}
+
   defp do_cast("admission_mode", mode) when is_binary(mode) do
     if mode in Settings.scheduler_admission_modes(),
       do: {:ok, mode},
@@ -345,6 +391,14 @@ defmodule Arbiter.Settings.Registry do
 
   defp do_cast("admission_mode", _),
     do: {:error, "value must be legacy, shadow or enforce, or null"}
+
+  defp do_cast("cli_name_list", list) do
+    valid = allowed("cli_name_list")
+
+    if is_list(list) and Enum.all?(list, &(is_binary(&1) and &1 in valid)),
+      do: {:ok, list},
+      else: {:error, "value must be a list of CLIs (#{Enum.join(valid, ", ")}) or null"}
+  end
 
   defp do_cast(type, list) when type in ["agent_type_list", "quota_provider_list"] do
     valid = allowed(type)
@@ -466,6 +520,10 @@ defmodule Arbiter.Settings.Registry do
   defp write("nodes.registry_insecure", v), do: wrap(Settings.set_nodes_registry_insecure(v))
   defp write("nodes.registry_public_ok", v), do: wrap(Settings.set_nodes_registry_public_ok(v))
 
+  defp write("worker.cli.versions", v), do: wrap(Settings.set_worker_cli_versions(v))
+  defp write("worker.cli.manual", v), do: wrap(Settings.set_worker_cli_manual(v))
+  defp write("worker.cli_set.hold", v), do: wrap(Settings.set_worker_cli_set_hold(v))
+
   defp wrap({:ok, updated}), do: {:ok, updated}
   defp wrap({:error, reason}), do: {:error, {:invalid, inspect(reason)}}
 
@@ -503,6 +561,9 @@ defmodule Arbiter.Settings.Registry do
   def override("nodes.registry_username"), do: Settings.nodes_registry_username()
   def override("nodes.registry_insecure"), do: Settings.nodes_registry_insecure()
   def override("nodes.registry_public_ok"), do: Settings.nodes_registry_public_ok()
+  def override("worker.cli.versions"), do: Settings.worker_cli_versions()
+  def override("worker.cli.manual"), do: Settings.worker_cli_manual()
+  def override("worker.cli_set.hold"), do: Settings.worker_cli_set_hold()
 
   # Write-only: a stored password reads as a mask, never as the secret or its ciphertext.
   def override("nodes.registry_password"),
@@ -540,6 +601,9 @@ defmodule Arbiter.Settings.Registry do
   def default("nodes.registry_password"), do: nil
   def default("nodes.registry_insecure"), do: false
   def default("nodes.registry_public_ok"), do: false
+  def default("worker.cli.versions"), do: nil
+  def default("worker.cli.manual"), do: []
+  def default("worker.cli_set.hold"), do: nil
   def default("nodes.allow_public_endpoint"), do: false
   def default("nodes.join_token_ttl_minutes"), do: Settings.default_join_token_ttl_minutes()
   def default("nodes.fence_after_s"), do: Arbiter.Nodes.Liveness.default_fence_after_s()

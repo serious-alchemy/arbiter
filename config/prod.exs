@@ -7,5 +7,8 @@ config :logger, level: :info
 
 config :arbiter, :update_check, enabled: true
 
+# SI1a (OD13): the daily upstream CLI bump + fetch (Arbiter.Worker.CliFetcher.Scheduler).
+config :arbiter, :cli_fetcher, enabled: true
+
 # Runtime production configuration, including reading
 # of environment variables, is done on config/runtime.exs.

@@ -12,7 +12,8 @@ defmodule Arbiter.Settings.RegistryTest do
            scheduler_admission machine.derate
            nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
            nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.chart_ref nodes.registry_username
-           nodes.registry_password nodes.registry_insecure nodes.registry_public_ok)
+           nodes.registry_password nodes.registry_insecure nodes.registry_public_ok
+           worker.cli.versions worker.cli.manual worker.cli_set.hold)
 
   test "keys/0 lists every installation setting" do
     assert Registry.keys() == @keys
@@ -379,7 +380,8 @@ defmodule Arbiter.Settings.RegistryTest do
     @operator_only ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight machine.derate
                       nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
                       nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
-                      nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref)
+                      nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref
+                      worker.cli.versions worker.cli.manual worker.cli_set.hold)
 
     test "operator_only_keys/0 is the schema's operator-only set" do
       assert Enum.sort(Registry.operator_only_keys()) == Enum.sort(@operator_only)
@@ -443,6 +445,49 @@ defmodule Arbiter.Settings.RegistryTest do
 
       assert %{default: %{"thermal_soft_c" => 90.0, "thermal_hard_c" => 95.0}} =
                Registry.describe("machine.derate")
+    end
+  end
+
+  describe "worker.cli.* settings (SI1a, OD13)" do
+    test "worker.cli.versions pins stable x.y.z versions of known CLIs" do
+      assert {:ok, %{"claude" => "2.1.310", "codex" => "0.164.0"}} =
+               Registry.put("worker.cli.versions", ~s({"claude": "2.1.310", "codex": "0.164.0"}))
+
+      assert %{"claude" => "2.1.310"} = Settings.worker_cli_versions()
+      assert {:ok, nil} = Registry.put("worker.cli.versions", nil)
+      assert Settings.worker_cli_versions() == nil
+    end
+
+    test "worker.cli.versions refuses prereleases, junk versions and unknown CLIs" do
+      assert {:error, {:invalid, _}} =
+               Registry.put("worker.cli.versions", %{"claude" => "2.1.0-rc.1"})
+
+      assert {:error, {:invalid, _}} =
+               Registry.put("worker.cli.versions", %{"claude" => "latest"})
+
+      assert {:error, {:invalid, _}} = Registry.put("worker.cli.versions", %{"grok" => "1.0.0"})
+      assert {:error, {:invalid, _}} = Registry.put("worker.cli.versions", [])
+      assert Settings.worker_cli_versions() == nil
+    end
+
+    test "worker.cli.manual lists the CLIs auto-bump leaves alone" do
+      assert {:ok, ["codex"]} = Registry.put("worker.cli.manual", ~s(["codex"]))
+      assert Settings.worker_cli_manual() == ["codex"]
+      assert {:error, {:invalid, _}} = Registry.put("worker.cli.manual", ["nope"])
+      assert {:ok, []} = Registry.put("worker.cli.manual", [])
+    end
+
+    test "worker.cli_set.hold is a short token or null" do
+      assert {:ok, "a1b2c3d4"} = Registry.put("worker.cli_set.hold", "a1b2c3d4")
+      assert Settings.worker_cli_set_hold() == "a1b2c3d4"
+      assert {:error, {:invalid, _}} = Registry.put("worker.cli_set.hold", "has space")
+      assert {:ok, nil} = Registry.put("worker.cli_set.hold", nil)
+    end
+
+    test "all three are operator-only" do
+      for key <- ~w(worker.cli.versions worker.cli.manual worker.cli_set.hold) do
+        assert {:error, {:unauthorized, _}} = Registry.put(key, nil, authority: :coordinator)
+      end
     end
   end
 end

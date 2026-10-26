@@ -425,6 +425,32 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
     end
   end
 
+  describe "GET /api/server/cli_versions" do
+    test "reports the pins, the latest known, the manual opt-outs and the hold", %{conn: conn} do
+      {:ok, _} = Arbiter.Settings.set_worker_cli_versions(%{"claude" => "2.1.308"})
+      {:ok, _} = Arbiter.Settings.set_worker_cli_manual(["codex"])
+      {:ok, _} = Arbiter.Settings.set_worker_cli_set_hold("a1b2c3d4")
+
+      on_exit(fn ->
+        Arbiter.Settings.set_worker_cli_versions(nil)
+        Arbiter.Settings.set_worker_cli_manual(nil)
+        Arbiter.Settings.set_worker_cli_set_hold(nil)
+      end)
+
+      resp = conn |> get("/api/server/cli_versions") |> json_response(200)
+
+      assert resp["hold"] == "a1b2c3d4"
+      assert %{"enabled" => false} = resp["scheduler"]
+      assert ["claude", "codex", "arb"] = Enum.map(resp["clis"], & &1["name"])
+
+      assert %{"pinned" => "2.1.308", "manual" => false} =
+               Enum.find(resp["clis"], &(&1["name"] == "claude"))
+
+      assert %{"pinned" => nil, "manual" => true} =
+               Enum.find(resp["clis"], &(&1["name"] == "codex"))
+    end
+  end
+
   describe "GET /api/server/worker_memory" do
     test "reports whether the cap is in force and the server unit's OOM policy", %{conn: conn} do
       resp = conn |> get("/api/server/worker_memory") |> json_response(200)

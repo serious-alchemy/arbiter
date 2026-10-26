@@ -23,6 +23,7 @@ defmodule Arbiter.Settings do
 
   alias Arbiter.Agents.Routing.Competence
   alias Arbiter.Nodes.Liveness
+  alias Arbiter.Settings.CliVersionEvent
   alias Arbiter.Settings.Installation
   alias Arbiter.Settings.SchedulerChange
 
@@ -31,6 +32,7 @@ defmodule Arbiter.Settings do
   resources do
     resource Installation
     resource SchedulerChange
+    resource CliVersionEvent
   end
 
   @doc """
@@ -737,6 +739,89 @@ defmodule Arbiter.Settings do
   @spec set_machine_derate(map() | nil) :: {:ok, map() | nil} | {:error, term()}
   def set_machine_derate(v) when is_nil(v) or is_map(v), do: write_setting(:machine_derate, v)
   def set_machine_derate(_), do: {:error, :invalid_value}
+
+  # ---- worker.cli.* (SI1a, OD13) -------------------------------------------
+
+  @cli_names ~w(claude codex)
+  @cli_hold_re ~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/
+
+  @doc "The CLIs whose upstream version is pinned (`worker.cli.versions` is keyed by these)."
+  @spec cli_names() :: [String.t()]
+  def cli_names, do: @cli_names
+
+  @doc "`worker.cli.versions`: `%{\"claude\" => \"x.y.z\", ...}` as stored, or `nil`."
+  @spec worker_cli_versions() :: %{optional(String.t()) => String.t()} | nil
+  def worker_cli_versions, do: read_setting(:worker_cli_versions)
+
+  @doc "Persist the CLI pins; `nil` clears them. Names and versions are validated."
+  @spec set_worker_cli_versions(map() | nil) :: {:ok, map() | nil} | {:error, term()}
+  def set_worker_cli_versions(nil), do: write_setting(:worker_cli_versions, nil)
+
+  def set_worker_cli_versions(%{} = map) do
+    if valid_cli_versions?(map),
+      do: write_setting(:worker_cli_versions, map),
+      else: {:error, :invalid_value}
+  end
+
+  def set_worker_cli_versions(_), do: {:error, :invalid_value}
+
+  @doc "Whether `map` is `%{cli_name => stable x.y.z}` over known CLIs."
+  @spec valid_cli_versions?(term()) :: boolean()
+  def valid_cli_versions?(%{} = map) do
+    Enum.all?(map, fn {name, version} ->
+      name in @cli_names and Arbiter.Worker.CliFetcher.Semver.stable?(version)
+    end)
+  end
+
+  def valid_cli_versions?(_), do: false
+
+  @doc "`worker.cli.manual`: the CLIs auto-bump skips, or `nil`."
+  @spec worker_cli_manual() :: [String.t()] | nil
+  def worker_cli_manual, do: read_setting(:worker_cli_manual)
+
+  @spec set_worker_cli_manual([String.t()] | nil) :: {:ok, [String.t()] | nil} | {:error, term()}
+  def set_worker_cli_manual(nil), do: write_setting(:worker_cli_manual, nil)
+
+  def set_worker_cli_manual(names) when is_list(names) do
+    if Enum.all?(names, &(&1 in @cli_names)),
+      do: write_setting(:worker_cli_manual, Enum.uniq(names)),
+      else: {:error, :invalid_value}
+  end
+
+  def set_worker_cli_manual(_), do: {:error, :invalid_value}
+
+  @doc "`worker.cli_set.hold`: the held CLI-set token (freezes bumps), or `nil`."
+  @spec worker_cli_set_hold() :: String.t() | nil
+  def worker_cli_set_hold, do: read_setting(:worker_cli_set_hold)
+
+  @doc "Whether `value` is a valid `worker.cli_set.hold` token."
+  @spec valid_cli_set_hold?(term()) :: boolean()
+  def valid_cli_set_hold?(value) when is_binary(value), do: Regex.match?(@cli_hold_re, value)
+  def valid_cli_set_hold?(_), do: false
+
+  @spec set_worker_cli_set_hold(String.t() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+  def set_worker_cli_set_hold(nil), do: write_setting(:worker_cli_set_hold, nil)
+
+  def set_worker_cli_set_hold(value) when is_binary(value) do
+    if valid_cli_set_hold?(value),
+      do: write_setting(:worker_cli_set_hold, value),
+      else: {:error, :invalid_value}
+  end
+
+  def set_worker_cli_set_hold(_), do: {:error, :invalid_value}
+
+  @doc "Append a `cli_version_*` audit row (`Arbiter.Settings.CliVersionEvent`)."
+  @spec record_cli_version_event(map()) :: {:ok, CliVersionEvent.t()} | {:error, term()}
+  def record_cli_version_event(%{} = attrs), do: Ash.create(CliVersionEvent, attrs)
+
+  @doc "The CLI version audit rows, newest first. Option `:cli` filters to one CLI."
+  @spec cli_version_events(keyword()) :: [CliVersionEvent.t()]
+  def cli_version_events(opts \\ []) do
+    CliVersionEvent
+    |> Ash.read!()
+    |> Enum.filter(&(is_nil(opts[:cli]) or &1.cli == opts[:cli]))
+    |> Enum.sort_by(& &1.at, {:desc, DateTime})
+  end
 
   @doc "The operator's override of the primary's own worker cap (`local` on the nodes page), or `nil`."
   @spec nodes_local_max_workers() :: non_neg_integer() | nil

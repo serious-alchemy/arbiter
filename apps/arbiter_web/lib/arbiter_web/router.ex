@@ -410,6 +410,7 @@ defmodule ArbiterWeb.Router do
     get("/server/grok_auth", ServerController, :grok_auth)
     get("/server/provider_accounts", ServerController, :provider_accounts)
     get("/server/merge_routing", ServerController, :merge_routing)
+    get("/server/cli_versions", ServerController, :cli_versions)
     get("/server/tmux", ServerController, :tmux)
     get("/server/doctor_scope", ServerController, :doctor_scope)
     get("/server/spawn_canary", ServerController, :spawn_canary_report)

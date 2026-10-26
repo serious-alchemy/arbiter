@@ -67,6 +67,11 @@ defmodule ArbiterWeb.Api.ServerController do
       `Arbiter.Mergers.RoutingCheck.report/0`): a forge strategy with no
       `origin` remote, or an `origin` that is not the effective
       `owner/repo`. `arb server doctor` lists them with the fix.
+    * `GET /api/server/cli_versions` — the pinned upstream CLI versions
+      (SI1a, OD13, `Arbiter.Worker.CliFetcher.Status`): per CLI the `pinned` and
+      last-seen `latest` version, whether the pin is `cached`, `manual`, and the
+      `last_bump`; plus the `worker.cli_set.hold` token. `arb server doctor`
+      reports it. Never touches the network.
     * `GET /api/server/podman_sandbox` — rootless-podman sandbox readiness
       checks (`arb server doctor`)
     * `GET /api/server/tmux` — whether `tmux` is installed on this host
@@ -98,6 +103,7 @@ defmodule ArbiterWeb.Api.ServerController do
   alias Arbiter.Agents.Gemini.ModelCheck
   alias Arbiter.Guardrails
   alias Arbiter.Mergers.RoutingCheck
+  alias Arbiter.Worker.CliFetcher.Status, as: CliStatus
   alias Arbiter.Worker.Egress.SelfTest
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.MemoryScope.Diagnosis, as: MemoryDiagnosis
@@ -221,6 +227,8 @@ defmodule ArbiterWeb.Api.ServerController do
 
   def spawn_canary_report(conn, _params),
     do: json(conn, %{report: Arbiter.Doctor.SpawnCanary.cached()})
+
+  def cli_versions(conn, _params), do: json(conn, CliStatus.build())
 
   def merge_routing(conn, _params) do
     repos = Enum.map(RoutingCheck.report(), &routing_entry/1)

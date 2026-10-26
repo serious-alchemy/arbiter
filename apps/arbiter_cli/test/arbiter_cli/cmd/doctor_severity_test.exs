@@ -121,6 +121,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
        {%{"decision" => "on", "stranded_workspaces" => [], "server_env_token" => false}, 200}},
       {{"get", "/api/server/merge_routing"}, {%{"repos" => [], "problems" => []}, 200}},
       {{"get", "/api/nodes"}, {%{"nodes" => [], "public_url" => nil, "warnings" => []}, 200}},
+      {{"get", "/api/server/cli_versions"}, {cli_versions_ok(), 200}},
       {{"get", "/api/providers/paused"}, {%{"paused" => []}, 200}},
       {{"get", "/api/server/doctor_scope"}, {@scope_none, 200}},
       {{"get", "/api/server/spawn_canary"}, {%{"report" => canary_ok()}, 200}}
@@ -128,6 +129,24 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
 
     keys = Enum.map(overrides, &elem(&1, 0))
     Enum.reject(base, fn {k, _} -> k in keys end) ++ overrides
+  end
+
+  defp cli_versions_ok do
+    %{
+      "hold" => nil,
+      "scheduler" => %{"enabled" => true, "checked_at" => "2026-10-26T03:00:00Z"},
+      "clis" =>
+        for name <- ~w(claude codex arb) do
+          %{
+            "name" => name,
+            "pinned" => "1.2.3",
+            "latest" => "1.2.3",
+            "cached" => true,
+            "manual" => false,
+            "last_bump" => nil
+          }
+        end
+    }
   end
 
   defp stub_healthy(overrides \\ []), do: stub_routes(healthy_routes(overrides))
@@ -334,6 +353,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       {"/api/server/provider_accounts", "provider_accounts"},
       {"/api/server/merge_routing", "merge_routing"},
       {"/api/nodes", "nodes"},
+      {"/api/server/cli_versions", "cli_versions"},
       {"/api/scheduler/status", "restart_safety"}
     ]
 
@@ -569,6 +589,85 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
     end
   end
 
+  # SI1a (OD13): the pinned upstream CLI versions.
+  describe "cli versions" do
+    defp cli(overrides),
+      do:
+        Map.merge(
+          %{
+            "name" => "claude",
+            "pinned" => "2.1.308",
+            "latest" => "2.1.310",
+            "cached" => true,
+            "manual" => false,
+            "last_bump" => %{
+              "from" => "2.1.300",
+              "to" => "2.1.308",
+              "at" => "2026-10-25T03:00:00Z"
+            }
+          },
+          overrides
+        )
+
+    defp cli_rows(clis, hold \\ nil) do
+      body = %{
+        "hold" => hold,
+        "scheduler" => %{"enabled" => true, "checked_at" => "2026-10-26T03:00:00Z"},
+        "clis" => clis
+      }
+
+      stub_healthy([{{"get", "/api/server/cli_versions"}, {body, 200}}])
+      Checks.run() |> Enum.filter(&String.starts_with?(&1.id, "cli_versions."))
+    end
+
+    test "renders the pinned and latest-available version and the last bump per CLI" do
+      rows =
+        cli_rows([
+          cli(%{}),
+          cli(%{"name" => "codex", "pinned" => "0.164.0", "latest" => "0.164.0"})
+        ])
+
+      claude = by_id(rows, "cli_versions.cli_claude")
+      assert claude.status == :ok
+      assert claude.detail =~ "pinned 2.1.308"
+      assert claude.detail =~ "latest available 2.1.310"
+      assert claude.detail =~ "last bump 2.1.300 -> 2.1.308"
+
+      codex = by_id(rows, "cli_versions.cli_codex")
+      assert codex.detail =~ "pinned 0.164.0, latest available 0.164.0 (current)"
+      assert codex.detail =~ "never bumped" or codex.detail =~ "last bump"
+    end
+
+    test "shows a manual pin and the hold state" do
+      rows = cli_rows([cli(%{"manual" => true})], "a1b2c3d4")
+
+      assert by_id(rows, "cli_versions.cli_claude").detail =~ "manual"
+      hold = by_id(rows, "cli_versions.cli_set_hold")
+      assert hold.status == :warn
+      assert hold.detail =~ "held at a1b2c3d4"
+      assert hold.hint =~ "worker.cli_set.hold"
+    end
+
+    test "no hold is an ok row" do
+      rows = cli_rows([cli(%{})])
+      assert by_id(rows, "cli_versions.cli_set_hold").status == :ok
+      assert by_id(rows, "cli_versions.cli_set_hold").detail =~ "no hold"
+    end
+
+    test "warns about an unpinned CLI and about a pin that is not cached" do
+      rows =
+        cli_rows([
+          cli(%{"pinned" => nil, "latest" => nil, "last_bump" => nil}),
+          cli(%{"name" => "codex", "cached" => false})
+        ])
+
+      assert by_id(rows, "cli_versions.cli_claude").status == :warn
+      assert by_id(rows, "cli_versions.cli_claude").detail =~ "no version pinned"
+      assert by_id(rows, "cli_versions.cli_codex").status == :warn
+      assert by_id(rows, "cli_versions.cli_codex").detail =~ "not yet in the verified cache"
+    end
+  end
+
   describe "agy tier models (bd-7wx2lh)" do
     defp gemini_in_use do
       put_in(@scope_none, ["providers", "gemini", "in_use"], true)
@@ -648,6 +747,12 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       merge_routing nodes pr_patrol
     )
 
+    # SI1a: one row per CLI plus the hold.
+    @cli_ids ~w(
+      cli_versions.cli_claude cli_versions.cli_codex cli_versions.cli_arb
+      cli_versions.cli_set_hold
+    )
+
     # bd-8t4yui: one row per provider the server's canary reports.
     @spawn_ids ~w(
       spawn.spawn_canary_claude spawn.spawn_canary_codex spawn.spawn_canary_agy
@@ -660,7 +765,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
 
       assert Enum.sort(ids) == Enum.sort(Enum.uniq(ids))
       assert @expected_ids -- ids == []
-      assert ids -- (@expected_ids ++ @spawn_ids) == []
+      assert ids -- (@expected_ids ++ @spawn_ids ++ @cli_ids) == []
     end
 
     test "--json lists every check, n/a included" do
@@ -670,7 +775,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
       {:ok, payload} = Jason.decode(String.trim(json))
 
       assert payload["checks"] |> Enum.map(& &1["id"]) |> Enum.sort() ==
-               Enum.sort(@expected_ids ++ @spawn_ids)
+               Enum.sort(@expected_ids ++ @spawn_ids ++ @cli_ids)
     end
   end
 
