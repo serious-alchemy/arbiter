@@ -27,18 +27,16 @@ defmodule Arbiter.Worker.Image.PublisherSettingsTest do
     {:ok, _} = Settings.put("nodes.registry_password", @password)
 
     ctx = %{plan: plan(), repo: "arb-app", repo_path: nil, base: "main", seed_paths: []}
-
-    cli = [
-      {write(tmp, "claude"), "/opt/arbiter/cli/claude"},
-      {write(tmp, "arb"), "/opt/arbiter/cli/arb"}
-    ]
+    cli = Arbiter.Worker.CliSetFixture.put(Path.join(tmp, "cli"))
 
     assert {:ok, %{ref: ref}} =
-             Publisher.ensure_ready(ctx,
-               runner: runner(self()),
-               scratch: tmp,
-               cli: cli,
-               timeout_ms: 10_000
+             Publisher.ensure_ready(
+               ctx,
+               [
+                 runner: runner(self()),
+                 scratch: tmp,
+                 timeout_ms: 10_000
+               ] ++ cli
              )
 
     assert ref =~ ~r|\Aregistry\.example\.com/arb/arb-app/worker@sha256:[0-9a-f]{64}\z|
@@ -66,12 +64,6 @@ defmodule Arbiter.Worker.Image.PublisherSettingsTest do
         containerfile: "FROM scratch"
       }
     }
-  end
-
-  defp write(dir, name) do
-    path = Path.join(dir, name)
-    File.write!(path, name)
-    path
   end
 
   defp runner(test) do

@@ -10,7 +10,7 @@ defmodule Arbiter.Worker.CliSet do
 
   Only `Arbiter.Worker.CliFetcher.Cache`, SI1a's verified, content-addressed
   store of pinned upstream releases. Never a CLI installed on the primary:
-  nothing here looks at `PATH`, `~/.local/bin` or an npm prefix, and it never
+  nothing here looks at `PATH` or any install directory, and it never
   touches the network (`CliFetcher.Cache.lookup/3` is a read). A CLI whose
   pinned version is not cached yet is left out of the set, and asking for it
   is `{:error, {:cli_not_cached, name}}`.

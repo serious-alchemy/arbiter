@@ -61,10 +61,9 @@ defmodule Arbiter.Worker.ContainerSpawn do
       at every port re-open, at `teardown/1`, and when the owning worker dies by
       any means (`AuthSync.Reaper`, flushed by `RunTmp.Reaper` before it removes
       the directory). A re-opened run also takes a newer login a sibling rotated.
-    * **The CLI** is the vendored static binary, not the `codex` node launcher
-      the host has on `PATH` (a container has no node): found beside the launcher
-      in the npm package, mounted with its `rg` and `bwrap` so the CLI's own
-      helpers resolve on the image's `PATH`.
+    * **The CLI** is the vendored static binary from the pinned upstream release
+      (`Arbiter.Worker.CliSet`; a container has no node), mounted with its `rg`
+      and `bwrap` so the CLI's own helpers resolve on the image's `PATH`.
     * **Egress infra** is the OpenAI hosts (`chatgpt.com`, `api.openai.com`,
       `auth.openai.com`) rather than Anthropic's.
 

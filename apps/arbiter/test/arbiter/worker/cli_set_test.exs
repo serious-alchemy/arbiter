@@ -167,6 +167,25 @@ defmodule Arbiter.Worker.CliSetTest do
     end
   end
 
+  describe "no host installs" do
+    @resolvers ~w(
+      lib/arbiter/worker/cli_set.ex
+      lib/arbiter/worker/container_spawn.ex
+      lib/arbiter/worker/image/publisher.ex
+      lib/arbiter/worker/image/publisher/pipeline.ex
+    )
+
+    test "the resolver, the spawn and the publisher never look a CLI up on the host" do
+      for file <- @resolvers do
+        source = File.read!(file)
+
+        for needle <- ["find_executable", "host_escript", "installed_arb", ".local/bin"] do
+          refute source =~ needle, "#{file} mentions #{needle}"
+        end
+      end
+    end
+  end
+
   defp file_paths(set) do
     for cli <- set.clis, f <- cli.files, do: f.path
   end

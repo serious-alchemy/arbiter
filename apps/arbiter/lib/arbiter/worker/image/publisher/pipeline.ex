@@ -211,12 +211,14 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   @doc """
   The resolved, materialized and re-verified CLI set the layers are built from
   (`Arbiter.Worker.CliSet`), or `{:error, {:cli_unavailable, reason}}`. claude
-  is mandatory; codex and arb are in the image when their pins are cached.
+  and arb are mandatory (a pod has no host bind mount, so the image IS the agent's
+  `arb`, bd-czvxfs); codex is in the image when its pin is cached.
   """
   @spec cli_set(keyword()) :: {:ok, CliSet.t()} | {:error, term()}
   def cli_set(opts) do
     with {:ok, set} <- CliSet.resolve(opts),
          :ok <- CliSet.require_cli(set, "claude"),
+         :ok <- CliSet.require_cli(set, "arb"),
          {:ok, set} <- CliSet.materialize(set, verify: true) do
       {:ok, set}
     else

@@ -2597,12 +2597,6 @@ defmodule Arbiter.Worker.DispatchTest do
       put_app_env(:arbiter, :worker_container_network_available, true)
       put_app_env(:arbiter, :worker_container_image, "localhost/arb-test/dispatch:1")
 
-      put_app_env(
-        :arbiter,
-        :cli_set_opts,
-        Arbiter.Worker.CliSetFixture.put(Path.join(tmp, "cli"))
-      )
-
       {:ok, ws} =
         Ash.update(ws, %{
           config: %{
@@ -2670,12 +2664,6 @@ defmodule Arbiter.Worker.DispatchTest do
       put_app_env(:arbiter, :worker_container_available, true)
       put_app_env(:arbiter, :worker_container_network_available, true)
       put_app_env(:arbiter, :worker_container_image, "localhost/arb-test/dispatch:1")
-
-      put_app_env(
-        :arbiter,
-        :cli_set_opts,
-        Arbiter.Worker.CliSetFixture.put(Path.join(tmp, "cli"))
-      )
 
       {:ok, ws} =
         Ash.update(ws, %{

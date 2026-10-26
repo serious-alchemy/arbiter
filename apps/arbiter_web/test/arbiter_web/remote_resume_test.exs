@@ -80,21 +80,6 @@ defmodule ArbiterWeb.RemoteResumeTest do
     File.write!(cli, "#!/bin/sh\n")
     File.chmod!(cli, 0o755)
 
-    # The run's CLIs come from the pinned upstream cache (Worker.CliSet), not the host.
-    previous_cli_set = Application.get_env(:arbiter, :cli_set_opts)
-
-    Application.put_env(
-      :arbiter,
-      :cli_set_opts,
-      Arbiter.Worker.CliSetFixture.put(Path.join(root, "cli-set"))
-    )
-
-    on_exit(fn ->
-      if previous_cli_set,
-        do: Application.put_env(:arbiter, :cli_set_opts, previous_cli_set),
-        else: Application.delete_env(:arbiter, :cli_set_opts)
-    end)
-
     start_supervised!({Task.Supervisor, name: Arbiter.NodeAgent.TaskSupervisor})
     start_supervised!({Status, path: Path.join(root, "agent-status.json")})
     for spec <- Runs.child_specs(), do: start_supervised!(spec)
