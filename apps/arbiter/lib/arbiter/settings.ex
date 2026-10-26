@@ -491,7 +491,7 @@ defmodule Arbiter.Settings do
     %{
       epic_floors_enabled: scheduling_epic_floors_enabled() != false,
       max_lifted_in_flight: scheduling_max_lifted_in_flight(),
-      finish_first: scheduling_finish_first() == true,
+      finish_first: scheduling_finish_first() != false,
       finish_first_max_wait_hours:
         scheduling_finish_first_max_wait_hours() || @default_finish_first_max_wait_hours
     }

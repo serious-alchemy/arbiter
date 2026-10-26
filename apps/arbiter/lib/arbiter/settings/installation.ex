@@ -256,7 +256,7 @@ defmodule Arbiter.Settings.Installation do
       public? true
       allow_nil? true
 
-      description "Finish-first tiebreak inside a priority band (ES3); nil / false = off."
+      description "Finish-first tiebreak inside a priority band (ES3); nil = on (default), false = off."
     end
 
     attribute :scheduling_finish_first_max_wait_hours, :integer do
