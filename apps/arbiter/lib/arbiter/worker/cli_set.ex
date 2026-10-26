@@ -54,6 +54,7 @@ defmodule Arbiter.Worker.CliSet do
   """
 
   alias Arbiter.Config.Paths
+  alias Arbiter.Settings
   alias Arbiter.Worker.ArbCli
   alias Arbiter.Worker.CliFetcher
   alias Arbiter.Worker.CliFetcher.Cache
@@ -120,8 +121,63 @@ defmodule Arbiter.Worker.CliSet do
 
     case Keyword.get(opts, :cli_set) do
       %__MODULE__{} = set -> {:ok, set}
-      _ -> from_cache(opts)
+      _ -> held_or_cached(Settings.worker_cli_set_hold(), opts)
     end
+  end
+
+  # `worker.cli_set.hold` (SI2) names a snapshot, `<sets root>/<token>/`, that was
+  # materialized earlier: the set is read back from it, whatever the pins and the
+  # cache say now. A hold with no snapshot behind it (the token is not a set8
+  # that was ever materialized here) leaves the pins as they are, and the hold
+  # has frozen those.
+  defp held_or_cached(nil, opts), do: from_cache(opts)
+
+  defp held_or_cached(token, opts) do
+    case from_snapshot(Path.join(sets_root(opts), token)) do
+      {:ok, set} -> {:ok, set}
+      :error -> from_cache(opts)
+    end
+  end
+
+  defp from_snapshot(dir) do
+    with {:ok, json} <- File.read(Path.join(dir, "manifest.json")),
+         {:ok, %{"set" => hash, "set8" => set8, "platform" => platform, "clis" => clis}} <-
+           Jason.decode(json) do
+      {:ok,
+       %__MODULE__{
+         hash: hash,
+         set8: set8,
+         platform: platform,
+         root: Path.dirname(dir),
+         dir: dir,
+         clis: Enum.map(clis, &snapshot_cli(&1, dir))
+       }}
+    else
+      _ -> :error
+    end
+  end
+
+  defp snapshot_cli(%{"name" => name} = cli, dir) do
+    %{
+      name: name,
+      version: cli["version"],
+      integrity: cli["integrity"],
+      source: cli["source"],
+      digest: cli["digest"],
+      files:
+        for f <- cli["files"] do
+          path = Path.join([dir, name, f["path"]])
+
+          %{
+            name: f["path"],
+            sha256: f["sha256"],
+            size: f["size"],
+            mode: f["mode"],
+            source: {:snapshot, path},
+            path: path
+          }
+        end
+    }
   end
 
   defp from_cache(opts) do
@@ -404,10 +460,32 @@ defmodule Arbiter.Worker.CliSet do
   def materialize(set, opts \\ [])
 
   def materialize(%__MODULE__{dir: dir} = set, opts) when is_binary(dir) do
-    if Keyword.get(opts, :verify, false), do: do_materialize(set, opts), else: {:ok, set}
+    cond do
+      not Keyword.get(opts, :verify, false) -> {:ok, set}
+      snapshot?(set) -> verify_snapshot(set)
+      true -> do_materialize(set, opts)
+    end
   end
 
   def materialize(%__MODULE__{} = set, opts), do: do_materialize(set, opts)
+
+  # A set read back from a held snapshot has no cache behind it to rebuild a bad
+  # copy from, so verifying it is checking every file against the manifest.
+  defp snapshot?(set),
+    do:
+      Enum.any?(set.clis, fn cli ->
+        Enum.any?(cli.files, &match?(%{source: {:snapshot, _}}, &1))
+      end)
+
+  defp verify_snapshot(set) do
+    bad =
+      for cli <- set.clis, f <- cli.files, not current?(f.path, f, true), do: {cli.name, f.name}
+
+    case bad do
+      [] -> {:ok, set}
+      [{name, file} | _] -> {:error, {:cli_set_snapshot_corrupt, set.set8, name, file}}
+    end
+  end
 
   defp do_materialize(set, opts) do
     dir = Path.join(set.root, set.set8)
