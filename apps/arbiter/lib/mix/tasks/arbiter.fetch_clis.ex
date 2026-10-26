@@ -8,8 +8,8 @@ defmodule Mix.Tasks.Arbiter.FetchClis do
       mix arbiter.fetch_clis
 
   Workers run only the cached, checksum-verified upstream CLIs
-  (`Arbiter.Worker.CliSet`), never one installed on this host. The daily
-  `Arbiter.Worker.CliFetcher.Scheduler` fills the cache itself where it is
+  (`Arbiter.Worker.CliSet`), never one installed on this host. The
+  daily CLI fetcher job fills the cache itself where it is
   enabled (prod, dev); run this where it is off (`ARBITER_CLI_FETCHER=0`) or
   after wiping the cache. A CLI whose version is already cached costs no
   network. Exits non-zero when a pinned CLI could not be cached.

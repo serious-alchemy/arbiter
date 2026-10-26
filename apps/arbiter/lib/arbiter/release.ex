@@ -812,11 +812,11 @@ defmodule Arbiter.Release do
   @doc """
   Fill the verified CLI cache now (SI1a/SI1): fetch, checksum-verify and store
   every pinned upstream CLI (`claude`, `codex`) and the running release's `arb`
-  that is not cached yet (`Arbiter.Worker.CliFetcher.ensure_pinned/1`).
+  that is not cached yet (`Arbiter.Worker.CliFetcher.Fill`).
 
   Local and remote workers run only these cached bytes
   (`Arbiter.Worker.CliSet`), never a CLI installed on the host, so an install
-  whose `Arbiter.Worker.CliFetcher.Scheduler` is off (`ARBITER_CLI_FETCHER=0`)
+  whose daily CLI fetcher job is off (`ARBITER_CLI_FETCHER=0`)
   or has not run yet fills the cache once, here:
   `bin/arbiter eval 'Arbiter.Release.fetch_clis()'` or `mix arbiter.fetch_clis`.
   Touches the network only for a version that is not cached. Starts only Ash +
@@ -829,22 +829,8 @@ defmodule Arbiter.Release do
     start_release_repo!()
     {:ok, _} = Application.ensure_all_started(:req)
 
-    result =
-      Map.new(Arbiter.Worker.CliFetcher.ensure_pinned(opts), fn
-        {name, {:ok, _entry}} -> {name, :ok}
-        {name, other} -> {name, other}
-      end)
-
-    for {name, outcome} <- Enum.sort(result), do: IO.puts(fetch_clis_line(name, outcome))
-    result
+    Arbiter.Worker.CliFetcher.Fill.run(opts)
   end
-
-  defp fetch_clis_line(name, :ok), do: "#{name}: cached"
-
-  defp fetch_clis_line(name, :unpinned),
-    do: "#{name}: no version pinned (set worker.cli.versions; arb needs a stable release)"
-
-  defp fetch_clis_line(name, {:error, reason}), do: "#{name}: NOT cached: #{inspect(reason)}"
 
   @doc """
   Load config and start only Ash + `Arbiter.Repo` (`pool_size: 1`), never
