@@ -1449,7 +1449,11 @@ defmodule Arbiter.Worker.StopReason do
   # with `SSL_write(): … unexpected eof`), never the agent CLI failing. They carry no
   # signature; a real failure surfaces as the CLI's own `result` event or stderr.
   defp bridge_noise_line?(line) when is_binary(line),
-    do: Regex.match?(~r/^socat\[\d+\] [EWNID] /, line)
+    do:
+      Regex.match?(
+        ~r/^(?:\d{4}\/\d\d\/\d\d \d\d:\d\d:\d\d(?:\.\d+)? )?socat\[\d+\] [EWNID] /,
+        line
+      )
 
   defp bridge_noise_line?(_line), do: false
 

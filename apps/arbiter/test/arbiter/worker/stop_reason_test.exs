@@ -171,6 +171,16 @@ defmodule Arbiter.Worker.StopReasonTest do
       assert StopReason.classify(0, lines).category == :exited_without_done
     end
 
+    test "timestamped socat lines (real format) without a clean end are not a gateway error" do
+      lines = [
+        @started,
+        "2026/10/26 07:12:35 socat[611] E read(6, 0x1, 8192): Connection reset by peer",
+        "2026/10/26 07:12:35.123456 socat[611] W SSL_write(): bad gateway 502"
+      ]
+
+      refute StopReason.classify(1, lines).category == :gateway_error
+    end
+
     test "a real gateway failure (error result + signature) is still a gateway error" do
       lines = [@started, @socat, "API Error: 502 Bad Gateway", "⚙ claude session error · 1.2s"]
 
