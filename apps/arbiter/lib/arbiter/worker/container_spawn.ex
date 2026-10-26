@@ -834,13 +834,26 @@ defmodule Arbiter.Worker.ContainerSpawn do
     :ok
   end
 
-  defp container_name(opts) do
+  # The one builder of a run's container/pod name: a DNS-1123 label (lowercase
+  # alphanumerics and `-`, <= 63 chars, alphanumeric at both ends), so it is valid
+  # as a podman container name and as a k8s pod name. Synthetic run ids
+  # (`<ticket>#review`, `#r2`, `#impl1`, `#v1`, `#t1`) carry characters a pod name
+  # refuses; the random hash keeps names unique after truncation.
+  @doc false
+  @spec container_name(keyword()) :: String.t()
+  def container_name(opts) do
     slug =
       opts
       |> Keyword.get(:task_id, "run")
       |> to_string()
-      |> String.replace(~r/[^A-Za-z0-9_.-]/, "_")
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9-]/, "-")
       |> String.slice(0, 30)
+      |> String.trim("-")
+      |> case do
+        "" -> "run"
+        slug -> slug
+      end
 
     hash =
       :crypto.hash(:sha256, :erlang.term_to_binary({Keyword.get(opts, :owner), make_ref()}))
