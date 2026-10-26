@@ -96,7 +96,6 @@ defmodule Arbiter.Worker.Image do
   # Hex and rebar live here, outside any checkout, so a first `mix` never stops on
   # the "Shall I install Hex?" prompt (bd-40njjj). The k8s pod spec sets the same.
   @mix_home "/opt/toolchain/mix"
-  @hex_home "/opt/toolchain/hex"
 
   @default_toolchain %{erlang: "29.1.1", elixir: "1.20.4"}
 
@@ -322,6 +321,8 @@ defmodule Arbiter.Worker.Image do
   defp toolchain_source(nil, toolchain), do: {:generated, generated_containerfile(toolchain)}
   # `FROM ${ARBITER_BASE}` needs the arg declared before the first FROM.
   defp toolchain_source(text, _toolchain) do
+    text = with_hex_layer(text)
+
     if Regex.match?(~r/^\s*ARG\s+ARBITER_BASE\b/m, text),
       do: {:repo, text},
       else: {:repo, "ARG ARBITER_BASE\n" <> text}
@@ -407,14 +408,44 @@ defmodule Arbiter.Worker.Image do
     #{if node, do: "FROM docker.io/library/node:#{node}-bookworm-slim AS node\n", else: ""}\
     FROM ${ARBITER_BASE}
     COPY --from=beam /usr/local/ /usr/local/
-    ENV MIX_HOME=#{@mix_home} HEX_HOME=#{@hex_home}
-    RUN mkdir -p $MIX_HOME $HEX_HOME \\
-     && mix local.hex --force \\
-     && mix local.rebar --force \\
-     && chmod -R a+rX $MIX_HOME $HEX_HOME \\
-     && mix hex.info
+    #{hex_layer()}
     #{if node, do: node_layer(), else: ""}\
     """
+  end
+
+  # Archives only need to be readable. The check runs as the pod's uid with MIX_HOME
+  # read-only, a writable HEX_HOME and no stdin, so it shows the pod case works.
+  defp hex_layer do
+    """
+    ENV MIX_HOME=#{@mix_home}
+    RUN mkdir -p $MIX_HOME \\
+     && mix local.hex --force \\
+     && mix local.rebar --force \\
+     && chmod -R a+rX $MIX_HOME \\
+     && H=$(mktemp -d) && chmod 777 $H \\
+     && HOME=$H HEX_HOME=$H/.hex setpriv --reuid=10001 --regid=10001 --clear-groups mix hex.info </dev/null \\
+     && rm -rf $H
+    """
+    |> String.trim_trailing()
+  end
+
+  # A repo Containerfile gets the same layer appended (as root, then back to its last
+  # USER), because the pod always sets MIX_HOME. Skipped when the image has no mix.
+  defp with_hex_layer(text) do
+    user =
+      case Regex.scan(~r/^\s*USER\s+(\S+)/mi, text) do
+        [] -> nil
+        users -> users |> List.last() |> List.last()
+      end
+
+    layer =
+      String.replace(hex_layer(), "RUN mkdir", "RUN command -v mix >/dev/null || exit 0; mkdir",
+        global: false
+      )
+
+    String.trim_trailing(text) <>
+      "\n\n# Added by Arbiter (bd-40njjj): Hex and rebar outside the checkout.\nUSER root\n" <>
+      layer <> "\n" <> if(user, do: "USER #{user}\n", else: "")
   end
 
   defp node_layer do

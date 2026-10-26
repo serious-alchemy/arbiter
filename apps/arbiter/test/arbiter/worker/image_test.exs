@@ -364,9 +364,21 @@ defmodule Arbiter.Worker.ImageTest do
     test "the generated toolchain installs Hex and rebar into a MIX_HOME outside any checkout" do
       repo = repo_with(%{"README.md" => "hi\n"})
       assert {:ok, plan} = Image.plan(repo, "main", opts())
-      assert plan.containerfile =~ "ENV MIX_HOME=/opt/toolchain/mix HEX_HOME=/opt/toolchain/hex"
+      assert plan.containerfile =~ "ENV MIX_HOME=/opt/toolchain/mix\n"
+      refute plan.containerfile =~ "HEX_HOME=/opt"
       assert plan.containerfile =~ "mix local.hex --force"
       assert plan.containerfile =~ "mix local.rebar --force"
+      # Checked as the pod runs it: non-root uid, no stdin.
+      assert plan.containerfile =~ ~r/setpriv --reuid=10001 .*mix hex\.info <\/dev\/null/
+    end
+
+    test "a repo Containerfile gets the Hex layer too, then its own USER restored" do
+      repo = repo_with(%{".arbiter/Containerfile" => @repo_containerfile <> "\nUSER app\n"})
+      assert {:ok, plan} = Image.plan(repo, "main", opts())
+      assert plan.containerfile =~ "ENV MIX_HOME=/opt/toolchain/mix\n"
+      assert plan.containerfile =~ "mix local.hex --force"
+      assert plan.containerfile =~ "mix hex.info"
+      assert String.ends_with?(plan.containerfile, "USER app\n")
     end
 
     test "a repo Containerfile gets a per-repo image name, a generated one a toolchain name" do
