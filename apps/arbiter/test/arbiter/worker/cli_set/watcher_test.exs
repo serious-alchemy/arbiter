@@ -128,6 +128,12 @@ defmodule Arbiter.Worker.CliSet.WatcherTest do
     assert Enum.find(bumped.clis, &(&1.name == "claude")).version == "2.1.310"
     assert {:ok, _} = CliSet.materialize(bumped, verify: true)
 
+    # Under the hold the shipped escript is the snapshot's, not the host's.
+    escript = CliSet.arb_escript(Keyword.delete(b, :cli_set))
+    assert is_binary(escript)
+    assert escript =~ "/arb/arb.escript"
+    assert escript =~ Keyword.fetch!(a, :cli_sets_root)
+
     {:ok, _} = Settings.set_worker_cli_set_hold(nil)
     assert {:ok, moved} = CliSet.resolve(b)
     refute moved.hash == set.hash

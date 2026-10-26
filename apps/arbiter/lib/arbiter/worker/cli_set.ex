@@ -308,8 +308,11 @@ defmodule Arbiter.Worker.CliSet do
   def arb_escript(opts \\ []) do
     with {:ok, set} <- resolve(opts),
          %{files: files} <- cli(set, "arb"),
-         %{source: {:cache, entry, rel}} <- Enum.find(files, &(&1.name == "arb.escript")) do
-      Cache.object_path(entry, rel)
+         %{source: source} <- Enum.find(files, &(&1.name == "arb.escript")) do
+      case source do
+        {:cache, entry, rel} -> Cache.object_path(entry, rel)
+        {:snapshot, path} -> path
+      end
     else
       _ -> nil
     end

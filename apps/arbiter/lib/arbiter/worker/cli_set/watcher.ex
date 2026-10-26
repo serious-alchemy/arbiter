@@ -99,7 +99,11 @@ defmodule Arbiter.Worker.CliSet.Watcher do
       if set.hash == state.last_hash do
         {:unchanged, state}
       else
-        {{:republished, republish(opts)}, %{state | last_hash: set.hash}}
+        results = republish(opts)
+        # Advance only when every republish succeeded, so a transient registry
+        # failure is retried on the next tick.
+        failed? = Enum.any?(results, &match?({_, {:error, _}}, &1))
+        {{:republished, results}, if(failed?, do: state, else: %{state | last_hash: set.hash})}
       end
     else
       hold when is_binary(hold) -> {:held, state}
