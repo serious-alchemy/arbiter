@@ -229,6 +229,16 @@ defmodule Arbiter.Worker.CliSet do
     end
   end
 
+  # Every other CLI is flat in `/opt/arbiter/cli`; two files may not share a name.
+  defp container_files(name, entry) do
+    files = Enum.map(entry.files, fn f -> cache_file(Path.basename(f.path), f, entry) end)
+
+    case files |> Enum.frequencies_by(& &1.name) |> Enum.find(fn {_, n} -> n > 1 end) do
+      nil -> {:ok, Enum.sort_by(files, & &1.name)}
+      {dup, _} -> {:error, {:cli_file_collision, name, dup}}
+    end
+  end
+
   @doc """
   The cached `arb` escript (the object in the verified cache, read-only) the
   set `opts` resolve, or `nil` when the set has no `arb`. It is what ships in
@@ -243,16 +253,6 @@ defmodule Arbiter.Worker.CliSet do
       Cache.object_path(entry, rel)
     else
       _ -> nil
-    end
-  end
-
-  # Every other CLI is flat in `/opt/arbiter/cli`; two files may not share a name.
-  defp container_files(name, entry) do
-    files = Enum.map(entry.files, fn f -> cache_file(Path.basename(f.path), f, entry) end)
-
-    case files |> Enum.frequencies_by(& &1.name) |> Enum.find(fn {_, n} -> n > 1 end) do
-      nil -> {:ok, Enum.sort_by(files, & &1.name)}
-      {dup, _} -> {:error, {:cli_file_collision, name, dup}}
     end
   end
 
