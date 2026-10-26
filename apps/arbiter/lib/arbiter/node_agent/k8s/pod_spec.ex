@@ -268,9 +268,6 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
 
   defp label_value(key, _), do: bad_spec({:bad_label, key})
 
-  defp optional_label(_key, nil), do: {:ok, nil}
-  defp optional_label(key, value), do: label_value(key, value)
-
   # A synthetic run id (`bd-1#review`) is not a legal label value: the label gets
   # a safe form of it and `annotations/1` keeps the real id for lookup.
   defp task_label(nil), do: {:ok, nil}
