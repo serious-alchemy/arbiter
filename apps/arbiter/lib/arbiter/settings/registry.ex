@@ -78,7 +78,7 @@ defmodule Arbiter.Settings.Registry do
       type: "boolean",
       description:
         "Finish-first tiebreak inside a priority band: children of in-progress epics go first, " <>
-          "fewest open leaves first; null/false = off. Takes effect on the next scheduler tick."
+          "fewest open leaves first; null = on (default), false = off. Takes effect on the next scheduler tick."
     },
     %{
       key: "scheduling_finish_first_max_wait_hours",
@@ -583,7 +583,7 @@ defmodule Arbiter.Settings.Registry do
   def default("output_offload_enabled"), do: false
 
   def default("scheduling_epic_floors_enabled"), do: true
-  def default("scheduling_finish_first"), do: false
+  def default("scheduling_finish_first"), do: true
 
   def default("scheduling_finish_first_max_wait_hours"),
     do: Settings.default_finish_first_max_wait_hours()

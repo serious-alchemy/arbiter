@@ -150,7 +150,7 @@ defmodule Arbiter.Settings.RegistryTest do
       assert %{value: nil, overridden: false} =
                Registry.describe("scheduling_max_lifted_in_flight")
 
-      assert %{value: false, overridden: false} = Registry.describe("scheduling_finish_first")
+      assert %{value: true, overridden: false} = Registry.describe("scheduling_finish_first")
 
       assert %{value: 24, overridden: false} =
                Registry.describe("scheduling_finish_first_max_wait_hours")
@@ -158,7 +158,7 @@ defmodule Arbiter.Settings.RegistryTest do
       assert Settings.scheduling() == %{
                epic_floors_enabled: true,
                max_lifted_in_flight: nil,
-               finish_first: false,
+               finish_first: true,
                finish_first_max_wait_hours: 24
              }
     end
@@ -205,7 +205,7 @@ defmodule Arbiter.Settings.RegistryTest do
       end
 
       assert Settings.scheduling().epic_floors_enabled
-      refute Settings.scheduling().finish_first
+      assert Settings.scheduling().finish_first
     end
 
     test "the Settings setters refuse bad values directly" do

@@ -476,7 +476,7 @@ defmodule Arbiter.Settings do
 
   @doc """
   The scheduling settings in force, defaults applied:
-  `%{epic_floors_enabled: true, max_lifted_in_flight: nil, finish_first: false,
+  `%{epic_floors_enabled: true, max_lifted_in_flight: nil, finish_first: true,
   finish_first_max_wait_hours: 24}`. `max_lifted_in_flight: nil` means
   `max(slots_total - 1, 1)`, which only the board knows. Never raises: an
   unreadable row reads as no overrides.
@@ -491,7 +491,7 @@ defmodule Arbiter.Settings do
     %{
       epic_floors_enabled: scheduling_epic_floors_enabled() != false,
       max_lifted_in_flight: scheduling_max_lifted_in_flight(),
-      finish_first: scheduling_finish_first() == true,
+      finish_first: scheduling_finish_first() != false,
       finish_first_max_wait_hours:
         scheduling_finish_first_max_wait_hours() || @default_finish_first_max_wait_hours
     }
@@ -521,11 +521,11 @@ defmodule Arbiter.Settings do
 
   def set_scheduling_max_lifted_in_flight(_), do: {:error, :invalid_value}
 
-  @doc "The finish-first switch override; `nil` = off."
+  @doc "The finish-first switch override; `nil` = on (default), `false` = off."
   @spec scheduling_finish_first() :: boolean() | nil
   def scheduling_finish_first, do: read_setting(:scheduling_finish_first)
 
-  @doc "Persist the finish-first switch; `nil` clears it (off)."
+  @doc "Persist the finish-first switch; `nil` clears it (on, the default)."
   @spec set_scheduling_finish_first(boolean() | nil) ::
           {:ok, boolean() | nil} | {:error, term()}
   def set_scheduling_finish_first(v) when is_nil(v) or is_boolean(v),
