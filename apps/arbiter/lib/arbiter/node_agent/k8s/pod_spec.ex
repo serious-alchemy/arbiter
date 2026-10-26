@@ -808,7 +808,14 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   defp worker_env(run, cfg) do
     service_env = for s <- run.services, {k, v} <- s.worker_env, into: %{}, do: {k, v}
 
-    run.env
+    # Hex and rebar archives live in the image's MIX_HOME (read-only, outside the
+    # checkout); Hex's registry cache needs a writable HEX_HOME, so that sits under the
+    # per-run home (bd-40njjj). A run's own env wins.
+    %{
+      "MIX_HOME" => "/opt/toolchain/mix",
+      "HEX_HOME" => Path.join(mount_path(run, "home") || "/tmp", ".hex")
+    }
+    |> Map.merge(run.env)
     |> Map.merge(service_env)
     |> Map.put("ARB_BRIDGE_ADDR", cfg.bridge_addr)
     |> Map.put("ARB_BRIDGES", Enum.join(run.bridges, " "))

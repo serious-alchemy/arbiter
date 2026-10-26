@@ -1796,6 +1796,8 @@ defmodule Arbiter.Worker do
       |> maybe_put(:result_is_error, Map.get(meta, :result_is_error))
       |> maybe_put(:result_message, Map.get(meta, :result_message))
       |> maybe_put(:harness_version, Map.get(meta, :harness_version))
+      |> maybe_put(:image_ref, Map.get(meta, :image_ref))
+      |> maybe_put(:cli_set, Map.get(meta, :cli_set))
 
     # bd-apwfmy: keep StopReason's typed category, not just the prose summary
     # it renders into `failure_reason`. Same best-effort discipline — absent
@@ -3858,6 +3860,9 @@ defmodule Arbiter.Worker do
             :harness_version,
             Map.get(usage, :harness_version) || Map.get(session, :harness_version)
           )
+          # SI3: the image and CLI set a container or remote spawn ran in.
+          |> maybe_put(:image_ref, Map.get(session, :image_ref))
+          |> maybe_put(:cli_set, Map.get(session, :cli_set))
           |> maybe_put(:result_subtype, Map.get(usage, :result_subtype))
           |> maybe_put(:result_is_error, Map.get(usage, :result_is_error))
           |> maybe_put(:result_message, Map.get(usage, :result_message))

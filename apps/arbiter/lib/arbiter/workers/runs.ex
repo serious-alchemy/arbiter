@@ -78,7 +78,10 @@ defmodule Arbiter.Workers.Runs do
     :node_id,
     :model_family,
     :routing_decision,
-    :guardrail_decision
+    :guardrail_decision,
+    :image_ref,
+    :cli_set,
+    :harness_version
   ]
 
   @type filters :: %{

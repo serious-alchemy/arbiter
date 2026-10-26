@@ -726,6 +726,14 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
     end
   end
 
+  describe "Hex outside the checkout (bd-40njjj)" do
+    test "the worker points MIX_HOME and HEX_HOME at the image's toolchain dirs, not the work tree" do
+      env = env_pairs(worker(build!()))
+      assert {"MIX_HOME", "/opt/toolchain/mix"} in env
+      assert {"HEX_HOME", @home <> "/.hex"} in env
+    end
+  end
+
   describe "bridges" do
     test "bridge sockets have no pod twin: the CA mount, the controller address and the names" do
       pod = build!(run_spec(wire_bridges()))

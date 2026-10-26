@@ -206,7 +206,10 @@ defmodule Arbiter.Workers.Serializer do
       :provider_account_id,
       :model_family,
       :routing_decision,
-      :guardrail_decision
+      :guardrail_decision,
+      :image_ref,
+      :cli_set,
+      :harness_version
     ])
     |> Map.put(:model, Stats.short_model_name(run.model))
   end
@@ -221,7 +224,10 @@ defmodule Arbiter.Workers.Serializer do
       provider_account_id: Map.get(meta, :provider_account_id),
       model_family: Map.get(meta, :model_family),
       routing_decision: Map.get(meta, :routing_decision),
-      guardrail_decision: Map.get(meta, :guardrail_decision)
+      guardrail_decision: Map.get(meta, :guardrail_decision),
+      image_ref: Map.get(meta, :image_ref),
+      cli_set: Map.get(meta, :cli_set),
+      harness_version: Map.get(meta, :harness_version)
     }
   end
 
@@ -267,6 +273,10 @@ defmodule Arbiter.Workers.Serializer do
       model_family: r.model_family,
       routing_decision: r.routing_decision,
       guardrail_decision: r.guardrail_decision,
+      # SI3: what the run ran in.
+      image_ref: r.image_ref,
+      cli_set: r.cli_set,
+      harness_version: r.harness_version,
       session_id: r.session_id,
       resumed_from_run_id: r.resumed_from_run_id
     })
