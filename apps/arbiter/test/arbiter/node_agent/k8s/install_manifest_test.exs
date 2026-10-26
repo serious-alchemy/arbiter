@@ -834,6 +834,47 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
       assert values["concurrency"]["max"] == 5
     end
 
+    test "a --registries entry for nodes.registry merges into one entry, either slash form" do
+      for prefix <- ["registry.example.test/arbiter", "registry.example.test/arbiter/"] do
+        server = Keyword.put(@values_server, :registry, prefix)
+
+        values =
+          values!(
+            %{"name" => "n", "registries" => "registry.example.test/arbiter/=ghcr-pull"},
+            server
+          )
+
+        assert [%{"pullSecret" => "ghcr-pull"}] = values["registries"], "registry #{prefix}"
+      end
+    end
+
+    test "nodes.registry without a trailing slash merges with the slashed --registries entry" do
+      values =
+        values!(%{
+          "name" => "n",
+          "registries" => "registry.example.test/arbiter/=ghcr-pull,ghcr.io/x/=g"
+        })
+
+      assert length(values["registries"]) == 2
+
+      entries =
+        for e <- values["registries"],
+            do: %{"prefix" => e["prefix"], "pull_secret" => e["pullSecret"]}
+
+      assert {:ok, %{registries: [_, _]}} =
+               Arbiter.NodeAgent.K8s.ControllerConfig.from_map(%{"registries" => entries})
+    end
+
+    test "duplicate normalized registries prefixes are refused" do
+      assert {:error, errors} =
+               InstallManifest.parse(%{
+                 "name" => "n",
+                 "registries" => "ghcr.io/x/=a,ghcr.io/x/=b"
+               })
+
+      assert Enum.any?(errors, &String.starts_with?(&1, "registries"))
+    end
+
     test "placement, pull secret, proxy and admission map onto the chart's keys" do
       values =
         values!(%{

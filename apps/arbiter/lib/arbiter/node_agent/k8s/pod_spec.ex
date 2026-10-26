@@ -224,6 +224,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
          services: services,
          command: command,
          run: spec.run,
+         task: spec.task,
          interval: interval
        }}
     end
@@ -240,7 +241,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   defp labels(spec, cfg) do
     with :ok <- install(spec.install, cfg),
          {:ok, run} <- label_value("arbiter.dev/run", spec.run),
-         {:ok, task} <- optional_label("arbiter.dev/task", spec.task),
+         {:ok, task} <- task_label(spec.task),
          {:ok, extra} <- extra_labels(spec.labels) do
       controller =
         %{
@@ -267,8 +268,40 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
 
   defp label_value(key, _), do: bad_spec({:bad_label, key})
 
-  defp optional_label(_key, nil), do: {:ok, nil}
-  defp optional_label(key, value), do: label_value(key, value)
+  # A synthetic run id (`bd-1#review`) is not a legal label value: the label gets
+  # a safe form of it and `annotations/1` keeps the real id for lookup.
+  defp task_label(nil), do: {:ok, nil}
+
+  defp task_label(task) when is_binary(task) do
+    case label_value("arbiter.dev/task", task) do
+      {:ok, _} = ok -> ok
+      _ -> label_value("arbiter.dev/task", safe_label(task))
+    end
+  end
+
+  defp task_label(_), do: bad_spec({:bad_label, "arbiter.dev/task"})
+
+  defp safe_label(value) do
+    value
+    |> String.replace(~r/[^A-Za-z0-9_.-]/, "_")
+    |> String.slice(0, 63)
+    |> String.trim("_")
+    |> String.trim("-")
+    |> String.trim(".")
+  end
+
+  defp annotations(%{task: task, labels: labels}) when is_binary(task) do
+    if labels["arbiter.dev/task"] == task, do: %{}, else: %{"arbiter.dev/task" => task}
+  end
+
+  defp annotations(_run), do: %{}
+
+  defp put_annotations(meta, run) do
+    case annotations(run) do
+      empty when map_size(empty) == 0 -> meta
+      annotations -> Map.put(meta, "annotations", annotations)
+    end
+  end
 
   defp extra_labels(labels) when is_map(labels) do
     Enum.reduce_while(labels, {:ok, %{}}, fn {k, v}, {:ok, acc} ->
@@ -563,19 +596,21 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
     %{
       "apiVersion" => "v1",
       "kind" => "Pod",
-      "metadata" => %{
-        "name" => run.name,
-        "namespace" => cfg.namespace,
-        "labels" => run.labels,
-        "ownerReferences" => [
-          %{
-            "apiVersion" => "apps/v1",
-            "kind" => "Deployment",
-            "name" => @owner_name,
-            "uid" => cfg.owner_uid
-          }
-        ]
-      },
+      "metadata" =>
+        %{
+          "name" => run.name,
+          "namespace" => cfg.namespace,
+          "labels" => run.labels,
+          "ownerReferences" => [
+            %{
+              "apiVersion" => "apps/v1",
+              "kind" => "Deployment",
+              "name" => @owner_name,
+              "uid" => cfg.owner_uid
+            }
+          ]
+        }
+        |> put_annotations(run),
       "spec" =>
         %{
           "restartPolicy" => "Never",

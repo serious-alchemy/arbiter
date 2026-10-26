@@ -1186,6 +1186,38 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
   end
 
+  describe "container_name/1 (bd-1chty2: a DNS-1123 label for every synthetic run id)" do
+    @dns ~r/\A[a-z0-9]([-a-z0-9]*[a-z0-9])?\z/
+
+    for {kind, task_id} <- [
+          review: "bd-1hoo7j#review",
+          r: "bd-1hoo7j#r2",
+          impl: "bd-1hoo7j#impl1",
+          v: "bd-1hoo7j#v1",
+          t: "bd-1hoo7j#t1"
+        ] do
+      test "#{kind} run id #{task_id}" do
+        name = ContainerSpawn.container_name(task_id: unquote(task_id), owner: self())
+        assert name =~ @dns
+        assert byte_size(name) <= 63
+        assert String.starts_with?(name, "arb-bd-1hoo7j-")
+      end
+    end
+
+    test "an over-long ticket and run id stays within 63 characters" do
+      long = String.duplicate("Ticket_", 20) <> "#review"
+      name = ContainerSpawn.container_name(task_id: long, owner: self())
+      assert byte_size(name) <= 63
+      assert name =~ @dns
+    end
+
+    test "different run ids for the same ticket get different names" do
+      a = ContainerSpawn.container_name(task_id: "bd-1#review", owner: self())
+      b = ContainerSpawn.container_name(task_id: "bd-1#r2", owner: self())
+      assert a != b
+    end
+  end
+
   describe "teardown/1" do
     test "removes the container by name, and is a no-op for any other spawn" do
       test_pid = self()
