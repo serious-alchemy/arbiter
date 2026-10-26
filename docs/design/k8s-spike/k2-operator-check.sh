@@ -150,7 +150,9 @@ expect "other-ns pod -> worker pod 7000"             "$OTHER" bystander "$W1" 70
 expect "worker2 -> worker pod 7000"                  "$NS" worker2 "$W1" 7000 BLOCKED
 echo "-- controller egress (want: API via node IP and ClusterIP, DNS, internet 443; not the pod network)"
 expect "controller -> API ClusterIP :443"            "$NS" controller "$APIIP" 443 CONNECTED
-expect "controller -> node IP :6443"                 "$NS" controller "$NODEIP" 6443 CONNECTED
+for ep in $APIEPS; do
+  expect "controller -> API endpoint $ep :6443"      "$NS" controller "$ep" 6443 CONNECTED
+done
 expect "controller -> pod in another namespace"      "$NS" controller "$BYS" 8080 BLOCKED
 expect "controller -> worker pod"                    "$NS" controller "$W1" 7000 BLOCKED
 
