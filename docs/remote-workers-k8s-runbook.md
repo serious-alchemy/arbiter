@@ -347,6 +347,29 @@ existing objects into a release is possible but optional.
   `registries[]`), and every worker pod references the `pullSecret`. The `Image pull`
   readiness check (§3) confirms it from inside the namespace.
 
+### Known pitfalls (first enrollment)
+
+The first real enrollment (mesaana k3s, 2026-10-26) hit these (the last was found right after).
+
+1. **tailscale sidecar crash-loops.** Symptom: `missing get permission on secret
+   "tailscale"`. containerboot wants a `tailscale` Secret unless `TS_KUBE_SECRET=""`.
+   Fix: the chart and raw manifest now set `TS_KUBE_SECRET=""` on the controller's
+   sidecar (bd-5qclzf). Upgrade the chart.
+2. **`{:registries, :duplicate_prefix}`.** Symptom: the controller logs `config ...
+   rejected` every 30s and the canary reports `{:config, :no_config}`. Cause: `arb node
+   add --registries` repeated the prefix of `nodes.registry`. Fix: bd-308jwo; on older
+   builds, do not repeat the `nodes.registry` prefix in `--registries`.
+3. **Canary `{:no_image, :not_published}` on a fresh install.** The primary publishes
+   the controller image only at boot. If `nodes.registry` was set after the last boot,
+   restart the primary once, then re-run the canary.
+4. **API CIDRs on multi-node k3s.** Take the API server address from the `kubernetes`
+   EndpointSlice (`kubectl get endpointslice -l kubernetes.io/service-name=kubernetes`),
+   not from `nodes[0]`, or the controller → API egress rule allows the wrong /32 and
+   checks report false FAILs. Fix: bd-6vlqu8 (`k2-operator-check.sh`). mesaana's is
+   192.168.1.169.
+5. **Run ids rejected as `bad_name`.** Synthetic `#review` run ids are not valid k8s
+   object names, so the Job/Pod create is rejected with `bad_name` (bd-1chty2).
+
 ## 5. Running the end-to-end suite on a disposable cluster
 
 The `:k8s` suite (`apps/arbiter/test/k8s/`) runs the canary, the readiness checks and
