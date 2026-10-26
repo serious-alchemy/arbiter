@@ -46,6 +46,16 @@ defmodule Arbiter.Worker.JailPodNetworkTest do
     assert Jail.bridge_names(@network) == ["proxy", "4848", "5432"]
   end
 
+  test "the start-up readiness wait reads /proc/net/tcp and never dials a listener (bd-8midj6)" do
+    assert ["sh", "-c", script | _] = Jail.pod_network_command(@network, ["claude"])
+
+    # A dialled probe would fork a socat child that opens TLS to the controller and
+    # logs `SSL_write(): unexpected eof` when the probe hangs up. The loop only
+    # greps the listening-socket table, so the start-up window makes no connection.
+    assert script =~ "/proc/net/tcp"
+    refute script =~ ~r/\bnc\b|\/dev\/tcp|socat[^\n]*TCP:/
+  end
+
   test "a missing network spec leaves the command alone" do
     assert Jail.pod_network_command(nil, ["claude"]) == ["claude"]
   end
