@@ -46,7 +46,7 @@ spec:
         - name: ARB_WORKER_BEAD_ID
           value: bd-1nfuq5
         - name: HEX_HOME
-          value: /tmp/.hex
+          value: /var/lib/arb/run/home/.hex
         - name: HOME
           value: /var/lib/arb/run/home
         - name: LANG
