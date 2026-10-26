@@ -81,6 +81,7 @@ defmodule Arbiter.Worker.Image.PublishLedger do
     end
   end
 
+  # sobelow_skip ["Misc.BinToTerm"]
   defp safe_decode(bin) do
     :erlang.binary_to_term(bin, [:safe])
   rescue
