@@ -573,6 +573,7 @@ defmodule Arbiter.Worker.StopReason do
   defp classify_by_output(exit_status, output_lines, provider) do
     haystack = signature_haystack(output_lines)
     signal = signal_for(exit_status)
+    clean_end? = clean_completion?(exit_status, output_lines, provider)
 
     cond do
       # bd-8praoz: a signal-terminated run is checked FIRST, ahead of every
@@ -720,10 +721,10 @@ defmodule Arbiter.Worker.StopReason do
           retry_after: retry_after
         }
 
-      # A Codex run that exited 0 after its own `turn.completed` summary line
-      # finished cleanly; an earlier non-fatal auth-looking line (e.g. an MCP
-      # transport warning) must not turn it into `:auth_expired`.
-      not codex_clean_completion?(exit_status, output_lines, provider) and
+      # bd-czvxfs: a run that finished cleanly (`clean_completion?/3`) is not an auth death on
+      # the strength of earlier auth-looking text (a Codex MCP transport warning; a Claude
+      # agent's own prose about a file that mentions 401 / expired tokens).
+      not clean_end? and
           Regex.match?(@auth_signature, haystack) ->
         %__MODULE__{
           category: :auth_expired,
@@ -737,7 +738,7 @@ defmodule Arbiter.Worker.StopReason do
           signal: signal
         }
 
-      Regex.match?(@credit_signature, haystack) ->
+      not clean_end? and Regex.match?(@credit_signature, haystack) ->
         %__MODULE__{
           category: :credit_exhausted,
           summary: "agent ran out of credits / quota",
@@ -747,7 +748,7 @@ defmodule Arbiter.Worker.StopReason do
           signal: signal
         }
 
-      Regex.match?(@rate_limit_signature, haystack) ->
+      not clean_end? and Regex.match?(@rate_limit_signature, haystack) ->
         %__MODULE__{
           category: :rate_limited,
           summary: "agent was rate-limited / the API was overloaded",
@@ -756,7 +757,7 @@ defmodule Arbiter.Worker.StopReason do
           signal: signal
         }
 
-      Regex.match?(@gateway_error_signature, haystack) ->
+      not clean_end? and Regex.match?(@gateway_error_signature, haystack) ->
         %__MODULE__{
           category: :gateway_error,
           summary: "agent lost connectivity to the API (transient gateway / proxy error)",
@@ -1401,10 +1402,35 @@ defmodule Arbiter.Worker.StopReason do
     end
   end
 
-  defp codex_clean_completion?(0, output_lines, "codex"),
+  # The CLI finished its own work and said so: exit 0 AND its terminal event reported
+  # success. Anything auth/credit/rate-limit/gateway-shaped earlier in such a transcript is
+  # prose the run itself produced (an assistant message or a tool_use summary about a file
+  # that mentions "401" or "token expired"; `signature_haystack/1` can only drop tool
+  # *results*), not the CLI failing — so it must not outrank the clean end (bd-czvxfs: the
+  # first cluster run, a k8s-runbook edit, was reopened as `:auth_expired` on exactly that).
+  # A real CLI auth/limit failure ends with an `is_error` result (rendered `session error`)
+  # and a non-zero exit, so it is unaffected.
+  defp clean_completion?(0, output_lines, "codex"),
     do: Enum.any?(output_lines, &String.contains?(&1, "codex session complete"))
 
-  defp codex_clean_completion?(_exit_status, _output_lines, _provider), do: false
+  defp clean_completion?(0, output_lines, provider) when provider in [nil, "claude"] do
+    marker =
+      output_lines
+      |> Enum.filter(&claude_session_marker?/1)
+      |> List.last()
+
+    match?("⚙ claude session success" <> _, marker) or
+      match?("⚙ claude session done" <> _, marker)
+  end
+
+  defp clean_completion?(_exit_status, _output_lines, _provider), do: false
+
+  # `ClaudeSession`'s init / result display lines (oldest-first): the last one tells
+  # whether the final session started and never finished, errored, or succeeded.
+  defp claude_session_marker?(line) when is_binary(line),
+    do: String.starts_with?(line, "⚙ claude session ")
+
+  defp claude_session_marker?(_line), do: false
 
   defp signature_haystack(output_lines) do
     output_lines
