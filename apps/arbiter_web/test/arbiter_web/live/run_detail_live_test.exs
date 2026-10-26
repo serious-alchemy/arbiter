@@ -95,6 +95,30 @@ defmodule ArbiterWeb.RunDetailLiveTest do
     end
   end
 
+  describe "provenance (SI3)" do
+    test "shows the image, CLI set and harness version a run recorded", %{conn: conn} do
+      r =
+        run(%{
+          task_id: "bd-prov-run",
+          image_ref: "registry.example/x@sha256:abc",
+          cli_set: "feed0123",
+          harness_version: "2.1.310"
+        })
+
+      {:ok, view, _html} = live_run(conn, r.id)
+
+      assert has_element?(view, "#run-image-ref", "registry.example/x@sha256:abc")
+      assert has_element?(view, "#run-cli-set", "feed0123")
+      assert has_element?(view, "#run-harness-version", "2.1.310")
+    end
+
+    test "a host-local run has no provenance block", %{conn: conn} do
+      r = run(%{task_id: "bd-noprov-run"})
+      {:ok, view, _html} = live_run(conn, r.id)
+      refute has_element?(view, "#run-provenance")
+    end
+  end
+
   describe "mount" do
     test "renders the loading state then the run", %{conn: conn} do
       r = run(%{task_id: "bd-detail-ok", task_title: "the-good-run", output_lines: ["hello"]})

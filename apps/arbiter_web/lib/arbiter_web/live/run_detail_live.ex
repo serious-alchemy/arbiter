@@ -276,6 +276,26 @@ defmodule ArbiterWeb.RunDetailLive do
               <.run_where class="font-medium text-[var(--text-title)]" />
             </div>
 
+            <%!-- ── Provenance: image, CLI set, harness version (SI3) ───── --%>
+            <div
+              :if={@run.image_ref || @run.cli_set || @run.harness_version}
+              id="run-provenance"
+              class="flex flex-col gap-1 rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--arb-panel-alt)] px-3 py-2 text-[12px] text-[var(--text-secondary)]"
+            >
+              <span class="text-[10.5px] text-[var(--text-label)] font-medium font-[family-name:var(--font-mono)]">
+                PROVENANCE
+              </span>
+              <span :if={@run.image_ref} id="run-image-ref" class="font-mono break-all">
+                image {@run.image_ref}
+              </span>
+              <span :if={@run.cli_set} id="run-cli-set" class="font-mono">
+                CLI set {@run.cli_set}
+              </span>
+              <span :if={@run.harness_version} id="run-harness-version" class="font-mono">
+                harness {@run.harness_version}
+              </span>
+            </div>
+
             <%!-- ── Live worker link ────────────────────────────────── --%>
             <div
               :if={@live_worker?}

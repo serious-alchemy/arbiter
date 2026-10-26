@@ -237,6 +237,62 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert run.harness_version == "1.2.16"
   end
 
+  describe "SI3: image_ref and cli_set on the run" do
+    @tag :tmp_dir
+    test "a container spawn's image, CLI set and label version land on the row", %{tmp_dir: dir} do
+      task_id = "bd-runprov-#{System.unique_integer([:positive])}"
+      {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      request = %{
+        image_ref: "localhost/arbiter-dev/x:abc-clifeed0123",
+        cli_set: "feed0123",
+        harness_version: "0.130.0"
+      }
+
+      port_args = %{
+        exec: System.find_executable("true"),
+        argv: ["true"],
+        cd: dir,
+        env: [],
+        sandbox: request
+      }
+
+      config =
+        ClaudeSession.host_harness_version(
+          ClaudeSession.build_session_config(task_id, nil, provider: "codex"),
+          port_args,
+          []
+        )
+
+      assert config.harness_version == "0.130.0"
+
+      {:ok, _port} =
+        GenServer.call(pid, {:__claude_session_open__, Map.delete(port_args, :sandbox), config})
+
+      :ok = Worker.advance(pid, :implement)
+      :ok = Worker.complete(pid, :done)
+
+      [run] = runs_for(task_id)
+      assert run.image_ref == "localhost/arbiter-dev/x:abc-clifeed0123"
+      assert run.cli_set == "feed0123"
+      assert run.harness_version == "0.130.0"
+    end
+
+    test "a remote spawn's request supplies the same three" do
+      request = %{
+        image_ref: "reg.example/x@sha256:" <> String.duplicate("a", 64),
+        cli_set: "feed0123",
+        harness_version: "2.1.310"
+      }
+
+      config =
+        ClaudeSession.host_harness_version(%{}, %{remote: %{request: request}}, [])
+
+      assert config == Map.take(request, [:image_ref, :cli_set, :harness_version])
+    end
+  end
+
   test "difficulty_at_dispatch is captured from meta at Run creation (bd-dzz6ly)" do
     task_id = "bd-rundiff-#{System.unique_integer([:positive])}"
 

@@ -321,6 +321,14 @@ defmodule ArbiterCli.Cmd.Worker do
 
   # ---- render ---------------------------------------------------------
 
+  # SI3: what the run ran in: the image (digest-pinned for a registry node), the
+  # CLI set's short hash and the harness version. Absent for a host-local run.
+  defp emit_provenance(run) do
+    if run["image_ref"], do: IO.puts("Image:      #{run["image_ref"]}")
+    if run["cli_set"], do: IO.puts("CLI set:    #{run["cli_set"]}")
+    if run["harness_version"], do: IO.puts("Harness:    #{run["harness_version"]}")
+  end
+
   defp emit_show(snap, :json), do: IO.puts(Jason.encode!(snap))
 
   # Pre-existing complexity 13 — baselined when bd-4x2yhq first
@@ -364,6 +372,7 @@ defmodule ArbiterCli.Cmd.Worker do
     if snap["exit_status"], do: IO.puts("Exit:       #{snap["exit_status"]}")
     if snap["result"], do: IO.puts("Result:     #{snap["result"]}")
     if snap["failure_reason"], do: IO.puts("Failure:    #{snap["failure_reason"]}")
+    emit_provenance(snap)
 
     emit_pre_push_checks(snap["pre_push_checks"] || [])
 
@@ -506,6 +515,7 @@ defmodule ArbiterCli.Cmd.Worker do
     IO.puts("Ticket:      #{run["task_id"]}")
     if run["repo"], do: IO.puts("Repo:        #{run["repo"]}")
     if run["model"], do: IO.puts("Model:      #{run["model"]}")
+    emit_provenance(run)
     IO.puts("Started:    #{run["started_at"]}")
     if run["completed_at"], do: IO.puts("Completed:  #{run["completed_at"]}")
     if run["failure_reason"], do: IO.puts("#{reason_label(run)}:    #{run["failure_reason"]}")
