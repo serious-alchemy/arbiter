@@ -4380,6 +4380,8 @@ defmodule Arbiter.Worker do
       notify_auth_hold(state, reason)
     end
 
+    log_remote_stream_tail(state, session, reason)
+
     meta =
       state.meta
       |> Map.put(:failure_reason, reason.summary)
@@ -4393,6 +4395,30 @@ defmodule Arbiter.Worker do
     return_pass_ticket(new_state)
     new_state
   end
+
+  # bd-5uqs30: a run on a node that exits cleanly without `arb done` is the one stop
+  # whose cause lives in its stream (a cluster canary lost the sentinel with the agent's
+  # final message in the transcript), so say how much stdout this session took and what
+  # its last lines were. Lines are the redacted ones the session already kept.
+  defp log_remote_stream_tail(
+         %State{task_id: task_id},
+         %{stdout_offset: bytes} = session,
+         %{category: :exited_without_done}
+       )
+       when is_integer(bytes) do
+    tail =
+      session
+      |> Map.get(:output_lines, [])
+      |> Enum.take(3)
+      |> Enum.reverse()
+      |> Enum.map(&String.slice(&1, 0, 200))
+
+    Logger.warning(
+      "Worker: task=#{task_id} remote stdout at exit: stdout_bytes=#{bytes} last_lines=#{inspect(tail)}"
+    )
+  end
+
+  defp log_remote_stream_tail(_state, _session, _reason), do: :ok
 
   # Resolve the agent adapter from the worker's routing config (set by Dispatch
   # via Worker.report/3) and record the death on the AuthHold. Best-effort —
