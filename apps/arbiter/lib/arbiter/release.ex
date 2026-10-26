@@ -17,6 +17,7 @@ defmodule Arbiter.Release do
   alias Arbiter.Loop.Scarcity.Draw
   alias Arbiter.Quota.BudgetCalibration
   alias Arbiter.Settings
+  alias Arbiter.Worker.CliFetcher.Fill
 
   @app :arbiter
 
@@ -829,7 +830,7 @@ defmodule Arbiter.Release do
     start_release_repo!()
     {:ok, _} = Application.ensure_all_started(:req)
 
-    Arbiter.Worker.CliFetcher.Fill.run(opts)
+    Fill.run(opts)
   end
 
   @doc """
