@@ -78,6 +78,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifestTest do
     test "runs in userspace networking with an ephemeral tagged key from the Secret", %{ts: ts} do
       env = Map.new(ts["env"], &{&1["name"], &1})
       assert env["TS_USERSPACE"]["value"] == "true"
+      assert env["TS_KUBE_SECRET"] == %{"name" => "TS_KUBE_SECRET", "value" => ""}
       assert env["TS_OUTBOUND_HTTP_PROXY_LISTEN"]["value"] == "127.0.0.1:1055"
       assert env["TS_EXTRA_ARGS"]["value"] =~ "--advertise-tags=tag:arbiter-node"
       assert env["TS_AUTHKEY"]["valueFrom"]["secretKeyRef"]["name"] == "arbiter-tailscale"

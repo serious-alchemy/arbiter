@@ -104,6 +104,8 @@ spec:
               value: --advertise-tags=tag:arbiter-node
             - name: TS_STATE_DIR
               value: /tmp/tailscale
+            - name: TS_KUBE_SECRET
+              value: ""
             - name: TS_SOCKET
               value: /tmp/tailscaled.sock
             - name: TS_AUTHKEY

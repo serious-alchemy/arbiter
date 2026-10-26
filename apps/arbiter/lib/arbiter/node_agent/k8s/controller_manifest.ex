@@ -154,6 +154,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
           %{"name" => "TS_OUTBOUND_HTTP_PROXY_LISTEN", "value" => @proxy_addr},
           %{"name" => "TS_EXTRA_ARGS", "value" => "--advertise-tags=" <> @tailscale_tag},
           %{"name" => "TS_STATE_DIR", "value" => "/tmp/tailscale"},
+          %{"name" => "TS_KUBE_SECRET", "value" => ""},
           %{"name" => "TS_SOCKET", "value" => @socket},
           %{
             "name" => "TS_AUTHKEY",
