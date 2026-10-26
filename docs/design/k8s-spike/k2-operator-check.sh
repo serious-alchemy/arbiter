@@ -22,7 +22,13 @@ fail=0
 
 # ---- discover the cluster (nothing hard-coded) ----
 APIIP=$(kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}')
-NODEIP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+# API server address(es) come from the `kubernetes` Endpoints (what the ClusterIP
+# DNATs to), not nodes[0]: on multi-node clusters they differ, and kube-router
+# evaluates egress after DNAT.
+APIEPS=$(kubectl get endpoints kubernetes -n default -o jsonpath='{.subsets[*].addresses[*].ip}' | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+NODEIP=$(printf '%s\n' "$APIEPS" | head -1)
+[ -n "$NODEIP" ] || { echo "cannot discover API endpoint from endpoints/kubernetes" >&2; exit 2; }
+echo "API endpoint address(es) (use for networkPolicy.apiServerCIDRs): $(printf '%s' "$APIEPS" | tr '\n' ' ')"
 DNSIP=$(kubectl get svc kube-dns -n kube-system -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
 PODCIDR=$(kubectl get nodes -o jsonpath='{.items[0].spec.podCIDR}')
 SVCCIDR=$(printf '%s' "$APIIP" | awk -F. '{print $1"."$2".0.0/16"}')
@@ -118,7 +124,7 @@ spec:
   podSelector: {matchLabels: {app.kubernetes.io/component: controller}}
   policyTypes: [Egress]
   egress:
-  - to: [{ipBlock: {cidr: $NODEIP/32}}, {ipBlock: {cidr: $APIIP/32}}]
+  - to: [$(for ip in $APIEPS; do printf '{ipBlock: {cidr: %s/32}}, ' "$ip"; done){ipBlock: {cidr: $APIIP/32}}]
     ports: [{protocol: TCP, port: 6443}, {protocol: TCP, port: 443}]
   - to: [{ipBlock: {cidr: 0.0.0.0/0, except: [$PODCIDR, $SVCCIDR]}}]
     ports: [{protocol: TCP, port: 443}]
@@ -144,7 +150,9 @@ expect "other-ns pod -> worker pod 7000"             "$OTHER" bystander "$W1" 70
 expect "worker2 -> worker pod 7000"                  "$NS" worker2 "$W1" 7000 BLOCKED
 echo "-- controller egress (want: API via node IP and ClusterIP, DNS, internet 443; not the pod network)"
 expect "controller -> API ClusterIP :443"            "$NS" controller "$APIIP" 443 CONNECTED
-expect "controller -> node IP :6443"                 "$NS" controller "$NODEIP" 6443 CONNECTED
+for ep in $APIEPS; do
+  expect "controller -> API endpoint $ep :6443"      "$NS" controller "$ep" 6443 CONNECTED
+done
 expect "controller -> pod in another namespace"      "$NS" controller "$BYS" 8080 BLOCKED
 expect "controller -> worker pod"                    "$NS" controller "$W1" 7000 BLOCKED
 
