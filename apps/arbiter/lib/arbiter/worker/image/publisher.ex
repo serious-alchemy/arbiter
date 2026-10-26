@@ -53,6 +53,7 @@ defmodule Arbiter.Worker.Image.Publisher do
   alias Arbiter.Worker.CliSet
   alias Arbiter.Worker.Image.Prebuilt
   alias Arbiter.Worker.Image.Publisher.Pipeline
+  alias Arbiter.Worker.Image.PublishLedger
   alias Arbiter.Worker.Image.Registry
   alias Arbiter.Worker.Image.RegistryReport
 
@@ -94,14 +95,15 @@ defmodule Arbiter.Worker.Image.Publisher do
       {:ok, cfg} ->
         key = image_key(ctx, cfg, opts)
 
-        flight(
-          key,
+        key
+        |> flight(
           :worker,
           fn ->
             with :ok <- ensure_private(cfg, ctx, opts), do: Pipeline.publish_image(ctx, cfg, opts)
           end,
           opts
         )
+        |> tap(fn result -> if match?({:ok, _}, result), do: PublishLedger.record(ctx, opts) end)
     end
   end
 
