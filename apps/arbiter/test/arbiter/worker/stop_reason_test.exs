@@ -96,6 +96,47 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "classify/2 — a clean Claude end_turn is not an auth death (bd-czvxfs)" do
+    # bd-bmymrp, run 0f54e530, the first cluster run: the agent edited
+    # docs/remote-workers-k8s-runbook.md (whose tables are full of "401" and
+    # "token ... expired" for the k8s join token), committed, wrote its summary,
+    # ended with `end_turn` and exited 0 without `arb done`. Its own assistant
+    # text and tool_use lines — which `signature_haystack/1` cannot tell from
+    # CLI output — carried that vocabulary and the run was labelled
+    # `:auth_expired`, reopened, and its commit never pushed.
+    @clean_run [
+      "⚙ claude session started (model sonnet-5-5)",
+      "⏵ Edit(docs/remote-workers-k8s-runbook.md)",
+      "⏴ tool result",
+      "⏵ Bash(git commit -qam \"runbook: primary_facts 401 row\")",
+      "Documented the `primary_facts`: 401 row: the join token is expired or revoked.",
+      "⚙ claude session success · 78.2s · $0.159"
+    ]
+
+    test "exit 0 after a successful result with 401 / token-expired prose is exited_without_done" do
+      assert StopReason.classify(0, @clean_run).category == :exited_without_done
+      assert StopReason.classify(0, @clean_run, "claude").category == :exited_without_done
+    end
+
+    test "the same prose with no clean result line is still auth_expired" do
+      assert StopReason.classify(0, Enum.drop(@clean_run, -1)).category == :auth_expired
+    end
+
+    test "an error result is not a clean end, even with exit 0" do
+      lines = Enum.drop(@clean_run, -1) ++ ["⚙ claude session error · 1.2s · $0.001"]
+      assert StopReason.classify(0, lines).category == :auth_expired
+    end
+
+    test "a non-zero exit after a success result keeps the auth classification" do
+      assert StopReason.classify(1, @clean_run).category == :auth_expired
+    end
+
+    test "a later session start (resume) voids an earlier clean result" do
+      lines = @clean_run ++ ["⚙ claude session started (model sonnet-5-5)", "API Error: 401"]
+      assert StopReason.classify(0, lines).category == :auth_expired
+    end
+  end
+
   describe "classify/2 — credit / rate limit" do
     test "insufficient credit balance" do
       reason = StopReason.classify(1, ["Your credit balance is too low to run this request."])
