@@ -610,6 +610,25 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       assert uid == config().owner_uid
     end
 
+    test "a synthetic run id as the task keeps the real id in an annotation, label made safe" do
+      pod = build!(%{run_spec() | task: "bd-1hoo7j#review"})
+      meta = pod["metadata"]
+
+      assert meta["labels"]["arbiter.dev/task"] == "bd-1hoo7j_review"
+      assert meta["annotations"] == %{"arbiter.dev/task" => "bd-1hoo7j#review"}
+    end
+
+    test "a task that is already a valid label gets no annotation" do
+      refute Map.has_key?(build!()["metadata"], "annotations")
+    end
+
+    test "the sanitized container name for every synthetic run id kind is accepted" do
+      for task <- ["bd-1#review", "bd-1#r2", "bd-1#impl1", "bd-1#v1", "bd-1#t1"] do
+        name = Arbiter.Worker.ContainerSpawn.container_name(task_id: task, owner: self())
+        assert {:ok, _} = PodSpec.build(%{run_spec() | name: name, task: task}, config())
+      end
+    end
+
     test "an unsafe name or label value is bad_spec" do
       base = run_spec()
 
