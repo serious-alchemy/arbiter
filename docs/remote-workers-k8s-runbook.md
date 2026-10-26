@@ -311,7 +311,10 @@ automation fallback only: the token then lands in Helm's release record.
 
 **Install.** `helm install <node> oci://ghcr.io/ryanrborn/charts/arbiter-node -n
 arbiter-workers -f values.yaml`, with the values the primary prints. On k3s add the API
-server's node IP to `networkPolicy.apiServerCIDRs` (step 5). A join Secret created after
+server's endpoint address(es) to `networkPolicy.apiServerCIDRs` (step 5). Take them from
+`kubectl get endpoints kubernetes` (`.subsets[].addresses[].ip`), not from `kubectl get
+nodes`: on a multi-node cluster the first node is not necessarily the API server, and
+egress is evaluated after DNAT. `k2-operator-check.sh` prints these addresses. A join Secret created after
 the pod started reaches it after about 90 s (the kubelet sync period), so expect that wait
 before the node shows `online`. Then steps 7-8.
 
