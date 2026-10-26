@@ -724,7 +724,9 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # A Codex container's `TMPDIR` is a subdirectory of the run dir, not the run
   # dir itself. The CLI (0.164.0) refuses to create its helper binaries when
   # `CODEX_HOME` is under the temp dir, and `CODEX_HOME` is `<run dir>/codex-home`:
-  # with `TMPDIR` the run dir the reviewer died at start-up (bd-83gbsh, #1040).
+  # with `TMPDIR` the run dir it warns "Refusing to create helper binaries"
+  # (bd-83gbsh, #1040). That is only a warning; the fatal "config.toml Permission
+  # denied" was the image running as uid 0 (`Arbiter.Worker.Image.with_hex_layer/1`).
   # Still disk-backed and inside the run's writable mount, so still removed with
   # the run. Claude has no such guard and keeps the run dir.
   defp container_temp_dir("codex", tmp_dir) do

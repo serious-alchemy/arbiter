@@ -157,4 +157,79 @@ defmodule Arbiter.Worker.ImagePodmanTest do
     assert out =~ "Erlang/OTP 28"
     assert out =~ "v22.11.0"
   end
+
+  # bd-83gbsh (#1040): a repo-custom image that ran as uid 0 could not read the 0600
+  # files (codex's config.toml) or use the 0700 dirs (claude's config dir) the host
+  # uid owns. The agent CLIs are not in this image; the identity and the file
+  # access they depend on are what is checked, with the flags `Container.argv/2` sets.
+  test "a repo-custom image runs as the host uid, not root, and reaches host-owned 0600 files" do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
+    dir = Path.join(System.tmp_dir!(), "img-podman-uid-#{suffix}")
+    root = Path.join(dir, "state")
+    repo = Path.join(dir, "repo")
+    run_dir = Path.join(dir, "run")
+    File.mkdir_p!(Path.join(repo, ".arbiter"))
+    File.mkdir_p!(Path.join(run_dir, "codex-home"))
+    on_exit(fn -> File.rm_rf!(dir) end)
+
+    git!(repo, ["init", "-q", "-b", "main"])
+
+    # No USER of its own, like vstim's: it inherits the base's identity.
+    File.write!(
+      Path.join(repo, ".arbiter/Containerfile"),
+      "FROM ${ARBITER_BASE}\nRUN echo repo-custom-#{suffix} > /marker\n"
+    )
+
+    git!(repo, ["add", "-A"])
+    git!(repo, ["commit", "-q", "-m", "init"])
+
+    config = Path.join(run_dir, "codex-home/config.toml")
+    File.write!(config, "model = \"x\"\n")
+    File.chmod!(config, 0o600)
+    File.chmod!(Path.join(run_dir, "codex-home"), 0o700)
+
+    builder = start_supervised!({Builder, name: nil})
+    opts = [root: root, scratch: Path.join(dir, "scratch"), server: builder, repo_name: suffix]
+    {:ok, plan} = Image.plan(repo, "main", opts)
+
+    on_exit(fn ->
+      for tag <- [plan.tag, plan.base.tag], do: System.cmd("podman", ["rmi", tag])
+    end)
+
+    assert {:ok, %{tag: tag}} = Image.ensure(repo, "main", opts)
+
+    {host_uid, 0} = System.cmd("id", ["-u"])
+
+    {out, status} =
+      System.cmd(
+        "podman",
+        [
+          "run",
+          "--rm",
+          "--pull=never",
+          "--userns=keep-id",
+          "--read-only",
+          "--cap-drop=all",
+          "--security-opt",
+          "no-new-privileges",
+          "--security-opt",
+          "label=disable",
+          "-v",
+          "#{run_dir}:#{run_dir}:rw",
+          tag,
+          "sh",
+          "-c",
+          "id -u; cat #{config} && mkdir #{run_dir}/claude-$(id -u) && mkdir #{run_dir}/codex-home/x && echo reached"
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, out
+    refute out =~ "Permission denied"
+    refute out =~ "EACCES"
+    [uid | _] = String.split(out, "\n")
+    assert uid == String.trim(host_uid)
+    refute uid == "0"
+    assert out =~ "reached"
+  end
 end

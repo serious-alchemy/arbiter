@@ -345,9 +345,13 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
     end
   end
 
-  # The read itself: the container runs as the host uid (`--userns=keep-id`, no
-  # other identity flag, no relabel once the bridge sockets disable SELinux
-  # labels), so the 0600 files the primary wrote are the container user's own.
+  # The spawn side of the read: `--userns=keep-id` with no other identity flag, so
+  # the process runs as the host uid and owns the 0600 files the primary wrote,
+  # *provided the image records no USER*. An image that does (a repo-custom image
+  # before bd-83gbsh: `USER root`) overrides keep-id and runs as uid 0, which
+  # `--cap-drop=all` leaves unable to read them. That half is pinned in
+  # `image_test.exs` ("a repo Containerfile with no USER ...") and run against real
+  # podman in `image_podman_test.exs`.
   describe "CODEX_HOME is readable by the container user (bd-83gbsh)" do
     test "config.toml is owned by the uid keep-id maps in, mode 0600, in a mounted dir", ctx do
       {:ok, request} = ContainerSpawn.prepare(ctx.opts)

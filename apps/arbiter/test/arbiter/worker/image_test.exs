@@ -71,6 +71,14 @@ defmodule Arbiter.Worker.ImageTest do
     git!(dir, ["commit", "-q", "-m", msg])
   end
 
+  # The USER the built image records: the last USER instruction, nil when none.
+  defp final_user(containerfile) do
+    case Regex.scan(~r/^\s*USER\s+(\S+)/mi, containerfile) do
+      [] -> nil
+      users -> users |> List.last() |> List.last()
+    end
+  end
+
   @repo_containerfile """
   FROM ${ARBITER_BASE}
   RUN echo default-branch-toolchain
@@ -379,6 +387,35 @@ defmodule Arbiter.Worker.ImageTest do
       assert plan.containerfile =~ "mix local.hex --force"
       assert plan.containerfile =~ "mix hex.info"
       assert String.ends_with?(plan.containerfile, "USER app\n")
+    end
+
+    # bd-83gbsh (#1040): an explicit `USER root` in the image config makes podman run
+    # the agent as uid 0 instead of the `--userns=keep-id` host uid, so it cannot read
+    # the host-owned 0600 run dirs under `--cap-drop=all`.
+    test "a repo Containerfile with no USER keeps the base's identity: no USER line is added" do
+      repo = repo_with(%{".arbiter/Containerfile" => @repo_containerfile})
+      assert {:ok, plan} = Image.plan(repo, "main", opts())
+
+      assert plan.containerfile =~ "mix local.hex --force"
+      assert final_user(plan.containerfile) == nil
+      refute plan.containerfile =~ ~r/^\s*USER\b/mi
+    end
+
+    test "a repo Containerfile with its own USER ends on that USER, never root" do
+      repo = repo_with(%{".arbiter/Containerfile" => @repo_containerfile <> "\nUSER app\n"})
+      assert {:ok, plan} = Image.plan(repo, "main", opts())
+      assert final_user(plan.containerfile) == "app"
+
+      switched = @repo_containerfile <> "\nUSER app\nRUN true\nUSER 1234:1234\nRUN true\n"
+      repo = repo_with(%{".arbiter/Containerfile" => switched})
+      assert {:ok, plan} = Image.plan(repo, "main", opts())
+      assert final_user(plan.containerfile) == "1234:1234"
+    end
+
+    test "the generated default image never sets a USER either" do
+      repo = repo_with(%{"README.md" => "hi\n"})
+      assert {:ok, plan} = Image.plan(repo, "main", opts())
+      assert final_user(plan.containerfile) == nil
     end
 
     test "a repo Containerfile gets a per-repo image name, a generated one a toolchain name" do
