@@ -57,4 +57,35 @@ defmodule Arbiter.NodeAgent.K8s.LogLinesTest do
     assert LogLines.since_time("#{@ts1} 3") == @ts1
     assert LogLines.since_time(nil) == nil
   end
+
+  describe "a line the runtime cut into partial records" do
+    @ts3 "2026-10-10T12:00:00.000000003Z"
+
+    test "drops the timestamps a kubelet stamps into the middle of it" do
+      a = String.duplicate("a", 16_384)
+      b = String.duplicate("b", 16_384)
+      {_acc, lines} = feed(LogLines.new(nil), "#{@ts1} #{a}#{@ts2} #{b}#{@ts3} tail arb done\n")
+      assert lines == [{"#{@ts1} 1", a <> b <> "tail arb done\n"}]
+    end
+
+    test "also at an 8 KiB record size, with the body arriving in several chunks" do
+      a = String.duplicate("a", 8_192)
+      raw = "#{@ts1} #{a}#{@ts2} #{a}#{@ts3} end\n"
+      {acc, []} = feed(LogLines.new(nil), binary_part(raw, 0, 10_000))
+      {_acc, lines} = feed(acc, binary_part(raw, 10_000, byte_size(raw) - 10_000))
+      assert lines == [{"#{@ts1} 1", a <> a <> "end\n"}]
+    end
+
+    test "leaves a timestamp-looking string that is not at a record boundary alone" do
+      text = String.duplicate("a", 100) <> "#{@ts2} kept"
+      {_acc, lines} = feed(LogLines.new(nil), "#{@ts1} #{text}\n")
+      assert lines == [{"#{@ts1} 1", text <> "\n"}]
+    end
+
+    test "leaves a boundary timestamp that is earlier than the line's own alone" do
+      text = String.duplicate("a", 4_096) <> "#{@ts1} kept"
+      {_acc, lines} = feed(LogLines.new(nil), "#{@ts2} #{text}\n")
+      assert lines == [{"#{@ts2} 1", text <> "\n"}]
+    end
+  end
 end
