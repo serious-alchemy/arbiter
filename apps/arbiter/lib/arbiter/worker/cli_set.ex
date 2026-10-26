@@ -71,7 +71,10 @@ defmodule Arbiter.Worker.CliSet do
           sha256: String.t(),
           size: non_neg_integer(),
           mode: non_neg_integer(),
-          source: {:cache, Cache.entry(), String.t()} | {:launcher, String.t()},
+          source:
+            {:cache, Cache.entry(), String.t()}
+            | {:launcher, String.t()}
+            | {:snapshot, String.t()},
           path: Path.t() | nil
         }
   @type cli :: %{
