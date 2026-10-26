@@ -14,6 +14,7 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
 
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Test.GitFixture
+  alias Arbiter.Worker.CliSetFixture
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.PrivateClone
 
@@ -54,35 +55,13 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
     File.write!(Path.join(source_home, "config.toml"), ~s(model = "personal"\n))
     File.write!(Path.join(source_home, "state_5.sqlite"), "history")
 
-    # The npm layout: a node launcher script that links to the vendored static
-    # binary, which has `rg` and `bwrap` beside it.
-    pkg = Path.join(dir, "lib/node_modules/@openai/codex")
-
-    vendor =
-      Path.join(pkg, "node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl")
-
-    File.mkdir_p!(Path.join(pkg, "bin"))
-    File.mkdir_p!(Path.join(vendor, "bin"))
-    File.mkdir_p!(Path.join(vendor, "codex-path"))
-    File.mkdir_p!(Path.join(vendor, "codex-resources"))
-    File.write!(Path.join(pkg, "bin/codex.js"), "#!/usr/bin/env node\n")
-    File.chmod!(Path.join(pkg, "bin/codex.js"), 0o755)
-    native = Path.join(vendor, "bin/codex")
-    host = Path.join(vendor, "bin/codex-code-mode-host")
-    File.write!(host, <<0x7F, "ELF", 0>>)
-    File.chmod!(host, 0o755)
-    rg = Path.join(vendor, "codex-path/rg")
-    bwrap = Path.join(vendor, "codex-resources/bwrap")
-    File.write!(native, <<0x7F, "ELF", 0>>)
-    File.write!(rg, <<0x7F, "ELF", 0>>)
-    File.write!(bwrap, <<0x7F, "ELF", 0>>)
-    Enum.each([native, rg, bwrap], &File.chmod!(&1, 0o755))
-    File.mkdir_p!(Path.join(dir, "bin"))
-    codex_link = Path.join(dir, "bin/codex")
-    File.ln_s!("../lib/node_modules/@openai/codex/bin/codex.js", codex_link)
-
-    arb = Path.join(dir, "arb")
-    File.write!(arb, "#!/bin/sh\n")
+    # The CLIs come from the pinned upstream cache (SI1a), never a host install.
+    cli_opts = CliSetFixture.put(Path.join(dir, "cli"))
+    native = CliSetFixture.host_path(cli_opts, "codex", "codex")
+    host = CliSetFixture.host_path(cli_opts, "codex", "codex-code-mode-host")
+    rg = CliSetFixture.host_path(cli_opts, "codex", "rg")
+    bwrap = CliSetFixture.host_path(cli_opts, "codex", "bwrap")
+    arb = CliSetFixture.host_path(cli_opts, "arb", "arb.escript")
 
     tmp_dir = Path.join(dir, "run-tmp")
     File.mkdir_p!(tmp_dir)
@@ -111,21 +90,20 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
       {:ok, [proxy_socket: proxy, proxy_port: proxy_port, bridges: [{arb_port, bridge}]], "rtest"}
     end
 
-    base_opts = [
-      provider: "codex",
-      policy: podman_policy(),
-      worktree_path: clone,
-      owner: self(),
-      task_id: "bd-p8test",
-      arb_token: "arb-secret-token",
-      tmp_dir: tmp_dir,
-      image: @image,
-      podman: "/usr/bin/podman",
-      codex_path: codex_link,
-      codex_source_home: source_home,
-      arb_path: arb,
-      egress: egress
-    ]
+    base_opts =
+      [
+        provider: "codex",
+        policy: podman_policy(),
+        worktree_path: clone,
+        owner: self(),
+        task_id: "bd-p8test",
+        arb_token: "arb-secret-token",
+        tmp_dir: tmp_dir,
+        image: @image,
+        podman: "/usr/bin/podman",
+        codex_source_home: source_home,
+        egress: egress
+      ] ++ cli_opts
 
     Map.merge(ctx, %{
       clone: clone,
@@ -138,7 +116,6 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
       rg: rg,
       bwrap: bwrap,
       arb: arb,
-      codex_link: codex_link,
       tmp_dir: tmp_dir,
       opts: base_opts
     })
@@ -187,10 +164,7 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
         remote: "acme/tonic"
       }
 
-      claude = Path.join(ctx.root, "claude")
-      File.write!(claude, "#!/bin/sh\n")
-      File.chmod!(claude, 0o755)
-      claude_opts = Keyword.merge(ctx.opts, provider: "claude", claude_path: claude)
+      claude_opts = Keyword.merge(ctx.opts, provider: "claude")
 
       claude_secrets = secret_shape(claude_opts, material)
       codex_secrets = secret_shape(ctx.opts, material)
@@ -222,27 +196,15 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
       refute Enum.any?(request.cli_mounts, &String.ends_with?(elem(&1, 0), "codex.js"))
     end
 
-    test "a bare native binary on PATH (no npm tree) is mounted as it is", ctx do
-      bare = Path.join(ctx.dir, "bare-codex")
-      File.write!(bare, <<0x7F, "ELF", 0>>)
-      File.chmod!(bare, 0o755)
+    test "refuses when the cache has no codex, whatever codex is installed on the host", ctx do
+      opts =
+        Keyword.merge(
+          ctx.opts,
+          CliSetFixture.put(Path.join(ctx.dir, "no-codex"), codex: nil) ++
+            [codex_path: ctx.native, find_executable: fn _ -> ctx.native end]
+        )
 
-      assert {:ok, request} = ContainerSpawn.prepare(Keyword.put(ctx.opts, :codex_path, bare))
-      assert {bare, "/opt/arbiter/cli/codex"} in request.cli_mounts
-    end
-
-    test "refuses a codex that is a node script with no native binary beside it", ctx do
-      lone = Path.join(ctx.dir, "lone/codex.js")
-      File.mkdir_p!(Path.dirname(lone))
-      File.write!(lone, "#!/usr/bin/env node\n")
-
-      assert {:error, {:codex_native_binary_not_found, ^lone}} =
-               ContainerSpawn.prepare(Keyword.put(ctx.opts, :codex_path, lone))
-    end
-
-    test "refuses when there is no codex to mount", ctx do
-      opts = Keyword.merge(ctx.opts, codex_path: nil, find_executable: fn _ -> nil end)
-      assert {:error, {:executable_not_found, "codex"}} = ContainerSpawn.prepare(opts)
+      assert {:error, {:cli_not_cached, "codex"}} = ContainerSpawn.prepare(opts)
     end
 
     test "gives the run its own CODEX_HOME holding a COPY of auth.json", ctx do
@@ -275,10 +237,7 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
     end
 
     test "a claude prepare still uses the Anthropic infra", ctx do
-      claude = Path.join(ctx.dir, "claude")
-      File.write!(claude, "#!/bin/sh\n")
-
-      opts = Keyword.merge(ctx.opts, provider: "claude", claude_path: claude)
+      opts = Keyword.merge(ctx.opts, provider: "claude")
       assert {:ok, request} = ContainerSpawn.prepare(opts)
       assert_received {:egress, egress_opts}
       assert "api.anthropic.com:443" in Keyword.fetch!(egress_opts, :infra)

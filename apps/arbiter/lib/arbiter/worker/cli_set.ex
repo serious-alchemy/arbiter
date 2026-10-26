@@ -43,6 +43,9 @@ defmodule Arbiter.Worker.CliSet do
 
   ## Options
 
+  `config :arbiter, :cli_set_opts` supplies defaults for any of these (the test
+  suite points it at a fixture cache); a call's own options win.
+
   `:cli_set` (a resolved `t:t/0`, returned as is; a test seam),
   `:cli_cache_root` (the `CliFetcher.Cache` root), `:cli_sets_root` (where sets
   are materialized, default `<image root>/cli-sets`), and `CliFetcher.pin/2`'s
@@ -113,6 +116,8 @@ defmodule Arbiter.Worker.CliSet do
   def resolve(opts \\ [])
 
   def resolve(opts) do
+    opts = Keyword.merge(Application.get_env(:arbiter, :cli_set_opts, []), opts)
+
     case Keyword.get(opts, :cli_set) do
       %__MODULE__{} = set -> {:ok, set}
       _ -> from_cache(opts)

@@ -58,6 +58,21 @@ defmodule ArbiterWeb.RemoteRestartTest do
     File.write!(cli, "#!/bin/sh\n")
     File.chmod!(cli, 0o755)
 
+    # The run's CLIs come from the pinned upstream cache (Worker.CliSet), not the host.
+    previous_cli_set = Application.get_env(:arbiter, :cli_set_opts)
+
+    Application.put_env(
+      :arbiter,
+      :cli_set_opts,
+      Arbiter.Worker.CliSetFixture.put(Path.join(root, "cli-set"))
+    )
+
+    on_exit(fn ->
+      if previous_cli_set,
+        do: Application.put_env(:arbiter, :cli_set_opts, previous_cli_set),
+        else: Application.delete_env(:arbiter, :cli_set_opts)
+    end)
+
     {:ok, config} =
       Config.load(
         env: %{},
@@ -279,8 +294,6 @@ defmodule ArbiterWeb.RemoteRestartTest do
         SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}}),
       provider: "claude",
       image: "localhost/arbiter-dev/beam:abc123",
-      claude_path: ctx.cli,
-      arb_path: ctx.cli,
       egress: egress,
       arb_token: "arb-tok",
       node: %{id: ctx.node.id, capacity: %{}}
@@ -833,8 +846,6 @@ defmodule ArbiterWeb.RemoteRestartTest do
                  security: policy,
                  provider: "claude",
                  image: "localhost/arbiter-dev/beam:abc123",
-                 claude_path: ctx.cli,
-                 arb_path: ctx.cli,
                  egress: egress,
                  arb_token: "arb-tok",
                  node: %{id: ctx.node.id, capacity: %{}}

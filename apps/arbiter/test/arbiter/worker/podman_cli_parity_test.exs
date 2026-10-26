@@ -9,6 +9,7 @@ defmodule Arbiter.Worker.PodmanCliParityTest do
   """
   use ExUnit.Case, async: true
 
+  alias Arbiter.Worker.CliSetFixture
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.PromptBuilder
@@ -17,21 +18,14 @@ defmodule Arbiter.Worker.PodmanCliParityTest do
   @in_base_image ~w(git curl bc)
   @deliberately_absent ~w(gh glab)
 
-  defp cli_mounts(extra \\ []) do
-    opts =
-      [
-        find_executable: fn
-          "claude" -> "/host/bin/claude"
-          "arb" -> "/host/bin/arb"
-          _ -> nil
-        end
-      ] ++ extra
+  @moduletag :tmp_dir
 
+  defp cli_mounts(opts) do
     {:ok, mounts} = ContainerSpawn.cli_mounts("claude", opts)
     mounts
   end
 
-  defp argv(extra) do
+  defp argv(opts, extra) do
     Container.argv(
       Map.merge(
         %{
@@ -39,7 +33,7 @@ defmodule Arbiter.Worker.PodmanCliParityTest do
           image: "localhost/arbiter-dev/beam-1.19.4-28.2",
           name: "arb-parity",
           worktree: "/work/tree",
-          cli_mounts: cli_mounts()
+          cli_mounts: cli_mounts(opts)
         },
         extra
       ),
@@ -47,9 +41,13 @@ defmodule Arbiter.Worker.PodmanCliParityTest do
     )
   end
 
-  test "the real spec builder mounts every expected CLI under the image's PATH dir" do
+  setup %{tmp_dir: tmp} do
+    {:ok, cli: CliSetFixture.put(tmp)}
+  end
+
+  test "the real spec builder mounts every expected CLI under the image's PATH dir", %{cli: cli} do
     dests =
-      Map.new(cli_mounts(), fn {_host, dest} -> {Path.basename(dest), Path.dirname(dest)} end)
+      Map.new(cli_mounts(cli), fn {_host, dest} -> {Path.basename(dest), Path.dirname(dest)} end)
 
     cf = base_containerfile()
 
@@ -60,16 +58,18 @@ defmodule Arbiter.Worker.PodmanCliParityTest do
     assert cf =~ "ENV PATH=/opt/arbiter/cli:$PATH"
   end
 
-  test "mounted CLIs are bound read-only; an explicit host PATH still gets the dir" do
-    argv = argv(%{env: [{"PATH", "/x/bin"}]})
+  test "mounted CLIs are bound read-only; an explicit host PATH still gets the dir", %{cli: cli} do
+    argv = argv(cli, %{env: [{"PATH", "/x/bin"}]})
     volumes = for [flag, v] <- Enum.chunk_every(argv, 2, 1, :discard), flag == "-v", do: v
     [path] = for "PATH=" <> p <- argv, do: p
 
-    for {host, dest} <- cli_mounts(), do: assert("#{host}:#{dest}:ro" in volumes)
-    assert "/host/bin/claude:/opt/arbiter/cli/claude:ro" in volumes
+    for {host, dest} <- cli_mounts(cli), do: assert("#{host}:#{dest}:ro" in volumes)
+    claude = CliSetFixture.host_path(cli, "claude", "claude")
+    assert "#{claude}:/opt/arbiter/cli/claude:ro" in volumes
     # bd-59m96o: the host's arb escript sits beside `arb`, the launcher that
     # runs it on an Erlang that can load it.
-    assert "/host/bin/arb:/opt/arbiter/cli/arb.escript:ro" in volumes
+    arb = CliSetFixture.host_path(cli, "arb", "arb.escript")
+    assert "#{arb}:/opt/arbiter/cli/arb.escript:ro" in volumes
     assert path == "/opt/arbiter/cli:/x/bin"
   end
 
