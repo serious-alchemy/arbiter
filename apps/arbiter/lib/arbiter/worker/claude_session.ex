@@ -338,10 +338,16 @@ defmodule Arbiter.Worker.ClaudeSession do
   # its own (Claude's `init`) wins later. A container or a remote node runs a
   # binary that is not the host's, so neither is probed. `:harness_probe` is the
   # test seam: options for `HarnessVersion.host/2`.
-  defp host_harness_version(config, %{remote: %{}}, _opts), do: config
-  defp host_harness_version(config, %{sandbox: %{}}, _opts), do: config
+  # SI3: a container or remote spawn instead records what it ran in: the image,
+  # the CLI set and the CLI's version off the image's label.
+  @doc false
+  def host_harness_version(config, %{remote: %{request: request}}, _opts),
+    do: put_provenance(config, request)
 
-  defp host_harness_version(config, _port_args, opts) do
+  def host_harness_version(config, %{sandbox: %{} = request}, _opts),
+    do: put_provenance(config, request)
+
+  def host_harness_version(config, _port_args, opts) do
     case Arbiter.Agents.HarnessVersion.host(
            Keyword.get(opts, :provider),
            Keyword.get(opts, :harness_probe, [])
@@ -349,6 +355,13 @@ defmodule Arbiter.Worker.ClaudeSession do
       nil -> config
       version -> Map.put(config, :harness_version, version)
     end
+  end
+
+  defp put_provenance(config, request) do
+    for {key, value} <- Arbiter.Worker.ContainerSpawn.provenance(request),
+        not is_nil(value),
+        reduce: config,
+        do: (config -> Map.put(config, key, value))
   end
 
   # bd-9cygoo (G16): resolve the spawn's repo-scoped git credential. A spawn that

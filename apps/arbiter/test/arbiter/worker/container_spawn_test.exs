@@ -118,6 +118,38 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
   defp mounts(argv), do: for(["-v", spec] <- Enum.chunk_every(argv, 2, 1), do: spec)
 
+  describe "prepare/1 provenance (SI3)" do
+    test "the request carries the image, the CLI set and the provider CLI's label version", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+
+      assert %{image_ref: @image, cli_set: set8, harness_version: "2.1.310"} =
+               ContainerSpawn.provenance(request)
+
+      {:ok, set} = Arbiter.Worker.CliSet.resolve(ctx.opts)
+      assert set8 == set.set8
+      assert {"arbiter.cli.claude.version", "2.1.310"} in Arbiter.Worker.CliSet.labels(set)
+    end
+  end
+
+  describe "prepare_remote/1 provenance (SI3)" do
+    test "the remote request carries the digest-pinned ref, the set and the label version", ctx do
+      ref = "registry.example/arbiter/x@sha256:" <> String.duplicate("b", 64)
+      node = %{id: Ecto.UUID.generate(), kind: :ssh, caps: %{"image" => "registry"}}
+      stub = fn _ctx -> {:ok, %{ref: ref}} end
+
+      opts =
+        ctx.opts
+        |> Keyword.merge(node: node, publish: [stub: stub])
+
+      assert {:ok, request} = ContainerSpawn.prepare_remote(opts)
+
+      {:ok, set} = Arbiter.Worker.CliSet.resolve(ctx.opts)
+
+      assert ContainerSpawn.provenance(request) ==
+               %{image_ref: ref, cli_set: set.set8, harness_version: "2.1.310"}
+    end
+  end
+
   describe "run_command/3 (bd-8wdrql: the pre-push recipe in the run's own container)" do
     setup do
       test = self()

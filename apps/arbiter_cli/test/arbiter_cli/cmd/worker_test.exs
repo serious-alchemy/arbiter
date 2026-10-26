@@ -82,6 +82,41 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       refute out =~ "Pre-push"
     end
 
+    test "shows the image, CLI set and harness version a container run ran in (SI3)" do
+      stub_get("/api/workers/bd-prov", %{
+        "task_id" => "bd-prov",
+        "kind" => "implement",
+        "state" => "working",
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "image_ref" => "registry.example/x@sha256:abc",
+        "cli_set" => "feed0123",
+        "harness_version" => "2.1.310",
+        "output_lines" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-prov"]) end)
+      assert out =~ "Image:      registry.example/x@sha256:abc"
+      assert out =~ "CLI set:    feed0123"
+      assert out =~ "Harness:    2.1.310"
+    end
+
+    test "a run with no provenance prints no provenance lines (SI3)" do
+      stub_get("/api/workers/bd-noprov", %{
+        "task_id" => "bd-noprov",
+        "kind" => "implement",
+        "state" => "working",
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "output_lines" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-noprov"]) end)
+      refute out =~ "CLI set:"
+    end
+
     test "shows the phase and agent liveness" do
       stub_get("/api/workers/bd-002", %{
         "task_id" => "bd-002",
