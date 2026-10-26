@@ -108,7 +108,9 @@ defmodule Arbiter.Worker.CliSet.Watcher do
   end
 
   defp republish(opts) do
-    publish = Keyword.get(opts, :publish, &Publisher.ensure_ready/1)
+    # `ledger: nil`: a republish must not record itself, or it would restart the
+    # repo's 14-day clock and a repo nobody dispatches would never age out.
+    publish = Keyword.get(opts, :publish, &Publisher.ensure_ready(&1, ledger: nil))
     ledger = Keyword.take(opts, [:ledger, :now])
 
     for %{key: key, ctx: ctx} <- PublishLedger.recent(Keyword.get(opts, :days, @days), ledger) do
