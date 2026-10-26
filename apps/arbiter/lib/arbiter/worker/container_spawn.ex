@@ -283,7 +283,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
          {:ok, research_dir} <- stage_research(opts, tmp_dir),
          {:ok, image} <- fetch_image(opts, worktree),
-         {:ok, cli_mounts} <- cli_mounts(provider, opts),
+         {:ok, set, cli_mounts} <- resolve_cli(provider, opts),
          {:ok, home, config_dir, codex_auth} <- run_dirs(provider, tmp_dir, policy, opts),
          # Before the egress run starts: a cold seed takes minutes.
          deps_cache = seed_deps(opts, worktree, image, home),
@@ -298,6 +298,9 @@ defmodule Arbiter.Worker.ContainerSpawn do
          name: name,
          provider: provider,
          image: image,
+         image_ref: image,
+         cli_set: set.set8,
+         harness_version: cli_version(set, provider),
          podman: Keyword.get(opts, :podman),
          mounts: with_research_mount(mounts, research_dir),
          home: home,
@@ -553,15 +556,44 @@ defmodule Arbiter.Worker.ContainerSpawn do
   @doc false
   @spec cli_mounts(String.t(), keyword()) :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
   def cli_mounts(provider, opts) do
+    with {:ok, _set, mounts} <- resolve_cli(provider, opts), do: {:ok, mounts}
+  end
+
+  defp resolve_cli(provider, opts) do
     with {:ok, set} <- CliSet.resolve(opts),
          :ok <- require_cached(set, provider, opts),
          {:ok, set} <- CliSet.materialize(set) do
       unless CliSet.cli(set, "arb"),
         do: Logger.warning("ContainerSpawn: no cached `arb`; the container has no arb CLI")
 
-      CliSet.mounts(set, provider)
+      with {:ok, mounts} <- CliSet.mounts(set, provider), do: {:ok, set, mounts}
     end
   end
+
+  # SI3: the provider CLI's version as the image's `arbiter.cli.<name>.version`
+  # label carries it (the label is `CliSet.labels/1` of this very set).
+  defp cli_version(set, provider) do
+    label = "arbiter.cli.#{provider}.version"
+    Enum.find_value(CliSet.labels(set), fn {key, value} -> key == label && value end)
+  end
+
+  # A registry node's digest-pinned ref, else the tag the node builds or pulls.
+  defp image_ref(%{ref: ref}) when is_binary(ref), do: ref
+  defp image_ref(%{tag: tag}) when is_binary(tag), do: tag
+  defp image_ref(_), do: nil
+
+  @doc """
+  SI3: what a prepared spawn (`prepare/1`'s or `prepare_remote/1`'s request)
+  ran in: `%{image_ref, cli_set, harness_version}`, the last read from the
+  image's `arbiter.cli.<provider>.version` label.
+  """
+  @spec provenance(map()) :: %{
+          image_ref: String.t() | nil,
+          cli_set: String.t() | nil,
+          harness_version: String.t() | nil
+        }
+  def provenance(request),
+    do: Map.new([:image_ref, :cli_set, :harness_version], &{&1, Map.get(request, &1)})
 
   # An empty or unpinned cache is an install state, not a bug: say what it is and
   # how to fill it, beside the `{:cli_not_cached, provider}` the caller gets.
@@ -813,7 +845,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
          {:ok, image} <- remote_image(opts, worktree, node),
-         {:ok, cli} <- remote_cli(provider, opts),
+         {:ok, set, cli} <- remote_cli(provider, opts),
          {:ok, services} <- remote_services(opts),
          {:ok, home, config_dir} <- remote_dirs(tmp_dir),
          {:ok, checkout} <- remote_checkout(opts, worktree, config_dir),
@@ -829,6 +861,9 @@ defmodule Arbiter.Worker.ContainerSpawn do
          name: name,
          provider: provider,
          image: image,
+         image_ref: image_ref(image),
+         cli_set: set.set8,
+         harness_version: cli_version(set, provider),
          worktree: worktree,
          checkout: checkout,
          worktree_files: worktree_files,
@@ -1063,14 +1098,19 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   # `[{sha256, name, container path}]`: the node fetches by hash.
   defp remote_cli(provider, opts) do
-    with {:ok, mounts} <- cli_mounts(provider, opts) do
-      Enum.reduce_while(mounts, {:ok, []}, fn {host, dest}, {:ok, acc} ->
-        case Files.publish(host) do
-          {:ok, sha} -> {:cont, {:ok, acc ++ [{sha, Path.basename(dest), dest}]}}
-          {:error, reason} -> {:halt, {:error, {:cli_unavailable, reason}}}
-        end
-      end)
+    with {:ok, set, mounts} <- resolve_cli(provider, opts),
+         {:ok, files} <- publish_cli(mounts) do
+      {:ok, set, files}
     end
+  end
+
+  defp publish_cli(mounts) do
+    Enum.reduce_while(mounts, {:ok, []}, fn {host, dest}, {:ok, acc} ->
+      case Files.publish(host) do
+        {:ok, sha} -> {:cont, {:ok, acc ++ [{sha, Path.basename(dest), dest}]}}
+        {:error, reason} -> {:halt, {:error, {:cli_unavailable, reason}}}
+      end
+    end)
   end
 
   # Presets only cross the wire (`Arbiter.NodeAgent.RunSpec`); a custom service

@@ -123,7 +123,9 @@ defmodule Arbiter.Workers.Run do
         :model_family,
         :routing_decision,
         :guardrail_decision,
-        :harness_version
+        :harness_version,
+        :image_ref,
+        :cli_set
       ]
     end
 
@@ -167,6 +169,8 @@ defmodule Arbiter.Workers.Run do
         :routing_decision,
         :guardrail_decision,
         :harness_version,
+        :image_ref,
+        :cli_set,
         :stdout_offset
       ]
     end
@@ -258,6 +262,22 @@ defmodule Arbiter.Workers.Run do
       description "The agent CLI's version for the run (e.g. \"2.1.296\"), as the session " <>
                     "reported it or the host binary answered; nil when neither said. A " <>
                     "change resets the subject's trust promotion clock (G18)."
+    end
+
+    attribute :image_ref, :string do
+      public? true
+
+      description "SI3: the image the run ran in: the digest-pinned ref for a registry " <>
+                    "node, else the tag. nil for a host-local run and for rows before SI3."
+    end
+
+    attribute :cli_set, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "SI3: the CLI set's short hash (`Arbiter.Worker.CliSet`, the image's " <>
+                    "`arbiter.cli-set` label) the run's CLIs came from; nil for a " <>
+                    "host-local run and for rows before SI3."
     end
 
     attribute :provider_account_id, :uuid do
