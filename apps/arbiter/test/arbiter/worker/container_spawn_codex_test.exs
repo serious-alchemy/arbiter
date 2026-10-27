@@ -173,6 +173,24 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
       assert Enum.sort(codex_secrets) == [{:env, "ARB_GIT_TOKEN"}, {:env, "GITLAB_TOKEN"}]
     end
 
+    # bd-1vhect: the reviewer's token is read-only (GitCredential.plan/3 with
+    # role: :reviewer), so a reviewer container of either provider carries
+    # GITLAB_TOKEN alone: no ARB_GIT_TOKEN, no git push helper.
+    test "a reviewer container of either provider gets only the read-only GITLAB_TOKEN", ctx do
+      material = %Arbiter.Worker.GitCredential.Material{
+        kind: :gitlab_project_token,
+        token: "glpat-readonly",
+        read_only: true,
+        host: "gitlab.example.com",
+        remote: "acme/tonic"
+      }
+
+      claude_opts = Keyword.merge(ctx.opts, provider: "claude")
+
+      assert secret_shape(ctx.opts, material) == [{:env, "GITLAB_TOKEN"}]
+      assert secret_shape(claude_opts, material) == [{:env, "GITLAB_TOKEN"}]
+    end
+
     defp secret_shape(opts, material) do
       case ContainerSpawn.prepare([git_material: material] ++ opts) do
         {:ok, request} -> for s <- request.git_secrets, do: {s.type, s.target}

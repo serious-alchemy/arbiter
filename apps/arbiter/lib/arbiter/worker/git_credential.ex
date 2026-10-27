@@ -99,6 +99,9 @@ defmodule Arbiter.Worker.GitCredential do
   # is `api`), `write_repository` is git push/pull over https.
   @gitlab_access_level 30
   @gitlab_scopes ~w(read_api write_repository)
+  # bd-1vhect: a reviewer in a container reads MRs, pipelines and jobs, and pushes nothing.
+  @gitlab_read_scopes ~w(read_api)
+  @gitlab_read_access_level 20
   # Kinds whose credential a container holds even when the host pushes for it
   # (`plan/3`'s `:host_pushes?`): a GitLab project token is also the worker's API access, and
   # both are short-lived and repo-pinned, so the container can `git fetch origin` over
@@ -109,7 +112,7 @@ defmodule Arbiter.Worker.GitCredential do
   @remote_container_kinds [:gitlab_project_token]
   @block_keys ~w(legacy_operator repos)
 
-  defstruct mode: :unenforced, repo: nil, entry: nil
+  defstruct mode: :unenforced, repo: nil, entry: nil, read_only: false
 
   @type kind :: :deploy_key | :token | :github_app | :gitlab_project_token
   @type entry :: %{
@@ -119,7 +122,8 @@ defmodule Arbiter.Worker.GitCredential do
   @type t :: %__MODULE__{
           mode: :scoped | :legacy | :unenforced | :not_needed,
           repo: String.t() | nil,
-          entry: entry() | nil
+          entry: entry() | nil,
+          read_only: boolean()
         }
 
   # ---- config -----------------------------------------------------------------
@@ -170,6 +174,14 @@ defmodule Arbiter.Worker.GitCredential do
     entry = repo_entry(block, repo)
 
     cond do
+      # bd-1vhect: a reviewer in a container has no host `glab` session and was
+      # handed no forge credential at all. Where the repo has a GitLab project
+      # token, it gets a read-only one (`read_api`, Reporter): enough to read the
+      # MR description and pipelines, never to push or comment.
+      role == :reviewer and Keyword.get(opts, :host_pushes?, false) and
+          container_credential?(entry) ->
+        {:ok, %__MODULE__{mode: :scoped, repo: repo, entry: parse_entry(entry), read_only: true}}
+
       role == :reviewer or
           (Keyword.get(opts, :host_pushes?, false) and
              not container_credential?(entry, Keyword.get(opts, :remote_node?, false))) ->
@@ -437,12 +449,12 @@ defmodule Arbiter.Worker.GitCredential do
   run on the operator's credential.
   """
   @spec materialize(t(), map() | nil, keyword()) :: {:ok, Material.t() | nil} | {:error, term()}
-  def materialize(%__MODULE__{mode: :scoped, entry: entry}, workspace, opts) do
+  def materialize(%__MODULE__{mode: :scoped, entry: entry} = plan, workspace, opts) do
     case entry.kind do
       :deploy_key -> materialize_key(entry, workspace)
       :token -> materialize_token(entry, workspace, opts)
       :github_app -> materialize_app(entry, workspace, opts)
-      :gitlab_project_token -> materialize_gitlab(entry, workspace, opts)
+      :gitlab_project_token -> materialize_gitlab(entry, workspace, opts, plan.read_only)
     end
   end
 
@@ -491,16 +503,17 @@ defmodule Arbiter.Worker.GitCredential do
 
   # The parent credential mints a project access token for this one project and
   # stays here: the material keeps it only so the primary can revoke the token.
-  defp materialize_gitlab(entry, workspace, opts) do
+  defp materialize_gitlab(entry, workspace, opts, read_only?) do
     with {:ok, parent} <- secret(workspace, entry.parent_token_secret),
          {:ok, remote} <- remote(entry, opts),
-         {:ok, %{id: id, token: token}} <- gitlab_mint(entry, parent, remote, opts) do
+         {:ok, %{id: id, token: token}} <- gitlab_mint(entry, parent, remote, opts, read_only?) do
       {:ok,
        %Material{
          kind: :gitlab_project_token,
          token: token,
          token_id: id,
          parent_token: parent,
+         read_only: read_only?,
          host: entry.host,
          username: entry.username,
          remote: remote,
@@ -609,7 +622,12 @@ defmodule Arbiter.Worker.GitCredential do
   # URL-encoded path. What comes back is checked against what was asked: a token
   # with more scopes or a higher role than a worker's is revoked at once and the
   # spawn refused, so a forge that widens a request never hands a worker more.
-  defp gitlab_mint(entry, parent, remote, opts) do
+  defp gitlab_mint(entry, parent, remote, opts, read_only?) do
+    {scopes, level} =
+      if read_only?,
+        do: {@gitlab_read_scopes, @gitlab_read_access_level},
+        else: {@gitlab_scopes, @gitlab_access_level}
+
     today = Date.utc_today()
     days = entry.expires_in_days
 
@@ -619,8 +637,8 @@ defmodule Arbiter.Worker.GitCredential do
           url: "#{gitlab_api(entry)}/projects/#{gitlab_project(remote)}/access_tokens",
           json: %{
             "name" => "arbiter-run-#{System.unique_integer([:positive])}",
-            "scopes" => @gitlab_scopes,
-            "access_level" => @gitlab_access_level,
+            "scopes" => scopes,
+            "access_level" => level,
             "expires_at" => today |> Date.add(days) |> Date.to_iso8601()
           },
           headers: [{"private-token", parent}],
@@ -633,7 +651,7 @@ defmodule Arbiter.Worker.GitCredential do
     case Req.post(request) do
       {:ok, %Req.Response{status: 201, body: %{"token" => token, "id" => id} = body}}
       when is_binary(token) and is_integer(id) ->
-        if gitlab_grant_ok?(body) do
+        if gitlab_grant_ok?(body, scopes, level) do
           {:ok, %{id: id, token: token}}
         else
           _ = gitlab_revoke_token(gitlab_api(entry), remote, id, parent, opts)
@@ -641,7 +659,7 @@ defmodule Arbiter.Worker.GitCredential do
           {:error,
            {:git_credential_mint_failed, :too_broad,
             "GitLab granted scopes #{inspect(body["scopes"])} at role #{inspect(body["access_level"])}, " <>
-              "not #{inspect(@gitlab_scopes)} at #{@gitlab_access_level}"}}
+              "not #{inspect(scopes)} at #{level}"}}
         end
 
       {:ok, %Req.Response{status: status, body: body}} ->
@@ -653,11 +671,11 @@ defmodule Arbiter.Worker.GitCredential do
     end
   end
 
-  defp gitlab_grant_ok?(%{"scopes" => scopes, "access_level" => @gitlab_access_level})
-       when is_list(scopes),
-       do: Enum.sort(scopes) == Enum.sort(@gitlab_scopes)
+  defp gitlab_grant_ok?(%{"scopes" => granted, "access_level" => level}, scopes, level)
+       when is_list(granted),
+       do: Enum.sort(granted) == Enum.sort(scopes)
 
-  defp gitlab_grant_ok?(_), do: false
+  defp gitlab_grant_ok?(_, _, _), do: false
 
   defp gitlab_project(remote), do: URI.encode_www_form(remote)
 
@@ -1111,6 +1129,16 @@ defmodule Arbiter.Worker.GitCredential do
   def podman_secrets(%Material{kind: :deploy_key, key: key}, prefix),
     do: [%{name: prefix <> "-git-key", type: :mount, target: @podman_key_name, value: key}]
 
+  # bd-1vhect: a read-only (reviewer) token is the API credential and nothing
+  # else; it is not offered to git, so no `ARB_GIT_TOKEN`.
+  def podman_secrets(
+        %Material{kind: :gitlab_project_token, read_only: true, token: token},
+        prefix
+      )
+      when is_binary(token) do
+    [%{name: prefix <> "-git-api-token", type: :env, target: "GITLAB_TOKEN", value: token}]
+  end
+
   # A GitLab project token is also the worker's API credential: a second secret of
   # the same value, under the name `glab` and `curl` scripts read.
   def podman_secrets(%Material{kind: :gitlab_project_token, token: token}, prefix)
@@ -1138,6 +1166,8 @@ defmodule Arbiter.Worker.GitCredential do
 
   def container_env(%Material{kind: :deploy_key}), do: []
 
+  def container_env(%Material{read_only: true, host: host}), do: [{"GITLAB_HOST", host}]
+
   def container_env(%Material{} = material),
     do:
       material
@@ -1163,6 +1193,11 @@ defmodule Arbiter.Worker.GitCredential do
   def remote_delivery(%Material{kind: :github_app, token: token} = material)
       when is_binary(token) and token != "",
       do: {:ok, %{env: container_env(material), secrets: %{"ARB_GIT_TOKEN" => token}}}
+
+  # bd-1vhect: a reviewer's read-only token is the API credential only.
+  def remote_delivery(%Material{kind: :gitlab_project_token, read_only: true, token: token} = m)
+      when is_binary(token) and token != "",
+      do: {:ok, %{env: container_env(m), secrets: %{"GITLAB_TOKEN" => token}}}
 
   def remote_delivery(%Material{kind: :gitlab_project_token, token: token} = material)
       when is_binary(token) and token != "",
