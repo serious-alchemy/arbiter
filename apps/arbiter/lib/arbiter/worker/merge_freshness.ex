@@ -46,6 +46,25 @@ defmodule Arbiter.Worker.MergeFreshness do
     end
   end
 
+  @default_max_syncs 3
+
+  @doc "Freshness syncs allowed per head (`merge.max_freshness_syncs`). Default `3`."
+  @spec max_syncs(map() | nil) :: pos_integer()
+  def max_syncs(workspace) do
+    case merge_setting(workspace, "max_freshness_syncs") do
+      n when is_integer(n) and n >= 1 -> n
+      s when is_binary(s) -> parse_pos(s)
+      _ -> @default_max_syncs
+    end
+  end
+
+  defp parse_pos(s) do
+    case Integer.parse(s) do
+      {n, ""} when n >= 1 -> n
+      _ -> @default_max_syncs
+    end
+  end
+
   @doc "Commits the head may lack and still merge unsynced. Default `0`."
   @spec tolerance(map() | nil) :: non_neg_integer()
   def tolerance(workspace) do

@@ -252,6 +252,61 @@ defmodule Arbiter.Worker.WatchdogMergeFreshnessTest do
     assert StubMerger.update_branch_count("!mf6") == 0
   end
 
+  test "syncs spent on earlier heads do not park a later head (sync, new head, behind, sync, CI passes, behind, sync)" do
+    {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-reviewed"})
+    probe(%{"sha-reviewed" => 2, "h2" => 2, "h3" => 2, "h4" => 2, "h5" => 0})
+
+    StubMerger.set_diff("!mf9", "sha-reviewed", @reviewed_diff)
+    for h <- ~w(h2 h3 h4 h5), do: StubMerger.set_diff("!mf9", h, @merge_from_main_diff)
+
+    ok = %{pipeline: :success, ci_clean: true}
+
+    # Each head is polled twice: the sync is issued on the first, the second waits.
+    # h2 is a push by someone else; h3 is our synced head (CI green) with the target
+    # moved again; and so on.
+    StubMerger.queue_get(
+      "!mf9",
+      Enum.flat_map(~w(sha-reviewed h2 h3 h4 h5), &[open(&1, ok), open(&1, ok)])
+    )
+
+    start_watchdog(task, "!mf9", ws)
+
+    assert_receive {:watchdog, _, {:merged, _}}, 5_000
+    assert StubMerger.update_branch_count("!mf9") == 4
+  end
+
+  test "merge.max_freshness_syncs is read from the workspace config" do
+    {task, ws} =
+      reviewed_task(%{last_reviewed_sha: "sha-reviewed"}, %{
+        "merge" => %{"max_freshness_syncs" => 1}
+      })
+
+    probe(%{"sha-reviewed" => 3})
+
+    StubMerger.queue_get("!mf10", [open("sha-reviewed", %{pipeline: :success, ci_clean: true})])
+
+    wpid = start_watchdog(task, "!mf10", ws, max_polls: 500)
+
+    wait_until(fn -> :sys.get_state(wpid).last_block_reason == :behind_base end, 10_000)
+
+    assert StubMerger.update_branch_count("!mf10") == 1
+  end
+
+  test "a new head resets the Path A auto-resolve counter while the branch stays behind" do
+    {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-reviewed"})
+
+    StubMerger.queue_get("!mf11", [
+      open("a1", %{block_reason: :behind_base, ci_clean: false}),
+      open("a2", %{block_reason: :behind_base, ci_clean: false}),
+      open("a3", %{block_reason: :behind_base, ci_clean: false}),
+      open("a4", %{block_reason: :behind_base, ci_clean: false})
+    ])
+
+    start_watchdog(task, "!mf11", ws, max_auto_resolve_attempts: 2)
+
+    wait_until(fn -> StubMerger.update_branch_count("!mf11") >= 4 end, 5_000)
+  end
+
   defp wait_until(fun, timeout \\ 2_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
 
