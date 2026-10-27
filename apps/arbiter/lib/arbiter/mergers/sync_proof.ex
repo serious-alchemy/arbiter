@@ -107,7 +107,7 @@ defmodule Arbiter.Mergers.SyncProof do
   # as positional parameters (never interpolated into the script).
   defp log_patch_ids(repo, range) do
     script =
-      "git -C \"$1\" log --reverse --no-merges --no-color --no-ext-diff -p -U0 \"$2\" " <>
+      ~S(git -C "$1" log --reverse --no-merges --no-color --no-ext-diff -p -U0 "$2" ) <>
         "| git patch-id --stable"
 
     case System.cmd("sh", ["-c", script, "sh", repo, range],

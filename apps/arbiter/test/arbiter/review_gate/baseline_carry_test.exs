@@ -20,7 +20,9 @@ defmodule Arbiter.ReviewGate.BaselineCarryTest do
         config: %{"review" => %{"required" => true}}
       })
 
-    {:ok, task} = Ash.create(Issue, %{title: "carried", workspace_id: ws.id, issue_type: :feature})
+    {:ok, task} =
+      Ash.create(Issue, %{title: "carried", workspace_id: ws.id, issue_type: :feature})
+
     task
   end
 
@@ -103,7 +105,10 @@ defmodule Arbiter.ReviewGate.BaselineCarryTest do
       {:ok, fx: fx, task: task}
     end
 
-    test "survives a rebase with identical patch-ids and the merge proceeds", %{fx: fx, task: task} do
+    test "survives a rebase with identical patch-ids and the merge proceeds", %{
+      fx: fx,
+      task: task
+    } do
       rebased = rebase!(fx)
       assert {:error, {:review_not_approved, _}} = MergeAuthorization.check(task.id, rebased)
 
@@ -121,6 +126,12 @@ defmodule Arbiter.ReviewGate.BaselineCarryTest do
       assert carried.reasoning =~ fx.reviewed
       assert carried.reasoning =~ "patch-id"
       assert carried.reasoning =~ "coordinator"
+
+      assert [carry] = report.carries
+      assert carry.baseline == "ruling"
+      assert carry.from_sha == fx.reviewed
+      assert carry.head_sha == rebased
+      assert carry.actor == "system:ruling-resume"
     end
 
     test "survives a merge of the target whose tree equals merge-tree", %{fx: fx, task: task} do
@@ -173,12 +184,23 @@ defmodule Arbiter.ReviewGate.BaselineCarryTest do
       {:ok, fx: fx, task: task}
     end
 
-    test "survives a rebase with identical patch-ids: the latch is re-stamped", %{fx: fx, task: task} do
+    test "survives a rebase with identical patch-ids: the latch is re-stamped", %{
+      fx: fx,
+      task: task
+    } do
       rebased = rebase!(fx)
 
       assert {:carried, :approval, proof} = BaselineCarry.carry(request(fx, task, rebased))
       assert proof =~ "patch-id"
       assert reviewed_sha(task) == rebased
+
+      # who / what / why in the rounds list
+      assert [carry] = RoundsReport.build(task.id).carries
+      assert carry.baseline == "approval"
+      assert carry.from_sha == fx.reviewed
+      assert carry.head_sha == rebased
+      assert carry.actor == "system:baseline-carry"
+      assert carry.proof =~ "patch-id"
     end
 
     test "survives a merge of the target whose tree equals merge-tree", %{fx: fx, task: task} do

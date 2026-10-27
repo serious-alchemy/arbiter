@@ -50,6 +50,27 @@ defmodule Arbiter.ReviewGate.BaselineCarry do
         }
 
   @doc """
+  The head `task_id`'s baseline currently sits on when it is not `to`: a standing
+  ruling's recorded head, else — for a ReviewGate APPROVE — the ticket's recorded
+  `last_reviewed_sha`. nil when there is no baseline at another head.
+  """
+  @spec baseline_head(String.t() | nil, String.t() | nil) :: String.t() | nil
+  def baseline_head(task_id, to) when is_binary(task_id) and is_binary(to) do
+    from =
+      case MergeAuthorization.head_changed(task_id, to) do
+        {:changed, ruling} ->
+          ruling.head_sha
+
+        :none ->
+          if MergeAuthorization.approved?(task_id), do: recorded_reviewed_sha(task_id)
+      end
+
+    if is_binary(from) and from != "" and from != to, do: from
+  end
+
+  def baseline_head(_task_id, _to), do: nil
+
+  @doc """
   Verify that `to` is `from` synced with `base` and, if so, carry the ticket's
   baseline from `from` to `to`. `{:carried, baseline, proof}` (`baseline` is
   `:ruling` or `:approval`) or `:void`.
@@ -145,7 +166,8 @@ defmodule Arbiter.ReviewGate.BaselineCarry do
   # restart) binds the merge to the head that is actually there.
   defp restamp(task_id, from, to) do
     with {:ok, %Issue{last_reviewed_sha: ^from} = task} <- Ash.get(Issue, task_id),
-         {:ok, _} <- Ash.update(task, %{last_reviewed_sha: to, last_reviewed_at: DateTime.utc_now()}) do
+         {:ok, _} <-
+           Ash.update(task, %{last_reviewed_sha: to, last_reviewed_at: DateTime.utc_now()}) do
       :ok
     else
       _ -> :ok

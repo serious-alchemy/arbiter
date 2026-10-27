@@ -12,6 +12,9 @@ defmodule Arbiter.ReviewGate.RoundsReport do
     * `outcome` / `resolution` / `resolutions` — the coordinator's recorded
       answer to a gate escalation (bd-4qjl0q), so a run that escalated and was
       amended no longer reads like one that converged;
+    * `carries` — each time a ruling or APPROVE baseline moved to a new head
+      across a proven clean sync (`Arbiter.ReviewGate.BaselineCarry`): who,
+      from/to, why;
     * `conflict_review` — how much re-review the conflict-resolution path saved,
       for this ticket and fleet-wide (bd-954ym8).
   """
@@ -55,8 +58,39 @@ defmodule Arbiter.ReviewGate.RoundsReport do
       },
       outcome: Resolutions.outcome(all_rounds, resolutions),
       resolution: List.last(serialized_resolutions),
-      resolutions: serialized_resolutions
+      resolutions: serialized_resolutions,
+      carries: carries(task_id)
     }
+  end
+
+  @doc """
+  The baseline carries recorded for `task_id`, oldest first: each time a ruling
+  or an APPROVE moved from one head to another across a proven clean sync
+  (`Arbiter.ReviewGate.BaselineCarry`). `baseline` is `"ruling"` / `"approval"`,
+  `from_sha` -> `head_sha` the move, `actor` who did it and `proof` why it was
+  allowed. Read from the retained `review_gate` event stream.
+  """
+  @spec carries(String.t()) :: [map()]
+  def carries(task_id) when is_binary(task_id) do
+    Arbiter.Events.Record
+    |> Ash.Query.filter(topic == "review_gate")
+    |> Ash.Query.sort(seq: :desc)
+    |> Ash.Query.limit(5_000)
+    |> Ash.read!()
+    |> Enum.reverse()
+    |> Enum.map(&(&1.payload || %{}))
+    |> Enum.filter(&(&1["task_id"] == task_id and &1["ruling_event"] == "carried"))
+    |> Enum.map(fn p ->
+      %{
+        baseline: p["baseline"],
+        from_sha: p["from_sha"],
+        head_sha: p["head_sha"],
+        actor: p["actor"],
+        proof: p["proof"]
+      }
+    end)
+  rescue
+    _ -> []
   end
 
   @doc "One round, as every surface renders it."

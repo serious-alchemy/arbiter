@@ -173,6 +173,8 @@ defmodule Arbiter.Mergers.SyncProofTest do
     fx = feature_fixture()
     assert {:error, _} = SyncProof.verify(fx.clone, "main", fx.reviewed, fx.reviewed)
     assert {:error, _} = SyncProof.verify(nil, "main", fx.reviewed, String.duplicate("0", 40))
-    assert {:error, _} = SyncProof.verify(fx.clone, "main", fx.reviewed, String.duplicate("0", 40))
+
+    assert {:error, _} =
+             SyncProof.verify(fx.clone, "main", fx.reviewed, String.duplicate("0", 40))
   end
 end

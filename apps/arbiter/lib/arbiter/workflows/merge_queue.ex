@@ -218,6 +218,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   alias Arbiter.GitHub.Limiter
   alias Arbiter.Mergers
   alias Arbiter.Mergers.LocalCompare
+  alias Arbiter.ReviewGate.BaselineCarry
   alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.ReviewGate.RulingResume
   alias Arbiter.Reviews.Coverage
@@ -1459,7 +1460,9 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp merge_guarded(state, item) do
     head = Map.get(item, :last_head_sha)
 
-    case MergeAuthorization.check(item.task_id, head) do
+    {check, item} = check_authorization(state, item, head)
+
+    case check do
       :ok ->
         case freshness_precheck(state, item, head) do
           :proceed -> merge_coverage_guarded(state, item, head)
@@ -1468,6 +1471,63 @@ defmodule Arbiter.Workflows.MergeQueue do
 
       {:error, {:review_not_approved, _} = refusal} ->
         {{:error, refusal}, note_review_refusal(state, item, head, refusal)}
+    end
+  end
+
+  # bd-2oo8kf / #1062. A refusal because the head moved past a ruling is first
+  # put to the sync proof: a head that is the ruled one plus the target's own
+  # delta (a rebase with identical patch-ids, a clean merge of the target)
+  # keeps the ruling, re-recorded against it. Anything else is refused as
+  # before.
+  defp check_authorization(state, item, head) do
+    case MergeAuthorization.check(item.task_id, head) do
+      {:error, {:review_not_approved, _}} = refusal ->
+        case carry_clean_sync(state, item, head) do
+          {:carried, item} -> {MergeAuthorization.check(item.task_id, head), item}
+          {:void, item} -> {refusal, item}
+        end
+
+      :ok ->
+        {:ok, item}
+    end
+  end
+
+  # Carry the task's review baseline (a ruling, or an APPROVE) from the head it
+  # names to `head` when `Arbiter.Mergers.SyncProof` proves `head` is that
+  # commit synced with the target. Returns `{:carried, item}` with the queue's
+  # own baseline re-pinned to `head`, or `{:void, item}`. A `{from, head}` pair
+  # that failed the proof is remembered: the verdict cannot change until one of
+  # them does, and the proof costs a fetch.
+  defp carry_clean_sync(state, item, head) do
+    base = Map.get(item, :base) || state.base
+
+    with true <- is_binary(head) and is_binary(base) and base != "",
+         from when is_binary(from) <- BaselineCarry.baseline_head(item.task_id, head) do
+      attempt_carry(state, item, from, head, base)
+    else
+      _ -> {:void, item}
+    end
+  end
+
+  defp attempt_carry(_state, %{carry_void: {from, head}} = item, from, head, _base),
+    do: {:void, item}
+
+  defp attempt_carry(state, item, from, head, base) do
+    request = %{
+      task_id: item.task_id,
+      workspace_id: state.workspace_id,
+      from: from,
+      to: head,
+      repo_path: local_repo(state, item),
+      base: base
+    }
+
+    case BaselineCarry.carry(request) do
+      {:carried, _baseline, _proof} ->
+        {:carried, %{item | last_reviewed_sha: head, reviewed_sha: head, carry_void: nil}}
+
+      :void ->
+        {:void, %{item | carry_void: {from, head}}}
     end
   end
 
@@ -1711,13 +1771,22 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp legacy_merge_decision(%State{} = state, item, head) do
     case Mergers.ReviewedSha.check(item_reviewed_sha(item), head) do
       {:error, {:stale_reviewed_sha, reviewed, ^head}} = stale ->
-        case content_equal(state, item, reviewed, head) do
-          {true, item} -> {{:ok, head}, item}
-          {false, item} -> {stale, item}
+        # bd-2oo8kf / #1062: a proven clean sync keeps the baseline (and re-stamps
+        # it) before the net-diff comparison is even asked.
+        case carry_clean_sync(state, item, head) do
+          {:carried, item} -> {{:ok, head}, item}
+          {:void, item} -> legacy_content_decision(state, item, reviewed, head, stale)
         end
 
       result ->
         {result, item}
+    end
+  end
+
+  defp legacy_content_decision(state, item, reviewed, head, stale) do
+    case content_equal(state, item, reviewed, head) do
+      {true, item} -> {{:ok, head}, item}
+      {false, item} -> {stale, item}
     end
   end
 
@@ -1739,6 +1808,15 @@ defmodule Arbiter.Workflows.MergeQueue do
         )
 
         record_content_equal_coverage(item, head, base, head_diff)
+
+        BaselineCarry.carry_proven(
+          item.task_id,
+          state.workspace_id,
+          reviewed,
+          head,
+          "net diff against #{base} is identical (patch-id style fingerprint)"
+        )
+
         true
       else
         _ -> false
@@ -2388,6 +2466,9 @@ defmodule Arbiter.Workflows.MergeQueue do
       # re-polls every tick (M3) re-fetches the two net diffs once per head,
       # not once per tick.
       content_checked: nil,
+      # bd-2oo8kf / #1062. `{baseline_head, head}` that `BaselineCarry` could not
+      # prove a clean sync of, so the proof is not re-run (and re-fetched) per tick.
+      carry_void: nil,
       # bd-df3zlo / #1736. The coverage read path's bounded wait, keyed on the
       # head it is waiting about: a new head is a new question, so both the
       # count and the one-page-per-episode latch reset.

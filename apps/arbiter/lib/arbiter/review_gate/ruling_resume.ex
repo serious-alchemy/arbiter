@@ -43,7 +43,9 @@ defmodule Arbiter.ReviewGate.RulingResume do
   fix-pass path, whose new head needs a fresh round or ruling; a head that moves
   before the merge blocks it and re-escalates naming both SHAs
   (`head_changed/4`), unless the move is a pure rebase whose net diff against the
-  base is identical to the ruled one (`carry_forward/4`).
+  base is identical to the ruled one (`carry_forward/4`), or a sync that
+  `Arbiter.ReviewGate.BaselineCarry` proves adds nothing but the target's own
+  delta (identical patch-ids, or a merge whose tree equals `git merge-tree`).
 
   ## Events
 
@@ -419,7 +421,14 @@ defmodule Arbiter.ReviewGate.RulingResume do
   `review_gate` stream, the same event a carried ruling emits, so the rounds
   report lists both. Best-effort.
   """
-  @spec announce_carry(String.t(), String.t() | nil, String.t(), String.t(), String.t(), String.t()) ::
+  @spec announce_carry(
+          String.t(),
+          String.t() | nil,
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t()
+        ) ::
           :ok
   def announce_carry(task_id, workspace_id, baseline, from, to, proof) do
     ws_id =
