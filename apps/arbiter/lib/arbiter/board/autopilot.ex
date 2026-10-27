@@ -648,6 +648,8 @@ defmodule Arbiter.Board.Autopilot do
       priority: Keyword.get(opts, :priority, &default_priority/1),
       escalate: Keyword.get(opts, :escalate, &default_escalate/3),
       now: Keyword.get(opts, :now, &DateTime.utc_now/0),
+      # bd-545yem: whether a ticket has closed, for sweeping a stale promotion.
+      ticket_closed?: Keyword.get(opts, :ticket_closed?, &default_ticket_closed?/1),
       # The one promotion in flight, if any: %{ref: ref, id: id, waiters: [from]}.
       dispatching: nil,
       # A reactive trigger's debounce timer, once scheduled — cleared when it
@@ -748,6 +750,8 @@ defmodule Arbiter.Board.Autopilot do
   end
 
   def handle_call({:paused, paused?, by}, _from, state) do
+    state = sweep_stale_dispatch(state)
+
     state =
       if paused? != state.paused? do
         {label, actor, surface} = actor_parts(by)
@@ -920,7 +924,7 @@ defmodule Arbiter.Board.Autopilot do
   # the same as a trigger that arrived while busy: queue one re-plan for when
   # the in-flight dispatch completes.
   defp run_pass(state) do
-    case promote(state) do
+    case state |> sweep_stale_dispatch() |> promote() do
       {{:busy, _} = outcome, state} -> {outcome, %{state | replan_after_dispatch: true}}
       {outcome, state} -> {outcome, state}
     end
@@ -1332,7 +1336,7 @@ defmodule Arbiter.Board.Autopilot do
     end
 
     task = spawn_dispatch(fun)
-    %{state | dispatching: %{ref: task.ref, id: id, waiters: [], resume: entry}}
+    %{state | dispatching: %{ref: task.ref, pid: task.pid, id: id, waiters: [], resume: entry}}
   end
 
   # A quota-exhausted failure (bd-8lnnnt) is not transient the way a network
@@ -1387,7 +1391,7 @@ defmodule Arbiter.Board.Autopilot do
     end
 
     task = spawn_dispatch(fun)
-    %{state | dispatching: %{ref: task.ref, id: id, waiters: []}}
+    %{state | dispatching: %{ref: task.ref, pid: task.pid, id: id, waiters: []}}
   end
 
   # The dispatch seam takes the extra options (the admission shadow's record)
@@ -1672,6 +1676,59 @@ defmodule Arbiter.Board.Autopilot do
       opts
       |> Keyword.get(:args, %{})
       |> Map.put(:slot_admitted, Keyword.get(opts, :slot_admitted))
+
+  # ---- stale promotion sweep (bd-545yem) --------------------------------------
+
+  # `dispatching` pins the one-promotion-at-a-time slot, so an entry that can
+  # never complete freezes every Ready card on the board (and `Drain` reports
+  # it as a live `board_promotion`). Two such entries are recognised:
+  #
+  #   * its ticket has closed (a merge finalized it under the promotion's feet):
+  #     there is nothing left to promote or resume, so the task is killed and
+  #     the ticks parked on it are answered;
+  #   * its task process is gone but no result or `:DOWN` was ever handled:
+  #     a synthetic `:DOWN` is queued behind whatever is already in the mailbox,
+  #     so a result that really is waiting is still handled first.
+  defp sweep_stale_dispatch(%{dispatching: %{id: id} = in_flight} = state) do
+    cond do
+      state.ticket_closed?.(id) ->
+        Logger.warning("board autopilot: ticket #{id} closed mid-dispatch; releasing its slot")
+        release_dispatch(in_flight)
+        reply_all(in_flight.waiters, {:error, :ticket_closed})
+        after_dispatch(%{state | dispatching: nil}, {:error, :ticket_closed})
+
+      task_gone?(in_flight) ->
+        send(self(), {:DOWN, in_flight.ref, :process, in_flight.pid, :noproc})
+        state
+
+      true ->
+        state
+    end
+  end
+
+  defp sweep_stale_dispatch(state), do: state
+
+  defp task_gone?(%{pid: pid}) when is_pid(pid), do: not Process.alive?(pid)
+  defp task_gone?(_in_flight), do: false
+
+  defp release_dispatch(%{ref: ref} = in_flight) do
+    Process.demonitor(ref, [:flush])
+
+    receive do
+      {^ref, _result} -> :ok
+    after
+      0 -> :ok
+    end
+
+    if is_pid(in_flight[:pid]), do: Process.exit(in_flight.pid, :kill)
+    :ok
+  end
+
+  defp default_ticket_closed?(id) do
+    match?({:ok, %Issue{state: :closed}}, Ash.get(Issue, id))
+  rescue
+    _ -> false
+  end
 
   defp dispatching_id(%{dispatching: %{id: id}}), do: id
   defp dispatching_id(_), do: nil

@@ -474,8 +474,18 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   defp do_enqueue(state, task_id) do
     case Ash.get(Issue, task_id) do
-      {:ok, task} -> enqueue_task(state, task_id, task)
-      {:error, _} = err -> {err, state}
+      # bd-545yem: the Watchdog (or another merge path) already finalized this
+      # ticket. Adopting its MR would slot a phantom item whose later
+      # `Issue.close` fails on the already-closed ticket.
+      {:ok, %Issue{state: :closed}} ->
+        Logger.info("MergeQueue: task #{task_id} is already closed; not enqueueing it")
+        {:ok, state}
+
+      {:ok, task} ->
+        enqueue_task(state, task_id, task)
+
+      {:error, _} = err ->
+        {err, state}
     end
   end
 
@@ -2209,6 +2219,11 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   defp close_task_and_finalize(state, item) do
     case Ash.get(Issue, item.task_id) do
+      # bd-545yem: another merge path (the Watchdog) finalized the ticket first;
+      # closing it again only fails. The primary-checkout sync below still runs.
+      {:ok, %Issue{state: :closed}} ->
+        Logger.info("MergeQueue: task #{item.task_id} already closed; skipping finalize")
+
       {:ok, task} ->
         Arbiter.Trackers.Sync.lifecycle(task, :merged)
 
