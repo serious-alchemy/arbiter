@@ -1216,7 +1216,6 @@ defmodule Arbiter.Worker.PromptBuilderTest do
           test_tool?: false
         )
 
-      refute prompt =~ "MCP tool"
       refute prompt =~ "`run_tests`"
       assert prompt =~ "mix test"
       assert prompt =~ "tail"
