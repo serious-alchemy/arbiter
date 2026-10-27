@@ -3204,3 +3204,24 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
   end
 end
+
+defmodule ArbiterCli.Cmd.Doctor.SocketPathsTest do
+  use ExUnit.Case, async: true
+
+  alias ArbiterCli.Cmd.Doctor.Checks
+
+  test "socket_paths warns on an over-length operator socket path, naming path and length" do
+    path = "/tmp/" <> String.duplicate("x", 110) <> "/op.sock"
+    Process.put(:bd2_operator_socket, path)
+
+    result = Checks.check_socket_paths()
+    assert result.status == :warn
+    assert result.detail =~ path
+    assert result.detail =~ "#{byte_size(path)} bytes"
+  end
+
+  test "socket_paths is ok for a short path" do
+    Process.put(:bd2_operator_socket, "/tmp/op.sock")
+    assert Checks.check_socket_paths().status == :ok
+  end
+end
