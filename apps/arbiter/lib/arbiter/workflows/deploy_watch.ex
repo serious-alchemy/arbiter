@@ -147,12 +147,19 @@ defmodule Arbiter.Workflows.DeployWatch do
       # A later pipeline passed but the forge could not say whether it holds
       # our commit (lookup error): wait for the next sweep rather than alert.
       Enum.any?(newer, &(watched_ok?(&1, jobs) and unknown?.(&1))) -> :pending
-      own && in_flight?(own) -> :pending
-      Enum.any?(newer, &(in_flight?(&1) and contains?.(&1))) -> :pending
-      # Auto-canceled by a newer merge: a successor will carry the commit.
-      own && own.status == "canceled" -> :pending
+      awaiting_successor?(own, newer, contains?) -> :pending
       own -> {:failed, own}
       true -> :pending
+    end
+  end
+
+  defp awaiting_successor?(own, newer, contains?) do
+    cond do
+      own && in_flight?(own) -> true
+      Enum.any?(newer, &(in_flight?(&1) and contains?.(&1))) -> true
+      # Auto-canceled by a newer merge: a successor will carry the commit.
+      own && own.status == "canceled" -> true
+      true -> false
     end
   end
 
