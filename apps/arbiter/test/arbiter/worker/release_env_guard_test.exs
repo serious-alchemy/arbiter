@@ -174,6 +174,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/mcp/agent_config.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/gitlab.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/local_compare.ex" => :pure_tool,
+    # bd-2oo8kf: git only (`log | patch-id`, `merge-tree`, `merge-base`), piped through a
+    # literal `sh -c`; proves a synced head is the reviewed head. Runs no hooks.
+    "apps/arbiter/lib/arbiter/mergers/sync_proof.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/reviews/conflict_resolution.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/github/repo_resolver.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/reviews/checkout.ex" => :pure_tool,
