@@ -430,4 +430,62 @@ defmodule Arbiter.Worker.GitCredentialGitlabTest do
       assert_receive {:gitlab, "DELETE", "/api/v4/projects/acme/tonic/access_tokens/77", _, _}
     end
   end
+
+  describe "a reviewer in a container (bd-1vhect)" do
+    test "plans a read-only scoped credential, only when it runs in a container" do
+      ws = workspace()
+
+      assert {:ok, %GitCredential{mode: :scoped, read_only: true}} =
+               GitCredential.plan(ws, "tonic", role: :reviewer, host_pushes?: true)
+
+      assert {:ok, %GitCredential{mode: :not_needed}} =
+               GitCredential.plan(ws, "tonic", role: :reviewer)
+
+      assert {:ok, %GitCredential{mode: :scoped, read_only: false}} =
+               GitCredential.plan(ws, "tonic", role: :implementer, host_pushes?: true)
+    end
+
+    test "a github_app repo's reviewer still gets no credential" do
+      ws =
+        workspace(%{
+          "kind" => "github_app",
+          "app_id" => 1,
+          "installation_id" => 2,
+          "private_key_secret" => "GL_PARENT"
+        })
+
+      assert {:ok, %GitCredential{mode: :not_needed}} =
+               GitCredential.plan(ws, "tonic", role: :reviewer, host_pushes?: true)
+    end
+
+    test "mints read_api at Reporter and delivers only GITLAB_TOKEN + GITLAB_HOST" do
+      ws = workspace()
+      {:ok, plan} = GitCredential.plan(ws, "tonic", role: :reviewer, host_pushes?: true)
+
+      stub_gitlab(mint: %{"scopes" => ["read_api"], "access_level" => 20, "token" => "glpat-ro"})
+
+      assert {:ok, %Material{read_only: true, token: "glpat-ro"} = material} =
+               GitCredential.materialize(plan, ws, [remote: "acme/tonic"] ++ req_options())
+
+      assert_received {:gitlab, "POST", _path, _tok, body}
+      assert body["scopes"] == ["read_api"]
+      assert body["access_level"] == 20
+
+      assert [%{type: :env, target: "GITLAB_TOKEN", value: "glpat-ro"}] =
+               GitCredential.podman_secrets(material, "run")
+
+      env = GitCredential.container_env(material)
+      assert {"GITLAB_HOST", "gitlab.com"} in env
+      refute Enum.any?(env, fn {k, _} -> k in ["GIT_CONFIG_PARAMETERS", "ARB_GIT_TOKEN"] end)
+    end
+
+    test "a mint that grants more than read_api at Reporter is refused" do
+      ws = workspace()
+      {:ok, plan} = GitCredential.plan(ws, "tonic", role: :reviewer, host_pushes?: true)
+      stub_gitlab()
+
+      assert {:error, {:git_credential_mint_failed, :too_broad, _}} =
+               GitCredential.materialize(plan, ws, [remote: "acme/tonic"] ++ req_options())
+    end
+  end
 end

@@ -102,7 +102,12 @@ defmodule Arbiter.Worker.CliSet.Watcher do
         results = republish(opts)
         # Advance only when every republish succeeded, so a transient registry
         # failure is retried on the next tick.
-        failed? = Enum.any?(results, &match?({_, {:error, _}}, &1))
+        failed? =
+          Enum.any?(
+            results,
+            &match?({_, {status, _}} when status in [:error, :still_publishing], &1)
+          )
+
         {{:republished, results}, if(failed?, do: state, else: %{state | last_hash: set.hash})}
       end
     else
@@ -125,7 +130,21 @@ defmodule Arbiter.Worker.CliSet.Watcher do
           kind, reason -> {:error, {kind, reason}}
         end
 
+      # The publish keeps running in the Publisher after the wait lapses, so a
+      # timeout is progress to report, not a failure.
+      result =
+        case result do
+          {:error, {:timeout, ms}} -> {:still_publishing, div(ms, 1000)}
+          other -> other
+        end
+
       case result do
+        {:still_publishing, secs} ->
+          Logger.warning(
+            "CliSet.Watcher: republish of #{inspect(key)} still publishing (#{secs}s); " <>
+              "will check again next tick"
+          )
+
         {:error, reason} ->
           Logger.warning(
             "CliSet.Watcher: republish of #{inspect(key)} failed: #{inspect(reason)}"

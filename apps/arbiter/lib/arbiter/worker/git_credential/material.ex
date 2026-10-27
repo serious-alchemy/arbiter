@@ -33,7 +33,8 @@ defmodule Arbiter.Worker.GitCredential.Material do
             host: "github.com",
             username: "x-access-token",
             remote: nil,
-            api_url: nil
+            api_url: nil,
+            read_only: false
 
   @type t :: %__MODULE__{
           kind: :deploy_key | :token | :github_app | :gitlab_project_token | nil,
@@ -45,7 +46,8 @@ defmodule Arbiter.Worker.GitCredential.Material do
           host: String.t(),
           username: String.t(),
           remote: String.t() | nil,
-          api_url: String.t() | nil
+          api_url: String.t() | nil,
+          read_only: boolean()
         }
 
   @doc """

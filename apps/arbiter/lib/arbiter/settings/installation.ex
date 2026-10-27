@@ -104,6 +104,7 @@ defmodule Arbiter.Settings.Installation do
     :nodes_registry_password,
     :nodes_registry_insecure,
     :nodes_registry_public_ok,
+    :nodes_registry_publish_timeout_ms,
     :machine_derate,
     :worker_cli_versions,
     :worker_cli_manual,
@@ -378,6 +379,13 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description "nodes.registry_public_ok: accept a nodes.registry that answers anonymous reads (SI12); nil/false = refused."
+    end
+
+    attribute :nodes_registry_publish_timeout_ms, :integer do
+      public? true
+      allow_nil? true
+
+      description "nodes.registry.publish_timeout_ms: how long a dispatch or republish waits on an image publish; nil = 30 minutes."
     end
 
     attribute :machine_derate, :map do

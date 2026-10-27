@@ -474,6 +474,14 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            """
   end
 
+  test "review prompt directs the reviewer to the read-only forge token (bd-1vhect)" do
+    prompt = PromptBuilder.prompt_for_task(task(%{}), review: true)
+
+    assert prompt =~ "PRIVATE-TOKEN: $GITLAB_TOKEN"
+    assert prompt =~ "glab mr view"
+    assert prompt =~ "Never print or log the token"
+  end
+
   test "review prompt is byte-identical for fixed inputs" do
     prompt = PromptBuilder.prompt_for_task(task(%{}), review: true)
 
@@ -519,6 +527,15 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            deliberately no `gh`/`glab` and no forge token; if `command -v gh` finds
            nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
            retrying the CLI.
+
+           Reading the PR/MR itself (description, linked acceptance, pipelines) — this
+           refines the FORGE CLIs note above for reviewers: do NOT
+           browse the web or call the forge API anonymously — private projects answer
+           404. Use `gh pr view <ref>` / `glab mr view <ref>` (add `--comments` for
+           notes). If `GITLAB_TOKEN` is set in your environment, it is a read-only
+           token for this project: with no `glab` on PATH, call the API with it, e.g.
+           `curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "https://$GITLAB_HOST/api/v4/projects/<url-encoded group/project>/merge_requests/<iid>"`
+           (`/pipelines`, `/notes` likewise). Never print or log the token.
 
            Steps:
              1. Read the PR/MR diff via the configured tracker's CLI (`gh pr diff
@@ -645,6 +662,15 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            deliberately no `gh`/`glab` and no forge token; if `command -v gh` finds
            nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
            retrying the CLI.
+
+           Reading the PR/MR itself (description, linked acceptance, pipelines) — this
+           refines the FORGE CLIs note above for reviewers: do NOT
+           browse the web or call the forge API anonymously — private projects answer
+           404. Use `gh pr view <ref>` / `glab mr view <ref>` (add `--comments` for
+           notes). If `GITLAB_TOKEN` is set in your environment, it is a read-only
+           token for this project: with no `glab` on PATH, call the API with it, e.g.
+           `curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "https://$GITLAB_HOST/api/v4/projects/<url-encoded group/project>/merge_requests/<iid>"`
+           (`/pipelines`, `/notes` likewise). Never print or log the token.
 
            Steps:
              1. Read the diff under review with `git diff origin/main...HEAD` in this
