@@ -68,6 +68,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
   # P4 (bd-df3zlo / #1736): the same GitHub workspace with the read-path flip on.
   @ws_github_relaxed put_in(@ws_github, ["merge", "require_up_to_date"], false)
   @ws_github_tolerant put_in(@ws_github, ["merge", "up_to_date_tolerance"], 5)
+  @ws_github_one_sync put_in(@ws_github, ["merge", "max_freshness_syncs"], 1)
 
   @ws_github_coverage %{
     "merge" => %{
@@ -2164,6 +2165,36 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert length(updates) == 3
       refute_received {:merged, 234}
       assert %{items: [_item]} = MergeQueue.state(name)
+    end
+
+    @tag workspace_config: @ws_github_one_sync
+    test "merge.max_freshness_syncs bounds the syncs on one head", %{workspace: ws} do
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            235 => %{
+              reviews: "APPROVED",
+              pr: %{"mergeStateStatus" => "clean", "head" => %{"sha" => "abc1234def"}}
+            }
+          }
+        end)
+
+      Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 3} end)
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 0} end)
+      end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#235", 2)
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      for _ <- 1..60, do: :ok = MergeQueue.tick(name)
+
+      updates = for {:update_branch, 235} <- Process.info(self(), :messages) |> elem(1), do: 1
+      assert length(updates) == 1
+      refute_received {:merged, 235}
     end
 
     @tag workspace_config: @ws_github_relaxed
