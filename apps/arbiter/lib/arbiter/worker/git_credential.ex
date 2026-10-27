@@ -169,7 +169,6 @@ defmodule Arbiter.Worker.GitCredential do
   @spec plan(map() | nil, String.t() | nil, keyword()) ::
           {:ok, t()} | {:error, {:git_credential_missing, String.t() | nil, String.t()}}
   def plan(workspace, repo, opts \\ []) do
-    role = Keyword.get(opts, :role, :implementer)
     block = block(workspace)
     entry = repo_entry(block, repo)
 
@@ -178,13 +177,16 @@ defmodule Arbiter.Worker.GitCredential do
       # handed no forge credential at all. Where the repo has a GitLab project
       # token, it gets a read-only one (`read_api`, Reporter): enough to read the
       # MR description and pipelines, never to push or comment.
-      role == :reviewer and Keyword.get(opts, :host_pushes?, false) and
-          container_credential?(entry) ->
+      read_only_reviewer?(opts, entry) ->
         {:ok, %__MODULE__{mode: :scoped, repo: repo, entry: parse_entry(entry), read_only: true}}
 
+<<<<<<< HEAD
       role == :reviewer or
           (Keyword.get(opts, :host_pushes?, false) and
              not container_credential?(entry, Keyword.get(opts, :remote_node?, false))) ->
+=======
+      not_needed?(opts, entry) ->
+>>>>>>> 7cbf80be4 (Split GitCredential.plan decision into helpers to satisfy credo complexity)
         {:ok, %__MODULE__{mode: :not_needed, repo: repo}}
 
       scoped?(entry) ->
@@ -199,6 +201,16 @@ defmodule Arbiter.Worker.GitCredential do
       true ->
         {:ok, %__MODULE__{mode: :unenforced, repo: repo}}
     end
+  end
+
+  defp read_only_reviewer?(opts, entry) do
+    Keyword.get(opts, :role, :implementer) == :reviewer and
+      Keyword.get(opts, :host_pushes?, false) and container_credential?(entry)
+  end
+
+  defp not_needed?(opts, entry) do
+    Keyword.get(opts, :role, :implementer) == :reviewer or
+      (Keyword.get(opts, :host_pushes?, false) and not container_credential?(entry))
   end
 
   defp repo_entry(block, repo) when is_binary(repo) and repo != "" do
