@@ -274,6 +274,8 @@ defmodule ArbiterCli.Cmd.Worker do
   # the task's most recent run when omitted); `--model` is an optional per-run
   # override. POSTs to the same endpoint regardless of whether the user typed
   # `arb worker resume` or the top-level `arb resume` alias.
+  @resume_timeout_ms 180_000
+
   defp resume(task_id, positional, flags, mode) do
     repo =
       case positional do
@@ -291,7 +293,14 @@ defmodule ArbiterCli.Cmd.Worker do
       |> maybe_put("force", if(flags[:force], do: true))
       |> maybe_put("mode", flags[:mode])
 
-    case Client.post("/api/workers/#{Client.path_segment(task_id)}/resume", body) do
+    # The resume POST runs worktree reuse + agent spawn inline, which can outlast
+    # the default 10s client timeout although the resume succeeds (bd-k51pj3);
+    # a timeout would read as failure and prompt a duplicate retry.
+    case Client.post(
+           "/api/workers/#{Client.path_segment(task_id)}/resume",
+           body,
+           receive_timeout: @resume_timeout_ms
+         ) do
       {:ok, payload} -> emit_resume(payload, mode)
       {:error, err} -> Output.die(err)
     end

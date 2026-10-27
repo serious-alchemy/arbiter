@@ -52,6 +52,32 @@ defmodule ArbiterCli.Cmd.ResumeTest do
       assert decoded["task"]["id"] == "bd-1"
     end
 
+    test "uses a receive timeout well past the default so a slow spawn is not a client timeout" do
+      test_pid = self()
+
+      adapter = fn request ->
+        send(test_pid, {:receive_timeout, request.options[:receive_timeout]})
+        {request, Req.Response.new(status: 202, body: %{"task" => %{"id" => "bd-1"}})}
+      end
+
+      Process.put(:bd2_req_options, adapter: adapter, retry: false)
+
+      {_out, _err, code} = capture(fn -> run_resume(["bd-1", "--json"]) end)
+      assert code == 0
+      assert_received {:receive_timeout, timeout}
+      assert timeout > 60_000
+    end
+
+    test "a genuine transport timeout is still an error" do
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        Req.Test.transport_error(conn, :timeout)
+      end)
+
+      {_out, err, code} = capture(fn -> run_resume(["bd-1"]) end)
+      assert code != 0
+      assert err =~ "timed out"
+    end
+
     test "error response propagates as die" do
       stub_post(
         "/api/workers/bd-x/resume",
