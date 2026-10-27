@@ -33,6 +33,20 @@ defmodule Arbiter.Worker.GitCredentialPlanTest do
                GitCredential.plan(workspace, "tonic", role: :implementer, guarded?: false)
     end
 
+    test "a podman run (host pushes) still gets a github_app credential, so `git fetch origin` works" do
+      app = %{
+        "kind" => "github_app",
+        "app_id" => "1",
+        "installation_id" => "2",
+        "private_key_secret" => "PEM"
+      }
+
+      workspace = ws(%{"repos" => %{"tonic" => app}})
+
+      assert {:ok, %GitCredential{mode: :scoped}} =
+               GitCredential.plan(workspace, "tonic", role: :implementer, host_pushes?: true)
+    end
+
     test "a configured repo gets its scoped credential" do
       workspace = ws(%{"repos" => %{"tonic" => @key_entry}})
 

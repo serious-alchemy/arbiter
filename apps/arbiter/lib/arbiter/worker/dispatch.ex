@@ -4902,7 +4902,7 @@ defmodule Arbiter.Worker.Dispatch do
               # `:unsupported` there; the prompt must not steer the worker to it.
               |> Keyword.put(
                 :test_tool?,
-                not match?(%{kind: "cluster"}, Keyword.get(opts, :node))
+                PromptBuilder.test_tool_for_node?(Keyword.get(opts, :node))
               )
               |> Keyword.put(:projection, projection)
               |> Keyword.put(
@@ -5227,7 +5227,8 @@ defmodule Arbiter.Worker.Dispatch do
     GitCredential.plan(workspace, Keyword.get(opts, :repo),
       role: role,
       guarded?: Guardrails.guarded?(),
-      host_pushes?: ContainerSpawn.podman?(policy)
+      host_pushes?: ContainerSpawn.podman?(policy),
+      remote_node?: Keyword.get(opts, :node) != nil
     )
   end
 

@@ -1216,11 +1216,28 @@ defmodule Arbiter.Worker.PromptBuilderTest do
           test_tool?: false
         )
 
-      refute prompt =~ "RUNNING TESTS"
       refute prompt =~ "`run_tests`"
-      assert prompt =~ "by running just those test files"
+      assert prompt =~ "mix test"
+      assert prompt =~ "tail"
       # the completion path is still spelled out
       assert prompt =~ "arb done"
+    end
+
+    test "a pod prompt says to run mix test directly; other placements are unchanged" do
+      pod = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt", test_tool?: false)
+      assert pod =~ "mix test <files>"
+      refute pod =~ "run_tests"
+
+      plain = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+      assert plain =~ "`run_tests`"
+      refute plain =~ "mix test <files>"
+    end
+
+    test "test_tool_for_node?/1 treats an atom or string cluster kind as a pod" do
+      refute PromptBuilder.test_tool_for_node?(%{kind: :cluster})
+      refute PromptBuilder.test_tool_for_node?(%{kind: "cluster"})
+      assert PromptBuilder.test_tool_for_node?(%{kind: :machine})
+      assert PromptBuilder.test_tool_for_node?(nil)
     end
 
     test "the section is exposed for the other authoring prompts" do

@@ -100,8 +100,13 @@ defmodule Arbiter.Worker.GitCredential do
   @gitlab_access_level 30
   @gitlab_scopes ~w(read_api write_repository)
   # Kinds whose credential a container holds even when the host pushes for it
-  # (`plan/3`'s `:host_pushes?`): the token is also the worker's GitLab API access.
-  @container_kinds [:gitlab_project_token]
+  # (`plan/3`'s `:host_pushes?`): a GitLab project token is also the worker's API access, and
+  # both are short-lived and repo-pinned, so the container can `git fetch origin` over
+  # the https rewrite (`Material.env/2`) instead of failing on ssh with no key.
+  @container_kinds [:gitlab_project_token, :github_app]
+  # On a remote node (`plan/3`'s `:remote_node?`) the host keeps the App's token: only the
+  # GitLab project token (the worker's API access) goes.
+  @remote_container_kinds [:gitlab_project_token]
   @block_keys ~w(legacy_operator repos)
 
   defstruct mode: :unenforced, repo: nil, entry: nil
@@ -152,7 +157,8 @@ defmodule Arbiter.Worker.GitCredential do
 
   Options: `:role` (`:implementer`, the default, or `:reviewer`), `:guarded?`
   (the spawn's projection is guarded), `:host_pushes?` (the host pushes the
-  branch, so the worker needs no credential).
+  branch, so the worker needs no credential), `:remote_node?` (the run is placed on a remote
+  node, which is never handed a GitHub App token).
 
   `{:error, {:git_credential_missing, repo, message}}` is the refusal.
   """
@@ -165,7 +171,8 @@ defmodule Arbiter.Worker.GitCredential do
 
     cond do
       role == :reviewer or
-          (Keyword.get(opts, :host_pushes?, false) and not container_credential?(entry)) ->
+          (Keyword.get(opts, :host_pushes?, false) and
+             not container_credential?(entry, Keyword.get(opts, :remote_node?, false))) ->
         {:ok, %__MODULE__{mode: :not_needed, repo: repo}}
 
       scoped?(entry) ->
@@ -200,10 +207,12 @@ defmodule Arbiter.Worker.GitCredential do
   defp scoped?(%{"kind" => kind}) when kind in @kinds, do: true
   defp scoped?(_), do: false
 
-  defp container_credential?(%{"kind" => kind}) when is_binary(kind),
-    do: Enum.any?(@container_kinds, &(Atom.to_string(&1) == kind))
+  defp container_credential?(%{"kind" => kind}, remote_node?) when is_binary(kind) do
+    kinds = if remote_node?, do: @remote_container_kinds, else: @container_kinds
+    Enum.any?(kinds, &(Atom.to_string(&1) == kind))
+  end
 
-  defp container_credential?(_), do: false
+  defp container_credential?(_, _remote_node?), do: false
 
   # A repo entry's own `legacy_operator` (true or false) wins over the workspace's.
   defp legacy?(_block, %{"legacy_operator" => value}) when is_boolean(value), do: value
