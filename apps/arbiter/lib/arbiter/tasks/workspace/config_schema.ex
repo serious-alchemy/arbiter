@@ -160,6 +160,10 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                             value avoids a sync pipeline per unrelated target commit, at the cost
                             of merging a combination CI never ran, so only raise it where main
                             runs the tests.
+      max_freshness_syncs   positive integer — freshness syncs (update-branch) allowed per head
+                            before the merge parks and pages (default: 3). The count restarts
+                            when the head changes for any reason other than a pending sync, and
+                            when a synced head reaches a merge decision (CI passed).
       repos                 map, repo_paths key -> per-repo override of any key
                             above (strategy, config, auto_merge, …). Deep-merged
                             over the workspace-level merge block, so unset

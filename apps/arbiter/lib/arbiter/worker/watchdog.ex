@@ -3845,7 +3845,9 @@ defmodule Arbiter.Worker.Watchdog do
     behind =
       case state.mr_base_ref do
         base when is_binary(base) and is_binary(state.last_head_sha) ->
-          case safe(fn -> MergeFreshness.behind_by(local_repo(state), base, state.last_head_sha) end) do
+          case safe(fn ->
+                 MergeFreshness.behind_by(local_repo(state), base, state.last_head_sha)
+               end) do
             {:ok, n} -> "#{n}"
             _ -> "an unknown number of"
           end
