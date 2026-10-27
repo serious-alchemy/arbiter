@@ -53,7 +53,7 @@ defmodule Arbiter.Quota.GrantRefresher do
     * a failed refresh or an unreadable grant — once, until the grant is
       healthy again (a refresh succeeds, or a fresh `expiresAt` shows the
       operator logged in again);
-    * a `refreshTokenExpiresAt` within `:refresh_token_warning_ms` (default 7
+    * a `refreshTokenExpiresAt` within `:refresh_token_warning_ms` (default 2
       days) — once per distinct `refreshTokenExpiresAt`.
 
   ## Configuration
@@ -77,7 +77,7 @@ defmodule Arbiter.Quota.GrantRefresher do
 
   @default_interval_ms 60_000
   @default_refresh_window_ms 4 * 60_000
-  @default_refresh_token_warning_ms 7 * 24 * 3_600_000
+  @default_refresh_token_warning_ms 2 * 24 * 3_600_000
   @default_failure_backoff_ms 5 * 60_000
   @default_cli_timeout_ms 120_000
 
