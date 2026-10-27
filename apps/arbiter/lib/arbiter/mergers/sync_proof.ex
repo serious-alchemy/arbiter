@@ -36,6 +36,7 @@ defmodule Arbiter.Mergers.SyncProof do
   """
 
   alias Arbiter.Mergers.LocalCompare
+  alias Arbiter.Worker.ReleaseEnv
 
   @max_depth 8
 
@@ -110,7 +111,7 @@ defmodule Arbiter.Mergers.SyncProof do
       ~S(git -C "$1" log --reverse --no-merges --no-color --no-ext-diff -p -U0 "$2" ) <>
         "| git patch-id --stable"
 
-    case System.cmd("sh", ["-c", script, "sh", repo, range],
+    case ReleaseEnv.cmd("sh", ["-c", script, "sh", repo, range],
            stderr_to_stdout: true,
            env: [{"GIT_TERMINAL_PROMPT", "0"}]
          ) do
