@@ -693,6 +693,14 @@ defmodule Arbiter.Nodes.Session do
     do: {:noreply, node_event_apply(state, event, payload)}
 
   def handle_cast({:cancel_run, run, reason}, state) do
+    # A run stopped before its agent started (still `assigned`/`pending`/`starting`)
+    # holds a slot the node will never use: drop it from the node's run map now,
+    # rather than count it live until the agent's next heartbeat.
+    state =
+      if RunStreams.started?(state.streams, run) or RunStreams.stage(state.streams, run) == nil,
+        do: state,
+        else: forget_hold(%{state | runs: Map.delete(state.runs, run)}, run)
+
     {streams, effects} = RunStreams.cancel(state.streams, run, reason)
     {:noreply, run_effects(%{state | streams: streams}, effects)}
   end

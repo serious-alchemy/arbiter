@@ -266,21 +266,27 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       :ok
     end
 
-    defp redispatchable!(stop_category) do
+    defp redispatchable!(stop_category, extra \\ %{}) do
       ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
       issue = ready!(ws, "redispatch #{stop_category}")
       {:ok, active} = Ash.update(issue, %{}, action: :start)
 
-      Ash.create!(Arbiter.Workers.Run, %{
-        task_id: active.id,
-        workspace_id: ws.id,
-        repo: @repo,
-        kind: :implement,
-        state: :finished,
-        outcome: :failed,
-        stop_category: stop_category,
-        started_at: DateTime.utc_now()
-      })
+      Ash.create!(
+        Arbiter.Workers.Run,
+        Map.merge(
+          %{
+            task_id: active.id,
+            workspace_id: ws.id,
+            repo: @repo,
+            kind: :implement,
+            state: :finished,
+            outcome: :failed,
+            stop_category: stop_category,
+            started_at: DateTime.utc_now()
+          },
+          extra
+        )
+      )
 
       active
     end
@@ -306,6 +312,29 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
         :ok = Worker.stop(issue.id, :normal)
         assert_receive {:DOWN, ^ref, :process, _, _}, 5_000
       end
+    end
+
+    test "an operator stop before the agent started is placed on a node again" do
+      issue =
+        redispatchable!(nil, %{outcome: :stopped, failure_reason: "operator_stop by coordinator"})
+
+      assert {:ok, %{worker_pid: pid}} = dispatch(issue, redispatch_opts())
+      assert_receive {:spawned, %{id: "n-scoped"}}
+      ref = Process.monitor(pid)
+      :ok = Worker.stop(issue.id, :normal)
+      assert_receive {:DOWN, ^ref, :process, _, _}, 5_000
+    end
+
+    test "an operator stop after the agent started stays on the primary" do
+      issue =
+        redispatchable!(nil, %{
+          outcome: :stopped,
+          failure_reason: "operator_stop",
+          session_id: "sess-1"
+        })
+
+      assert {:ok, %{worker_pid: _pid}} = dispatch(issue, redispatch_opts())
+      assert_receive {:spawned, nil}
     end
 
     test "a re-dispatch after an attempt that ran the agent stays on the primary" do

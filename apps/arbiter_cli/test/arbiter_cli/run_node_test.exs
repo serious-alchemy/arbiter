@@ -21,6 +21,23 @@ defmodule ArbiterCli.RunNodeTest do
       assert RunLabel.node_suffix(%{}) == ""
       assert RunLabel.node_suffix(@remote) == "  node=gpu-box"
     end
+
+    test "names the planned node while the run is still preparing" do
+      preparing = %{
+        "node_id" => nil,
+        "planned_node_id" => "n-1",
+        "planned_node_name" => "mesaana"
+      }
+
+      assert RunLabel.where(preparing) == "placing: mesaana"
+      assert RunLabel.node_suffix(preparing) == "  node=placing: mesaana"
+
+      assert RunLabel.where(%{
+               "node_id" => "n-1",
+               "node_name" => "mesaana",
+               "planned_node_name" => "x"
+             }) == "mesaana"
+    end
   end
 
   defp run(extra),

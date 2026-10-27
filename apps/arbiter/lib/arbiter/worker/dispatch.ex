@@ -3047,11 +3047,17 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # Did the ticket's latest main run end before its agent ever started?
+  # Did the ticket's latest main run end before its agent ever started? Either
+  # a pre-agent `stop_category`, or an operator stop (no category) of a run that
+  # never opened an agent session.
   defp pre_agent_failure?(task_id) do
     case latest_main_run(task_id) do
-      %Run{state: :finished, stop_category: category} ->
+      %Run{state: :finished, stop_category: category} when is_binary(category) ->
         category in StopReason.pre_agent_categories()
+
+      %Run{state: :finished, outcome: :stopped, session_id: nil, failure_reason: reason}
+      when is_binary(reason) ->
+        String.starts_with?(reason, "operator_stop")
 
       _ ->
         false

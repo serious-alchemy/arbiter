@@ -32,11 +32,15 @@ defmodule ArbiterCli.RunLabel do
   def run_suffix(_run), do: ""
 
   @doc """
-  Where the run executes (bd-1b4k9r): the node's name, `local` for the primary.
+  Where the run executes (bd-1b4k9r): the node's name, `local` for the primary,
+  `placing: <node>` while it prepares on the node placement chose.
   `nil` when the payload carries no `node_id` key at all (an older server), so
   nothing is claimed that was not reported.
   """
   @spec where(map()) :: String.t() | nil
+  def where(%{"node_id" => nil, "planned_node_name" => name}) when is_binary(name) and name != "",
+    do: "placing: #{name}"
+
   def where(%{"node_id" => nil}), do: "local"
   def where(%{"node_name" => name}) when is_binary(name) and name != "", do: name
   def where(%{"node_id" => id}) when is_binary(id), do: id

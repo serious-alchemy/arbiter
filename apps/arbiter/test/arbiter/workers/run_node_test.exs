@@ -57,4 +57,37 @@ defmodule Arbiter.Workers.RunNodeTest do
     updated = Ash.update!(run, %{node_id: node.id}, action: :update)
     assert RunNode.node_name(updated) == node.name
   end
+
+  describe "a run still preparing on a placed node" do
+    defp preparing_view(meta) do
+      %{
+        ticket_id: "bd-pn",
+        task_id: "bd-pn",
+        source: :ticket,
+        kind: :implement,
+        state: :working,
+        outcome: nil,
+        node_id: nil,
+        meta: meta
+      }
+    end
+
+    test "reports the planned node while node_id is still nil" do
+      node = node!("plan-#{System.unique_integer([:positive])}")
+      row = Arbiter.Workers.Serializer.current_run(preparing_view(%{placed_node_id: node.id}))
+
+      assert row.node_id == nil
+      assert row.planned_node_id == node.id
+      assert row.planned_node_name == node.name
+    end
+
+    test "reports no planned node for a primary run, or once the agent started" do
+      assert %{planned_node_id: nil} =
+               Arbiter.Workers.Serializer.current_run(preparing_view(%{}))
+
+      node = node!("up-#{System.unique_integer([:positive])}")
+      view = %{preparing_view(%{placed_node_id: node.id}) | node_id: node.id}
+      assert %{planned_node_id: nil} = Arbiter.Workers.Serializer.current_run(view)
+    end
+  end
 end
