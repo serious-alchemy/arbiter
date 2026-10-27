@@ -338,6 +338,29 @@ defmodule Arbiter.Board.Autopilot do
   ]
   @account_cap_retry_ms 15_000
 
+  # bd-1ggu6v: refusals that are held with their own backoff rather than retried
+  # on every pass, but are not "self clearing" in the sense above.
+  #
+  # `:sandbox_backend`: the routed provider cannot run under the workspace's
+  # sandbox backend (grok on podman). It changes only when routing or config
+  # does, so it backs off (30s doubling to 10m) and still escalates after
+  # `@dispatch_failure_retry_threshold` attempts.
+  #
+  # `:migrations_check_failed`: `count_pending` could not reach the database
+  # (`:unreachable`). Transient: retried on a 5s to 60s backoff and never
+  # counted toward "dispatch stuck".
+  @held_dispatch_errors @self_clearing_dispatch_errors ++
+                          [:sandbox_backend, :migrations_check_failed]
+  @sandbox_backend_backoff_ms 30_000
+  @sandbox_backend_backoff_max_ms 600_000
+  @migrations_backoff_ms 5_000
+  @migrations_backoff_max_ms 60_000
+
+  # A promotion in flight longer than this is reaped (bd-1ggu6v). A safety net:
+  # a dispatch parked on an image publish is bounded by the publisher's own
+  # timeout (600s), so this only fires for one that is hung outright.
+  @dispatch_timeout_ms :timer.minutes(20)
+
   # How many consecutive same-shape failures a non-deterministic error (a
   # quota gate, a network blip) gets before Autopilot escalates it too.
   @dispatch_failure_retry_threshold 3
@@ -648,6 +671,7 @@ defmodule Arbiter.Board.Autopilot do
       priority: Keyword.get(opts, :priority, &default_priority/1),
       escalate: Keyword.get(opts, :escalate, &default_escalate/3),
       now: Keyword.get(opts, :now, &DateTime.utc_now/0),
+      dispatch_timeout_ms: Keyword.get(opts, :dispatch_timeout_ms, @dispatch_timeout_ms),
       # bd-545yem: whether a ticket has closed, for sweeping a stale promotion.
       ticket_closed?: Keyword.get(opts, :ticket_closed?, &default_ticket_closed?/1),
       # The one promotion in flight, if any: %{ref: ref, id: id, waiters: [from]}.
@@ -943,7 +967,7 @@ defmodule Arbiter.Board.Autopilot do
   # bd-814vuy: a placement refusal holds that card only — go straight on to the
   # next candidate rather than idling the slot until some other event wakes us.
   defp after_dispatch(state, {:error, reason}) do
-    if error_shape(reason) in @self_clearing_dispatch_errors,
+    if error_shape(reason) in @held_dispatch_errors,
       do: trigger_immediate_pass(%{state | replan_after_dispatch: false}),
       else: after_dispatch_replan(state)
   end
@@ -1336,7 +1360,18 @@ defmodule Arbiter.Board.Autopilot do
     end
 
     task = spawn_dispatch(fun)
-    %{state | dispatching: %{ref: task.ref, pid: task.pid, id: id, waiters: [], resume: entry}}
+
+    %{
+      state
+      | dispatching: %{
+          ref: task.ref,
+          pid: task.pid,
+          id: id,
+          waiters: [],
+          resume: entry,
+          started_at: state.now.()
+        }
+    }
   end
 
   # A quota-exhausted failure (bd-8lnnnt) is not transient the way a network
@@ -1391,7 +1426,17 @@ defmodule Arbiter.Board.Autopilot do
     end
 
     task = spawn_dispatch(fun)
-    %{state | dispatching: %{ref: task.ref, pid: task.pid, id: id, waiters: []}}
+
+    %{
+      state
+      | dispatching: %{
+          ref: task.ref,
+          pid: task.pid,
+          id: id,
+          waiters: [],
+          started_at: state.now.()
+        }
+    }
   end
 
   # The dispatch seam takes the extra options (the admission shadow's record)
@@ -1470,7 +1515,7 @@ defmodule Arbiter.Board.Autopilot do
   # its threshold, escalates.
   defp finish_dispatch(state, id, {:error, reason} = error) do
     # bd-814vuy: a placement refusal is a hold on this card, not a failure.
-    if error_shape(reason) in @self_clearing_dispatch_errors do
+    if error_shape(reason) in @held_dispatch_errors do
       Logger.info("board autopilot: dispatch of #{id} held: #{inspect(reason)}")
     else
       Logger.warning("board autopilot: dispatch of #{id} failed: #{inspect(reason)}")
@@ -1511,6 +1556,10 @@ defmodule Arbiter.Board.Autopilot do
   defp failure_detail({:provider_constraint, _provider, phrase}), do: phrase
   defp failure_detail({:guardrail_ineligible, _provider, phrase}), do: phrase
   defp failure_detail({:no_node_capacity, _}), do: "no node capacity"
+  defp failure_detail({:sandbox_backend, _provider, phrase}), do: phrase
+
+  defp failure_detail({:migrations_check_failed, why}),
+    do: "migrations check failed (#{inspect(why)})"
 
   defp failure_detail({:image_publish_failed, %{reason: r}}),
     do: "image publish failed: #{inspect(r)}"
@@ -1560,6 +1609,8 @@ defmodule Arbiter.Board.Autopilot do
   defp escalate_dispatch_failure?(shape, _count) when shape in @self_clearing_dispatch_errors,
     do: false
 
+  defp escalate_dispatch_failure?(:migrations_check_failed, _count), do: false
+
   defp escalate_dispatch_failure?(shape, _count) when shape in @deterministic_dispatch_errors,
     do: true
 
@@ -1602,8 +1653,19 @@ defmodule Arbiter.Board.Autopilot do
   defp preflight_retry_not_before({:below_floor, _provider, _phrase}, _count, now),
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
+  defp preflight_retry_not_before({:sandbox_backend, _provider, _phrase}, count, now),
+    do: backoff(now, @sandbox_backend_backoff_ms, @sandbox_backend_backoff_max_ms, count)
+
+  defp preflight_retry_not_before({:migrations_check_failed, _why}, count, now),
+    do: backoff(now, @migrations_backoff_ms, @migrations_backoff_max_ms, count)
+
   defp preflight_retry_not_before(reason, count, now),
     do: Arbiter.Worker.PreflightHold.retry_not_before(reason, count, now)
+
+  defp backoff(now, base_ms, max_ms, count) do
+    ms = min(base_ms * Integer.pow(2, min(count - 1, 16)), max_ms)
+    DateTime.add(now, ms, :millisecond)
+  end
 
   # Resolves the card's workspace so `CoordinatorNotifier.dispatch_stuck/3`
   # has somewhere to post — a card with no readable Issue/workspace has
@@ -1701,12 +1763,28 @@ defmodule Arbiter.Board.Autopilot do
         send(self(), {:DOWN, in_flight.ref, :process, in_flight.pid, :noproc})
         state
 
+      dispatch_overdue?(in_flight, state) ->
+        Logger.warning(
+          "board autopilot: dispatch of #{id} exceeded #{state.dispatch_timeout_ms}ms; releasing its slot"
+        )
+
+        release_dispatch(in_flight)
+        reply_all(in_flight.waiters, {:error, :dispatch_timeout})
+        state = record_failure(state, id, :dispatch_timeout)
+        after_dispatch(%{state | dispatching: nil}, {:error, :dispatch_timeout})
+
       true ->
         state
     end
   end
 
   defp sweep_stale_dispatch(state), do: state
+
+  defp dispatch_overdue?(%{started_at: %DateTime{} = started_at}, state) do
+    DateTime.diff(state.now.(), started_at, :millisecond) > state.dispatch_timeout_ms
+  end
+
+  defp dispatch_overdue?(_in_flight, _state), do: false
 
   defp task_gone?(%{pid: pid}) when is_pid(pid), do: not Process.alive?(pid)
   defp task_gone?(_in_flight), do: false
