@@ -394,7 +394,11 @@ defmodule Arbiter.ReviewGate.RulingResume do
         case Resolutions.record(attrs, resume: false) do
           {:ok, carried} ->
             note(task_id, ruling.workspace_id, "carried", %{
+              baseline: "ruling",
               head_sha: to,
+              from_sha: from,
+              actor: carried.actor,
+              proof: proof,
               message: "ruling carried #{from} -> #{to}: #{proof}"
             })
 
@@ -407,6 +411,43 @@ defmodule Arbiter.ReviewGate.RulingResume do
       _ ->
         :none
     end
+  end
+
+  @doc """
+  A ReviewGate APPROVE baseline moved from `from` to `to` on a proven clean sync
+  (`Arbiter.ReviewGate.BaselineCarry`): announce `"carried"` on the workspace
+  `review_gate` stream, the same event a carried ruling emits, so the rounds
+  report lists both. Best-effort.
+  """
+  @spec announce_carry(String.t(), String.t() | nil, String.t(), String.t(), String.t(), String.t()) ::
+          :ok
+  def announce_carry(task_id, workspace_id, baseline, from, to, proof) do
+    ws_id =
+      workspace_id ||
+        case Ash.get(Issue, task_id) do
+          {:ok, %Issue{workspace_id: ws}} -> ws
+          _ -> nil
+        end
+
+    Arbiter.Events.broadcast(ws_id, "review_gate", %{
+      task_id: task_id,
+      ruling_event: "carried",
+      baseline: baseline,
+      head_sha: to,
+      from_sha: from,
+      actor: "system:baseline-carry",
+      proof: proof,
+      message: "#{baseline} baseline carried #{from} -> #{to}: #{proof}"
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "RulingResume.announce_carry for task=#{task_id} swallowed: #{Exception.message(e)}"
+      )
+
+      :ok
   end
 
   defp present?(v), do: is_binary(v) and v != ""
