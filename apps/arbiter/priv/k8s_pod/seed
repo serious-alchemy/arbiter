@@ -158,7 +158,9 @@ git_in() { git -C "$wt" "$@"; }
 
 mkdir -p "$dot_git/hooks" "$dot_git/info" "$dot_git/objects/info"
 : >"$dot_git/objects/info/alternates"
-printf '.arbiter/\n' >"$dot_git/info/exclude"
+# `.arbiter/` is the harness's; mix_home/.mix/.hex are where an agent that points MIX_HOME or
+# HEX_HOME into the checkout puts them (bd-5wm92s): never part of the work, never staged.
+printf '.arbiter/\nmix_home/\n.mix/\n.hex/\n' >"$dot_git/info/exclude"
 # The identity a container commits as (a pod sees no global git config).
 git_in config user.name arbiter
 git_in config user.email arbiter@localhost
@@ -227,8 +229,14 @@ printf '.\n' >"$dot_git/commondir"
 # -- 6. seed layer and seed files ------------------------------------------------
 # The image's warm deps/_build, then what /boot delivered. Neither may reach
 # into `.git`.
+# The layer also carries `mix_home/` (Hex and rebar, for a podman run's HOME). A pod takes
+# them from the image's MIX_HOME, so it stays out of the checkout (bd-5wm92s).
 if [ -d "$seed_layer" ]; then
-  cp -a --no-preserve=ownership "$seed_layer/." "$wt/"
+  for entry in "$seed_layer"/* "$seed_layer"/.[!.]* "$seed_layer"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ "${entry##*/}" = mix_home ] && continue
+    cp -a --no-preserve=ownership "$entry" "$wt/"
+  done
   chmod -R u+rwX "$wt" 2>/dev/null || true
 fi
 if [ -e "$stage/worktree/.git" ]; then
