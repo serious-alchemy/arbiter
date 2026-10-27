@@ -173,6 +173,24 @@ defmodule Arbiter.Board.Drain do
   end
 
   @doc """
+  Sets (or, with `nil`, clears) the `:detail` of the calling process's own
+  `track/3` entries, so a tracked call that is parked on something slow says
+  what it is waiting for in `scheduler_status` rather than reading as a bare,
+  stuck-looking entry (bd-1ggu6v). A no-op outside a `track/3` call, and
+  without the Registry running.
+  """
+  @spec note_detail(String.t() | nil) :: :ok
+  def note_detail(detail) when is_nil(detail) or is_binary(detail) do
+    for key <- Registry.keys(@registry, self()) do
+      Registry.update_value(@registry, key, &Map.put(&1, :detail, detail))
+    end
+
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc """
   Whether any `Arbiter.Worker.Dispatch` dispatch or resume is between starting
   and returning — the window in which its worker may not be registered yet, so
   `Arbiter.Accounts.Concurrency.live_count/1` under-reports (bd-35gvrj).
@@ -212,15 +230,19 @@ defmodule Arbiter.Board.Drain do
     autopilot = autopilot_status(Keyword.get(opts, :autopilot, Autopilot))
     workers = worker_entries(Keyword.get(opts, :supervisor, Worker.Supervisor))
 
-    promotions = promotion_entries(autopilot)
+    all_tracked = opts |> Keyword.get(:registry, @registry) |> tracked_entries()
+
+    promotions =
+      autopilot |> promotion_entries() |> Enum.map(&with_dispatch_progress(&1, all_tracked))
 
     # The autopilot's promotion runs `Dispatch.dispatch/2`, which tracks itself
-    # too: list that one promotion once, under its more specific kind.
+    # too: list that one promotion once, under its more specific kind, carrying
+    # the dispatch's own start time and detail.
     tracked =
-      opts
-      |> Keyword.get(:registry, @registry)
-      |> tracked_entries()
-      |> Enum.reject(&(&1.kind == :dispatch_pending and promoting?(promotions, &1.task_id)))
+      Enum.reject(
+        all_tracked,
+        &(&1.kind == :dispatch_pending and promoting?(promotions, &1.task_id))
+      )
 
     in_flight = promotions ++ tracked ++ workers
 
@@ -382,6 +404,13 @@ defmodule Arbiter.Board.Drain do
     do: [entry(:board_promotion, id, nil, :dispatching, nil, nil, nil)]
 
   defp promotion_entries(_), do: []
+
+  defp with_dispatch_progress(%{task_id: task_id} = promotion, tracked) do
+    case Enum.find(tracked, &(&1.kind == :dispatch_pending and &1.task_id == task_id)) do
+      nil -> promotion
+      pending -> %{promotion | started_at: pending.started_at, detail: pending.detail}
+    end
+  end
 
   defp promoting?(promotions, task_id), do: Enum.any?(promotions, &(&1.task_id == task_id))
 

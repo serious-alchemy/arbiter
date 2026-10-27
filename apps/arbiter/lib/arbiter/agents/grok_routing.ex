@@ -74,12 +74,38 @@ defmodule Arbiter.Agents.GrokRouting do
   account-wide, bd-bvx07f) and, when `:task` is given, grok allowed by the
   ticket's provider constraint. Grok is a routing candidate like any other: a
   pause or a constraint that rules it out sends the ticket to the policy's own
-  choice. Options: `:task`; (tests) `:auth_hold` and `:credential_watchdog`.
+  choice. Also false when the resolved sandbox backend cannot run grok
+  (podman, bd-1ggu6v). Options: `:task`, `:security`; (tests) `:auth_hold` and `:credential_watchdog`.
   """
   @spec route?(Workspace.t() | nil, 0..5, keyword()) :: boolean()
   def route?(workspace, difficulty, opts \\ []) do
     enabled?(workspace) and difficulty in difficulties(workspace) and not held?(opts) and
-      not paused?(workspace) and allowed?(Keyword.get(opts, :task))
+      not paused?(workspace) and allowed?(Keyword.get(opts, :task)) and
+      backend_runs_grok?(workspace, opts)
+  end
+
+  # bd-1ggu6v: grok has no wrap point under `sandbox.backend podman`
+  # (`Sandbox.module/2` refuses it), so routing it there only produces a
+  # `:sandbox_backend` refusal on every attempt. Not a candidate when the
+  # resolved policy's backend cannot run it. `:security` (a resolved policy)
+  # wins over resolving the workspace's own.
+  defp backend_runs_grok?(workspace, opts) do
+    policy =
+      case Keyword.get(opts, :security) do
+        %Arbiter.Agents.SecurityPolicy{} = policy ->
+          policy
+
+        _ ->
+          repo =
+            case Keyword.get(opts, :task) do
+              %{repo: repo} -> repo
+              _ -> nil
+            end
+
+          Arbiter.Agents.SecurityPolicy.resolve(workspace, %{}, repo)
+      end
+
+    is_nil(Arbiter.Agents.ProviderRouting.backend_refusal(policy, :grok))
   end
 
   defp paused?(workspace) do

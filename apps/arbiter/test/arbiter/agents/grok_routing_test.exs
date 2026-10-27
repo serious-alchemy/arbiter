@@ -81,6 +81,37 @@ defmodule Arbiter.Agents.GrokRoutingTest do
     end
   end
 
+  describe "sandbox backend (bd-1ggu6v)" do
+    defp backend_ws(backend) do
+      %Workspace{
+        config: %{
+          "agent" => %{
+            "type" => "claude",
+            "config" => %{},
+            "security" => %{"sandbox" => %{"backend" => backend}}
+          },
+          "routing" => %{"policy" => "by_difficulty", "grok" => %{"enabled" => true}}
+        }
+      }
+    end
+
+    test "under sandbox.backend podman routing never picks grok" do
+      w = backend_ws("podman")
+      task = %Issue{difficulty: 1}
+
+      refute GrokRouting.route?(w, 1, task: task)
+      assert %{type: :claude} = Routing.choose(task, w, %{})
+    end
+
+    test "under bwrap grok is still routed" do
+      w = backend_ws("bwrap")
+      task = %Issue{difficulty: 1}
+
+      assert GrokRouting.route?(w, 1, task: task)
+      assert %{type: :grok} = Routing.choose(task, w, %{})
+    end
+  end
+
   test "grok is a registered agent type" do
     assert "grok" in Arbiter.Agents.valid_agent_types()
   end
