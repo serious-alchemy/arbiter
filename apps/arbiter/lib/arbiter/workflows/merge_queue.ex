@@ -1134,7 +1134,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp update_base(state, item) do
     item = clear_reviewed_latch(item)
 
-    case safe_update_branch(state.adapter, item.mr_ref) do
+    case safe_update_branch(state, item) do
       :ok ->
         Logger.info(
           "MergeQueue: rebasing #{item_branch_label(item)} onto moved base (update-branch)"
@@ -1157,8 +1157,8 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
-  defp safe_update_branch(adapter, mr_ref) when is_atom(adapter) do
-    adapter.update_branch(mr_ref)
+  defp safe_update_branch(%State{adapter: adapter, workspace: ws}, item) when is_atom(adapter) do
+    Mergers.update_branch(adapter, item.mr_ref, ws, item.repo)
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
   catch
@@ -1573,7 +1573,7 @@ defmodule Arbiter.Workflows.MergeQueue do
         freshness_syncs: item.freshness_syncs + 1
     }
 
-    case safe_update_branch(state.adapter, item.mr_ref) do
+    case safe_update_branch(state, item) do
       :ok ->
         {:hold, item}
 
