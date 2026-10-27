@@ -446,7 +446,13 @@ defmodule Arbiter.Worker.GitCredentialGitlabTest do
     end
 
     test "a github_app repo's reviewer still gets no credential" do
-      ws = workspace(%{"kind" => "github_app", "app_id" => 1, "installation_id" => 2})
+      ws =
+        workspace(%{
+          "kind" => "github_app",
+          "app_id" => 1,
+          "installation_id" => 2,
+          "private_key_secret" => "GL_PARENT"
+        })
 
       assert {:ok, %GitCredential{mode: :not_needed}} =
                GitCredential.plan(ws, "tonic", role: :reviewer, host_pushes?: true)
