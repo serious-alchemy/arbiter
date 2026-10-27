@@ -100,8 +100,10 @@ defmodule Arbiter.Worker.GitCredential do
   @gitlab_access_level 30
   @gitlab_scopes ~w(read_api write_repository)
   # Kinds whose credential a container holds even when the host pushes for it
-  # (`plan/3`'s `:host_pushes?`): the token is also the worker's GitLab API access.
-  @container_kinds [:gitlab_project_token]
+  # (`plan/3`'s `:host_pushes?`): a GitLab project token is also the worker's API access, and
+  # both are short-lived and repo-pinned, so the container can `git fetch origin` over
+  # the https rewrite (`Material.env/2`) instead of failing on ssh with no key.
+  @container_kinds [:gitlab_project_token, :github_app]
   @block_keys ~w(legacy_operator repos)
 
   defstruct mode: :unenforced, repo: nil, entry: nil
