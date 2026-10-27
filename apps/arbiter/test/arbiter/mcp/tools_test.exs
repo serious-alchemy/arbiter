@@ -6658,6 +6658,39 @@ defmodule Arbiter.MCP.ToolsTest do
              ]
     end
 
+    # bd-cmvmzl: rows order by time, not (fix_round_attempt, round).
+    test "orders by inserted_at across attempts; limit 1 is the newest; a later APPROVE converges",
+         ctx do
+      for {attempt, round, verdict} <- [
+            {0, 1, :request_changes},
+            {1, 2, :request_changes},
+            {1, 1, :approve}
+          ] do
+        {:ok, _} =
+          Ash.create(Arbiter.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            fix_round_attempt: attempt,
+            role: :review,
+            verdict: verdict,
+            converged: verdict == :approve
+          })
+      end
+
+      assert {:ok, %{rounds: rounds, outcome: "converged"}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert Enum.map(rounds, &{&1.fix_round_attempt, &1.round}) == [{0, 1}, {1, 2}, {1, 1}]
+
+      assert {:ok, %{rounds: [last], outcome: "converged"}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "limit" => 1
+               })
+
+      assert last.verdict == :approve
+    end
+
     test "fix_round_attempt defaults to 0 for a row that doesn't specify one", ctx do
       {:ok, _} =
         Ash.create(Arbiter.ReviewGate.Round, %{
