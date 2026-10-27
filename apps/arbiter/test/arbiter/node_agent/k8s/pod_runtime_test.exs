@@ -132,6 +132,34 @@ defmodule Arbiter.NodeAgent.K8s.PodRuntimeTest do
     end
   end
 
+  describe "the seed layer's mix_home (bd-5wm92s)" do
+    # The deps cache ships `mix_home/` in the seed layer for a podman run's `HOME`; a pod
+    # takes Hex from the image's MIX_HOME, so a copy in the checkout is only a stray
+    # untracked directory that trips the commit gate.
+    test "is not copied into the worktree, and dirs a run points MIX_HOME at are git-excluded",
+         ctx do
+      layer = Path.join(ctx.tmp_dir, "layer")
+      File.mkdir_p!(Path.join(layer, "deps/foo"))
+      File.write!(Path.join(layer, "deps/foo/mix.exs"), "# dep\n")
+      File.mkdir_p!(Path.join(layer, "mix_home/archives"))
+      File.write!(Path.join(layer, "mix_home/archives/hex-2.0.ez"), "hex")
+      env = put_env(ctx.env, "ARB_SEED_LAYER", layer)
+
+      assert {_, 0} = sh("seed", env)
+      assert File.read!(Path.join(ctx.wt, "deps/foo/mix.exs")) == "# dep\n"
+      refute File.exists?(Path.join(ctx.wt, "mix_home"))
+
+      for dir <- ["mix_home", ".mix", ".hex"] do
+        File.mkdir_p!(Path.join(ctx.wt, dir))
+        File.write!(Path.join([ctx.wt, dir, "x"]), "x")
+      end
+
+      # `deps/` is gitignored in a real repo; the fixture repo has no .gitignore.
+      File.rm_rf!(Path.join(ctx.wt, "deps"))
+      assert H.git!(ctx.wt, ["status", "--porcelain"]) == ""
+    end
+  end
+
   describe "the entry wrapper after seed" do
     test "sources the secrets the seed unpacked, then deletes them", ctx do
       assert {_, 0} = sh("seed", ctx.env)

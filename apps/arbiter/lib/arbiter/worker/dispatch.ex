@@ -4857,6 +4857,12 @@ defmodule Arbiter.Worker.Dispatch do
               # run completes; the prompt must not send the worker to push.
               |> Keyword.put(:host_pushes?, ContainerSpawn.podman?(policy))
               |> Keyword.put(:sandbox_backend, SecurityPolicy.sandbox_backend(policy))
+              # bd-5wm92s: a cluster pod's agent has no `exec`, so `run_tests` answers
+              # `:unsupported` there; the prompt must not steer the worker to it.
+              |> Keyword.put(
+                :test_tool?,
+                not match?(%{kind: "cluster"}, Keyword.get(opts, :node))
+              )
               |> Keyword.put(:projection, projection)
               |> Keyword.put(
                 :prepush_steps,

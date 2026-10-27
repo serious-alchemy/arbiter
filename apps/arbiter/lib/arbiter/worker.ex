@@ -3153,7 +3153,14 @@ defmodule Arbiter.Worker do
         RetryHold.stop_reason(info, exit_status)
 
       true ->
-        Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))
+        # bd-5wm92s: the decoded `result` event rides along, so a clean end is known even
+        # when the rendered summary line is not among `output_lines`.
+        Arbiter.Worker.StopReason.classify(
+          exit_status,
+          output_lines,
+          Map.get(session, :provider),
+          result: Map.get(session, :usage)
+        )
     end
   end
 

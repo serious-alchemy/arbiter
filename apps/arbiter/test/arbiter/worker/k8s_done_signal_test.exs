@@ -68,9 +68,20 @@ defmodule Arbiter.Worker.K8sDoneSignalTest do
       "type" => "result",
       "subtype" => "success",
       "is_error" => false,
+      "api_error_status" => nil,
       "stop_reason" => "end_turn",
+      "total_cost_usd" => 0.774,
       "result" => "ok"
     })
+  end
+
+  # The pod bridge's transport chatter after the agent's last event (cluster canary #3,
+  # bd-5wm92s): enough of it to push everything before it out of the session's line buffer,
+  # and worded the way a gateway failure is (a line shape the noise filter does not know).
+  defp bridge_noise(pid, count) do
+    for i <- 1..count do
+      line(pid, "bridge[#{i}]: upstream unreachable: connection reset by peer (502 Bad Gateway)")
+    end
   end
 
   defp line(pid, text), do: send(pid, {@handle, {:data, {:eol, text}}})
@@ -144,6 +155,39 @@ defmodule Arbiter.Worker.K8sDoneSignalTest do
       assert log =~ "remote stdout"
       assert log =~ "stdout_bytes="
       assert log =~ "All finished."
+    end
+
+    # bd-5wm92s. bd-5uqs30 (#1045) made the `arb done` an agent PRINTS survive the pod's log
+    # stream; this run printed none (Sonnet ended its turn on a summary), and the primary then
+    # read the bridge noise after the result as the cause. The prompt tells a pod agent to
+    # print `arb done` exactly as it tells a local one (the sentinel needs no CLI or MCP
+    # tool), so the stop must be the resumable one that sends the agent back for it.
+    test "with a clean result and a long socat tail is exited_without_done, not a gateway error",
+         %{pid: pid, task_id: task_id} do
+      open_remote_session(pid, task_id)
+
+      line(pid, assistant("Committed b7b26344; tests green."))
+      line(pid, result_event())
+      bridge_noise(pid, 1_100)
+      line(pid, "CLIENT ALERT: Fatal - Decode Error")
+      exit_remote(pid)
+
+      snap = settled(pid)
+      assert %{state: :finished, outcome: :failed} = snap
+      assert snap.meta.stop_reason.category == :exited_without_done
+    end
+
+    test "that printed `arb done` before a long socat tail is done", %{pid: pid, task_id: task_id} do
+      open_remote_session(pid, task_id)
+
+      line(pid, assistant("All finished.\n\narb done"))
+      line(pid, result_event())
+      bridge_noise(pid, 1_100)
+      exit_remote(pid)
+
+      snap = settled(pid)
+      assert %{state: :finished, outcome: :succeeded} = snap
+      assert snap.meta.done_seen == true
     end
 
     test "that only mentions `arb done` in prose is not done", %{pid: pid, task_id: task_id} do

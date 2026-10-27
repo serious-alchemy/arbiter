@@ -536,13 +536,14 @@ defmodule Arbiter.Worker.StopReason do
 
   Returns a `%StopReason{}`.
   """
-  @spec classify(integer() | nil, [String.t()], String.t() | nil) :: t()
-  def classify(exit_status, output_lines, provider \\ nil) when is_list(output_lines) do
+  @spec classify(integer() | nil, [String.t()], String.t() | nil, keyword()) :: t()
+  def classify(exit_status, output_lines, provider \\ nil, opts \\ [])
+      when is_list(output_lines) and is_list(opts) do
     # qwen's documented exit codes (auth, config, turn/token budget) are
     # authoritative and outrank incidental output vocabulary.
     with nil <- provider_exit_reason(provider, exit_status),
          nil <- provider_output_reason(provider, exit_status, output_lines) do
-      classify_by_output(exit_status, output_lines, provider)
+      classify_by_output(exit_status, output_lines, provider, Keyword.get(opts, :result))
     end
   end
 
@@ -570,10 +571,13 @@ defmodule Arbiter.Worker.StopReason do
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  defp classify_by_output(exit_status, output_lines, provider) do
+  defp classify_by_output(exit_status, output_lines, provider, result) do
     haystack = signature_haystack(output_lines)
     signal = signal_for(exit_status)
-    clean_end? = clean_completion?(exit_status, output_lines, provider)
+
+    clean_end? =
+      clean_completion?(exit_status, output_lines, provider) or
+        clean_result?(exit_status, provider, result)
 
     cond do
       # bd-8praoz: a signal-terminated run is checked FIRST, ahead of every
@@ -1425,6 +1429,21 @@ defmodule Arbiter.Worker.StopReason do
 
   defp clean_completion?(_exit_status, _output_lines, _provider), do: false
 
+  # bd-5wm92s: the same verdict from the session's decoded `result` event (its `:usage`
+  # map, `ClaudeSession.absorb_usage/2`), for when the rendered `⚙ claude session success`
+  # line is not in `output_lines`: the in-memory buffer keeps the newest 1000 lines, and a
+  # pod's bridge can fill it with socat/TLS noise after the result (cluster canary #3, run
+  # 2b2bd5ce, ended "gateway error" with a clean result and exit 0). The event is the CLI's
+  # own record of how the turn ended, so no trailing log line can contradict it.
+  defp clean_result?(0, provider, %{} = result) when provider in [nil, "claude"] do
+    raw = Map.get(result, :raw) || %{}
+
+    Map.get(result, :result_subtype) == "success" and Map.get(result, :is_error) in [false, nil] and
+      is_nil(raw["api_error_status"]) and raw["stop_reason"] in [nil, "end_turn"]
+  end
+
+  defp clean_result?(_exit_status, _provider, _result), do: false
+
   # `ClaudeSession`'s init / result display lines (oldest-first): the last one tells
   # whether the final session started and never finished, errored, or succeeded.
   defp claude_session_marker?(line) when is_binary(line),
@@ -1448,12 +1467,12 @@ defmodule Arbiter.Worker.StopReason do
   # merged stdout/stderr stream, but they are transport chatter (every cluster run ends
   # with `SSL_write(): … unexpected eof`), never the agent CLI failing. They carry no
   # signature; a real failure surfaces as the CLI's own `result` event or stderr.
-  defp bridge_noise_line?(line) when is_binary(line),
-    do:
-      Regex.match?(
-        ~r/^(?:\d{4}\/\d\d\/\d\d \d\d:\d\d:\d\d(?:\.\d+)? )?socat\[\d+\] [EWNID] /,
-        line
-      )
+  # bd-5wm92s: the same stream also carries the OpenSSL error text socat prints on its own
+  # lines and the TLS peer's `CLIENT ALERT: …`, and a log shipper may put a tag or
+  # timestamp ahead of the `socat[` token, so the match allows a short prefix.
+  @bridge_noise ~r/^(?:\S+ ){0,3}socat\[\d+\] [EWNID] |^SSL_write\(\)|^OpenSSL: error:|^CLIENT ALERT: /
+
+  defp bridge_noise_line?(line) when is_binary(line), do: Regex.match?(@bridge_noise, line)
 
   defp bridge_noise_line?(_line), do: false
 
