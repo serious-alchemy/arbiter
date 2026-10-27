@@ -263,12 +263,16 @@ defmodule Arbiter.Worker.StopReasonTest do
 
     test "a non-zero exit is never a clean end, whatever the result event says" do
       lines = [@started, "API Error: 502 Bad Gateway"]
-      assert StopReason.classify(1, lines, "claude", result: @pod_result).category == :gateway_error
+
+      assert StopReason.classify(1, lines, "claude", result: @pod_result).category ==
+               :gateway_error
     end
 
     test "the result event of another provider's stream does not apply" do
       lines = [@started, "API Error: 502 Bad Gateway"]
-      assert StopReason.classify(0, lines, "codex", result: @pod_result).category == :gateway_error
+
+      assert StopReason.classify(0, lines, "codex", result: @pod_result).category ==
+               :gateway_error
     end
   end
 
