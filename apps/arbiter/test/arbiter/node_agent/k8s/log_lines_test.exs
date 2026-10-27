@@ -53,6 +53,39 @@ defmodule Arbiter.NodeAgent.K8s.LogLinesTest do
     assert lines == [{"#{@ts1} 1", "a\n"}, {"#{@ts1} 2", "garbage\n"}]
   end
 
+  describe "numeric-offset timestamps (mesaana's kubelet stamps -04:00)" do
+    @off "2026-10-27T11:14:41.173636866-04:00"
+    @json ~s({"type":"assistant","message":{"content":[]}})
+
+    test "the stamp is stripped and the cursor round-trips through since_time" do
+      {_acc, lines} = feed(LogLines.new(nil), "#{@off} #{@json}\n")
+      assert lines == [{"#{@off} 1", @json <> "\n"}]
+
+      since = LogLines.since_time("#{@off} 1")
+      assert LogLines.parse_ts(since) == LogLines.parse_ts("2026-10-27T15:14:41.173636866Z")
+
+      {_acc, lines} = feed(LogLines.new("#{@off} 1"), "#{@off} #{@json}\n#{@off} next\n")
+      assert lines == [{"#{@off} 2", "next\n"}]
+    end
+
+    test "an offset stamp and the same instant in UTC compare equal" do
+      assert LogLines.parse_ts("2026-10-27T11:14:41-04:00") ==
+               LogLines.parse_ts("2026-10-27T15:14:41Z")
+
+      assert LogLines.parse_ts("2026-10-27T11:14:41+05:30") ==
+               LogLines.parse_ts("2026-10-27T05:44:41Z")
+    end
+
+    test "a record-splice stamp with an offset is removed from a long line" do
+      line = String.duplicate("x", 4096)
+      tail = String.duplicate("y", 10)
+      spliced = line <> "2026-10-27T11:14:41.173636866-04:00 " <> tail
+      {_acc, lines} = feed(LogLines.new(nil), "#{@off} #{spliced}\n")
+      assert [{_, text}] = lines
+      assert text == line <> tail <> "\n"
+    end
+  end
+
   test "since_time is the cursor's timestamp" do
     assert LogLines.since_time("#{@ts1} 3") == @ts1
     assert LogLines.since_time(nil) == nil
