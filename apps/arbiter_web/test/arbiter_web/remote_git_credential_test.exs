@@ -306,7 +306,11 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
       StubPodman.write_mode(ctx.stub, "hang")
 
       {:ok, plan} =
-        GitCredential.plan(ws, "tonic", role: :implementer, host_pushes?: true)
+        GitCredential.plan(ws, "tonic",
+          role: :implementer,
+          host_pushes?: true,
+          remote_node?: true
+        )
 
       log =
         capture_all(fn ->
@@ -353,7 +357,13 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
 
       {task_id, pid} = worker!(ws)
       StubPodman.write_mode(ctx.stub, "hang")
-      {:ok, plan} = GitCredential.plan(ws, "tonic", role: :implementer, host_pushes?: true)
+
+      {:ok, plan} =
+        GitCredential.plan(ws, "tonic",
+          role: :implementer,
+          host_pushes?: true,
+          remote_node?: true
+        )
 
       log =
         capture_all(fn ->
