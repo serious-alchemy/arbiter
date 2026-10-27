@@ -369,13 +369,42 @@ defmodule Arbiter.Worker.PromptBuilder do
   end
 
   defp test_tool_section(opts),
-    do: if(test_tool?(opts), do: test_tool_section() <> "\n", else: "")
+    do: test_tool_section_text(opts)
+
+  defp test_tool_section_text(opts) do
+    cond do
+      test_tool?(opts) -> test_tool_section() <> "\n"
+      mcp_tools?(opts) -> pod_test_section() <> "\n"
+      true -> ""
+    end
+  end
+
+  # bd-c7r72i: a pod has no `run_tests`; say what to run instead.
+  @doc "The paragraph for a worker with no `run_tests` tool (a cluster pod)."
+  @spec pod_test_section() :: String.t()
+  def pod_test_section do
+    """
+    RUNNING TESTS — run `mix test <files>` directly in the shell, from the app
+    directory of the test file, and pipe long output through `tail` (for example
+    `mix test test/foo_test.exs 2>&1 | tail -60`) so compile output and passing
+    tests do not ride in your context.
+    """
+  end
 
   # bd-5wm92s: `run_tests` runs through the node agent's `exec`, which a cluster pod's
   # (k8s backend) agent does not offer, so Dispatch sets `test_tool?: false` for a run
   # placed on a cluster node and the prompt neither points at the tool nor tells the
   # worker to run the gate's tests through it.
   defp test_tool?(opts), do: mcp_tools?(opts) and Keyword.get(opts, :test_tool?, true) != false
+
+  # bd-c7r72i: the dispatch node is an `Overview.node_row` whose `kind` is an atom, so the
+  # old `%{kind: "cluster"}` match never fired and a pod was still told to use `run_tests`.
+  @doc false
+  @spec test_tool_for_node?(map() | nil) :: boolean()
+  def test_tool_for_node?(node) when is_map(node),
+    do: Map.get(node, :kind) not in [:cluster, "cluster"]
+
+  def test_tool_for_node?(_), do: true
 
   # bd-capkj9: a podman container has no forge credential or host key by design;
   # the host pushes after `arb done`. Without this a worker that tries
@@ -514,7 +543,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     how =
       if mcp?,
         do: "with the `run_tests` tool and `changed: true`",
-        else: "by running just those test files"
+        else: "by running `mix test` on just those test files, piping long output through `tail`"
 
     hint = if tests_hint in [nil, ""], do: "", else: tests_hint <> "\n"
 

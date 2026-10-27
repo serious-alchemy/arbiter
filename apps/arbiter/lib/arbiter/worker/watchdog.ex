@@ -363,9 +363,9 @@ defmodule Arbiter.Worker.Watchdog do
   # parking the lane forever.
   @head_lag_grace_polls 5
 
-  # bd-5z9yvb. Bounds on the merge-time freshness sync: syncs per Watchdog, and
+  # bd-5z9yvb. Bounds on the merge-time freshness sync: syncs per head (budget:
+  # `merge.max_freshness_syncs`, `MergeFreshness.max_syncs/1`), and
   # polls to wait for a synced head to appear before syncing again.
-  @max_freshness_syncs 3
   @freshness_wait_polls 10
 
   # bd-df3zlo / #1736 (P4, AC4). How many consecutive polls a `{:unknown, _}`
@@ -3834,10 +3834,34 @@ defmodule Arbiter.Worker.Watchdog do
         state.mr_ref,
         reason,
         state.auto_resolve_attempts,
-        note: state.ci_external_note
+        note: unresolved_note(state, reason)
       )
     end)
   end
+
+  # Names the budget that tripped for a `:behind_base` park (the other, the freshness
+  # sync budget, pages from `freshness_sync_now/2`).
+  defp unresolved_note(state, :behind_base) do
+    behind =
+      case state.mr_base_ref do
+        base when is_binary(base) and is_binary(state.last_head_sha) ->
+          case safe(fn ->
+                 MergeFreshness.behind_by(local_repo(state), base, state.last_head_sha)
+               end) do
+            {:ok, n} -> "#{n}"
+            _ -> "an unknown number of"
+          end
+
+        _ ->
+          "an unknown number of"
+      end
+
+    "auto-resolve budget (max_auto_resolve_attempts) exhausted: " <>
+      "#{state.auto_resolve_attempts}/#{state.max_auto_resolve_attempts} update-branch attempts " <>
+      "used on head #{state.last_head_sha}, #{behind} commit(s) behind #{state.mr_base_ref}"
+  end
+
+  defp unresolved_note(state, _reason), do: state.ci_external_note
 
   @doc """
   Page the coordinator about a stalled auto-merge, behind the shared circuit
@@ -5057,7 +5081,7 @@ defmodule Arbiter.Worker.Watchdog do
   # synced head once CI is green. The synced head is then covered by the usual
   # content-equal / clean-integration rules, so a sync commit that is only the
   # target merge needs no new review while any other change still does.
-  defp freshness_gate({:merge, _sha, state} = merge) do
+  defp freshness_gate({:merge, sha, state} = merge) do
     cond do
       not function_exported?(state.adapter, :update_branch, 1) ->
         merge
@@ -5071,6 +5095,8 @@ defmodule Arbiter.Worker.Watchdog do
         merge
 
       true ->
+        merge = {:merge, sha, reset_freshness_budget(state)}
+
         case MergeFreshness.check(
                state.workspace,
                local_repo(state),
@@ -5098,6 +5124,20 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp freshness_gate(other), do: other
+
+  # The sync budget is per head. A head that is neither the one we last synced from
+  # nor the one we parked on is new: either someone else pushed, or our sync landed
+  # and CI went green on it (the merge decision only runs on a green head). Both
+  # restart the count, so a busy target that outruns CI parks only on a sync the
+  # forge never applies, not after a few lifetime syncs.
+  defp reset_freshness_budget(%{freshness_syncs: n, last_head_sha: head} = state)
+       when n > 0 and is_binary(head) do
+    if head in [state.freshness_sync_head, state.freshness_failed_head],
+      do: state,
+      else: %{state | freshness_syncs: 0}
+  end
+
+  defp reset_freshness_budget(state), do: state
 
   # The synced head has not shown up yet (the forge applies update-branch
   # asynchronously): wait for it rather than syncing again, but only for a bounded
@@ -5128,7 +5168,7 @@ defmodule Arbiter.Worker.Watchdog do
   defp freshness_sync({:merge, _sha, state}, behind), do: freshness_sync_now(state, behind)
 
   defp freshness_sync_now(state, behind) do
-    if state.freshness_syncs >= @max_freshness_syncs do
+    if state.freshness_syncs >= MergeFreshness.max_syncs(state.workspace) do
       # Fail closed: a branch still not (provably) current after the bounded syncs
       # is never merged untested. Park and page once; a new head re-enables it.
       Logger.warning(
@@ -5141,7 +5181,8 @@ defmodule Arbiter.Worker.Watchdog do
         Arbiter.Messages.CoordinatorNotifier.merge_blocked(
           snapshot(state),
           state.mr_ref,
-          :behind_base
+          :behind_base,
+          freshness_budget_detail(state, behind)
         )
       end)
 
@@ -5157,7 +5198,7 @@ defmodule Arbiter.Worker.Watchdog do
       Logger.info(
         "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head " <>
           "#{state.last_head_sha} lacks #{behind || "some"} commit(s) of #{state.mr_base_ref}; " <>
-          "syncing before merge (#{state.freshness_syncs + 1}/#{@max_freshness_syncs})"
+          "syncing before merge (#{state.freshness_syncs + 1}/#{MergeFreshness.max_syncs(state.workspace)})"
       )
 
       state = %{state | freshness_syncs: state.freshness_syncs + 1}
@@ -5192,6 +5233,12 @@ defmodule Arbiter.Worker.Watchdog do
            %{state | last_block_reason: :conflict, freshness_failed_head: state.last_head_sha}}
       end
     end
+  end
+
+  defp freshness_budget_detail(state, behind) do
+    "freshness syncs (merge.max_freshness_syncs) exhausted: #{state.freshness_syncs}/" <>
+      "#{MergeFreshness.max_syncs(state.workspace)} used on head #{state.last_head_sha}, " <>
+      "#{behind || "an unknown number of"} commit(s) behind #{state.mr_base_ref}"
   end
 
   defp legacy_merge_decision(state) do
@@ -6226,7 +6273,13 @@ defmodule Arbiter.Worker.Watchdog do
     if state.resume_attempts_seen > 0,
       do: safe(fn -> PullRequest.record_auto_resumes(state.task_id, 0) end)
 
-    %{state | resume_attempts_seen: 0, queued_polls: 0}
+    state = %{state | resume_attempts_seen: 0, queued_polls: 0}
+
+    # Path A budget is per head too: while main keeps moving a poll never sees
+    # "no block", so the clean-poll reset alone would leave it spent for good.
+    if state.last_block_reason == :behind_base,
+      do: %{state | auto_resolve_attempts: 0},
+      else: state
   end
 
   defp reset_for_new_head(state, _head), do: state

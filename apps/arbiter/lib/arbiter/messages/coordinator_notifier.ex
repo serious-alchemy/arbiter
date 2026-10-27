@@ -915,8 +915,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   block (a conflict appearing on top of a missing approval) is a different
   family and still pages immediately.
   """
-  @spec merge_blocked(map(), String.t() | nil, atom()) :: :ok
-  def merge_blocked(snapshot, mr_ref, reason) do
+  @spec merge_blocked(map(), String.t() | nil, atom(), String.t() | nil) :: :ok
+  def merge_blocked(snapshot, mr_ref, reason, detail \\ nil) do
     escalate_event(:merge_blocked, snapshot, fn task_id ->
       ws_id = snapshot.workspace_id
 
@@ -935,6 +935,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
             "#{title_for(task_id)} cannot merge: #{block_label(reason)}.",
             mr_ref && "PR/MR: #{mr_ref}",
             "Reason: #{reason}",
+            detail && "Budget: #{detail}",
             "Remediation: #{block_remediation(reason, auto_merge?(ws_id, task_id))}",
             "The Watchdog detected this on its merge poll and parked the PR rather " <>
               "than failing it — resolve the block (or force-merge) and the next " <>
