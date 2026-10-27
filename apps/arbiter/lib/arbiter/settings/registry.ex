@@ -190,6 +190,13 @@ defmodule Arbiter.Settings.Registry do
           "a registry that answers anonymously is refused. Operator-only."
     },
     %{
+      key: "nodes.registry.publish_timeout_ms",
+      type: "positive_integer",
+      description:
+        "Milliseconds a dispatch or CLI-set republish waits on an image publish before it " <>
+          "stops waiting (the publish keeps running); null = 1800000 (30 minutes). Operator-only."
+    },
+    %{
       key: "worker.cli.versions",
       type: "cli_versions",
       description:
@@ -229,6 +236,7 @@ defmodule Arbiter.Settings.Registry do
                     machine.derate
                     nodes.registry nodes.registry_username nodes.registry_password
                     nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref
+                    nodes.registry.publish_timeout_ms
                     worker.cli.versions worker.cli.manual worker.cli_set.hold)
 
   # Built at compile time from the fixed schema above, so no input ever mints an
@@ -518,6 +526,10 @@ defmodule Arbiter.Settings.Registry do
   defp write("nodes.registry_username", v), do: wrap(Settings.set_nodes_registry_username(v))
   defp write("nodes.registry_password", v), do: wrap(Settings.set_nodes_registry_password(v))
   defp write("nodes.registry_insecure", v), do: wrap(Settings.set_nodes_registry_insecure(v))
+
+  defp write("nodes.registry.publish_timeout_ms", v),
+    do: wrap(Settings.set_nodes_registry_publish_timeout_ms(v))
+
   defp write("nodes.registry_public_ok", v), do: wrap(Settings.set_nodes_registry_public_ok(v))
 
   defp write("worker.cli.versions", v), do: wrap(Settings.set_worker_cli_versions(v))
@@ -560,6 +572,10 @@ defmodule Arbiter.Settings.Registry do
   def override("nodes.registry"), do: Settings.nodes_registry()
   def override("nodes.registry_username"), do: Settings.nodes_registry_username()
   def override("nodes.registry_insecure"), do: Settings.nodes_registry_insecure()
+
+  def override("nodes.registry.publish_timeout_ms"),
+    do: Settings.nodes_registry_publish_timeout_ms()
+
   def override("nodes.registry_public_ok"), do: Settings.nodes_registry_public_ok()
   def override("worker.cli.versions"), do: Settings.worker_cli_versions()
   def override("worker.cli.manual"), do: Settings.worker_cli_manual()
@@ -600,6 +616,8 @@ defmodule Arbiter.Settings.Registry do
   def default("nodes.registry_username"), do: nil
   def default("nodes.registry_password"), do: nil
   def default("nodes.registry_insecure"), do: false
+  def default("nodes.registry.publish_timeout_ms"), do: Settings.default_publish_timeout_ms()
+
   def default("nodes.registry_public_ok"), do: false
   def default("worker.cli.versions"), do: nil
   def default("worker.cli.manual"), do: []

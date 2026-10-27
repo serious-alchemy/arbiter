@@ -138,4 +138,25 @@ defmodule Arbiter.Worker.CliSet.WatcherTest do
     assert {:ok, moved} = CliSet.resolve(b)
     refute moved.hash == set.hash
   end
+
+  test "a publish that outlives the wait logs still publishing, not failed, and is retried", %{
+    opts: opts
+  } do
+    opts =
+      Keyword.put(opts, :publish, fn _ctx -> {:error, {:timeout, 1_800_000}} end)
+
+    pid = start_supervised!({Watcher, opts})
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:republished, [{{"fresh", "/r/fresh"}, {:still_publishing, 1800}}]} =
+                 Watcher.run_now(pid)
+      end)
+
+    assert log =~ "still publishing (1800s)"
+    refute log =~ "failed"
+
+    # Not marked done: the next check joins the same flight again.
+    assert {:republished, [_]} = Watcher.run_now(pid)
+  end
 end

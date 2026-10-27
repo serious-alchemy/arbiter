@@ -941,6 +941,28 @@ defmodule Arbiter.Settings do
   @spec nodes_registry_public_ok?() :: boolean()
   def nodes_registry_public_ok?, do: read_setting(:nodes_registry_public_ok) == true
 
+  @default_publish_timeout_ms 1_800_000
+
+  @doc "The default `nodes.registry.publish_timeout_ms`: 30 minutes."
+  @spec default_publish_timeout_ms() :: pos_integer()
+  def default_publish_timeout_ms, do: @default_publish_timeout_ms
+
+  @doc "How long a caller waits on an image publish (`nodes.registry.publish_timeout_ms`)."
+  @spec publish_timeout_ms() :: pos_integer()
+  def publish_timeout_ms,
+    do: read_setting(:nodes_registry_publish_timeout_ms) || @default_publish_timeout_ms
+
+  @doc "The persisted `nodes.registry.publish_timeout_ms` override."
+  @spec nodes_registry_publish_timeout_ms() :: pos_integer() | nil
+  def nodes_registry_publish_timeout_ms, do: read_setting(:nodes_registry_publish_timeout_ms)
+
+  @spec set_nodes_registry_publish_timeout_ms(pos_integer() | nil) ::
+          {:ok, pos_integer() | nil} | {:error, term()}
+  def set_nodes_registry_publish_timeout_ms(n) when is_nil(n) or (is_integer(n) and n > 0),
+    do: write_setting(:nodes_registry_publish_timeout_ms, n)
+
+  def set_nodes_registry_publish_timeout_ms(_), do: {:error, :invalid_value}
+
   @doc "The persisted `nodes.registry_public_ok` override."
   @spec nodes_registry_public_ok() :: boolean() | nil
   def nodes_registry_public_ok, do: read_setting(:nodes_registry_public_ok)

@@ -25,7 +25,7 @@ defmodule Arbiter.Worker.Image.Publisher do
   ## `ensure_ready/2`: single flight, bounded wait, clean fallback
 
   Publishing can take minutes (a cold toolchain, a cold `DepsCache`), so the
-  caller waits at most `:timeout_ms` (default #{div(600_000, 60_000)} minutes,
+  caller waits at most `:timeout_ms` (default `nodes.registry.publish_timeout_ms`, 30 minutes,
   `config :arbiter, :image_publisher, timeout_ms:`) and gets
   `{:error, {:timeout, ms}}` instead of a hang. The publish **keeps going** in
   the server: a second caller for the same image joins the same flight rather
@@ -50,6 +50,7 @@ defmodule Arbiter.Worker.Image.Publisher do
 
   use GenServer
 
+  alias Arbiter.Settings
   alias Arbiter.Worker.CliSet
   alias Arbiter.Worker.Image.Prebuilt
   alias Arbiter.Worker.Image.Publisher.Pipeline
@@ -59,7 +60,6 @@ defmodule Arbiter.Worker.Image.Publisher do
 
   require Logger
 
-  @default_timeout_ms 600_000
   @default_boot_delay_ms 15_000
 
   # -- client -------------------------------------------------------------------
@@ -199,7 +199,11 @@ defmodule Arbiter.Worker.Image.Publisher do
 
   defp flight(key, kind, fun, opts) do
     server = Keyword.get(opts, :server, __MODULE__)
-    timeout = Keyword.get(opts, :timeout_ms, config(:timeout_ms, @default_timeout_ms))
+
+    timeout =
+      Keyword.get_lazy(opts, :timeout_ms, fn ->
+        config(:timeout_ms, Settings.publish_timeout_ms())
+      end)
 
     try do
       GenServer.call(server, {:ensure, key, kind, fun}, timeout)
