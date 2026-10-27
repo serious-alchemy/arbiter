@@ -148,6 +148,93 @@ defmodule Arbiter.Board.DrainTest do
     end
   end
 
+  # bd-1ggu6v: a dispatch parked on a registry-image publish read as a bare
+  # `dispatching` / nil entry for ten minutes and was mistaken for a stuck one.
+  describe "a dispatch waiting on work reports it" do
+    test "note_detail/1 sets the detail on the caller's tracked entry and nil clears it" do
+      test_pid = self()
+
+      {:ok, tracked} =
+        Task.start_link(fn ->
+          Drain.track(:dispatch_pending, %{task_id: "bd-note1"}, fn ->
+            Drain.note_detail("waiting for registry image")
+            send(test_pid, :noted)
+
+            receive do
+              :clear ->
+                Drain.note_detail(nil)
+                send(test_pid, :cleared)
+
+                receive do
+                  :done -> :ok
+                end
+            end
+          end)
+        end)
+
+      assert_receive :noted
+      ap = start_autopilot!(paused: true)
+
+      assert [%{task_id: "bd-note1", detail: "waiting for registry image"}] =
+               Drain.status(autopilot: ap, supervisor: empty_supervisor!()).in_flight
+
+      send(tracked, :clear)
+      assert_receive :cleared
+
+      assert [%{task_id: "bd-note1", detail: nil}] =
+               Drain.status(autopilot: ap, supervisor: empty_supervisor!()).in_flight
+
+      send(tracked, :done)
+    end
+
+    test "note_detail/1 outside a tracked call is a no-op" do
+      assert :ok = Drain.note_detail("nothing to annotate")
+    end
+
+    test "the board_promotion entry carries the dispatch's started_at and detail" do
+      test_pid = self()
+
+      dispatch = fn id ->
+        Drain.track(:dispatch_pending, %{task_id: id}, fn ->
+          Drain.note_detail("waiting for registry image for arbiter")
+          send(test_pid, {:dispatching, id, self()})
+
+          receive do
+            :release -> {:ok, id}
+          end
+        end)
+      end
+
+      ap =
+        start_autopilot!(
+          paused: false,
+          dispatch: dispatch,
+          snapshot: fn o -> board(o[:paused], "bd-promo2") end
+        )
+
+      tick = Task.async(fn -> Autopilot.tick(ap, 10_000) end)
+      assert_receive {:dispatching, "bd-promo2", dispatcher}, 5_000
+
+      assert [%{kind: :board_promotion, started_at: %DateTime{}, detail: detail}] =
+               Drain.status(autopilot: ap, supervisor: empty_supervisor!()).in_flight
+
+      assert detail =~ "registry image"
+
+      send(dispatcher, :release)
+      Task.await(tick, 10_000)
+    end
+
+    test "a fresh autopilot reports no promotion in flight" do
+      ap = start_autopilot!(paused: false)
+      assert %{dispatching: nil} = Autopilot.status(ap)
+
+      refute Enum.any?(
+               Drain.status(autopilot: ap, supervisor: empty_supervisor!()).in_flight,
+               &(&1.kind == :board_promotion)
+             )
+    end
+  end
+
   # bd-b2iigy: a resume waiting on the primary's own cap is visible, not silent.
   describe "resumes held for local capacity" do
     test "are listed, in the order they will resume, and do not make the scheduler busy" do
