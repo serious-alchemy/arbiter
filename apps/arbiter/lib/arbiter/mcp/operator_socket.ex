@@ -64,7 +64,8 @@ defmodule Arbiter.MCP.OperatorSocket do
     path = Keyword.fetch!(opts, :path)
     authorize = Keyword.get(opts, :authorize, [])
 
-    with :ok <- prepare(path),
+    with :ok <- check_length(path),
+         :ok <- prepare(path),
          {:ok, lsock} <- listen(path) do
       Process.flag(:trap_exit, true)
       acceptor = spawn_link(fn -> accept_loop(lsock, authorize) end)
@@ -73,7 +74,7 @@ defmodule Arbiter.MCP.OperatorSocket do
     else
       {:error, reason} ->
         Logger.error(
-          "operator socket not started at #{path}: #{inspect(reason)}; " <>
+          "operator socket not started at #{path}: #{reason_text(reason)}; " <>
             "`arb mcp token mint` will not work on this host until it is fixed"
         )
 
@@ -113,6 +114,22 @@ defmodule Arbiter.MCP.OperatorSocket do
   def parse_ttl(_), do: @default_ttl
 
   # ---- listener ------------------------------------------------------------
+
+  defp check_length(path) do
+    limit = Arbiter.MCP.OperatorProof.max_socket_path_bytes()
+
+    if byte_size(path) > limit do
+      {:error,
+       {:path_too_long,
+        "the socket path is #{byte_size(path)} bytes, over the Unix sun_path limit of " <>
+          "#{limit}; set ARB_OPERATOR_SOCKET to a shorter path"}}
+    else
+      :ok
+    end
+  end
+
+  defp reason_text({:path_too_long, msg}), do: msg
+  defp reason_text(reason), do: inspect(reason)
 
   defp prepare(path) do
     dir = Path.dirname(path)

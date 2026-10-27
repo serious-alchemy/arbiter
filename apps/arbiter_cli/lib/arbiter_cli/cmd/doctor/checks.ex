@@ -5,7 +5,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   "green" has one definition everywhere.
   """
 
-  alias ArbiterCli.{Client, SchedulerState, Workspace}
+  alias ArbiterCli.{Client, OperatorSocket, SchedulerState, Workspace}
   alias ArbiterCli.Cmd.Doctor.{Distribution, Scope}
   alias ArbiterCli.Cmd.Start
 
@@ -67,6 +67,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {"nodes", :core, nil, :always, plain(&check_nodes/0)},
       {"cli_versions", :core, nil, :always, plain(&check_cli_versions/0)},
       {"pr_patrol", :core, nil, :always, plain(&check_pr_patrol/0)},
+      {"socket_paths", :core, nil, :always, plain(&check_socket_paths/0)},
       {"claude_worker_credentials", :auth, nil, :always,
        plain(&check_claude_worker_credentials/0)},
       {"grok_auth", :auth, nil, :always, plain(&check_grok_auth/0)},
@@ -1144,6 +1145,50 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   end
 
   # bd-5ad4ch: the per-run worker TMPDIR root must be disk-backed and small.
+  # Unix domain socket paths are capped at 108 bytes (`sun_path`, NUL included).
+  # The operator socket and everything under ARBITER_SOCKET_ROOT (ssh-agent,
+  # egress, bridges) fail to bind past it. The root gets headroom for the
+  # longest subpath the server appends.
+  @sun_path_max 107
+  @socket_root_headroom 40
+
+  @doc false
+  @spec check_socket_paths() :: Result.t()
+  def check_socket_paths do
+    root = System.get_env("ARBITER_SOCKET_ROOT")
+
+    over =
+      [{"operator socket", OperatorSocket.path(), @sun_path_max}] ++
+        if(root in [nil, ""],
+          do: [],
+          else: [{"ARBITER_SOCKET_ROOT", root, @sun_path_max - @socket_root_headroom}]
+        )
+
+    case Enum.filter(over, fn {_, path, max} -> byte_size(path) > max end) do
+      [] ->
+        %Result{
+          name: "socket paths",
+          status: :ok,
+          detail: "within the #{@sun_path_max}-byte Unix socket path limit",
+          blocks_readiness: false
+        }
+
+      bad ->
+        %Result{
+          name: "socket paths",
+          status: :warn,
+          detail:
+            Enum.map_join(bad, "; ", fn {what, path, max} ->
+              "#{what} #{path} is #{byte_size(path)} bytes (limit #{max})"
+            end),
+          hint:
+            "Use a shorter path: ARB_OPERATOR_SOCKET for the operator socket, " <>
+              "ARBITER_SOCKET_ROOT (e.g. /tmp/arb) for the rest. The socket is silently unusable otherwise.",
+          blocks_readiness: false
+        }
+    end
+  end
+
   defp check_worker_tmp do
     case Client.get("/api/server/worker_tmp") do
       {:ok, %{"tmpfs" => true} = body} ->

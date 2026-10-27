@@ -253,8 +253,8 @@ defmodule Arbiter.Workflows.MergeQueue do
   # with no end (§5.1's I1).
   @coverage_unknown_grace_ticks 5
 
-  # bd-5z9yvb. Merge-time freshness syncs per item before the merge proceeds anyway.
-  @max_freshness_syncs 3
+  # bd-5z9yvb. Polls to wait for a synced head; the per-head sync budget is
+  # `merge.max_freshness_syncs` (`MergeFreshness.max_syncs/1`).
   @freshness_wait_ticks 10
 
   @typedoc "Status atom for an in-flight item."
@@ -1480,7 +1480,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   # guards: only the target merge on top of the reviewed content passes them.
   # A failed sync pages the coordinator once and is not retried on the same head;
   # the forge's conflict flag routes a real conflict to the resolver. Bounded by
-  # `@max_freshness_syncs`, after which the item stays held and the coordinator
+  # `merge.max_freshness_syncs` per head, after which the item stays held and the coordinator
   # is paged — it never merges an unsynced head.
   defp freshness_precheck(state, item, head) do
     base = Map.get(item, :base) || state.base
@@ -1534,20 +1534,33 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
-  defp freshness_hold(state, item, head, behind), do: freshness_sync(state, item, head, behind)
+  # A head that is neither the one synced from nor the parked one is new (a push by
+  # someone else, or our sync landed and CI went green on it): the budget restarts.
+  defp freshness_hold(state, item, head, behind),
+    do: freshness_sync(state, %{item | freshness_syncs: 0}, head, behind)
 
-  defp freshness_sync(state, %{freshness_syncs: n} = item, head, _behind)
-       when n >= @max_freshness_syncs do
-    # Fail closed: never merge a head CI never saw combined with the target.
-    freshness_park(
-      state,
-      item,
-      head,
-      "still not current with the target after #{n} syncs (the target keeps moving)"
-    )
+  defp freshness_sync(state, %{freshness_syncs: n} = item, head, behind) do
+    max = max_freshness_syncs(state, item)
+
+    if n >= max do
+      # Fail closed: never merge a head CI never saw combined with the target.
+      freshness_park(
+        state,
+        item,
+        head,
+        "still not current with the target after #{n} syncs (the target keeps moving)",
+        "freshness syncs (merge.max_freshness_syncs) exhausted: #{n}/#{max} used on head " <>
+          "#{head}, #{behind || "an unknown number of"} commit(s) behind the target"
+      )
+    else
+      do_freshness_sync(state, item, head, behind)
+    end
   end
 
-  defp freshness_sync(state, item, head, behind) do
+  defp max_freshness_syncs(state, item),
+    do: MergeFreshness.max_syncs(Mergers.scope(state.workspace, item.repo))
+
+  defp do_freshness_sync(state, item, head, behind) do
     Logger.info(
       "MergeQueue: #{item_branch_label(item)} head #{head} lacks #{behind || "some"} target " <>
         "commit(s); syncing before merge"
@@ -1574,21 +1587,22 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
-  defp freshness_park(state, item, head, why) do
+  defp freshness_park(state, item, head, why, detail \\ nil) do
     Logger.warning(
       "MergeQueue: #{item_branch_label(item)} freshness sync blocked: #{why}; paging the " <>
         "coordinator once and not merging"
     )
 
-    safe_notify_freshness_blocked(state, item)
+    safe_notify_freshness_blocked(state, item, detail)
     {:hold, %{item | freshness_parked_head: head}}
   end
 
-  defp safe_notify_freshness_blocked(%State{} = state, item) do
+  defp safe_notify_freshness_blocked(%State{} = state, item, detail) do
     Arbiter.Messages.CoordinatorNotifier.merge_blocked(
       %{task_id: item.task_id, workspace_id: state.workspace_id},
       item.mr_ref,
-      :behind_base
+      :behind_base,
+      detail
     )
 
     :ok

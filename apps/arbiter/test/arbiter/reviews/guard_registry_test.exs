@@ -35,7 +35,7 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "bd-8ztyal: mails the CI summary to the ticket that owns the PR instead of filing a " <>
        "follow-up; informational, deduped to one unread note per PR, nothing is refused"},
     # --- merge_queue.ex ---
-    {Arbiter.Workflows.MergeQueue, :safe_notify_freshness_blocked, 2,
+    {Arbiter.Workflows.MergeQueue, :safe_notify_freshness_blocked, 3,
      "bd-5z9yvb: pages the coordinator once per head when the merge-time freshness sync is " <>
        "capped, unknown or rejected; the item stays parked — nothing is refused or failed"},
     # --- watchdog.ex ---
