@@ -180,13 +180,7 @@ defmodule Arbiter.Worker.GitCredential do
       read_only_reviewer?(opts, entry) ->
         {:ok, %__MODULE__{mode: :scoped, repo: repo, entry: parse_entry(entry), read_only: true}}
 
-<<<<<<< HEAD
-      role == :reviewer or
-          (Keyword.get(opts, :host_pushes?, false) and
-             not container_credential?(entry, Keyword.get(opts, :remote_node?, false))) ->
-=======
       not_needed?(opts, entry) ->
->>>>>>> 7cbf80be4 (Split GitCredential.plan decision into helpers to satisfy credo complexity)
         {:ok, %__MODULE__{mode: :not_needed, repo: repo}}
 
       scoped?(entry) ->
@@ -205,12 +199,14 @@ defmodule Arbiter.Worker.GitCredential do
 
   defp read_only_reviewer?(opts, entry) do
     Keyword.get(opts, :role, :implementer) == :reviewer and
-      Keyword.get(opts, :host_pushes?, false) and container_credential?(entry)
+      Keyword.get(opts, :host_pushes?, false) and
+      container_credential?(entry, Keyword.get(opts, :remote_node?, false))
   end
 
   defp not_needed?(opts, entry) do
     Keyword.get(opts, :role, :implementer) == :reviewer or
-      (Keyword.get(opts, :host_pushes?, false) and not container_credential?(entry))
+      (Keyword.get(opts, :host_pushes?, false) and
+         not container_credential?(entry, Keyword.get(opts, :remote_node?, false)))
   end
 
   defp repo_entry(block, repo) when is_binary(repo) and repo != "" do
