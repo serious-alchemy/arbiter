@@ -189,6 +189,89 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  # bd-5wm92s, cluster canary #3 (run 2b2bd5ce, controller v0.2.86): a pod run committed, ran
+  # its tests green and ended `end_turn` with a success result event (exit 0), but the tail of
+  # its transcript was the bridge's socat/TLS noise and the run was recorded "gateway error".
+  # bd-1ppeua keyed the override on the rendered `⚙ claude session success` line alone, which a
+  # pod's stream can lose (the 1000-line buffer filled by noise, a result line the interleaved
+  # stderr corrupted), so the classifier also takes the session's decoded result event.
+  describe "classify/4 — a successful pod run's result event (bd-5wm92s)" do
+    @pod_result %{
+      result_subtype: "success",
+      is_error: false,
+      raw: %{
+        "type" => "result",
+        "subtype" => "success",
+        "is_error" => false,
+        "api_error_status" => nil,
+        "stop_reason" => "end_turn",
+        "total_cost_usd" => 0.774
+      }
+    }
+
+    @pod_noise for(
+                 i <- 1..120,
+                 do:
+                   "2026/10/27 04:07:#{rem(i, 60) |> Integer.to_string() |> String.pad_leading(2, "0")} " <>
+                     "socat[#{i}] E SSL_write(): error:0A000126:SSL routines::unexpected eof while reading"
+               ) ++
+                 [
+                   "socat[9] E read(6, 0x1, 8192): Connection reset by peer",
+                   "OpenSSL: error:0A000126:SSL routines::unexpected eof while reading",
+                   "CLIENT ALERT: Fatal - Decode Error",
+                   "bridge: 502 Bad Gateway upstream unreachable"
+                 ]
+
+    test "the result event outranks gateway noise that pushed the success line out of the buffer" do
+      lines = ["Committed b7b26344; tests green."] ++ @pod_noise
+
+      assert StopReason.classify(0, lines, "claude").category == :gateway_error
+
+      reason = StopReason.classify(0, lines, "claude", result: @pod_result)
+      assert reason.category == :exited_without_done
+    end
+
+    test "the result event outranks noise that is not recognisably socat-shaped" do
+      lines = [@started, "⚙ claude session success · 540.2s · $0.774" | @pod_noise]
+
+      reason = StopReason.classify(0, lines, nil, result: @pod_result)
+      assert reason.category == :exited_without_done
+    end
+
+    test "an error result event is not a clean end" do
+      result = %{@pod_result | result_subtype: "error_during_execution", is_error: true}
+      lines = [@started, "API Error: 502 Bad Gateway"]
+
+      assert StopReason.classify(0, lines, "claude", result: result).category == :gateway_error
+    end
+
+    test "a result carrying an api_error_status is not a clean end" do
+      raw = Map.put(@pod_result.raw, "api_error_status", 502)
+      result = %{@pod_result | raw: raw}
+      lines = [@started, "API Error: 502 Bad Gateway"]
+
+      assert StopReason.classify(0, lines, "claude", result: result).category == :gateway_error
+    end
+
+    test "a stop_reason other than end_turn is not a clean end" do
+      raw = Map.put(@pod_result.raw, "stop_reason", "max_tokens")
+      result = %{@pod_result | raw: raw}
+      lines = [@started, "API Error: 502 Bad Gateway"]
+
+      assert StopReason.classify(0, lines, "claude", result: result).category == :gateway_error
+    end
+
+    test "a non-zero exit is never a clean end, whatever the result event says" do
+      lines = [@started, "API Error: 502 Bad Gateway"]
+      assert StopReason.classify(1, lines, "claude", result: @pod_result).category == :gateway_error
+    end
+
+    test "the result event of another provider's stream does not apply" do
+      lines = [@started, "API Error: 502 Bad Gateway"]
+      assert StopReason.classify(0, lines, "codex", result: @pod_result).category == :gateway_error
+    end
+  end
+
   describe "classify/2 — credit / rate limit" do
     test "insufficient credit balance" do
       reason = StopReason.classify(1, ["Your credit balance is too low to run this request."])
