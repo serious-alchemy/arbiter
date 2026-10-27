@@ -299,6 +299,25 @@ defmodule Arbiter.Mergers do
   end
 
   @doc """
+  Sync the PR/MR `mr_ref` with its target through `adapter`.
+
+  Uses `adapter.update_branch/2` (given the workspace and repo, so the adapter
+  can read `merge.sync_strategy` and merge in the ticket worktree) when the
+  adapter has it, `adapter.update_branch/1` otherwise. Returns `:ok` or
+  `{:error, term}`; an adapter without either is the caller's to guard
+  (`function_exported?(adapter, :update_branch, 1)`).
+  """
+  @spec update_branch(adapter, String.t(), Workspace.t() | nil, String.t() | nil) ::
+          :ok | {:error, term()}
+  def update_branch(adapter, mr_ref, workspace, repo) when is_atom(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :update_branch, 2) do
+      adapter.update_branch(mr_ref, %{workspace: workspace, repo: repo})
+    else
+      adapter.update_branch(mr_ref)
+    end
+  end
+
+  @doc """
   Calls `adapter.open/4`, retrying when the failure is a 409/422 "an open
   PR/MR already exists for this branch" (bd-636thc).
 

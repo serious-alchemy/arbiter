@@ -302,3 +302,29 @@ defmodule Arbiter.MergersTest do
     end
   end
 end
+
+defmodule Arbiter.MergersUpdateBranchTest do
+  use ExUnit.Case, async: true
+
+  alias Arbiter.Mergers
+
+  defmodule WithContext do
+    def update_branch(ref), do: {:error, {:arity_1, ref}}
+    def update_branch(ref, ctx), do: {:ok_with, ref, ctx}
+  end
+
+  defmodule WithoutContext do
+    def update_branch(ref), do: {:arity_1, ref}
+  end
+
+  describe "update_branch/4" do
+    test "hands the workspace and repo to an adapter that takes them" do
+      assert {:ok_with, "!1", %{workspace: :ws, repo: "app"}} =
+               Mergers.update_branch(WithContext, "!1", :ws, "app")
+    end
+
+    test "falls back to update_branch/1 for an adapter that does not" do
+      assert {:arity_1, "!1"} = Mergers.update_branch(WithoutContext, "!1", :ws, "app")
+    end
+  end
+end
