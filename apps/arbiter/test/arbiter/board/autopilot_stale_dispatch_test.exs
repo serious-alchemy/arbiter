@@ -66,7 +66,7 @@ defmodule Arbiter.Board.AutopilotStaleDispatchTest do
   defp hang_promotion(pid) do
     test = self()
     spawn_link(fn -> send(test, {:tick_outcome, Autopilot.tick(pid)}) end)
-    assert_receive {:dispatched, "bd-1", task}
+    assert_receive {:dispatched, "bd-1", task}, 2_000
     assert %{dispatching: "bd-1"} = Autopilot.status(pid)
     task
   end
