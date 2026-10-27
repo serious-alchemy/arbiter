@@ -203,7 +203,7 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       end
     end
 
-    test "a GitHub App repo's implementer is placed on a node under prefer_remote, with a fetch-only-capable credential" do
+    test "a GitHub App repo's implementer is placed on a node under prefer_remote, carrying no credential" do
       issue = ready!(scoped_ws!("prefer_remote", app_entry()), "app prefer remote")
 
       assert {:ok, %{worker_pid: pid}} =
@@ -214,10 +214,12 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
                )
 
       assert_receive {:spawned, %{id: "n-scoped"}, plan}
-      # The App's short-lived, repo-pinned token is minted on the primary and
-      # delivered to the container (never the private key), so `git fetch origin`
-      # works over the https rewrite; the host still pushes the collected branch.
-      assert %Arbiter.Worker.GitCredential{mode: :scoped} = plan
+      # The host pushes the branch it collects (and opens the PR) with the App's
+      # token, minted on the primary; the container is handed nothing to push with.
+      assert %Arbiter.Worker.GitCredential{mode: :not_needed} = plan
+
+      assert {:ok, %{material: nil, env: [], redact: []}} =
+               Arbiter.Worker.GitCredential.prepare(plan, nil, self(), container?: true)
 
       assert %{node_id: "n-scoped"} =
                Enum.find(Arbiter.Worker.Registry.live_dispatches(), &(&1.pid == pid))

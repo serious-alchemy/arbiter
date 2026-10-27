@@ -5186,7 +5186,8 @@ defmodule Arbiter.Worker.Dispatch do
     GitCredential.plan(workspace, Keyword.get(opts, :repo),
       role: role,
       guarded?: Guardrails.guarded?(),
-      host_pushes?: ContainerSpawn.podman?(policy)
+      host_pushes?: ContainerSpawn.podman?(policy),
+      remote_node?: Keyword.get(opts, :node) != nil
     )
   end
 
