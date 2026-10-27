@@ -307,6 +307,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Mergers
   alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Mergers.PendingMerge
+  alias Arbiter.ReviewGate.BaselineCarry
   alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.ReviewGate.RulingResume
   alias Arbiter.Reviews.ConflictReview
@@ -5815,6 +5816,15 @@ defmodule Arbiter.Worker.Watchdog do
 
         {:merge, live, state}
 
+      carry_clean_sync(state, reviewed, live) == :carried ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head #{live} is the " <>
+            "reviewed commit #{reviewed} synced with #{state.mr_base_ref} and nothing else " <>
+            "(proven by SyncProof) — the baseline is carried; merging pinned to #{live}"
+        )
+
+        {:merge, live, %{state | reviewed_sha: live}}
+
       base_merge_only?(state, reviewed, live) ->
         Logger.info(
           "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head #{live} differs " <>
@@ -5865,8 +5875,37 @@ defmodule Arbiter.Worker.Watchdog do
   # mechanically by the caller. Records a system-authored ruling row for `live`
   # and says so in the event; a ticket with no such ruling is untouched.
   defp carry_ruling(state, reviewed, live, proof) do
-    safe(fn -> RulingResume.carry_forward(state.task_id, reviewed, live, proof) end)
+    safe(fn ->
+      BaselineCarry.carry_proven(state.task_id, workspace_id(state), reviewed, live, proof)
+    end)
+
     :ok
+  end
+
+  # bd-2oo8kf / #1062. A sync the fleet or the forge made (update-branch, a
+  # rebase) moves the head without changing a reviewed line. Before the content
+  # comparisons below are asked, put the move to `Arbiter.Mergers.SyncProof`
+  # (rebase with identical patch-ids, or a merge of the target whose tree equals
+  # `git merge-tree`): proven, the ruling / APPROVE baseline is carried to `live`
+  # and re-stamped, and anything else falls through unchanged. `from` is the
+  # head the task's own baseline names, never merely the Watchdog's latch.
+  defp carry_clean_sync(state, from, live) do
+    carried =
+      safe(fn ->
+        BaselineCarry.carry(%{
+          task_id: state.task_id,
+          workspace_id: workspace_id(state),
+          from: from,
+          to: live,
+          repo_path: local_repo(state),
+          base: state.mr_base_ref
+        })
+      end)
+
+    case carried do
+      {:carried, _baseline, _proof} -> :carried
+      _ -> :void
+    end
   end
 
   # Re-read the PR head from the forge. Keeps the previous reading on any
@@ -6151,7 +6190,7 @@ defmodule Arbiter.Worker.Watchdog do
   defp do_safe_merge(%{adapter: adapter, mr_ref: mr_ref} = state, expected_sha) do
     head = expected_sha || Map.get(state, :last_head_sha)
 
-    with :ok <- MergeAuthorization.check(Map.get(state, :task_id), head),
+    with :ok <- check_authorization(state, head),
          result <- adapter.merge(mr_ref, expected_sha) do
       case result do
         :ok -> :ok
@@ -6171,6 +6210,28 @@ defmodule Arbiter.Worker.Watchdog do
     e -> {:error, {:exception, Exception.message(e)}}
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # `MergeAuthorization.check/2`, with one second chance (bd-2oo8kf / #1062): a
+  # refusal because the head moved past the ruling is put to the sync proof
+  # first — the update-branch the Watchdog itself issued is the usual cause —
+  # and a head that is the ruled one plus the target's own delta keeps the
+  # ruling, re-recorded against it. Any other refusal stands.
+  defp check_authorization(state, head) do
+    task_id = Map.get(state, :task_id)
+
+    case MergeAuthorization.check(task_id, head) do
+      {:error, {:review_not_approved, _}} = refusal ->
+        with from when is_binary(from) <- BaselineCarry.baseline_head(task_id, head),
+             :carried <- carry_clean_sync(state, from, head) do
+          MergeAuthorization.check(task_id, head)
+        else
+          _ -> refusal
+        end
+
+      :ok ->
+        :ok
+    end
   end
 
   # The baseline to guard this merge on. While the latch is suspended (the

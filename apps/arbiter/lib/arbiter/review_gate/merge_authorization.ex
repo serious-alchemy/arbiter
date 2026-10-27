@@ -148,6 +148,20 @@ defmodule Arbiter.ReviewGate.MergeAuthorization do
 
   def standing_ruling(_task_id), do: nil
 
+  @doc """
+  Whether the ticket's latest reviewer round approved (the ReviewGate's APPROVE
+  baseline, as opposed to a coordinator's ruling). False when it did not, never
+  argued the ticket, or the record cannot be read.
+  """
+  @spec approved?(String.t() | nil) :: boolean()
+  def approved?(task_id) when is_binary(task_id) do
+    match?(%{verdict: :approve}, latest_review(task_id))
+  rescue
+    _ -> false
+  end
+
+  def approved?(_task_id), do: false
+
   @doc "`standing_ruling/1`, when it covers `head` (see the moduledoc), else nil."
   @spec ruling_covering(String.t() | nil, String.t() | nil) :: Resolution.t() | nil
   def ruling_covering(task_id, head) do

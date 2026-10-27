@@ -697,7 +697,8 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :resumed,
       sites: [
         {Watchdog, :resolve_stale_reviewed_head, 3},
-        {Watchdog, :route_unapproved_head_to_review, 2}
+        {Watchdog, :route_unapproved_head_to_review, 2},
+        {Watchdog, :check_authorization, 2}
       ],
       anchors: [":unreviewed_head", "@default_max_auto_resumes", ":review_not_approved"],
       summary:
@@ -987,6 +988,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :parked,
       sites: [
         {MergeQueue, :merge_guarded, 2},
+        {MergeQueue, :check_authorization, 3},
         {MergeQueue, :merge_coverage_guarded, 3},
         {MergeQueue, :note_review_refusal, 4},
         {MergeQueue, :safe_notify_review_refusal, 2},

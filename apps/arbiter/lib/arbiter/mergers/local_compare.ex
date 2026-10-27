@@ -206,6 +206,23 @@ defmodule Arbiter.Mergers.LocalCompare do
   end
 
   @doc """
+  Ready `repo_path` to answer a question about `shas` against `base`: fetch
+  `base` and any commit the checkout lacks, then resolve both to full ids.
+  Returns `{:ok, repo, base_rev, full_shas}`; `{:error, _}` is "could not tell".
+  The building block `Arbiter.Mergers.SyncProof` runs its own git calls from.
+  """
+  @spec prepare(String.t() | nil, String.t(), [String.t()]) ::
+          {:ok, String.t(), String.t(), [String.t()]} | {:error, term()}
+  def prepare(repo_path, base, shas) when is_list(shas) do
+    with {:ok, repo} <- usable_repo(repo_path),
+         :ok <- refresh(repo, base, shas),
+         {:ok, base_rev} <- resolve_base(repo, base),
+         {:ok, full} <- resolve_commits(repo, shas) do
+      {:ok, repo, base_rev, full}
+    end
+  end
+
+  @doc """
   The unreviewed delta between `reviewed` and `head`, for an escalation that
   has to name it (AC4):
 
