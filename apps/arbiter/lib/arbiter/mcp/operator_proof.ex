@@ -164,6 +164,10 @@ defmodule Arbiter.MCP.OperatorProof do
     end
   end
 
+  @doc "Longest usable Unix domain socket path in bytes (`sun_path` is 108 including the NUL)."
+  @spec max_socket_path_bytes() :: pos_integer()
+  def max_socket_path_bytes, do: 107
+
   defp default_dir do
     runtime = own_uid() && "/run/user/#{own_uid()}"
 

@@ -171,4 +171,18 @@ defmodule Arbiter.MCP.OperatorSocketTest do
       assert File.read!(path) == "not a socket"
     end
   end
+
+  @tag skip: false
+  test "an over-length socket path logs a clear error and does not start", %{dir: dir} do
+    path = Path.join([dir, String.duplicate("x", 120), "op.sock"])
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :ignore = OperatorSocket.init(path: path, authorize: [])
+      end)
+
+    assert log =~ path
+    assert log =~ "#{byte_size(path)} bytes"
+    assert log =~ "limit of 107"
+  end
 end
