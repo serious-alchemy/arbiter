@@ -221,8 +221,8 @@ defmodule Arbiter.Quota.GrantRefresherTest do
     assert msg.subject =~ "quota grant needs re-login"
   end
 
-  test "a refresh token expiring within 7 days escalates exactly once", ctx do
-    write_grant!(ctx.grant, now_ms() + 2 * @hour_ms, now_ms() + 3 * 24 * @hour_ms)
+  test "a refresh token expiring within 2 days escalates exactly once", ctx do
+    write_grant!(ctx.grant, now_ms() + 2 * @hour_ms, now_ms() + 1 * 24 * @hour_ms)
     pid = start_refresher(ctx, fake_cli!(ctx, :renews))
 
     for _ <- 1..3, do: GrantRefresher.tick(pid)
@@ -234,8 +234,8 @@ defmodule Arbiter.Quota.GrantRefresherTest do
     assert record_lines(ctx.record) == []
   end
 
-  test "a refresh token with more than 7 days left does not escalate", ctx do
-    write_grant!(ctx.grant, now_ms() + 2 * @hour_ms, now_ms() + 20 * 24 * @hour_ms)
+  test "a refresh token with more than 2 days left (even 7) does not escalate", ctx do
+    write_grant!(ctx.grant, now_ms() + 2 * @hour_ms, now_ms() + 7 * 24 * @hour_ms)
     pid = start_refresher(ctx, fake_cli!(ctx, :renews))
 
     GrantRefresher.tick(pid)
