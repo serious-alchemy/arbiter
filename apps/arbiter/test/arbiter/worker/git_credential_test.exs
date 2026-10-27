@@ -274,6 +274,42 @@ defmodule Arbiter.Worker.GitCredentialTest do
       assert String.trim(out) == "https://github.com/acme/tonic.git"
     end
 
+    test "a GitLab ssh origin is rewritten to https and the helper answers with the run token" do
+      m = %Material{
+        kind: :gitlab_project_token,
+        token: "glpat-run",
+        host: "gitlab.com",
+        username: "oauth2",
+        remote: "serious-alchemy/vstim"
+      }
+
+      env = Material.env(m, nil)
+
+      {out, 0} =
+        System.cmd("git", ["ls-remote", "--get-url", "git@gitlab.com:serious-alchemy/vstim.git"],
+          env: env ++ [{"GIT_CONFIG_GLOBAL", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "1"}]
+        )
+
+      assert String.trim(out) == "https://gitlab.com/serious-alchemy/vstim.git"
+
+      input = "protocol=https\nhost=gitlab.com\npath=serious-alchemy/vstim.git\n\n"
+
+      {out, 0} =
+        System.cmd("sh", ["-c", "printf '%s' \"$1\" | git credential fill", "sh", input],
+          env:
+            env ++
+              [
+                {"HOME", System.tmp_dir!()},
+                {"GIT_CONFIG_NOSYSTEM", "1"},
+                {"GIT_CONFIG_GLOBAL", "/dev/null"}
+              ],
+          stderr_to_stdout: true
+        )
+
+      assert out =~ "username=oauth2"
+      assert out =~ "password=glpat-run"
+    end
+
     test "the token is in env, the operator's helpers are reset, prompts are off", %{material: m} do
       env = Map.new(Material.env(m, nil))
       assert env["ARB_GIT_TOKEN"] == "s3cr3t-token"

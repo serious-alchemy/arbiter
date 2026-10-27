@@ -63,6 +63,12 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
     RateLimit.reset()
     on_exit(&RateLimit.reset/0)
 
+    # The stub records the environment it inherits; a worker running this suite has its own
+    # ARB_GIT_TOKEN, which would read as a token the node was sent.
+    inherited_token = System.get_env("ARB_GIT_TOKEN")
+    System.delete_env("ARB_GIT_TOKEN")
+    on_exit(fn -> inherited_token && System.put_env("ARB_GIT_TOKEN", inherited_token) end)
+
     on_exit(fn ->
       for {pid, _} <- Registry.list(),
           do: Arbiter.ProcessTeardown.stop_child(Arbiter.Nodes.SessionSupervisor, pid)
@@ -306,7 +312,11 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
       StubPodman.write_mode(ctx.stub, "hang")
 
       {:ok, plan} =
-        GitCredential.plan(ws, "tonic", role: :implementer, host_pushes?: true)
+        GitCredential.plan(ws, "tonic",
+          role: :implementer,
+          host_pushes?: true,
+          remote_node?: true
+        )
 
       log =
         capture_all(fn ->
@@ -353,7 +363,13 @@ defmodule ArbiterWeb.RemoteGitCredentialTest do
 
       {task_id, pid} = worker!(ws)
       StubPodman.write_mode(ctx.stub, "hang")
-      {:ok, plan} = GitCredential.plan(ws, "tonic", role: :implementer, host_pushes?: true)
+
+      {:ok, plan} =
+        GitCredential.plan(ws, "tonic",
+          role: :implementer,
+          host_pushes?: true,
+          remote_node?: true
+        )
 
       log =
         capture_all(fn ->
