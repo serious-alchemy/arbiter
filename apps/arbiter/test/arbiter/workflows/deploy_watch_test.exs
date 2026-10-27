@@ -16,7 +16,11 @@ defmodule Arbiter.Workflows.DeployWatchTest do
     def deploy_pipelines(_ref, _branch, _opts), do: {:ok, Process.get(:fake_forge).pipelines}
 
     def ancestor?(_ref, older, newer) do
-      {:ok, older == newer or {older, newer} in Process.get(:fake_forge).ancestry}
+      ancestry = Process.get(:fake_forge).ancestry
+
+      if {:error, older, newer} in ancestry,
+        do: {:error, :forge_lag},
+        else: {:ok, older == newer or {older, newer} in ancestry}
     end
   end
 
@@ -172,6 +176,45 @@ defmodule Arbiter.Workflows.DeployWatchTest do
     sweep(ws)
 
     assert %{"state" => "deployed", "pipeline_id" => 41} = watch_of(task)
+    assert active_alerts(ws) == []
+  end
+
+  test "a skipped own pipeline whose commit is in a later successful deploy is deployed, no alert",
+       %{ws: ws} do
+    task = merged_task(ws, "!5")
+
+    forge(
+      %{"!5" => "old"},
+      [
+        pipeline(52, "new", "success", [{"deploy", "success"}]),
+        pipeline(51, "mid", "success", [{"deploy", "skipped"}]),
+        pipeline(50, "old", "success", [{"deploy", "skipped"}])
+      ],
+      [{"old", "new"}]
+    )
+
+    sweep(ws)
+
+    assert %{"state" => "deployed", "pipeline_id" => 52} = watch_of(task)
+    assert active_alerts(ws) == []
+  end
+
+  test "an ancestry lookup error against a passed later deploy waits instead of alerting",
+       %{ws: ws} do
+    task = merged_task(ws, "!6")
+
+    forge(
+      %{"!6" => "old"},
+      [
+        pipeline(61, "new", "success", [{"deploy", "success"}]),
+        pipeline(60, "old", "success", [{"deploy", "skipped"}])
+      ],
+      [{:error, "old", "new"}]
+    )
+
+    sweep(ws)
+
+    assert %{"state" => "pending"} = watch_of(task)
     assert active_alerts(ws) == []
   end
 

@@ -117,13 +117,14 @@ defmodule Arbiter.Workflows.DeployWatch do
     own = Enum.find(pipelines, &(&1.sha == sha))
 
     newer = pipelines_after(pipelines, own)
-    contains? = fn p -> is_binary(p.sha) and ancestor?.(sha, p.sha) end
+    contains? = fn p -> is_binary(p.sha) and ancestor?.(sha, p.sha) == true end
+    unknown? = fn p -> is_binary(p.sha) and ancestor?.(sha, p.sha) == :unknown end
 
     case find_deployed(own, newer, jobs, contains?) do
       nil ->
         if timed_out?(watch, cfg, now),
           do: {:failed, own || Enum.find(newer, contains?)},
-          else: undeployed_verdict(own, newer, contains?)
+          else: undeployed_verdict(own, newer, contains?, unknown?, jobs)
 
       deployed ->
         {:deployed, deployed}
@@ -141,8 +142,11 @@ defmodule Arbiter.Workflows.DeployWatch do
   end
 
   # Not timed out and nothing succeeded yet.
-  defp undeployed_verdict(own, newer, contains?) do
+  defp undeployed_verdict(own, newer, contains?, unknown?, jobs) do
     cond do
+      # A later pipeline passed but the forge could not say whether it holds
+      # our commit (lookup error): wait for the next sweep rather than alert.
+      Enum.any?(newer, &(watched_ok?(&1, jobs) and unknown?.(&1))) -> :pending
       own && in_flight?(own) -> :pending
       Enum.any?(newer, &(in_flight?(&1) and contains?.(&1))) -> :pending
       # Auto-canceled by a newer merge: a successor will carry the commit.
@@ -314,7 +318,10 @@ defmodule Arbiter.Workflows.DeployWatch do
   defp ancestor_fun(adapter, mr_ref) do
     if function_exported?(adapter, :ancestor?, 3) do
       fn ancestor, descendant ->
-        match?({:ok, true}, adapter.ancestor?(mr_ref, ancestor, descendant))
+        case adapter.ancestor?(mr_ref, ancestor, descendant) do
+          {:ok, answer} when is_boolean(answer) -> answer
+          _ -> :unknown
+        end
       end
     else
       fn ancestor, descendant -> ancestor == descendant end
