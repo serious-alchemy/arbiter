@@ -141,6 +141,11 @@ defmodule Arbiter.Worker.WatchdogMergeFreshnessTest do
 
     assert_receive {:watchdog, _, {:merged, _}}, 3_000
     assert StubMerger.update_branch_count("!mf1") == 1
+    # The production call path hands the adapter the workspace and repo, which is
+    # how a GitLab adapter reads `merge.sync_strategy` and finds the checkout.
+    assert [%{workspace: %{id: ws_id}, repo: repo}] = StubMerger.update_contexts()
+    assert ws_id == ws.id
+    assert repo == task.repo
     assert StubMerger.last_merge() == {"!mf1", "sha-synced"}
     assert StubMerger.merge_count("!mf1") == 1
     assert StubAutoResumeDispatcher.resume_count() == 0

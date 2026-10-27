@@ -4977,8 +4977,8 @@ defmodule Arbiter.Worker.Watchdog do
     :exit, _ -> nil
   end
 
-  defp safe_update_branch(%{adapter: adapter, mr_ref: mr_ref}) do
-    case adapter.update_branch(mr_ref) do
+  defp safe_update_branch(%{adapter: adapter, mr_ref: mr_ref} = state) do
+    case Mergers.update_branch(adapter, mr_ref, state.workspace, state.repo) do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
       other -> {:error, {:bad_return, other}}

@@ -812,6 +812,182 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
   end
 
+  # `update_branch/2` — the strategy-aware sync (`merge.sync_strategy`).
+  describe "update_branch/2" do
+    alias Arbiter.Tasks.Workspace
+
+    defp sync_workspace(merge_extra, repo_paths \\ %{}) do
+      %Workspace{
+        config: %{
+          "merge" => Map.merge(%{"strategy" => "gitlab"}, merge_extra),
+          "repo_paths" => repo_paths
+        }
+      }
+    end
+
+    defp git!(cd, args) do
+      {out, 0} = System.cmd("git", args, cd: cd, stderr_to_stdout: true)
+      String.trim(out)
+    end
+
+    # A bare origin with `main` and `feature/x`, a clone the workspace maps as
+    # repo "app", and a seed clone used to move `main` / `feature/x` upstream.
+    defp bare_remote(dir) do
+      origin = Path.join(dir, "origin.git")
+      seed = Path.join(dir, "seed")
+      app = Path.join(dir, "app")
+      git!(dir, ["init", "--bare", "--initial-branch=main", origin])
+      git!(dir, ["clone", origin, seed])
+
+      for {k, v} <- [{"user.name", "T"}, {"user.email", "t@example.invalid"}] do
+        git!(seed, ["config", k, v])
+      end
+
+      File.write!(Path.join(seed, "a.txt"), "one\ntwo\nthree\n")
+      git!(seed, ["add", "."])
+      git!(seed, ["commit", "-m", "base"])
+      git!(seed, ["push", "origin", "main"])
+      git!(seed, ["checkout", "-b", "feature/x"])
+      File.write!(Path.join(seed, "f.txt"), "feature\n")
+      git!(seed, ["add", "."])
+      git!(seed, ["commit", "-m", "feature"])
+      git!(seed, ["push", "origin", "feature/x"])
+      git!(seed, ["checkout", "main"])
+      git!(dir, ["clone", origin, app])
+
+      for {k, v} <- [{"user.name", "T"}, {"user.email", "t@example.invalid"}] do
+        git!(app, ["config", k, v])
+      end
+
+      %{origin: origin, seed: seed, app: app}
+    end
+
+    defp move_main(seed, file, content) do
+      File.write!(Path.join(seed, file), content)
+      git!(seed, ["add", "."])
+      git!(seed, ["commit", "-m", "main: #{file}"])
+      git!(seed, ["push", "origin", "main"])
+    end
+
+    defp mr_stub do
+      stub(fn conn ->
+        case conn.method do
+          "GET" ->
+            Req.Test.json(conn, %{
+              "iid" => @iid,
+              "state" => "opened",
+              "source_branch" => "feature/x",
+              "target_branch" => "main"
+            })
+
+          "PUT" ->
+            send(self(), :rebase_endpoint_called)
+            conn |> Plug.Conn.put_status(202) |> Req.Test.json(%{"rebase_in_progress" => true})
+        end
+      end)
+    end
+
+    setup %{tmp_dir: dir} do
+      previous = Application.get_env(:arbiter, :worktree_root)
+      root = Path.join(dir, "worktrees")
+      File.mkdir_p!(root)
+      Application.put_env(:arbiter, :worktree_root, root)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:arbiter, :worktree_root, previous),
+          else: Application.delete_env(:arbiter, :worktree_root)
+      end)
+
+      %{remote: bare_remote(dir)}
+    end
+
+    @tag :tmp_dir
+    test "default strategy merges the target into the MR branch and pushes without force",
+         %{remote: %{origin: origin, seed: seed, app: app}} do
+      mr_stub()
+      reviewed = git!(origin, ["rev-parse", "refs/heads/feature/x"])
+      move_main(seed, "b.txt", "main change\n")
+      workspace = sync_workspace(%{}, %{"app" => app})
+
+      assert :ok = Gitlab.update_branch(@ref, %{workspace: workspace, repo: "app"})
+
+      refute_received :rebase_endpoint_called
+      new_head = git!(origin, ["rev-parse", "refs/heads/feature/x"])
+      refute new_head == reviewed
+
+      assert {_, 0} =
+               System.cmd("git", ["merge-base", "--is-ancestor", reviewed, new_head], cd: origin)
+
+      assert git!(origin, ["rev-parse", new_head <> "^2"]) ==
+               git!(origin, ["rev-parse", "refs/heads/main"])
+    end
+
+    @tag :tmp_dir
+    test "a merge conflict returns a :conflict error and never touches the remote branch",
+         %{remote: %{origin: origin, seed: seed, app: app}} do
+      mr_stub()
+      git!(seed, ["checkout", "feature/x"])
+      File.write!(Path.join(seed, "a.txt"), "one\nFEATURE\nthree\n")
+      git!(seed, ["commit", "-am", "feature edits a.txt"])
+      git!(seed, ["push", "origin", "feature/x"])
+      git!(seed, ["checkout", "main"])
+      move_main(seed, "a.txt", "one\nMAIN\nthree\n")
+      head = git!(origin, ["rev-parse", "refs/heads/feature/x"])
+      workspace = sync_workspace(%{}, %{"app" => app})
+
+      assert {:error, %Error{kind: :conflict, raw: {:conflict, ["a.txt"]}}} =
+               Gitlab.update_branch(@ref, %{workspace: workspace, repo: "app"})
+
+      refute_received :rebase_endpoint_called
+      assert git!(origin, ["rev-parse", "refs/heads/feature/x"]) == head
+    end
+
+    @tag :tmp_dir
+    test "sync_strategy: rebase keeps the rebase endpoint", %{remote: %{origin: origin, app: app}} do
+      mr_stub()
+      head = git!(origin, ["rev-parse", "refs/heads/feature/x"])
+      workspace = sync_workspace(%{"sync_strategy" => "rebase"}, %{"app" => app})
+
+      assert :ok = Gitlab.update_branch(@ref, %{workspace: workspace, repo: "app"})
+
+      assert_received :rebase_endpoint_called
+      assert git!(origin, ["rev-parse", "refs/heads/feature/x"]) == head
+    end
+
+    @tag :tmp_dir
+    test "a per-repo sync_strategy override wins", %{remote: %{app: app}} do
+      mr_stub()
+
+      workspace =
+        sync_workspace(
+          %{"sync_strategy" => "merge", "repos" => %{"app" => %{"sync_strategy" => "rebase"}}},
+          %{"app" => app}
+        )
+
+      assert :ok = Gitlab.update_branch(@ref, %{workspace: workspace, repo: "app"})
+      assert_received :rebase_endpoint_called
+    end
+
+    @tag :tmp_dir
+    test "a repo with no local checkout is an error, not a rebase", %{remote: _} do
+      mr_stub()
+      workspace = sync_workspace(%{})
+
+      assert {:error, %Error{kind: :git_push_failed, raw: :no_repo_path}} =
+               Gitlab.update_branch(@ref, %{workspace: workspace, repo: "app"})
+
+      refute_received :rebase_endpoint_called
+    end
+
+    @tag :tmp_dir
+    test "with no workspace context it keeps the rebase endpoint (update_branch/1)", %{remote: _} do
+      mr_stub()
+      assert :ok = Gitlab.update_branch(@ref)
+      assert_received :rebase_endpoint_called
+    end
+  end
+
   describe "merge/2 405 classification (#918)" do
     defp merge_405_stub(mr_fields) do
       stub(fn conn ->

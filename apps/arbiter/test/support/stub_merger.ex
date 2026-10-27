@@ -226,6 +226,22 @@ defmodule Arbiter.Test.StubMerger do
     end)
   end
 
+  # The context-taking variant production callers go through
+  # (`Mergers.update_branch/4`): record what the caller passed, then behave
+  # exactly like `update_branch/1`.
+  @impl true
+  def update_branch(ref, ctx) do
+    ensure_started()
+    Agent.update(@name, fn s -> Map.update(s, :update_contexts, [ctx], &[ctx | &1]) end)
+    update_branch(ref)
+  end
+
+  @doc "The `ctx` maps `update_branch/2` was called with, newest first."
+  def update_contexts do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :update_contexts, []) end)
+  end
+
   @impl true
   def update_branch(ref) do
     ensure_started()

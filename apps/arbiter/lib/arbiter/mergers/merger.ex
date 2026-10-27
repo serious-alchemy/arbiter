@@ -285,6 +285,19 @@ defmodule Arbiter.Mergers.Merger do
   @callback update_branch(mr_ref) :: :ok | {:error, term()}
 
   @doc """
+  `update_branch/1` with the workspace and repo the PR belongs to, for adapters
+  whose sync needs a local checkout (GitLab's `merge.sync_strategy: merge`
+  merges the target into the ticket worktree and pushes it, rather than asking
+  the forge to rebase). `ctx` is `%{workspace: Workspace.t() | nil, repo:
+  String.t() | nil}`. Same return contract as `update_branch/1`.
+
+  Optional; callers go through `Arbiter.Mergers.update_branch/4`, which uses it
+  when the adapter exports it and `update_branch/1` otherwise.
+  """
+  @callback update_branch(mr_ref, ctx :: %{workspace: term(), repo: String.t() | nil}) ::
+              :ok | {:error, term()}
+
+  @doc """
   Fetch the failing CI checks for `mr_ref` — their names and a tail of each
   one's output — so the Watchdog can brief a fix-pass worker on a `:ci_failed`
   block (#354, Phase 2a). For GitHub this reads the Checks API for the PR's head
@@ -619,6 +632,7 @@ defmodule Arbiter.Mergers.Merger do
 
   @optional_callbacks prepare: 2,
                       update_branch: 1,
+                      update_branch: 2,
                       ancestor?: 3,
                       failing_check_logs: 1,
                       rerun_ci: 2,

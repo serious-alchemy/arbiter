@@ -62,6 +62,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   alias Arbiter.Http.Client
   alias Arbiter.Http.Error, as: ErrorSpec
+  alias Arbiter.Mergers.BranchSync
   alias Arbiter.Mergers.CILogExcerpt
   alias Arbiter.Mergers.CIRerun
   alias Arbiter.Mergers.Gitlab.{Config, Error}
@@ -240,17 +241,91 @@ defmodule Arbiter.Mergers.Gitlab do
 
   defp deploy_pipeline_list(other), do: {:error, request_error(other)}
 
+  # The rebase strategy: GitLab's rebase endpoint (PUT …/rebase) queues an async
+  # rebase of the MR branch onto the target branch and returns 202 Accepted. It
+  # rewrites and force-pushes the branch, so every commit gets a new SHA. With no
+  # workspace context there is no checkout to merge in, so this is also what
+  # `update_branch/1` does; callers that have the context use `update_branch/2`.
   @impl true
-  def update_branch(mr_ref) when is_binary(mr_ref) do
+  def update_branch(mr_ref) when is_binary(mr_ref), do: rebase_branch(mr_ref)
+
+  @doc """
+  Sync the MR branch with its target per `merge.sync_strategy`
+  (`Arbiter.Mergers.BranchSync.strategy/2`, default `merge`).
+
+  `merge` merges `origin/<target>` into the branch in the ticket worktree and
+  pushes it as a plain fast-forward, so the previously reviewed head stays an
+  ancestor and nothing is force-pushed (`Arbiter.Mergers.BranchSync`). A merge
+  that conflicts is aborted and comes back as `{:error, %Error{kind: :conflict}}`,
+  which callers route to the conflict path. `rebase` is the rebase endpoint —
+  needed by fast-forward / semi-linear projects, which refuse merge commits.
+
+  `ctx` is `%{workspace: Workspace.t() | nil, repo: String.t() | nil}`.
+  """
+  @impl true
+  def update_branch(mr_ref, ctx) when is_binary(mr_ref) and is_map(ctx) do
+    workspace = Map.get(ctx, :workspace)
+    repo = Map.get(ctx, :repo)
+
+    case BranchSync.strategy(workspace, repo) do
+      :rebase -> rebase_branch(mr_ref)
+      :merge -> merge_branch(mr_ref, workspace, repo)
+    end
+  end
+
+  defp rebase_branch(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref) do
-      # GitLab's rebase endpoint (PUT …/rebase) queues an async rebase of the
-      # MR branch onto the target branch and returns 202 Accepted. A 409 means
-      # the rebase can't be applied cleanly (conflict); the queue treats that as
-      # non-fatal and lets the next get/1 poll surface the conflict state.
+      # A 409 means the rebase can't be applied cleanly (conflict); the queue
+      # treats that as non-fatal and lets the next get/1 poll surface the
+      # conflict state.
       request(cfg, :put, "/merge_requests/#{iid}/rebase", json: %{})
       |> handle_ok()
     end
+  end
+
+  defp merge_branch(mr_ref, workspace, repo) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, mr} <- request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json(),
+         {:ok, branch, target} <- mr_branches(mr) do
+      case BranchSync.sync(workspace, repo, branch, target) do
+        {:ok, _synced_or_current} -> :ok
+        {:error, reason} -> {:error, branch_sync_error(reason)}
+      end
+    end
+  end
+
+  defp mr_branches(%{"source_branch" => branch, "target_branch" => target})
+       when is_binary(branch) and branch != "" and is_binary(target) and target != "",
+       do: {:ok, branch, target}
+
+  defp mr_branches(mr) do
+    {:error,
+     %Error{
+       kind: :validation_failed,
+       status: nil,
+       message: "merge request carries no source/target branch to sync",
+       raw: mr
+     }}
+  end
+
+  defp branch_sync_error({:conflict, files} = reason) do
+    %Error{
+      kind: :conflict,
+      status: nil,
+      message: "merging the target into the branch conflicts in: #{Enum.join(files, ", ")}",
+      raw: reason
+    }
+  end
+
+  defp branch_sync_error(reason) do
+    %Error{
+      kind: :git_push_failed,
+      status: nil,
+      message: "merge sync failed: #{inspect(reason)}",
+      raw: reason
+    }
   end
 
   @impl true

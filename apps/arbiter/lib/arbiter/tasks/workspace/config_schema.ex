@@ -151,6 +151,15 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                             tests the branch head alone, so this MUST stay on there). A forge
                             that already reports behind_base is handled by the existing
                             update-branch path, with no double sync. (default: true)
+      sync_strategy         "merge" | "rebase" — how Arbiter brings an MR branch up to its target
+                            (behind-base and the pre-merge freshness sync). GitLab only; GitHub's
+                            update-branch always merges. "merge" (default) merges origin/<target>
+                            into the ticket worktree and pushes a plain fast-forward, so the
+                            reviewed head stays an ancestor and nothing is force-pushed; a conflict
+                            goes to the conflict resolver. "rebase" uses GitLab's rebase endpoint
+                            (rewrites the branch, new SHAs). GitLab projects with a fast-forward
+                            or semi-linear merge method refuse merge commits and need "rebase".
+                            Per repo via merge.repos.<repo>.sync_strategy. See docs/merge-sync-strategy.md
       deploy_watch          map (per repo, merge.repos.<repo>.deploy_watch) — (#967) {"job": "deploy",
                             "timeout_minutes": 90} or {"jobs": [...]}. After a merge, follow the
                             base branch pipeline and raise a coordinator alert when the deploy
