@@ -2951,7 +2951,7 @@ defmodule Arbiter.Worker.Dispatch do
     repo = Keyword.get(opts, :repo)
     image_opts = [workspace: workspace, repo: repo] ++ Keyword.take(opts, [:image, :publish])
 
-    case ContainerSpawn.preflight_image(resolve_repo_path(task, repo), node, image_opts) do
+    case publish_image(task, repo, node, image_opts) do
       :ok ->
         {:ok, Keyword.put(opts, :node, node)}
 
@@ -2960,6 +2960,27 @@ defmodule Arbiter.Worker.Dispatch do
         image_fallback(Publisher.fallback(request.mode, reason), request, opts, gate_opts)
     end
   end
+
+  # bd-1ggu6v: the publish can take minutes (a first build of the deps layer
+  # after a version bump). While it runs the dispatch's `Drain.track` entry — and
+  # so the autopilot's `board_promotion` entry in `scheduler_status.in_flight` —
+  # says what it is waiting on; its `started_at` gives the elapsed time.
+  defp publish_image(%Issue{} = task, repo, node, image_opts) do
+    Drain.note_detail(
+      "waiting for registry image for #{repo || task.repo || "repo"} " <>
+        "(node #{node_label(node)}); publishing"
+    )
+
+    try do
+      ContainerSpawn.preflight_image(resolve_repo_path(task, repo), node, image_opts)
+    after
+      Drain.note_detail(nil)
+    end
+  end
+
+  defp node_label(%{name: name}) when is_binary(name), do: name
+  defp node_label(%{id: id}) when is_binary(id), do: id
+  defp node_label(_node), do: "?"
 
   defp image_fallback({:hold, reason}, request, _opts, _gate_opts),
     do: {:error, {:no_node_capacity, Placement.image_hold(request, reason)}}
@@ -2973,7 +2994,16 @@ defmodule Arbiter.Worker.Dispatch do
       gate_opts ++
         [reason: :no_node, provider: request.provider, workspace_id: request.workspace_id]
 
-    with :ok <- LocalCapacity.admit(request.task_id, request.kind, admit_opts), do: {:ok, opts}
+    # The run records that it was meant for a node (`recorded_decision/1`), so
+    # `worker show` / `routing_decision` answers "why is this on the primary".
+    note = %{
+      "image_unavailable" => inspect(reason),
+      "fell_back_to" => "primary",
+      "mode" => to_string(request.mode)
+    }
+
+    with :ok <- LocalCapacity.admit(request.task_id, request.kind, admit_opts),
+         do: {:ok, Keyword.put(opts, :placement_note, note)}
   end
 
   defp node_request(%Issue{} = task, workspace, opts) do
@@ -3464,6 +3494,16 @@ defmodule Arbiter.Worker.Dispatch do
   # the run stores, as `admission_shadow`. It is a record: the decision's own
   # keys, and so the run's account and family, are untouched.
   defp recorded_decision(opts) do
+    opts
+    |> shadowed_decision()
+    |> with_placement_note(Keyword.get(opts, :placement_note))
+  end
+
+  defp with_placement_note(decision, nil), do: decision
+  defp with_placement_note(nil, note), do: %{"placement" => note}
+  defp with_placement_note(%{} = decision, note), do: Map.put(decision, "placement", note)
+
+  defp shadowed_decision(opts) do
     case {Keyword.get(opts, :routing_decision), Keyword.get(opts, :admission_shadow)} do
       {decision, nil} -> decision
       {nil, %{} = shadow} -> %{"admission_shadow" => shadow}

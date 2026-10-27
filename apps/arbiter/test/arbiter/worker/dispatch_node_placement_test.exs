@@ -6,6 +6,8 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
   """
   use Arbiter.DataCase, async: false
 
+  require Ash.Query
+
   alias Arbiter.Nodes
   alias Arbiter.Nodes.Placement
   alias Arbiter.Settings
@@ -36,6 +38,15 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
 
     {:ok, issue} = Ash.update(created, %{}, action: :promote_to_ready)
     issue
+  end
+
+  defp latest_run(task_id) do
+    Arbiter.Workers.Run
+    |> Ash.Query.filter(base_task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
   end
 
   defp dispatch(issue, opts \\ []) do
@@ -425,6 +436,58 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert {:ok, %{worker_pid: pid}} = dispatch(issue, timed_out())
       assert is_pid(pid)
       assert Placement.reservations() == []
+    end
+
+    # bd-1ggu6v: the fallback is visible on the run, not only in a log line.
+    test "prefer_remote's fallback to the primary is recorded on the run's routing decision" do
+      ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
+      issue = ready!(ws, "prefer remote, fallback recorded")
+
+      assert {:ok, %{worker_pid: _pid}} = dispatch(issue, timed_out())
+
+      assert %{
+               "placement" => %{
+                 "image_unavailable" => unavailable,
+                 "fell_back_to" => "primary",
+                 "mode" => "prefer_remote"
+               }
+             } = latest_run(issue.id).routing_decision
+
+      assert unavailable =~ "timeout"
+    end
+
+    # bd-1ggu6v: a dispatch parked on the publish is listed with what it waits
+    # on instead of a bare, stuck-looking entry.
+    test "while the publish is pending, in_flight carries a detail naming the image wait" do
+      test = self()
+      ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
+      issue = ready!(ws, "prefer remote, publish pending")
+
+      stub = fn _ctx ->
+        send(test, {:publishing, self()})
+
+        receive do
+          :finish_publish -> {:error, {:timeout, 5}}
+        end
+      end
+
+      opts = Keyword.put(timed_out(), :publish, stub: stub)
+      task = Task.async(fn -> dispatch(issue, opts) end)
+      assert_receive {:publishing, publisher}, 10_000
+
+      assert %{detail: detail, started_at: %DateTime{}} =
+               Enum.find(Arbiter.Board.Drain.status().in_flight, &(&1.task_id == issue.id))
+
+      assert detail =~ "registry image"
+
+      send(publisher, :finish_publish)
+      assert {:ok, _} = Task.await(task, 30_000)
+
+      # The wait is over: nothing says "waiting" any more.
+      refute Enum.any?(
+               Arbiter.Board.Drain.status().in_flight,
+               &(&1.task_id == issue.id and is_binary(&1.detail) and &1.detail =~ "registry image")
+             )
     end
 
     test "remote_only holds the card with the image error, and reserves nothing" do
