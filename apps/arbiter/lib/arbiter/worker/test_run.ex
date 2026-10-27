@@ -189,7 +189,7 @@ defmodule Arbiter.Worker.TestRun do
 
         {:error, reason} ->
           {:error,
-           "could not ask the run's environment for the changed files: #{inspect(reason)}"}
+           exec_error(reason, "could not ask the run's environment for the changed files")}
 
         _ ->
           {:error, "could not work out the changed files against #{target}; pass `paths` instead"}
@@ -223,12 +223,22 @@ defmodule Arbiter.Worker.TestRun do
         end
 
       {:error, reason} ->
-        {:error, "could not run in the run's environment: #{inspect(reason)}"}
+        {:error, exec_error(reason, "could not run in the run's environment")}
 
       {out, status} ->
         {:error, "path check exited #{status}: #{String.slice(out, 0, 300)}"}
     end
   end
+
+  # bd-5wm92s: a cluster pod's node agent offers no `exec`, so every probe answers
+  # `{:error, :unsupported}`. Say what to do instead of echoing the atom.
+  defp exec_error(:unsupported, _what) do
+    "run_tests is not available in this run's environment (a cluster pod cannot run a side " <>
+      "command): run `mix test <files>` in the shell, from the app's directory, and pipe the " <>
+      "output through `tail` or `grep`"
+  end
+
+  defp exec_error(reason, what), do: "#{what}: #{inspect(reason)}"
 
   defp resolve_command(paths) do
     """
@@ -251,7 +261,7 @@ defmodule Arbiter.Worker.TestRun do
 
     case exec.(command, timeout_s) do
       {:error, reason} ->
-        {:error, "could not run the tests: #{inspect(reason)}"}
+        {:error, exec_error(reason, "could not run the tests")}
 
       {output, status} ->
         {log_path, output} = split_log_marker(output)

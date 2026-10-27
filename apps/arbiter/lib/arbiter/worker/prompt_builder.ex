@@ -369,7 +369,13 @@ defmodule Arbiter.Worker.PromptBuilder do
   end
 
   defp test_tool_section(opts),
-    do: if(mcp_tools?(opts), do: test_tool_section() <> "\n", else: "")
+    do: if(test_tool?(opts), do: test_tool_section() <> "\n", else: "")
+
+  # bd-5wm92s: `run_tests` runs through the node agent's `exec`, which a cluster pod's
+  # (k8s backend) agent does not offer, so Dispatch sets `test_tool?: false` for a run
+  # placed on a cluster node and the prompt neither points at the tool nor tells the
+  # worker to run the gate's tests through it.
+  defp test_tool?(opts), do: mcp_tools?(opts) and Keyword.get(opts, :test_tool?, true) != false
 
   # bd-capkj9: a podman container has no forge credential or host key by design;
   # the host pushes after `arb done`. Without this a worker that tries
@@ -423,7 +429,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{isolation_section}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
-    #{test_tool_section(opts)}#{commit_gate_section(Keyword.get(opts, :prepush_steps), mcp?, nil)}#{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
+    #{test_tool_section(opts)}#{commit_gate_section(Keyword.get(opts, :prepush_steps), test_tool?(opts), nil)}#{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
     Work the task to completion: load context, design, implement, test,
     commit on this branch#{push_clause(opts)}.
 

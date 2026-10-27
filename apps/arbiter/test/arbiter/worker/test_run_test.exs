@@ -80,6 +80,25 @@ defmodule Arbiter.Worker.TestRunTest do
     end
   end
 
+  describe "an environment that cannot exec (a cluster pod, bd-5wm92s)" do
+    setup ctx do
+      %{pod: runner(ctx, %{exec: fn _command, _seconds -> {:error, :unsupported} end})}
+    end
+
+    test "paths: says to run mix in the shell, not an opaque :unsupported", %{pod: pod} do
+      assert {:error, message} = TestRun.run(pod, %{paths: ["apps/core/test/b_test.exs"]})
+      assert message =~ "not available in this run's environment"
+      assert message =~ "mix test"
+      refute message =~ ":unsupported"
+    end
+
+    test "changed: says the same", ctx do
+      pod = runner(ctx, %{exec: fn _c, _s -> {:error, :unsupported} end, target: "main"})
+      assert {:error, message} = TestRun.run(pod, %{changed: true})
+      assert message =~ "not available in this run's environment"
+    end
+  end
+
   describe "run/3" do
     test "a green run returns counts and the log path, not the output", ctx do
       File.write!(ctx.out, "Compiling 9 files\nwarning: noisy\n.....\n5 tests, 0 failures\n")

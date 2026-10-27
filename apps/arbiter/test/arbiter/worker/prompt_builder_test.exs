@@ -1204,6 +1204,25 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       refute prompt =~ "RUNNING TESTS"
     end
 
+    # bd-5wm92s: a cluster pod's node agent cannot `exec` a side command, so `run_tests`
+    # answers `:unsupported` there; the prompt must not steer the worker to it.
+    test "a run on a cluster pod is not pointed at run_tests, in either section" do
+      steps = [%{cmd: "mix format --check-formatted", scope: :all}]
+
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt",
+          prepush_steps: steps,
+          test_tool?: false
+        )
+
+      refute prompt =~ "RUNNING TESTS"
+      refute prompt =~ "`run_tests`"
+      assert prompt =~ "by running just those test files"
+      # the completion path is still spelled out
+      assert prompt =~ "arb done"
+    end
+
     test "the section is exposed for the other authoring prompts" do
       assert PromptBuilder.test_tool_section() =~ "`run_tests`"
     end
