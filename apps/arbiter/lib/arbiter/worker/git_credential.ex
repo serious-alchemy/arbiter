@@ -200,7 +200,7 @@ defmodule Arbiter.Worker.GitCredential do
   defp read_only_reviewer?(opts, entry) do
     Keyword.get(opts, :role, :implementer) == :reviewer and
       Keyword.get(opts, :host_pushes?, false) and
-      container_credential?(entry, Keyword.get(opts, :remote_node?, false))
+      match?(%{"kind" => "gitlab_project_token"}, entry)
   end
 
   defp not_needed?(opts, entry) do

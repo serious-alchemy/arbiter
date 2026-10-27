@@ -445,6 +445,21 @@ defmodule Arbiter.Worker.GitCredentialGitlabTest do
                GitCredential.plan(ws, "tonic", role: :implementer, host_pushes?: true)
     end
 
+    test "a github_app repo's reviewer still gets no credential" do
+      ws = %{
+        config: %{
+          "git_credentials" => %{
+            "repos" => %{
+              "gh" => %{"kind" => "github_app", "app_id" => 1, "installation_id" => 2}
+            }
+          }
+        }
+      }
+
+      assert {:ok, %GitCredential{mode: :not_needed}} =
+               GitCredential.plan(ws, "gh", role: :reviewer, host_pushes?: true)
+    end
+
     test "mints read_api at Reporter and delivers only GITLAB_TOKEN + GITLAB_HOST" do
       ws = workspace()
       {:ok, plan} = GitCredential.plan(ws, "tonic", role: :reviewer, host_pushes?: true)
