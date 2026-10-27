@@ -1042,6 +1042,8 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{tracker_line}#{review_location_section(checkout)}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
+    #{forge_read_section()}
+
     Steps:
       1. #{review_diff_instruction(checkout)}
       2. Identify real correctness, security, or contract issues against the
@@ -1076,7 +1078,26 @@ defmodule Arbiter.Worker.PromptBuilder do
     """
   end
 
+  # bd-1vhect: a reviewer in a container holds a read-only forge token in
+  # `GITLAB_TOKEN` (+ `GITLAB_HOST`) and may have no `glab`. Nothing told the
+  # agent to use it, and codex reviewers browsed or curl'd anonymously (404).
+  # The text is conditional because the prompt is built before the spawn is
+  # known to be a container; never print the token.
+  defp forge_read_section do
+    String.trim_trailing("""
+    Reading the PR/MR itself (description, linked acceptance, pipelines) — this
+    refines the FORGE CLIs note above for reviewers: do NOT
+    browse the web or call the forge API anonymously — private projects answer
+    404. Use `gh pr view <ref>` / `glab mr view <ref>` (add `--comments` for
+    notes). If `GITLAB_TOKEN` is set in your environment, it is a read-only
+    token for this project: with no `glab` on PATH, call the API with it, e.g.
+    `curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "https://$GITLAB_HOST/api/v4/projects/<url-encoded group/project>/merge_requests/<iid>"`
+    (`/pipelines`, `/notes` likewise). Never print or log the token.
+    """)
+  end
+
   # bd-199giy: the review checkout descriptor threaded in by
+
   # `Arbiter.Worker.Dispatch` when it managed to provision a throwaway worktree
   # at the reviewed branch's current `origin` head. `nil` — the pre-bd-199giy
   # shape, and the fallback whenever provisioning fails — keeps the diff-only
