@@ -50,7 +50,9 @@ defmodule Arbiter.Workers.RunNode do
     %{node_id: id, node_name: id && name_for(id)}
   end
 
-  defp name_for(id) do
+  @doc "The name of node `id`; a vanished node falls back to its id."
+  @spec name_for(String.t()) :: String.t()
+  def name_for(id) do
     case Nodes.get_node(id) do
       %{name: name} -> name
       _ -> id

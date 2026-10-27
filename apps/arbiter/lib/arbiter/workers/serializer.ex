@@ -115,6 +115,8 @@ defmodule Arbiter.Workers.Serializer do
       :role,
       :node_id,
       :node_name,
+      :planned_node_id,
+      :planned_node_name,
       :phase,
       :phase_label,
       :ci_wait_label,
@@ -139,6 +141,8 @@ defmodule Arbiter.Workers.Serializer do
       :role,
       :node_id,
       :node_name,
+      :planned_node_id,
+      :planned_node_name,
       :model,
       :started_at,
       :completed_at,
@@ -193,6 +197,19 @@ defmodule Arbiter.Workers.Serializer do
       failure_summary: Map.get(meta, :failure_summary)
     })
     |> Map.merge(routing_fields(Map.get(view, :run), meta))
+    |> Map.merge(planned_node_fields(view, meta))
+  end
+
+  # The node placement chose for a run still preparing: `node_id` stays nil until
+  # the agent starts, which the surfaces would read as "local".
+  defp planned_node_fields(view, meta) do
+    case {RunNode.node_id(view), Map.get(meta, :placed_node_id)} do
+      {nil, id} when is_binary(id) ->
+        %{planned_node_id: id, planned_node_name: RunNode.name_for(id)}
+
+      _ ->
+        %{planned_node_id: nil, planned_node_name: nil}
+    end
   end
 
   # bd-40pzpj: the model and provider, and what provider routing chose and why
