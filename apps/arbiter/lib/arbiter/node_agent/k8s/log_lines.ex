@@ -17,7 +17,8 @@ defmodule Arbiter.NodeAgent.K8s.LogLines do
       instead of keeping a window of line hashes that a controller restart would lose.
   """
 
-  @ts ~r/\A(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z\z/
+  # RFC 3339: `Z`, or a `±HH:MM` offset (a kubelet in a local zone, e.g. mesaana's `-04:00`).
+  @ts ~r/\A(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)\z/
   @epoch "0001-01-01T00:00:00Z"
 
   # The container runtime cuts a line longer than its read buffer (16 KiB for containerd and
@@ -27,8 +28,8 @@ defmodule Arbiter.NodeAgent.K8s.LogLines do
   # `unsplice/4` removes those, and only those: a fixed-width kubelet timestamp plus the
   # delimiter, at a 4 KiB boundary, not earlier than the line's own timestamp.
   @chunk 4096
-  @stamp_size 30
-  @stamp ~r/\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z\z/
+  @stamp_sizes [30, 35]
+  @stamp ~r/\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}(?:Z|[+-]\d\d:\d\d)\z/
 
   @type cursor :: String.t()
   @type line :: {cursor(), binary()}
@@ -106,16 +107,29 @@ defmodule Arbiter.NodeAgent.K8s.LogLines do
     end
   end
 
-  defp unsplice(rest, off, _at, acc) when byte_size(rest) < off + @stamp_size + 1,
+  defp unsplice(rest, off, _at, acc) when byte_size(rest) < off + 30 + 1,
     do: IO.iodata_to_binary([acc, rest])
 
   defp unsplice(rest, off, at, acc) do
-    head = binary_part(rest, 0, off)
-    <<_::binary-size(^off), stamp::binary-size(@stamp_size), delim, tail::binary>> = rest
+    case Enum.find(@stamp_sizes, &splice_at?(rest, off, &1, at)) do
+      nil ->
+        unsplice(rest, off + @chunk, at, acc)
 
-    if delim == ?\s and spliced_stamp?(stamp, at),
-      do: unsplice(tail, @chunk, at, [acc, head]),
-      else: unsplice(rest, off + @chunk, at, acc)
+      size ->
+        <<head::binary-size(^off), _stamp::binary-size(^size), _delim, tail::binary>> = rest
+        unsplice(tail, @chunk, at, [acc, head])
+    end
+  end
+
+  # A stamp of `size` bytes (`…Z` is 30, `…±HH:MM` is 35) plus the delimiter at `off`.
+  defp splice_at?(rest, off, size, at) do
+    case rest do
+      <<_::binary-size(^off), stamp::binary-size(^size), ?\s, _::binary>> ->
+        spliced_stamp?(stamp, at)
+
+      _ ->
+        false
+    end
   end
 
   # The kubelet's fixed `2006-01-02T15:04:05.000000000Z` form, at or after the line's own.
@@ -148,13 +162,20 @@ defmodule Arbiter.NodeAgent.K8s.LogLines do
   @doc false
   @spec parse_ts(String.t()) :: {:ok, {integer(), non_neg_integer()}} | :error
   def parse_ts(text) do
-    with [_, base | frac] <- Regex.run(@ts, text),
+    with [_, base, frac, zone] <- Regex.run(@ts, text),
          {:ok, naive} <- NaiveDateTime.from_iso8601(base) do
       secs = naive |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
-      nanos = frac |> List.first("") |> String.pad_trailing(9, "0") |> String.to_integer()
-      {:ok, {secs, nanos}}
+      nanos = frac |> String.pad_trailing(9, "0") |> String.to_integer()
+      {:ok, {secs - zone_offset(zone), nanos}}
     else
       _ -> :error
     end
+  end
+
+  defp zone_offset("Z"), do: 0
+
+  defp zone_offset(<<sign, h::binary-size(2), ?:, m::binary-size(2)>>) do
+    secs = String.to_integer(h) * 3600 + String.to_integer(m) * 60
+    if sign == ?-, do: -secs, else: secs
   end
 end

@@ -1453,10 +1453,22 @@ defmodule Arbiter.Worker.StopReason do
 
   defp signature_haystack(output_lines) do
     output_lines
-    |> Enum.reject(&(tool_result_line?(&1) or bridge_noise_line?(&1)))
+    |> Enum.reject(&(tool_result_line?(&1) or bridge_noise_line?(&1) or undecoded_json_line?(&1)))
     |> Enum.take(-@tail_lines)
     |> Enum.join("\n")
   end
+
+  # bd-1t1uhd: a stream event the session could not decode (a pod stream line that kept its
+  # kubelet timestamp, or one cut mid-object) reaches the transcript raw, with the tool-result
+  # text inside it and none of the "⏴ " tagging. It is the CLI's JSON, not the CLI failing,
+  # so it carries no signature. An optional leading RFC 3339 stamp is allowed for.
+  @raw_json_line ~r/\A(?:\d{4}-\d\d-\d\dT\S+ )?\{"/
+
+  defp undecoded_json_line?(line) when is_binary(line) do
+    Regex.match?(@raw_json_line, line) and match?({:error, _}, Jason.decode(line))
+  end
+
+  defp undecoded_json_line?(_line), do: false
 
   defp tool_result_line?(line) when is_binary(line),
     do: String.starts_with?(line, @tool_result_prefix)

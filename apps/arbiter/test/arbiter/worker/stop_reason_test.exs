@@ -96,6 +96,23 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "classify/2 — undecodable stream lines are not evidence of auth death (bd-1t1uhd)" do
+    test "raw JSON lines that never decoded are kept out of the auth haystack" do
+      output_lines = [
+        ~s(2026-10-27T11:14:41.173636866-04:00 {"type":"user","message":{"content":[{"type":"tool_result","content":"test unauthorized 401"}]}}),
+        ~s({"type":"user","content":"truncated unauthorized 401)
+      ]
+
+      reason = StopReason.classify(0, output_lines)
+      refute reason.category == :auth_expired
+    end
+
+    test "a genuine plain-text auth failure still classifies" do
+      assert StopReason.classify(1, ["API Error: 401 Invalid authentication credentials"]).category ==
+               :auth_expired
+    end
+  end
+
   describe "classify/2 — a clean Claude end_turn is not an auth death (bd-czvxfs)" do
     # bd-bmymrp, run 0f54e530, the first cluster run: the agent edited
     # docs/remote-workers-k8s-runbook.md (whose tables are full of "401" and
