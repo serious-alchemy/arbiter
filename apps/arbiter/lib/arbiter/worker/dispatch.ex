@@ -4902,7 +4902,7 @@ defmodule Arbiter.Worker.Dispatch do
               # `:unsupported` there; the prompt must not steer the worker to it.
               |> Keyword.put(
                 :test_tool?,
-                not match?(%{kind: "cluster"}, Keyword.get(opts, :node))
+                PromptBuilder.test_tool_for_node?(Keyword.get(opts, :node))
               )
               |> Keyword.put(:projection, projection)
               |> Keyword.put(
