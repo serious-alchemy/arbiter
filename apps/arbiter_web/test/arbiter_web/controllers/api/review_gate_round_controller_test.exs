@@ -95,21 +95,10 @@ defmodule ArbiterWeb.Api.ReviewGateRoundControllerTest do
     end
 
     # bd-6d3h8m: an automatic fix round's fresh gate restarts `round` at 1, so
-    # sorting on `round` alone (the pre-fix behavior) interleaves it with the
-    # original pass instead of reading as two consecutive passes.
+    # rounds are ordered by `inserted_at` (bd-cmvmzl), so the two passes read
+    # as consecutive even though `round` restarts.
     test "a fix round's rounds do not interleave with the original pass's", %{conn: conn} do
       task_id = "bd-rest-fixround-#{System.unique_integer([:positive])}"
-
-      for round <- 1..2 do
-        insert_round!(%{
-          task_id: task_id,
-          round: round,
-          fix_round_attempt: 1,
-          verdict: :request_changes,
-          findings: "pass 2 round #{round}",
-          converged: false
-        })
-      end
 
       for round <- 1..2 do
         insert_round!(%{
@@ -118,6 +107,17 @@ defmodule ArbiterWeb.Api.ReviewGateRoundControllerTest do
           fix_round_attempt: 0,
           verdict: :request_changes,
           findings: "pass 1 round #{round}",
+          converged: false
+        })
+      end
+
+      for round <- 1..2 do
+        insert_round!(%{
+          task_id: task_id,
+          round: round,
+          fix_round_attempt: 1,
+          verdict: :request_changes,
+          findings: "pass 2 round #{round}",
           converged: false
         })
       end

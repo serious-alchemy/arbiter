@@ -36,10 +36,9 @@ defmodule Arbiter.ReviewGate.RoundsReport do
     all_rounds =
       Round
       |> Ash.Query.filter(task_id == ^task_id)
-      # bd-6d3h8m: sort on `fix_round_attempt` first — `round` restarts at 1
-      # on every automatic fix round's fresh gate, so sorting on `round`
-      # alone interleaves a fix round's rounds 1..N with the original pass's.
-      |> Ash.Query.sort(fix_round_attempt: :asc, round: :asc, inserted_at: :asc)
+      # bd-cmvmzl: order by time. `round` restarts at 1 on every fix round, so
+      # (fix_round_attempt, round) can put the newest row (and `limit`) wrong.
+      |> Ash.Query.sort(inserted_at: :asc, fix_round_attempt: :asc, round: :asc)
       |> Ash.read!()
 
     rounds = all_rounds |> take_last(limit) |> Enum.map(&serialize_round/1)
