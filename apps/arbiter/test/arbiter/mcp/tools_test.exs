@@ -3082,6 +3082,7 @@ defmodule Arbiter.MCP.ToolsTest do
       "nodes.fence_after_s": nil,
       "nodes.lost_after_s": nil,
       "nodes.registry": nil,
+      "nodes.registry.publish_timeout_ms": nil,
       "nodes.registry_username": nil,
       "nodes.registry_password": nil,
       "nodes.registry_insecure": nil,
