@@ -578,6 +578,41 @@ defmodule Arbiter.Nodes.SessionTest do
     end
   end
 
+  describe "stopping a run before its agent started" do
+    test "drops it from the node's runs so its slot is freed", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+      _task = Task.async(fn -> Session.assign(pid, "run1", %{"run" => "run1"}, owner, []) end)
+      assert_receive {:node_session, {:push, "assign", %{"run" => "run1"}}}
+
+      {:ok, _} =
+        Session.heartbeat(pid, %{"seq" => 1, "runs" => %{"run1" => %{"state" => "pending"}}})
+
+      assert %{runs: %{"run1" => _}} = Session.snapshot(node.id)
+
+      Session.cancel_run(pid, "run1", "stop")
+      assert_receive {:node_session, {:push, "cancel", %{"run" => "run1"}}}
+
+      assert %{runs: runs} = Session.snapshot(node.id)
+      refute Map.has_key?(runs, "run1")
+    end
+
+    test "keeps a run whose agent is already running", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+      task = Task.async(fn -> Session.assign(pid, "run1", %{"run" => "run1"}, owner, []) end)
+      assert_receive {:node_session, {:push, "assign", _}}
+      Session.node_event(pid, "run.ready", %{"run" => "run1"})
+      assert {:ok, _} = Task.await(task)
+
+      {:ok, _} =
+        Session.heartbeat(pid, %{"seq" => 1, "runs" => %{"run1" => %{"state" => "running"}}})
+
+      Session.cancel_run(pid, "run1", "stop")
+      assert %{runs: %{"run1" => _}} = Session.snapshot(node.id)
+    end
+  end
+
   describe "a run's owner going away" do
     setup %{node: node, clock: c} do
       {:ok, %{pid: pid}} = attach(node, c)
