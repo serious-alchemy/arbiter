@@ -182,7 +182,13 @@ defmodule Arbiter.Test.FakeK8sApi do
   def current_rv(api), do: GenServer.call(api, :rv)
 
   @doc "Appends a log line to a pod's log (timestamped by the server)."
-  def push_log(api, pod, text), do: GenServer.call(api, {:push_log, pod, text})
+  def push_log(api, pod, text), do: GenServer.call(api, {:push_log, pod, text, :utc})
+
+  @doc """
+  `push_log/3` stamped the way a kubelet in a local zone does (mesaana: `-04:00`), the same
+  instant as the UTC stamp.
+  """
+  def push_log_offset(api, pod, text), do: GenServer.call(api, {:push_log, pod, text, :offset})
 
   @doc "Ends every follower of `pod`'s log."
   def finish_logs(api, pod), do: GenServer.call(api, {:finish_logs, pod})
@@ -363,7 +369,7 @@ defmodule Arbiter.Test.FakeK8sApi do
 
       state =
         Enum.reduce(lines, state, fn text, acc ->
-          {:reply, _ts, acc} = handle_call({:push_log, name, text}, nil, acc)
+          {:reply, _ts, acc} = handle_call({:push_log, name, text, :utc}, nil, acc)
           acc
         end)
 
@@ -496,9 +502,16 @@ defmodule Arbiter.Test.FakeK8sApi do
     end
   end
 
-  def handle_call({:push_log, pod, text}, _from, state) do
+  def handle_call({:push_log, pod, text, zone}, _from, state) do
     n = length(Map.get(state.logs, pod, [])) + 1
-    ts = "2026-10-10T12:00:00." <> String.pad_leading(Integer.to_string(n), 9, "0") <> "Z"
+    frac = String.pad_leading(Integer.to_string(n), 9, "0")
+
+    ts =
+      case zone do
+        :utc -> "2026-10-10T12:00:00." <> frac <> "Z"
+        :offset -> "2026-10-10T08:00:00." <> frac <> "-04:00"
+      end
+
     for f <- Map.get(state.followers, pod, []), do: send(f, {:fake_log, ts, text})
 
     {:reply, ts,

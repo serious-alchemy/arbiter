@@ -341,6 +341,24 @@ defmodule Arbiter.NodeAgent.K8s.ControllerPrimaryDoneTest do
       assert Worker.state(pid).meta.done_seen == true
     end
 
+    test "a kubelet stamping with a local offset (-04:00) still completes the run: done",
+         env do
+      controller = start_controller(env)
+      run = running!(env, controller, 1)
+      %{pid: pid, handle: handle} = start_worker()
+      table = RunStreams.open(%RunStreams{}, run, handle, pid, nil)
+
+      FakeK8sApi.push_log_offset(env.api, pod_name(1), assistant("working"))
+      FakeK8sApi.push_log_offset(env.api, pod_name(1), assistant("All finished.\n\narb done"))
+      FakeK8sApi.push_log_offset(env.api, pod_name(1), result_event())
+      set_status(env, 1, exited_status(:complete))
+      observed(run, :exit)
+      _ = finish_run(controller, run, table)
+
+      assert %{state: :finished, outcome: :succeeded} = Worker.state(pid)
+      assert Worker.state(pid).meta.done_seen == true
+    end
+
     test "a run with no `arb done` anywhere is still exited_without_done", env do
       controller = start_controller(env)
       run = running!(env, controller, 1)
