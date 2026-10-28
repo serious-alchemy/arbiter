@@ -51,6 +51,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
       :server_version,
       :last_heartbeat_at,
       :live,
+      :holding,
       :max,
       :suggested,
       :override,

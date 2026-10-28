@@ -806,6 +806,10 @@ defmodule ArbiterCli.Cmd.Node do
 
   defp version_cell(n), do: dash(n["agent_version"])
 
+  defp live_max(%{"live" => live, "holding" => holding, "max" => max})
+       when is_integer(holding) and holding != live,
+       do: "#{live}/#{max || "?"} (#{holding} hold slots)"
+
   defp live_max(%{"live" => live, "max" => max}), do: "#{live}/#{max || "?"}"
   defp live_max(_), do: "-"
 
