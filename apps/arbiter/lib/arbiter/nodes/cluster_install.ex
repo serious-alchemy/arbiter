@@ -339,12 +339,17 @@ defmodule Arbiter.Nodes.ClusterInstall do
   @doc """
   The one command that moves a Helm-installed cluster node to chart `version` (KH8). Helm
   owns that Deployment, so `kubectl set image` on it would fight the release.
+
+  `--set image.tag=v<version>` is required: the values `arb node add --format values`
+  renders pin `image.tag`, and `--reset-then-reuse-values` keeps that pin, so without the
+  override the chart upgrades but the controller image stays on the old version. Pinning is
+  kept (reproducible installs); the override is the migration for existing installs.
   """
   @spec helm_upgrade_command(String.t(), String.t(), String.t(), String.t()) :: String.t()
   def helm_upgrade_command(release, chart, version, namespace),
     do:
       "helm upgrade #{release} #{chart} --version #{version} -n #{namespace} " <>
-        "--reset-then-reuse-values"
+        "--reset-then-reuse-values --set image.tag=v#{version}"
 
   @doc """
   KH13 (§20.10): one command per registry that names a pull secret, creating it with a
