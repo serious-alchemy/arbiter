@@ -640,7 +640,8 @@ defmodule Arbiter.Quota.Codex do
         url: url,
         method: :get,
         headers: headers,
-        receive_timeout: @request_timeout_ms
+        receive_timeout: @request_timeout_ms,
+        retry: false
       )
       |> maybe_stub()
 
