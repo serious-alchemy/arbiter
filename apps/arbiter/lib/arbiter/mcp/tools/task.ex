@@ -1124,6 +1124,12 @@ defmodule Arbiter.MCP.Tools.Task do
 
   # ---- dep_list -----------------------------------------------------------
 
+  @dep_list_default_limit 200
+  @dep_list_max_limit 500
+
+  @doc "Page size `dep_list` uses when no `limit` is given."
+  def dep_list_default_limit, do: @dep_list_default_limit
+
   @doc """
   List dependency edges in the scope's workspace. Coordinator or worker
   (bd-1defgu) — a worker with no `workspace` arg sees its own workspace's
@@ -1144,12 +1150,6 @@ defmodule Arbiter.MCP.Tools.Task do
   edge (`conflicts_with`) is never doubled — it appears once, from wherever
   you look at it.
   """
-  @dep_list_default_limit 200
-  @dep_list_max_limit 500
-
-  @doc "Page size `dep_list` uses when no `limit` is given."
-  def dep_list_default_limit, do: @dep_list_default_limit
-
   @spec dep_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def dep_list(%Scope{} = scope, args) do
     with {:ok, type} <- Tools.optional_enum(args, "type", Dependency.types()),
