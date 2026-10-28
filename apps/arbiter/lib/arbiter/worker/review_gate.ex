@@ -8264,6 +8264,11 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  # bd-dlvegd: the task's workspace standing orders, labelled, for the prompts
+  # that open a reviewer/implementer role ("" when the workspace has none).
+  defp standing_orders_section(state),
+    do: state |> Map.get(:workspace_id) |> load_workspace() |> Arbiter.StandingOrders.section()
+
   defp load_workspace(nil), do: nil
 
   defp load_workspace(ws_id) when is_binary(ws_id) do
@@ -8435,65 +8440,66 @@ defmodule Arbiter.Worker.ReviewGate do
   def review_prompt(state) do
     task = load_task(state.task_id)
 
-    """
-    You are a REVIEWER worker — a ReviewGate. You did NOT write this code; a
-    different worker did. Your job is to code-review its work before it merges.
-    You must reach an independent verdict — do not rubber-stamp.
+    standing_orders_section(state) <>
+      """
+      You are a REVIEWER worker — a ReviewGate. You did NOT write this code; a
+      different worker did. Your job is to code-review its work before it merges.
+      You must reach an independent verdict — do not rubber-stamp.
 
-    Task under review: #{state.task_id}
-    Title: #{task.title}
+      Task under review: #{state.task_id}
+      Title: #{task.title}
 
-    Description:
-    #{task.description}
+      Description:
+      #{task.description}
 
-    Acceptance criteria:
-    #{task.acceptance}
-    #{tracker_spec_block(task)}
-    The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`.
-    #{head_sha_instruction(state)}#{review_checkout_block(state)}
-    #{scope_guidance(state)}
-    Judge the change against the acceptance criteria AND for correctness,
-    regressions, and obvious defects.
+      Acceptance criteria:
+      #{task.acceptance}
+      #{tracker_spec_block(task)}
+      The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`.
+      #{head_sha_instruction(state)}#{review_checkout_block(state)}
+      #{scope_guidance(state)}
+      Judge the change against the acceptance criteria AND for correctness,
+      regressions, and obvious defects.
 
-    NOTE (bd-ofql8k): if the diff above looks empty, also run `git status` BEFORE
-    concluding "no code exists". An empty diff plus a non-empty `git status` means
-    the implementer edited files but forgot to commit — the work is in the
-    worktree, just not in history. In that case REQUEST_CHANGES with a finding
-    that names the uncommitted files and asks for a commit, rather than reporting
-    "no work."
+      NOTE (bd-ofql8k): if the diff above looks empty, also run `git status` BEFORE
+      concluding "no code exists". An empty diff plus a non-empty `git status` means
+      the implementer edited files but forgot to commit — the work is in the
+      worktree, just not in history. In that case REQUEST_CHANGES with a finding
+      that names the uncommitted files and asks for a commit, rather than reporting
+      "no work."
 
-    *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
-    no `mix run`. Running a second app instance is hazardous. You review the diff
-    by reading it — you do not run the application. (Reading files and running
-    `git` is fine.)
+      *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
+      no `mix run`. Running a second app instance is hazardous. You review the diff
+      by reading it — you do not run the application. (Reading files and running
+      `git` is fine.)
 
-    #{async_tool_block(state)}
+      #{async_tool_block(state)}
 
-    #{ci_prompt_block(state)}NOTE: If you run tests or any build command, wrap it with a hard timeout so
-    a cold compilation pass cannot exhaust the reviewer session — e.g.
-    `timeout 120 mix test`. If the command times out or fails to compile, issue
-    your VERDICT based on the diff alone and note that live test verification
-    was unavailable — do not wait indefinitely for output that will not arrive.
+      #{ci_prompt_block(state)}NOTE: If you run tests or any build command, wrap it with a hard timeout so
+      a cold compilation pass cannot exhaust the reviewer session — e.g.
+      `timeout 120 mix test`. If the command times out or fails to compile, issue
+      your VERDICT based on the diff alone and note that live test verification
+      was unavailable — do not wait indefinitely for output that will not arrive.
 
-    #{EvidenceIntegrity.reviewer_block()}
-    #{ReviewVerification.anti_stale_reflag_block()}
-    When you have decided, print your verdict on its own line, EXACTLY one of:
+      #{EvidenceIntegrity.reviewer_block()}
+      #{ReviewVerification.anti_stale_reflag_block()}
+      When you have decided, print your verdict on its own line, EXACTLY one of:
 
-        VERDICT: APPROVE
-        VERDICT: REQUEST_CHANGES
+          VERDICT: APPROVE
+          VERDICT: REQUEST_CHANGES
 
-    #{criteria_prompt_block(task)}If you REQUEST_CHANGES you MUST follow the verdict with an ENUMERATED list of
-    concrete findings — each with a severity, a `file:line` location, and a
-    suggested fix. A REQUEST_CHANGES verdict that names no findings is invalid and
-    will be rejected: the implementer would have nothing to act on. Output only
-    structured review content — no roleplay persona, character, or theatrical
-    flourish.
+      #{criteria_prompt_block(task)}If you REQUEST_CHANGES you MUST follow the verdict with an ENUMERATED list of
+      concrete findings — each with a severity, a `file:line` location, and a
+      suggested fix. A REQUEST_CHANGES verdict that names no findings is invalid and
+      will be rejected: the implementer would have nothing to act on. Output only
+      structured review content — no roleplay persona, character, or theatrical
+      flourish.
 
-    #{ReviewVerification.disclosure_block()}
-    Then print, on a line by itself:
+      #{ReviewVerification.disclosure_block()}
+      Then print, on a line by itself:
 
-        arb done
-    """
+          arb done
+      """
   end
 
   # A tracker-claimed ticket with no checklist or acceptance section carries the
@@ -8727,60 +8733,61 @@ defmodule Arbiter.Worker.ReviewGate do
       |> load_workspace()
       |> Arbiter.Agents.for_workspace()
 
-    """
-    You are an IMPLEMENTER worker. A reviewer (a ReviewGate) has reviewed the work
-    on branch `#{state.branch}` and REQUESTED CHANGES. Your job is to address each
-    finding so the work can pass review.
+    standing_orders_section(state) <>
+      """
+      You are an IMPLEMENTER worker. A reviewer (a ReviewGate) has reviewed the work
+      on branch `#{state.branch}` and REQUESTED CHANGES. Your job is to address each
+      finding so the work can pass review.
 
-    Task: #{state.task_id}
-    Title: #{task.title}
+      Task: #{state.task_id}
+      Title: #{task.title}
 
-    Description:
-    #{task.description}
+      Description:
+      #{task.description}
 
-    Acceptance criteria:
-    #{task.acceptance}
-    #{work_so_far_briefing(state)}
-    Reviewer findings (round #{state.round}):
-    #{clean_findings(findings)}
+      Acceptance criteria:
+      #{task.acceptance}
+      #{work_so_far_briefing(state)}
+      Reviewer findings (round #{state.round}):
+      #{clean_findings(findings)}
 
-    For EACH finding, do ONE of:
-      * FIX it — edit the code on branch `#{state.branch}` and COMMIT the change
-        (`git add -A && git commit -m "..."`), so the reviewer can see it in the
-        diff on re-review; or
-      * REBUT it — if you believe the finding is mistaken, leave the code as-is
-        and explain, concretely, why it is not a problem; or
-      * RESOLVE IT WITHOUT A FILE CHANGE — some findings are legitimately fixed
-        through something other than an edit to this branch (a PR title or
-        description via `gh pr edit`, a label, a comment reply). If that is
-        genuinely how you addressed a finding, say so and include, on its own
-        line, `NO-FILE-CHANGE: <finding> — <exactly what you changed and how>`.
-        Do not use this for anything you actually edited a file for, and do not
-        use it as a way to avoid a fix a finding actually calls for — the next
-        review round re-checks the live PR for real, so a false claim here will
-        be caught, not accepted.
+      For EACH finding, do ONE of:
+        * FIX it — edit the code on branch `#{state.branch}` and COMMIT the change
+          (`git add -A && git commit -m "..."`), so the reviewer can see it in the
+          diff on re-review; or
+        * REBUT it — if you believe the finding is mistaken, leave the code as-is
+          and explain, concretely, why it is not a problem; or
+        * RESOLVE IT WITHOUT A FILE CHANGE — some findings are legitimately fixed
+          through something other than an edit to this branch (a PR title or
+          description via `gh pr edit`, a label, a comment reply). If that is
+          genuinely how you addressed a finding, say so and include, on its own
+          line, `NO-FILE-CHANGE: <finding> — <exactly what you changed and how>`.
+          Do not use this for anything you actually edited a file for, and do not
+          use it as a way to avoid a fix a finding actually calls for — the next
+          review round re-checks the live PR for real, so a false claim here will
+          be caught, not accepted.
 
-    State clearly, for each finding, whether you FIXED, REBUTTED, or resolved it
-    without a file change, and why — your reply here is forwarded back to the
-    reviewer as your side of the record.
+      State clearly, for each finding, whether you FIXED, REBUTTED, or resolved it
+      without a file change, and why — your reply here is forwarded back to the
+      reviewer as your side of the record.
 
-    #{EvidenceIntegrity.worker_block()}#{revise_container_note(state)}
-    The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`:
+      #{EvidenceIntegrity.worker_block()}#{revise_container_note(state)}
+      The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`:
 
-        git diff #{state.target_branch}...HEAD
-        git log --oneline #{state.target_branch}..HEAD
+          git diff #{state.target_branch}...HEAD
+          git log --oneline #{state.target_branch}..HEAD
 
-    *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
-    no `mix run`. (Reading files, editing, and running `git` is fine.)
+      *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
+      no `mix run`. (Reading files, editing, and running `git` is fine.)
 
-    #{ci_flake_guidance(state)}
-    #{test_tool_section(adapter)}#{revise_gate_section(state, adapter)}
-    #{PromptBuilder.async_tools_section(adapter, "`arb done`", nil)}
+      #{ci_flake_guidance(state)}
+      #{test_tool_section(adapter)}#{revise_gate_section(state, adapter)}
+      #{PromptBuilder.async_tools_section(adapter, "`arb done`", nil)}
 
-    When you have addressed every finding, print, on a line by itself:
+      When you have addressed every finding, print, on a line by itself:
 
-        arb done
-    """
+          arb done
+      """
   end
 
   # bd-57nhsi: the authoring prompt steers to `run_tests` only when the session
@@ -9087,54 +9094,55 @@ defmodule Arbiter.Worker.ReviewGate do
   defp conflict_review_prompt(state, info) do
     task = load_task(state.task_id)
 
-    """
-    You are a REVIEWER worker — a ReviewGate running a SCOPED CONFLICT-RESOLUTION
-    REVIEW. You did NOT write this code and you did NOT resolve these conflicts.
+    standing_orders_section(state) <>
+      """
+      You are a REVIEWER worker — a ReviewGate running a SCOPED CONFLICT-RESOLUTION
+      REVIEW. You did NOT write this code and you did NOT resolve these conflicts.
 
-    Task: #{state.task_id}
-    Title: #{task.title}
+      Task: #{state.task_id}
+      Title: #{task.title}
 
-    Branch `#{state.branch}` was reviewed and APPROVED at commit `#{info.approved}`.
-    Since then `#{state.target_branch}` moved, and integrating it collided with the
-    approved change in the regions below. Someone resolved those collisions by hand;
-    the result is head `#{info.head}`.
+      Branch `#{state.branch}` was reviewed and APPROVED at commit `#{info.approved}`.
+      Since then `#{state.target_branch}` moved, and integrating it collided with the
+      approved change in the regions below. Someone resolved those collisions by hand;
+      the result is head `#{info.head}`.
 
-    Everything OUTSIDE these regions has been machine-verified: it is exactly the
-    approved change plus `#{state.target_branch}`'s own commits, byte for byte. Do
-    NOT review it, and do NOT raise findings about code outside the regions below.
-    #{head_sha_instruction(state)}#{review_checkout_block(state)}
-    The conflicted regions — the TARGET side, the BRANCH side (the approved change)
-    and the RESOLUTION chosen — are:
+      Everything OUTSIDE these regions has been machine-verified: it is exactly the
+      approved change plus `#{state.target_branch}`'s own commits, byte for byte. Do
+      NOT review it, and do NOT raise findings about code outside the regions below.
+      #{head_sha_instruction(state)}#{review_checkout_block(state)}
+      The conflicted regions — the TARGET side, the BRANCH side (the approved change)
+      and the RESOLUTION chosen — are:
 
-    #{ConflictResolution.render(info)}
-    Judge ONLY whether each RESOLUTION preserves the intent of BOTH sides, or breaks
-    something: does it drop a change either side made, apply one twice, keep a
-    name/signature/call the other side removed or renamed, or leave code that no
-    longer compiles or type-checks? You may read the surrounding code in your
-    checkout (`git show #{info.head}:<path>`) to judge, and the approved change with
-    `git diff #{info.base_old}..#{info.approved}`.
+      #{ConflictResolution.render(info)}
+      Judge ONLY whether each RESOLUTION preserves the intent of BOTH sides, or breaks
+      something: does it drop a change either side made, apply one twice, keep a
+      name/signature/call the other side removed or renamed, or leave code that no
+      longer compiles or type-checks? You may read the surrounding code in your
+      checkout (`git show #{info.head}:<path>`) to judge, and the approved change with
+      `git diff #{info.base_old}..#{info.approved}`.
 
-    *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
-    no `mix run`. (Reading files and running `git` is fine.)
+      *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
+      no `mix run`. (Reading files and running `git` is fine.)
 
-    #{async_tool_block(state)}
+      #{async_tool_block(state)}
 
-    #{ci_prompt_block(state)}#{EvidenceIntegrity.reviewer_block()}
-    When you have decided, print your verdict on its own line, EXACTLY one of:
+      #{ci_prompt_block(state)}#{EvidenceIntegrity.reviewer_block()}
+      When you have decided, print your verdict on its own line, EXACTLY one of:
 
-        VERDICT: APPROVE
-        VERDICT: REQUEST_CHANGES
+          VERDICT: APPROVE
+          VERDICT: REQUEST_CHANGES
 
-    APPROVE means every resolution preserves both sides' intent. If you
-    REQUEST_CHANGES you MUST follow the verdict with an ENUMERATED list of concrete
-    findings — each with a severity, a `file:line` location, and a suggested fix. No
-    CRITERIA breakdown is needed for this scoped review. Output only structured
-    review content — no roleplay persona, character, or theatrical flourish.
+      APPROVE means every resolution preserves both sides' intent. If you
+      REQUEST_CHANGES you MUST follow the verdict with an ENUMERATED list of concrete
+      findings — each with a severity, a `file:line` location, and a suggested fix. No
+      CRITERIA breakdown is needed for this scoped review. Output only structured
+      review content — no roleplay persona, character, or theatrical flourish.
 
-    Then print, on a line by itself:
+      Then print, on a line by itself:
 
-        arb done
-    """
+          arb done
+      """
   end
 
   # ---- P7: delta-scoped re-review (bd-60r6wp / #1738, §4.5) ----------------
