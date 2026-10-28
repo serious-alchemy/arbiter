@@ -5091,6 +5091,51 @@ defmodule Arbiter.Worker.DispatchTest do
       end
     end
 
+    # The first launch pre-assigns the session (`--session-id <uuid>`, stored on
+    # the run row); a later session resume needs no usage event or parsed
+    # output — it finds that id on the run and builds `--resume <same uuid>`.
+    test "resume_session/2 resumes the pre-assigned session id with no usage event", %{
+      ws: ws,
+      tmp: tmp
+    } do
+      argv_file = Path.join(tmp, "claude-preassigned-argv.txt")
+      :ok = stub_sleeping_on_path(tmp, "claude", argv_file)
+      {:ok, task} = Ash.create(Issue, %{title: "claude preassigned", workspace_id: ws.id})
+
+      {:ok, first} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "rs/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :claude,
+          preflight: false
+        )
+
+      first_args = wait_for_argv!(argv_file)
+      %{meta: %{session_id: sid}} = Worker.state(first.worker_pid)
+      assert {:ok, _} = Ecto.UUID.cast(sid)
+      assert Enum.at(first_args, Enum.find_index(first_args, &(&1 == "--session-id")) + 1) == sid
+      refute "--resume" in first_args
+
+      :ok = Worker.fail(first.worker_pid, :token_exhausted)
+
+      run_row = Ash.read!(Run) |> Enum.find(&(&1.task_id == task.id))
+      assert run_row.session_id == sid
+
+      config_dir = Path.join(tmp, "preassigned-config")
+      File.mkdir_p!(Path.join([config_dir, "projects", "-some-slug"]))
+      File.write!(Path.join([config_dir, "projects", "-some-slug", sid <> ".jsonl"]), "{}\n")
+      {:ok, _} = Ash.update(run_row, %{config_dir: config_dir}, action: :update)
+
+      File.rm!(argv_file)
+      assert {:ok, _} = Dispatch.resume_session(task.id, start_driver: false, preflight: false)
+
+      args = wait_for_argv!(argv_file)
+      assert Enum.at(args, Enum.find_index(args, &(&1 == "--resume")) + 1) == sid
+      refute "--session-id" in args
+    end
+
     # bd-33n9v4: the Reconciler's post-restart auto-resume continues the
     # interrupted Claude session (`--resume <sid>`) when its JSONL is anywhere
     # SessionHistory can find it (the interrupted run's live config dir here),

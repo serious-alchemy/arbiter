@@ -84,6 +84,44 @@ defmodule Arbiter.Agents.ClaudeTest do
       refute "--model" in rest
     end
 
+    test "pre-assigns the session with `--session-id <uuid>` (opts[:session_id] or fresh)" do
+      sid = Ecto.UUID.generate()
+      assert {:ok, argv} = Claude.default_argv("p", session_id: sid)
+      assert flag_value(argv, "--session-id") == sid
+      assert Claude.session_id_from_argv(argv) == sid
+
+      assert {:ok, a} = Claude.default_argv("p", [])
+      assert {:ok, b} = Claude.default_argv("p", [])
+      assert {:ok, _} = Ecto.UUID.cast(flag_value(a, "--session-id"))
+      refute flag_value(a, "--session-id") == flag_value(b, "--session-id")
+    end
+
+    test "resuming builds `--resume <same uuid>` and drops `--session-id`" do
+      sid = Ecto.UUID.generate()
+      {:ok, argv} = Claude.default_argv("p", session_id: sid)
+
+      {:ok, resumed} = Claude.splice_prompt(argv, ["--resume", sid, "continue"])
+      assert flag_value(resumed, "--resume") == sid
+      refute "--session-id" in resumed
+      assert Claude.session_id_from_argv(resumed) == sid
+    end
+
+    test "an already nudged/resumed argv can be spliced again, keeping --resume <sid>" do
+      sid = Ecto.UUID.generate()
+      {:ok, argv} = Claude.default_argv("p", session_id: sid)
+
+      {:ok, nudged} = Claude.splice_prompt(argv, ["nudge1"])
+      assert {:ok, nudged2} = Claude.splice_prompt(nudged, ["nudge2"])
+      assert ["--resume", ^sid, "nudge2" | flags] = after_print(nudged2)
+      refute "nudge1" in nudged2
+      refute "--session-id" in nudged2
+      refute "--resume" in flags
+
+      assert {:ok, resumed} = Claude.splice_prompt(nudged, ["--resume", sid, "go"])
+      assert ["--resume", ^sid, "go" | _] = after_print(resumed)
+      assert Enum.count(resumed, &(&1 == sid)) == 1
+    end
+
     test "passes through `:model` opt as `--model <name>`", %{stub: stub} do
       assert {:ok, argv} = Claude.default_argv("the prompt", model: "opus")
       assert ["sh", "-c", _exec, "sh", ^stub, "--print", "the prompt" | rest] = argv
@@ -231,12 +269,16 @@ defmodule Arbiter.Agents.ClaudeTest do
 
     test "sandbox_wrap does not change what bwrap resolves" do
       assert {:ok, plain} =
-               Claude.default_argv("p", security: Arbiter.Agents.SecurityPolicy.base())
+               Claude.default_argv("p",
+                 security: Arbiter.Agents.SecurityPolicy.base(),
+                 session_id: "sid-1"
+               )
 
       assert {:ok, wrapped} =
                Claude.default_argv("p",
                  security: Arbiter.Agents.SecurityPolicy.base(),
-                 sandbox_wrap: true
+                 sandbox_wrap: true,
+                 session_id: "sid-1"
                )
 
       assert plain == wrapped
@@ -537,6 +579,15 @@ defmodule Arbiter.Agents.ClaudeTest do
       session = Claude.init_session([])
       attrs = Claude.usage_attrs(session)
       assert attrs.provider == "claude"
+    end
+  end
+
+  defp after_print(argv), do: argv |> Enum.drop_while(&(&1 != "--print")) |> tl()
+
+  defp flag_value(argv, flag) do
+    case Enum.find_index(argv, &(&1 == flag)) do
+      nil -> nil
+      i -> Enum.at(argv, i + 1)
     end
   end
 end

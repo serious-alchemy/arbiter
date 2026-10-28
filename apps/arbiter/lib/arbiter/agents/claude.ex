@@ -130,9 +130,41 @@ defmodule Arbiter.Agents.Claude do
           Security.permission_argv(policy) ++
           Security.settings_argv(policy) ++
           mcp_config_flag(opts) ++
+          session_id_flag(opts) ++
           stream_flags()
 
       build_argv(claude, prompt, flags)
+    end
+  end
+
+  # Pre-assign the CLI session: `--session-id <uuid>` names the conversation up
+  # front, so a resume never depends on parsing the id back out of the stream
+  # (an early crash or truncated stream would leave it unknown). The caller may
+  # supply `opts[:session_id]`; otherwise a fresh UUID is generated.
+  defp session_id_flag(opts) do
+    id =
+      case Keyword.get(opts, :session_id) do
+        id when is_binary(id) and id != "" -> id
+        _ -> Ecto.UUID.generate()
+      end
+
+    ["--session-id", id]
+  end
+
+  @doc """
+  The session id an argv names: the value after `--resume` (a resume argv) or
+  `--session-id` (a first launch), else `nil`. A resume argv carries no
+  `--session-id` (see `splice_prompt/2`), so there is at most one.
+  """
+  @spec session_id_from_argv([String.t()]) :: String.t() | nil
+  def session_id_from_argv(argv) when is_list(argv) do
+    flag_value(argv, "--resume") || flag_value(argv, "--session-id")
+  end
+
+  defp flag_value(argv, flag) do
+    case Enum.find_index(argv, &(&1 == flag)) do
+      nil -> nil
+      i -> Enum.at(argv, i + 1) |> then(&if(is_binary(&1), do: &1, else: nil))
     end
   end
 
@@ -225,15 +257,38 @@ defmodule Arbiter.Agents.Claude do
 
       idx ->
         {head, [print | tail]} = Enum.split(argv, idx)
+        {tmpfile?, head} = pop_tmpfile_positional(head)
+        {sid, flags} = split_session(tail, tmpfile?)
 
-        case pop_tmpfile_positional(head) do
-          {true, head} ->
-            head = List.replace_at(head, 2, @inline_prompt_script)
-            {:ok, head ++ [print] ++ insert ++ tail}
+        insert =
+          if sid && "--resume" not in insert, do: ["--resume", sid | insert], else: insert
 
-          {false, head} ->
-            {:ok, head ++ [print] ++ insert ++ drop_first(tail)}
-        end
+        head = if tmpfile?, do: List.replace_at(head, 2, @inline_prompt_script), else: head
+        {:ok, head ++ [print] ++ insert ++ flags}
+    end
+  end
+
+  # `claude` refuses `--session-id` alongside `--resume`, and reusing a
+  # session id for a fresh run is refused as "already in use". So the
+  # first-launch flag is always dropped; a bare prompt swap (nudge) of a
+  # pre-assigned argv continues that session via `--resume`.
+  #
+  # Mode B has no inline prompt in `tail`; mode A has `<prompt> flags...`
+  # or, for an already nudged/resumed argv, `--resume <sid> <prompt> flags...`.
+  defp split_session(tail, tmpfile?) do
+    {prefix_sid, flags} = if tmpfile?, do: {nil, tail}, else: strip_prompt(tail)
+    sid = prefix_sid || flag_value(flags, "--session-id") || flag_value(flags, "--resume")
+    {sid, flags |> drop_flag_pair("--session-id") |> drop_flag_pair("--resume")}
+  end
+
+  defp strip_prompt(["--resume", sid, _old_prompt | rest]), do: {sid, rest}
+  defp strip_prompt([_old_prompt | rest]), do: {nil, rest}
+  defp strip_prompt([]), do: {nil, []}
+
+  defp drop_flag_pair(list, flag) do
+    case Enum.find_index(list, &(&1 == flag)) do
+      nil -> list
+      i -> List.delete_at(List.delete_at(list, i), i)
     end
   end
 
@@ -248,9 +303,6 @@ defmodule Arbiter.Agents.Claude do
   end
 
   defp tmpfile_path?(path), do: Path.basename(path) |> String.starts_with?(@prompt_tmp_prefix)
-
-  defp drop_first([_ | rest]), do: rest
-  defp drop_first([]), do: []
 
   # The resolved `Arbiter.Agents.SecurityPolicy` for this spawn. Threaded in by
   # the caller (Dispatch / ReviewGate resolve it from the workspace); falls back to

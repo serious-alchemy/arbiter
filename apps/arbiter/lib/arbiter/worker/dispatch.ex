@@ -1512,10 +1512,29 @@ defmodule Arbiter.Worker.Dispatch do
         {:ok, sid, safe_provider_atom(p)}
 
       _ ->
-        {:error, :no_session}
+        latest_run_session_id(task_id)
     end
   rescue
     _ -> {:error, :no_session}
+  end
+
+  # A run pre-assigns its Claude session id and stores it on the run row before
+  # spawning, so a run that died before the stream reported anything (no usage
+  # event) is still resumable.
+  defp latest_run_session_id(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id and not is_nil(session_id))
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+    |> case do
+      %Run{session_id: sid, provider: p} when is_binary(sid) and sid != "" ->
+        {:ok, sid, safe_provider_atom(p)}
+
+      _ ->
+        {:error, :no_session}
+    end
   end
 
   defp safe_provider_atom(p) when is_binary(p) do

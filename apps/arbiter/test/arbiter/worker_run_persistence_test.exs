@@ -869,6 +869,76 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert run.config_dir == later_home
   end
 
+  describe "pre-assigned Claude session id" do
+    import ExUnit.CaptureLog
+
+    defp start_worker(prefix) do
+      task_id = "bd-#{prefix}-#{System.unique_integer([:positive])}"
+      {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      {task_id, pid}
+    end
+
+    test "run row stores the argv's --session-id though the process never prints one" do
+      {task_id, pid} = start_worker("preassign")
+      sid = Ecto.UUID.generate()
+
+      # The process prints nothing (simulated early crash), so only the
+      # pre-assigned id can be on the row.
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: System.tmp_dir!(),
+          command: ["sh", "-c", "sleep 30", "sh", "--session-id", sid]
+        )
+
+      assert [%{session_id: ^sid}] = runs_for(task_id)
+      assert %{meta: %{session_id: ^sid}} = Worker.state(pid)
+    end
+
+    test "a different id reported in output is logged and the pre-assigned one is kept" do
+      {task_id, pid} = start_worker("mismatch")
+      sid = Ecto.UUID.generate()
+      other = Ecto.UUID.generate()
+
+      events =
+        Path.join(System.tmp_dir!(), "mismatch-#{System.unique_integer([:positive])}.jsonl")
+
+      File.write!(
+        events,
+        Jason.encode!(%{
+          "type" => "system",
+          "subtype" => "init",
+          "model" => "claude-haiku-4-5",
+          "session_id" => other
+        }) <> "\n"
+      )
+
+      on_exit(fn -> File.rm(events) end)
+
+      log =
+        capture_log([level: :warning], fn ->
+          {:ok, _port} =
+            ClaudeSession.start(
+              owner: pid,
+              worktree_path: System.tmp_dir!(),
+              command: ["sh", "-c", ~s(cat "$1"), "sh", events, "--session-id", sid]
+            )
+
+          :ok =
+            wait_until(
+              fn -> match?(%{meta: %{model: "claude-haiku-4-5"}}, Worker.state(pid)) end,
+              2000
+            )
+        end)
+
+      assert log =~ "session id mismatch"
+      assert log =~ sid and log =~ other
+      assert [%{session_id: ^sid}] = runs_for(task_id)
+      assert %{meta: %{session_id: ^sid}} = Worker.state(pid)
+    end
+  end
+
   defp wait_until(fun, timeout_ms \\ 500, step_ms \\ 20) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait(fun, deadline, step_ms)
