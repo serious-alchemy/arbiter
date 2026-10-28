@@ -1124,6 +1124,12 @@ defmodule Arbiter.MCP.Tools.Task do
 
   # ---- dep_list -----------------------------------------------------------
 
+  @dep_list_default_limit 200
+  @dep_list_max_limit 500
+
+  @doc "Page size `dep_list` uses when no `limit` is given."
+  def dep_list_default_limit, do: @dep_list_default_limit
+
   @doc """
   List dependency edges in the scope's workspace. Coordinator or worker
   (bd-1defgu) — a worker with no `workspace` arg sees its own workspace's
@@ -1136,44 +1142,66 @@ defmodule Arbiter.MCP.Tools.Task do
   must resolve inside the same workspace-authorization the scope already
   has — a cross-workspace `issue_id` is not-found, not leaked).
 
-  Routed through `Arbiter.Tasks.Dependencies.list/1` (bd-1defgu): a symmetric
+  Paginated (bd-a1ar6n): at most `limit` edges per call (default 200, max 500),
+  oldest first; when more remain the result carries `next_cursor` — pass it back
+  as `cursor` for the next page.
+
+  Routed through `Arbiter.Tasks.Dependencies.list_page/1` (bd-1defgu): a symmetric
   edge (`conflicts_with`) is never doubled — it appears once, from wherever
   you look at it.
   """
   @spec dep_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def dep_list(%Scope{} = scope, args) do
-    with {:ok, type} <- Tools.optional_enum(args, "type", Dependency.types()) do
+    with {:ok, type} <- Tools.optional_enum(args, "type", Dependency.types()),
+         {:ok, page_opts} <- dep_list_page_opts(args) do
       case Tools.fetch_string(args, "issue_id") do
-        nil -> dep_list_workspace(scope, args, type)
-        issue_id -> dep_list_issue(scope, args, issue_id, type)
+        nil -> dep_list_workspace(scope, args, type, page_opts)
+        issue_id -> dep_list_issue(scope, args, issue_id, type, page_opts)
       end
     end
   end
 
-  defp dep_list_workspace(scope, args, type) do
-    with {:ok, ws_id} <- Tools.authorized_workspace(scope, args),
-         {:ok, rows} <- list_edges(workspace_id: ws_id, type: type) do
-      {:ok, Map.put(serialize_dep_list(rows), :workspace_id, ws_id)}
+  defp dep_list_page_opts(args) do
+    with {:ok, limit} <- Tools.optional_integer(args, "limit"),
+         :ok <- validate_dep_limit(limit) do
+      {:ok,
+       [
+         limit: min(limit || @dep_list_default_limit, @dep_list_max_limit),
+         cursor: Tools.fetch_string(args, "cursor")
+       ]}
     end
   end
 
-  defp dep_list_issue(scope, args, issue_id, type) do
+  defp validate_dep_limit(nil), do: :ok
+  defp validate_dep_limit(n) when n >= 1, do: :ok
+  defp validate_dep_limit(_), do: {:error, {:invalid, "`limit` must be a positive integer"}}
+
+  defp dep_list_workspace(scope, args, type, page_opts) do
+    with {:ok, ws_id} <- Tools.authorized_workspace(scope, args),
+         {:ok, rows, next} <- list_edges([workspace_id: ws_id, type: type] ++ page_opts) do
+      {:ok, Map.put(serialize_dep_list(rows, next), :workspace_id, ws_id)}
+    end
+  end
+
+  defp dep_list_issue(scope, args, issue_id, type, page_opts) do
     with {:ok, _issue} <- Tools.fetch_task(scope, args, issue_id),
-         {:ok, rows} <- list_edges(issue_id: issue_id, type: type) do
-      {:ok, serialize_dep_list(rows)}
+         {:ok, rows, next} <- list_edges([issue_id: issue_id, type: type] ++ page_opts) do
+      {:ok, serialize_dep_list(rows, next)}
     end
   end
 
   defp list_edges(opts) do
-    case Dependencies.list(opts) do
-      {:ok, rows} -> {:ok, rows}
+    case Dependencies.list_page(opts) do
+      {:ok, rows, next} -> {:ok, rows, next}
+      {:error, {:invalid_cursor, msg}} -> {:error, {:invalid, msg}}
       {:error, reason} -> Tools.dependency_error(reason)
     end
   end
 
-  defp serialize_dep_list(rows) do
+  defp serialize_dep_list(rows, next_cursor) do
     deps = Enum.map(rows, &Tools.serialize_dependency_edge/1)
-    %{dependencies: deps, count: length(deps)}
+    base = %{dependencies: deps, count: length(deps)}
+    if next_cursor, do: Map.put(base, :next_cursor, next_cursor), else: base
   end
 
   # Load the child-progress rollup calcs for a task so the serializer can emit

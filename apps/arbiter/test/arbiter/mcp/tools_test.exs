@@ -1769,6 +1769,80 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "dep_list/2 at scale (bd-a1ar6n)" do
+    # 1,100 edges is past SQLite's expression-tree depth limit (1000) for the
+    # `id = ? OR id = ? …` chain Ash emits when loading a relationship over the set.
+    setup ctx do
+      inputs = for i <- 1..1100, do: %{title: "fan-#{i}", workspace_id: ctx.ws.id}
+
+      %{records: issues} =
+        Ash.bulk_create!(inputs, Issue, :create, return_records?: true, return_errors?: true)
+
+      now = DateTime.utc_now()
+
+      rows =
+        issues
+        |> Enum.with_index()
+        |> Enum.map(fn {i, n} ->
+          %{
+            id: Ash.UUIDv7.generate(),
+            from_issue_id: ctx.task.id,
+            to_issue_id: i.id,
+            type: "relates_to",
+            notes: "",
+            created_at: DateTime.add(now, n, :millisecond),
+            updated_at: now
+          }
+        end)
+
+      {1100, _} = Arbiter.Repo.insert_all("dependencies", rows)
+      :ok
+    end
+
+    test "Dependencies.list/1 loads endpoints for >1,000 edges", ctx do
+      assert {:ok, rows} = Arbiter.Tasks.Dependencies.list(workspace_id: ctx.ws.id)
+      assert length(rows) == 1100
+      assert Enum.all?(rows, &(&1.from.id == ctx.task.id and is_binary(&1.to.title)))
+    end
+
+    test "dep_list with no filter returns a bounded page and a cursor", ctx do
+      assert {:ok, %{dependencies: deps, count: count, next_cursor: cursor}} =
+               Tools.dep_list(ctx.coordinator, %{"workspace" => ctx.ws.id})
+
+      assert count == length(deps)
+      assert count == Tools.dep_list_default_limit()
+      assert is_binary(cursor)
+    end
+
+    test "cursor pages cover every edge exactly once", ctx do
+      ids = page_all(ctx, %{"workspace" => ctx.ws.id, "limit" => 500}, nil, [])
+      assert length(ids) == 1100
+      assert length(Enum.uniq(ids)) == 1100
+    end
+
+    test "limit is capped and validated", ctx do
+      assert {:ok, %{count: 500}} =
+               Tools.dep_list(ctx.coordinator, %{"workspace" => ctx.ws.id, "limit" => 100_000})
+
+      assert {:error, {:invalid, _}} =
+               Tools.dep_list(ctx.coordinator, %{"workspace" => ctx.ws.id, "limit" => 0})
+
+      assert {:error, {:invalid, _}} =
+               Tools.dep_list(ctx.coordinator, %{"workspace" => ctx.ws.id, "cursor" => "junk"})
+    end
+
+    defp page_all(ctx, args, cursor, acc) do
+      args = if cursor, do: Map.put(args, "cursor", cursor), else: args
+      {:ok, page} = Tools.dep_list(ctx.coordinator, args)
+      acc = acc ++ Enum.map(page.dependencies, & &1.id)
+
+      case page[:next_cursor] do
+        nil -> acc
+        next -> page_all(ctx, args, next, acc)
+      end
+    end
+  end
+
   describe "parent/child grouping via dep_add parent_of + auto_close" do
     test "ticket_create accepts auto_close and task_update can toggle it", ctx do
       assert {:ok, parent} =
