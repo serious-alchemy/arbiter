@@ -3684,6 +3684,13 @@ defmodule Arbiter.Worker do
       run_signalled_done?(state) ->
         on_claude_done(state)
 
+      # A Codex run that exited 0 after echoing `arb done` through its last
+      # shell command: the sentinel never reached the agent's message text, but
+      # the run did finish. on_claude_done/1's commit gate still requires a
+      # clean tree with commits ahead, so unfinished work is nudged, not merged.
+      classify_stop(session).category == :sentinel_in_tool_output ->
+        on_claude_done(state)
+
       # bd-2da6ay: a non-reviewable no-PR (`task`/`research`) worker whose subprocess
       # exited cleanly (status 0) at wrap-up without ever printing `arb
       # done`. Its deliverable is a findings summary in `notes`, NOT a
