@@ -4,7 +4,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
   deployed, timed-out rollback, and post-restart version-mismatch rollback.
   """
 
-  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.ReleaseDeploy.ReleaseFiles, Cmd.Start, Output}
+  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Start, Output}
+  alias ArbiterCli.Cmd.ReleaseDeploy.{OutdatedNodes, ReleaseFiles}
 
   def emit_already_current(:json, tag) do
     Output.emit_json(%{
@@ -412,11 +413,16 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
       release_repo: extras[:release_repo],
       release_repo_source: extras[:release_repo_source],
       backup: extras[:backup] && Map.take(extras[:backup], [:path, :bytes]),
-      cli_update: extras[:cli_update]
+      cli_update: extras[:cli_update],
+      outdated_nodes: extras[:outdated_nodes]
     }
   end
 
   defp extras_text(extras) do
+    if text = OutdatedNodes.text(extras[:outdated_nodes] || [], extras[:tag] || "") do
+      IO.puts(text)
+    end
+
     if repo = extras[:release_repo] do
       IO.puts("Release source: #{repo} (#{extras[:release_repo_source_text]})")
     end

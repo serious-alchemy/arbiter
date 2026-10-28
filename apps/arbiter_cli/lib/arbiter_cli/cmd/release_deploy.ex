@@ -181,7 +181,17 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
   alias ArbiterCli.ArgParser
   alias ArbiterCli.{Cmd.Doctor, Cmd.InstallService, Cmd.Restart, Cmd.Start}
-  alias ArbiterCli.Cmd.ReleaseDeploy.{Backup, Formatter, Github, HostCheck, ReleaseFiles, Status}
+
+  alias ArbiterCli.Cmd.ReleaseDeploy.{
+    Backup,
+    Formatter,
+    Github,
+    HostCheck,
+    OutdatedNodes,
+    ReleaseFiles,
+    Status
+  }
+
   alias ArbiterCli.{Cmd.SelfUpdate, Output, ReleaseRepo}
 
   @default_timeout_s 60
@@ -494,7 +504,12 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     Backup.prune(Backup.snapshots_dir(), ctx.backup && ctx.backup.path)
 
     cli_update = self_update_cli(ctx)
-    extras = Map.put(ctx.extras, :cli_update, cli_update)
+
+    extras =
+      ctx.extras
+      |> Map.put(:cli_update, cli_update)
+      |> Map.put(:tag, ctx.tag)
+      |> Map.put(:outdated_nodes, OutdatedNodes.fetch(ctx.tag))
 
     Status.finish("succeeded", %{
       backup_path: ctx.backup && ctx.backup.path,
