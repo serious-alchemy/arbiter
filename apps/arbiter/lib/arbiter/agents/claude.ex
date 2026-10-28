@@ -261,22 +261,25 @@ defmodule Arbiter.Agents.Claude do
         # session id for a fresh run is refused as "already in use". So the
         # first-launch flag is always dropped; a bare prompt swap (nudge) of a
         # pre-assigned argv continues that session via `--resume`.
-        sid = flag_value(tail, "--session-id")
-        tail = drop_flag_pair(tail, "--session-id")
+        {tmpfile?, head} = pop_tmpfile_positional(head)
+
+        # Mode B has no inline prompt in `tail`; mode A has `<prompt> flags...`
+        # or, for an already nudged/resumed argv, `--resume <sid> <prompt> flags...`.
+        {prefix_sid, flags} = if tmpfile?, do: {nil, tail}, else: strip_prompt(tail)
+        sid = prefix_sid || flag_value(flags, "--session-id") || flag_value(flags, "--resume")
+        flags = flags |> drop_flag_pair("--session-id") |> drop_flag_pair("--resume")
 
         insert =
           if sid && "--resume" not in insert, do: ["--resume", sid | insert], else: insert
 
-        case pop_tmpfile_positional(head) do
-          {true, head} ->
-            head = List.replace_at(head, 2, @inline_prompt_script)
-            {:ok, head ++ [print] ++ insert ++ tail}
-
-          {false, head} ->
-            {:ok, head ++ [print] ++ insert ++ drop_first(tail)}
-        end
+        head = if tmpfile?, do: List.replace_at(head, 2, @inline_prompt_script), else: head
+        {:ok, head ++ [print] ++ insert ++ flags}
     end
   end
+
+  defp strip_prompt(["--resume", sid, _old_prompt | rest]), do: {sid, rest}
+  defp strip_prompt([_old_prompt | rest]), do: {nil, rest}
+  defp strip_prompt([]), do: {nil, []}
 
   defp drop_flag_pair(list, flag) do
     case Enum.find_index(list, &(&1 == flag)) do
@@ -296,9 +299,6 @@ defmodule Arbiter.Agents.Claude do
   end
 
   defp tmpfile_path?(path), do: Path.basename(path) |> String.starts_with?(@prompt_tmp_prefix)
-
-  defp drop_first([_ | rest]), do: rest
-  defp drop_first([]), do: []
 
   # The resolved `Arbiter.Agents.SecurityPolicy` for this spawn. Threaded in by
   # the caller (Dispatch / ReviewGate resolve it from the workspace); falls back to

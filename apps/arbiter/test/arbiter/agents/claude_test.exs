@@ -106,6 +106,22 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert Claude.session_id_from_argv(resumed) == sid
     end
 
+    test "an already nudged/resumed argv can be spliced again, keeping --resume <sid>" do
+      sid = Ecto.UUID.generate()
+      {:ok, argv} = Claude.default_argv("p", session_id: sid)
+
+      {:ok, nudged} = Claude.splice_prompt(argv, ["nudge1"])
+      assert {:ok, nudged2} = Claude.splice_prompt(nudged, ["nudge2"])
+      assert ["--resume", ^sid, "nudge2" | flags] = after_print(nudged2)
+      refute "nudge1" in nudged2
+      refute "--session-id" in nudged2
+      refute "--resume" in flags
+
+      assert {:ok, resumed} = Claude.splice_prompt(nudged, ["--resume", sid, "go"])
+      assert ["--resume", ^sid, "go" | _] = after_print(resumed)
+      assert Enum.count(resumed, &(&1 == sid)) == 1
+    end
+
     test "passes through `:model` opt as `--model <name>`", %{stub: stub} do
       assert {:ok, argv} = Claude.default_argv("the prompt", model: "opus")
       assert ["sh", "-c", _exec, "sh", ^stub, "--print", "the prompt" | rest] = argv
@@ -565,6 +581,8 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert attrs.provider == "claude"
     end
   end
+
+  defp after_print(argv), do: argv |> Enum.drop_while(&(&1 != "--print")) |> tl()
 
   defp flag_value(argv, flag) do
     case Enum.find_index(argv, &(&1 == flag)) do
