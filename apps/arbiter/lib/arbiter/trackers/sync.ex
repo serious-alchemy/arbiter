@@ -740,7 +740,7 @@ defmodule Arbiter.Trackers.Sync do
     end
   end
 
-  defp resolve_sync_escalations(%Issue{id: id} = issue) do
+  defp resolve_sync_escalations(%Issue{id: id}) do
     Message
     |> Ash.Query.filter(
       task_ref == ^id and kind == :escalation and escalation_kind == :tracker_sync_failed and
@@ -749,7 +749,11 @@ defmodule Arbiter.Trackers.Sync do
     |> Ash.read!()
     |> Enum.each(&Ash.update(&1, %{}, action: :resolve))
 
-    if issue.attention_cause == :tracker_sync, do: Attention.clear(id, :sync_retried)
+    case Ash.get(Issue, id) do
+      {:ok, %Issue{attention_cause: :tracker_sync_failed}} -> Attention.clear(id, :sync_retried)
+      _ -> :ok
+    end
+
     :ok
   rescue
     e ->

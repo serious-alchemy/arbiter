@@ -1380,6 +1380,7 @@ defmodule Arbiter.Trackers.SyncTest do
       assert path =~ "/issue/#{@ref}/transitions"
 
       assert [] = Enum.reject(escalations_for(ws.id), & &1.cleared_at)
+      assert Ash.get!(Issue, issue.id).attention_cause == nil
     end
   end
 end

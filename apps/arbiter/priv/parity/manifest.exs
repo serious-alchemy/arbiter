@@ -240,6 +240,18 @@
       status: :full
     },
     %{
+      id: "tickets/retry_lifecycle_sync_one_ticket",
+      title: "Retry one ticket's tracker lifecycle sync (e.g. pr_opened)",
+      mcp: ["ticket_sync_lifecycle"],
+      cli: nil,
+      rest: nil,
+      status: :full,
+      absent: %{
+        cli: {:intentional, "Recovery step named in the tracker-sync escalation; MCP-only like the other per-ticket sync tools."},
+        rest: {:intentional, "MCP-only recovery step; no REST consumer."}
+      }
+    },
+    %{
       id: "tickets/add_dependency_edge",
       title: "Add dependency edge",
       mcp: ["dep_add"],
