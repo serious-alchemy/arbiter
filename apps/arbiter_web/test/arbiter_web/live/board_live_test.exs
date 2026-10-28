@@ -789,6 +789,23 @@ defmodule ArbiterWeb.BoardLiveTest do
       refute has_element?(view, ~s(#{card} [data-detail="in_progress"]), "held: local capacity")
     end
 
+    # bd-5u99ki
+    test "a local card shows why remote capacity was skipped", %{conn: conn, ws: ws} do
+      task = issue(ws, "outdated node skipped")
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+      note = "remote skipped: mesaana outdated (0.2.88 < 0.2.90)"
+
+      :ok =
+        Worker.report(pid, :routing_decision, %{"placement" => %{"remote_skipped" => note}})
+
+      {:ok, view, _html} = live_board(conn)
+
+      assert has_element?(
+               view,
+               ~s(#board-column-in_progress [id="card-#{task.id}"] [data-remote-skipped="#{note}"])
+             )
+    end
+
     test "a local run's card has no node badge", %{conn: conn, ws: ws} do
       task = issue(ws, "work on the primary")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)

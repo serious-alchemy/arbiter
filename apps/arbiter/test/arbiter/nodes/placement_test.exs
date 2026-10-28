@@ -260,6 +260,23 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:ok, {:node, %{name: "busy"}}} = place(%{mode: :remote_only}, rows)
     end
 
+    test "prefer_remote records the outdated nodes that were skipped when it falls back to local" do
+      rows = [
+        row("mesaana", health: :outdated, agent_version: "0.2.88", server_version: "0.2.90"),
+        row("busy", live: 2)
+      ]
+
+      assert {:ok, {:local, {:node_outdated, [skipped]}}} = place(%{}, rows)
+      assert skipped == %{name: "mesaana", version: "0.2.88", server_version: "0.2.90"}
+
+      assert Placement.skipped_phrase([skipped]) ==
+               "remote skipped: mesaana outdated (0.2.88 < 0.2.90)"
+    end
+
+    test "an outdated node does not change the reason when a ready node is merely full" do
+      assert {:ok, {:local, :no_node}} = place(%{}, [row("full", live: 2)])
+    end
+
     test "prefer_remote skips a constrained node and runs locally when nothing else can take it" do
       assert {:ok, {:local, :no_node}} = place(%{}, [row("a", constrained?: true)])
     end

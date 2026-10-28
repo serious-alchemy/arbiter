@@ -429,6 +429,36 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
         @podman ++ extra
     end
 
+    # bd-5u99ki: an outdated controller silently gets no work; the run says so.
+    test "prefer_remote's fallback because every node is outdated is recorded on the routing decision" do
+      ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
+      issue = ready!(ws, "prefer remote, node outdated")
+
+      row = %{
+        id: "n-old",
+        name: "mesaana",
+        state: :online,
+        health: :outdated,
+        agent_version: "0.2.88",
+        server_version: "0.2.90",
+        max: 5,
+        live: 0,
+        workspace_ids: [],
+        labels: [],
+        caps: %{}
+      }
+
+      assert {:ok, %{worker_pid: _pid}} = dispatch(issue, @podman ++ [nodes: [row]])
+
+      assert %{
+               "placement" => %{
+                 "remote_skipped" => "remote skipped: mesaana outdated (0.2.88 < 0.2.90)",
+                 "fell_back_to" => "primary",
+                 "mode" => "prefer_remote"
+               }
+             } = latest_run(issue.id).routing_decision
+    end
+
     test "prefer_remote falls back to the primary and releases the node slot" do
       ws = workspace!(%{"worker" => %{"placement" => "prefer_remote"}})
       issue = ready!(ws, "prefer remote, image timed out")

@@ -2509,6 +2509,26 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     health = n["health"]
     ok? = state in ["online", "draining"] and health in [nil, "ready"]
 
+    if state in ["online", "draining", "suspect"] and health == "outdated",
+      do: outdated_result(n),
+      else: node_result(n, state, health, ok?)
+  end
+
+  # An outdated node is excluded from placement: say who, which versions, and how to fix it.
+  defp outdated_result(n) do
+    name = n["name"]
+    cmd = n["upgrade_command"] || "arb node upgrade #{name}"
+
+    nodes_result(
+      "node #{name}: outdated",
+      :warn,
+      "#{name} is at v#{n["agent_version"] || "?"}, behind this server's v#{n["server_version"] || "?"}: " <>
+        "no work is placed on it until it is upgraded",
+      "Run: #{cmd}"
+    )
+  end
+
+  defp node_result(n, state, health, ok?) do
     nodes_result(
       "node #{n["name"]}",
       if(ok?, do: :ok, else: :warn),

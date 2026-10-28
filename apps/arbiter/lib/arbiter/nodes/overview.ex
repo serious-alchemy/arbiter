@@ -285,6 +285,7 @@ defmodule Arbiter.Nodes.Overview do
       server_version: Skew.primary().version,
       last_heartbeat_at: nil,
       live: local_live(remote_run_ids),
+      holding: local_holding(),
       max: capacity.cap,
       offered: capacity.offered,
       derate: capacity.derate,
@@ -306,6 +307,16 @@ defmodule Arbiter.Nodes.Overview do
       %{psi: psi} when is_map(psi) -> Map.new(psi, fn {k, v} -> {Atom.to_string(k), v} end)
       _ -> nil
     end
+  end
+
+  # What the primary's cap counts: `LocalCapacity.holders/0`, the number admission compares to
+  # `max`. Unlike `live` (every live `Run` row), it leaves out a run released while it waits on
+  # CI and a primary parked behind its own review/fix sub-worker, so `live` may exceed `max`
+  # while `holding` never does (short of an audited `--over-cap` override).
+  defp local_holding do
+    length(Arbiter.Nodes.LocalCapacity.holders())
+  rescue
+    _ -> nil
   end
 
   # Live runs the primary itself holds: every live `Run` row that no node's

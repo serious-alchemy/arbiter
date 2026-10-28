@@ -102,7 +102,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
   # true` (DC8, `enforce`) holds only at 0 or on a hard derate.
   @follow_up_kinds [:redispatch, :resume]
 
-  @type reason :: {:local_only, Placement.reason()} | :no_node | nil
+  @type reason :: {:local_only, Placement.reason()} | {:node_outdated, [map()]} | :no_node | nil
   @type info :: %{
           required(:task_id) => String.t(),
           required(:node) => String.t(),
@@ -235,6 +235,19 @@ defmodule Arbiter.Nodes.LocalCapacity do
   @spec gate(Placement.request(), keyword()) ::
           {:ok, :local} | {:ok, {:node, map()}} | {:error, {:no_node_capacity, map()}}
   def gate(request, opts \\ []) do
+    case gate_with_reason(request, opts) do
+      {:ok, :local, _why} -> {:ok, :local}
+      other -> other
+    end
+  end
+
+  @doc """
+  `gate/2` that also says why a run stayed local: `{:ok, :local, why}`, `why` being
+  `Placement.place/2`'s (`:no_node`, `{:node_outdated, skipped}`, `{:local_only, reason}`).
+  """
+  @spec gate_with_reason(Placement.request(), keyword()) ::
+          {:ok, :local, term()} | {:ok, {:node, map()}} | {:error, {:no_node_capacity, map()}}
+  def gate_with_reason(request, opts \\ []) do
     case Placement.place(request, opts) do
       {:ok, {:node, _row}} = placed ->
         placed
@@ -249,7 +262,7 @@ defmodule Arbiter.Nodes.LocalCapacity do
             workspace_id: Map.get(request, :workspace_id)
           )
 
-        with :ok <- admit(request.task_id, request.kind, admit_opts), do: {:ok, :local}
+        with :ok <- admit(request.task_id, request.kind, admit_opts), do: {:ok, :local, why}
 
       {:error, _} = refused ->
         refused
@@ -405,6 +418,10 @@ defmodule Arbiter.Nodes.LocalCapacity do
     do: " (run is local-only: #{Placement.reason_phrase(why, %{provider: provider, kind: kind})})"
 
   defp suffix(:no_node, _provider, _kind), do: " (no node had a free slot)"
+
+  defp suffix({:node_outdated, skipped}, _provider, _kind),
+    do: " (" <> Placement.skipped_phrase(skipped) <> ")"
+
   defp suffix(_reason, _provider, _kind), do: ""
 
   defp message(task_id, phrase, _cap, level) when level != :none do

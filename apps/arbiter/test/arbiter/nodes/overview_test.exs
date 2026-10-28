@@ -283,6 +283,15 @@ defmodule Arbiter.Nodes.OverviewTest do
       assert %{local: %{live: 1}} = Overview.build()
     end
 
+    test "live counts every live Run row, holding only what counts against the cap" do
+      _waiting = run!(:waiting)
+      _working = run!(:working)
+
+      # No worker is registered for either row: `live` is the Run table's count (waiting
+      # runs included); `holding` is what `LocalCapacity.admit/3` counts against the cap.
+      assert %{local: %{live: 2, holding: 0}} = Overview.build()
+    end
+
     test "the override replaces the suggestion, and may be 0" do
       {:ok, 0} = Nodes.set_local_max_workers(0, @operator)
       assert %{local: %{override: 0, max: 0}} = Overview.build()

@@ -3120,9 +3120,36 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert %{status: :warn} = named(results, "node asleep")
       assert %{status: :warn, detail: shaky} = named(results, "node shaky")
       assert shaky =~ "suspect"
-      assert %{status: :warn, detail: stale} = named(results, "node stale")
-      assert stale =~ "outdated" and stale =~ "1.0.0"
+      assert %{status: :warn, detail: stale} = named(results, "node stale: outdated")
+      assert stale =~ "behind" and stale =~ "1.0.0"
       assert named(results, "node gone") == nil
+    end
+
+    test "an outdated node excluded from placement names both versions and the upgrade command" do
+      cmd = "helm upgrade arbiter-node oci://x/chart --set image.tag=v0.2.90"
+
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => @url,
+          "exposure" => "private",
+          "nodes" => [
+            node_row(%{
+              "name" => "mesaana",
+              "health" => "outdated",
+              "agent_version" => "0.2.88",
+              "server_version" => "0.2.90",
+              "upgrade_command" => cmd
+            })
+          ]
+        })
+      )
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(nodes_results(), "node mesaana: outdated")
+
+      assert detail =~ "mesaana" and detail =~ "0.2.88" and detail =~ "0.2.90"
+      assert detail =~ "no work is placed"
+      assert hint =~ cmd
     end
 
     test "a local cap of 0 warns that local-only work will wait" do

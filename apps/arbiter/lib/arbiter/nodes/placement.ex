@@ -194,7 +194,7 @@ defmodule Arbiter.Nodes.Placement do
           optional(atom()) => term()
         }
   @type result ::
-          {:ok, {:local, :no_node | {:local_only, reason()}}}
+          {:ok, {:local, :no_node | {:node_outdated, [map()]} | {:local_only, reason()}}}
           | {:ok, {:node, map()}}
           | {:error, {:no_node_capacity, info()}}
 
@@ -400,7 +400,41 @@ defmodule Arbiter.Nodes.Placement do
     end
   end
 
+  # Under `prefer_remote` the run goes local; when an online node was passed over only because
+  # its agent is older than this server, that is the reason, not "no node had a free slot".
+  defp none(%{mode: :prefer_remote}, rows) do
+    case outdated_skipped(rows) do
+      [] -> {:ok, {:local, :no_node}}
+      skipped -> {:ok, {:local, {:node_outdated, skipped}}}
+    end
+  end
+
   defp none(_request, _rows), do: {:ok, {:local, :no_node}}
+
+  defp outdated_skipped(rows) do
+    for row <- rows, row.state == :online, row.health == :outdated do
+      %{
+        name: Map.get(row, :name) || row.id,
+        version: Map.get(row, :agent_version),
+        server_version: Map.get(row, :server_version)
+      }
+    end
+  end
+
+  @doc """
+  The one-line account of nodes skipped as outdated, for the run's placement record, the
+  board and the hold phrase: `remote skipped: mesaana outdated (0.2.88 < 0.2.90)`.
+  """
+  @spec skipped_phrase([
+          %{name: String.t(), version: String.t() | nil, server_version: String.t() | nil}
+        ]) ::
+          String.t()
+  def skipped_phrase(skipped) do
+    "remote skipped: " <>
+      Enum.map_join(skipped, ", ", fn s ->
+        "#{s.name} outdated (#{s.version || "?"} < #{s.server_version || "?"})"
+      end)
+  end
 
   # The hold when the registry check is what excluded every node: some online node
   # advertises `caps.registries`, and none of those prefixes covers the request's registry.

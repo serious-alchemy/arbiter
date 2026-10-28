@@ -1729,6 +1729,7 @@ defmodule Arbiter.Board.Snapshot do
       activity: if(live?, do: activity(w, gate_worker), else: waiting_reason(w)),
       provider: card_provider(w, gate_worker),
       node_name: card_node_name(w, gate_worker),
+      remote_skipped: remote_skipped(w),
       collapsed_note: collapsed_note(w, group),
       since: since(w)
     })
@@ -2271,6 +2272,18 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   defp card_provider(worker, _gate_worker), do: Worker.provider(Map.get(worker, :meta))
+
+  # bd-5u99ki: why a `prefer_remote` run stayed on the primary when a node was passed over as
+  # outdated, from the routing decision `Worker.Dispatch` recorded.
+  defp remote_skipped(worker) do
+    case Map.get(worker, :meta) do
+      %{routing_decision: %{"placement" => %{"remote_skipped" => note}}} when is_binary(note) ->
+        note
+
+      _ ->
+        nil
+    end
+  end
 
   # Where the card's run executes: the node's name, nil for the primary. A card
   # waiting on its review gate shows the gate's agent, like the provider.
