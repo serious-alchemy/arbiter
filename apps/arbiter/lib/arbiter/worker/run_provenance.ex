@@ -46,22 +46,12 @@ defmodule Arbiter.Worker.RunProvenance do
   as-is.
   """
   @spec standing_orders_digest(Workspace.t() | nil) :: String.t() | nil
-  def standing_orders_digest(%Workspace{config: config}) do
-    case get_in(config || %{}, ["standing_orders"]) do
+  def standing_orders_digest(ws) do
+    case StandingOrders.text(ws) do
       nil -> nil
-      [] -> nil
-      "" -> nil
-      orders -> orders |> canonical_text() |> sha256_hex()
+      text -> sha256_hex(text)
     end
   end
-
-  def standing_orders_digest(_), do: nil
-
-  defp canonical_text(orders) when is_list(orders),
-    do: Enum.map_join(orders, "\n", &StandingOrders.canonical_text/1)
-
-  defp canonical_text(text) when is_binary(text), do: text
-  defp canonical_text(other), do: inspect(other)
 
   defp sha256_hex(text) do
     :sha256

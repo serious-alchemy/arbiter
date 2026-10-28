@@ -827,7 +827,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   @spec prompt_for(map()) :: String.t()
   def prompt_for(%{task: %Issue{} = task, branch: branch, target_branch: target} = context) do
     Arbiter.Worker.Dispatch.conflict_resolve_briefing(task, branch, target,
-      host_git: Map.get(context, :host_git, false)
+      host_git: Map.get(context, :host_git, false),
+      workspace: Map.get(context, :workspace)
     )
   end
 
