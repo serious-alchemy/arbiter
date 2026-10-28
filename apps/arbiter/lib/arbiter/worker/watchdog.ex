@@ -3647,7 +3647,7 @@ defmodule Arbiter.Worker.Watchdog do
         "#{length(checks)} failing check(s))"
     )
 
-    dispatched = dispatch_fix_pass(state, checks, outside_diff)
+    dispatched = state |> dispatch_fix_pass(checks, outside_diff) |> tag_image_failure()
 
     # The fix pass AUTHORS commits after the approval; see
     # `note_authored_push/1` for why that no longer suspends the latch.
@@ -3680,6 +3680,19 @@ defmodule Arbiter.Worker.Watchdog do
 
         reschedule(%{state | last_block_reason: :ci_failed})
 
+      # bd-ael5hi: the pass died at the spawn because its worker image could not be published
+      # (a registry that refuses the push). No agent ever ran, so it spends no attempt and no
+      # fix-pass budget, and the exhausted-CI escalation never fires for it: the PR's CI is
+      # not what is wrong. The cause is in the log and on the failed run.
+      {:spawn_image_unavailable, reason} ->
+        Logger.warning(
+          "Worker.Watchdog: fix pass for task=#{state.task_id} mr=#{state.mr_ref} could not " <>
+            "start, its worker image is unavailable (no attempt spent): " <>
+            inspect(reason, limit: 20, printable_limit: 400)
+        )
+
+        reschedule(%{state | last_block_reason: :ci_failed})
+
       _ ->
         reschedule(%{
           state
@@ -3689,6 +3702,16 @@ defmodule Arbiter.Worker.Watchdog do
         })
     end
   end
+
+  defp tag_image_failure({:error, reason} = error),
+    do: if(image_error?(reason), do: {:spawn_image_unavailable, reason}, else: error)
+
+  defp tag_image_failure(other), do: other
+
+  defp image_error?({:claude_start_failed, reason}), do: image_error?(reason)
+  defp image_error?({:image_unavailable, _}), do: true
+  defp image_error?({:image_publish_failed, _}), do: true
+  defp image_error?(_), do: false
 
   # True when a fix pass is working the ticket — its run, registered under the
   # ticket id since bd-741sid — or is queued for a slot.

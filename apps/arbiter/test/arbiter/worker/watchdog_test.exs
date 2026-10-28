@@ -1114,6 +1114,45 @@ defmodule Arbiter.Worker.WatchdogTest do
       refute state.park_reason == :ci_failed
     end
 
+    # bd-ael5hi: a fix pass whose worker image could not be published died at the spawn, before
+    # any agent ran. Two of those used to exhaust the budget and page "CI checks are failing".
+    for {label, reply} <- [
+          {"claude_start_failed",
+           {:error,
+            {:claude_start_failed,
+             {:image_unavailable,
+              {:push_failed, "registry.gitlab.com/g/p/vstim/worker:abc", 125, "access denied"}}}}},
+          {"bare image_unavailable", {:error, {:image_unavailable, :no_registry}}},
+          {"image_publish_failed",
+           {:error, {:image_publish_failed, %{task_id: "t", reason: :no_registry, message: "m"}}}}
+        ] do
+      test "a fix pass that died on an unavailable image (#{label}) spends no attempt and never escalates as exhausted" do
+        task_id = new_task_id()
+        StubFixPassDispatcher.reply_with(unquote(Macro.escape(reply)))
+
+        StubMerger.queue_get("!cfimg", [
+          %{status: :open, approved: true, block_reason: :ci_failed}
+        ])
+
+        wpid =
+          start_watchdog(task_id, "!cfimg",
+            auto_merge: true,
+            max_auto_resolve_attempts: 2,
+            max_fix_passes: 2,
+            fix_pass_history: fn _task_id, _mr_ref -> 0 end,
+            fix_pass_dispatcher: StubFixPassDispatcher,
+            interval_ms: 15
+          )
+
+        # Well past max_auto_resolve_attempts polls: the pass is asked for again each time.
+        wait_until(fn -> StubFixPassDispatcher.call_count() >= 4 end)
+        state = :sys.get_state(wpid)
+        assert state.auto_resolve_attempts == 0
+        assert state.fix_passes_dispatched == 0
+        refute state.park_reason == :ci_failed
+      end
+    end
+
     test "retry_auto_resolve/1 grants one more pass past the per-task cap" do
       task_id = new_task_id()
 
