@@ -189,7 +189,7 @@ defmodule Arbiter.Nodes.ClusterUpgradeTest do
 
       assert row.upgrade_command ==
                "helm upgrade arbiter-node oci://ghcr.io/acme/charts/arbiter-node " <>
-                 "--version 9.9.9 -n ci-workers --reset-then-reuse-values"
+                 "--version 9.9.9 -n ci-workers --reset-then-reuse-values --set image.tag=v9.9.9"
     end
 
     test "nodes.chart_ref wins over the chart the node reports" do
