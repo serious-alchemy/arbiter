@@ -1315,4 +1315,71 @@ defmodule Arbiter.Trackers.SyncTest do
       assert escalation.subject =~ "closed"
     end
   end
+
+  describe "retry_lifecycle/2 (per-ticket retry of a failed gated sync)" do
+    defp retry_stub(test_pid) do
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+        send(test_pid, {:http, conn.method, path})
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            Req.Test.json(conn, %{
+              "transitions" => [
+                %{
+                  "id" => "51",
+                  "name" => "Pull request created",
+                  "to" => %{"name" => "In Code Review"},
+                  "fields" => %{
+                    "customfield_10184" => %{"required" => true, "name" => "QA Testing Notes"},
+                    "customfield_10185" => %{"required" => true, "name" => "Deployment Notes"}
+                  }
+                }
+              ]
+            })
+
+          conn.method == "PUT" ->
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          conn.method == "POST" and String.ends_with?(path, "/transitions") ->
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          true ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{})
+        end
+      end)
+    end
+
+    test "fails while the gated field is missing, then succeeds and clears the escalation" do
+      ws = jira_workspace(%{"pr_opened" => "In Code Review"})
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "tracked",
+          tracker_type: :jira,
+          tracker_ref: @ref,
+          skip_upstream_create: true,
+          workspace_id: ws.id,
+          qa_notes: "qa text",
+          deployment_notes: nil
+        })
+
+      retry_stub(self())
+
+      assert {:error, %{kind: :gated_fields_missing}} = Sync.retry_lifecycle(issue, :pr_opened)
+      assert [esc] = escalations_for(ws.id)
+      assert esc.body =~ "ticket_sync_lifecycle"
+      refute_received {:http, "POST", _}
+
+      {:ok, fixed} = Ash.update(issue, %{deployment_notes: "None."}, action: :update)
+
+      # The retry bypasses the 5-minute escalation dedup and re-fires only
+      # this ticket's transition.
+      assert :ok = Sync.retry_lifecycle(fixed, :pr_opened)
+      assert_received {:http, "POST", path}
+      assert path =~ "/issue/#{@ref}/transitions"
+
+      assert [] = Enum.reject(escalations_for(ws.id), & &1.cleared_at)
+    end
+  end
 end

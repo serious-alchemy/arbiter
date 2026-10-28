@@ -2316,7 +2316,9 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
        when is_list(names) and names != [] do
     "The task has not produced a value for required tracker field(s): " <>
       "#{Enum.join(names, ", ")}. Populate them on the task " <>
-      "(e.g. `arb ticket update <id> --qa-notes ... --deployment-notes ...`) and re-run the sync."
+      "(e.g. `arb ticket update <id> --qa-notes ... --deployment-notes ...`), then re-fire just this " <>
+      "ticket's transition with the `ticket_sync_lifecycle` MCP tool (`id` + the failing event, " <>
+      "e.g. `pr_opened`) — not `tracker_sync`, which reconciles the whole workspace."
   end
 
   # Provider explicitly rejected the payload (field-validation gate, required

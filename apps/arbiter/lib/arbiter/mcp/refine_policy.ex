@@ -102,6 +102,7 @@ defmodule Arbiter.MCP.RefinePolicy do
     "ticket_verify" => @deny_reason_lifecycle,
     "ticket_demote" => @deny_reason_lifecycle,
     "ticket_sync_upstream_close" => @deny_reason_lifecycle,
+    "ticket_sync_lifecycle" => @deny_reason_lifecycle,
     "ticket_rank" => @deny_reason_scheduler,
     "ticket_create_batch" => @deny_reason_batch_create,
     "ticket_resume_review" => @deny_reason_review,
