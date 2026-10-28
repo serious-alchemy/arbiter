@@ -131,7 +131,12 @@ defmodule Arbiter.Worker.GitCredentialTest do
         workspace(
           %{
             "repos" => %{
-              "app-repo" => %{"kind" => "github_app", "app_id" => "1", "installation_id" => "2"},
+              "app-repo" => %{
+                "kind" => "github_app",
+                "app_id" => "1",
+                "installation_id" => "2",
+                "private_key_secret" => "PK"
+              },
               "key-repo" => %{"kind" => "deploy_key", "key_secret" => "K"}
             }
           },
