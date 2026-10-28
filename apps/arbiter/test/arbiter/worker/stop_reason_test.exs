@@ -1585,6 +1585,131 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  # bd-bjewzj / #1090: the `result` event's own structured fields classify the run before any
+  # text regex. Fixtures follow the shape the CLI's stream-json `result` event takes (the
+  # decoded event is `session.usage`, see `ClaudeSession.absorb_usage/2`); they are
+  # reconstructed from the documented field set, not captured from a live run.
+  describe "classify/4 — structured result fields outrank text heuristics (bd-bjewzj)" do
+    defp result_event(fields) do
+      raw =
+        Map.merge(
+          %{
+            "type" => "result",
+            "subtype" => "success",
+            "is_error" => false,
+            "api_error_status" => nil,
+            "terminal_reason" => "completed",
+            "stop_reason" => "end_turn"
+          },
+          fields
+        )
+
+      %{result_subtype: raw["subtype"], is_error: raw["is_error"], raw: raw}
+    end
+
+    defp classify_result(exit_status, lines, fields, provider \\ "claude"),
+      do: StopReason.classify(exit_status, lines, provider, result: result_event(fields))
+
+    test "success with auth-shaped prose is NOT an auth failure (the 10-27 false verdict)" do
+      lines = [
+        "⚙ claude session init",
+        "I rotated the credentials file; the old token expired and returned 401 Unauthorized.",
+        "tests green"
+      ]
+
+      refute classify_result(0, lines, %{}).category == :auth_expired
+    end
+
+    test "authentication_failed with a 401 => :auth_expired, with no auth text in the output" do
+      fields = %{"is_error" => true, "authentication_failed" => true, "api_error_status" => 401}
+
+      assert classify_result(1, ["something unrelated"], fields).category == :auth_expired
+    end
+
+    test "authentication_failed alone (no status) => :auth_expired" do
+      fields = %{"is_error" => true, "authentication_failed" => true}
+
+      assert classify_result(1, ["boom"], fields).category == :auth_expired
+    end
+
+    test "api_error_status 401 => :auth_expired" do
+      fields = %{"is_error" => true, "api_error_status" => 401}
+      assert classify_result(1, ["boom"], fields).category == :auth_expired
+    end
+
+    test "api_error_status 429 => :rate_limited" do
+      fields = %{"is_error" => true, "api_error_status" => 429}
+      assert classify_result(1, ["boom"], fields).category == :rate_limited
+    end
+
+    test "api_error_status 529 (overloaded) => :rate_limited" do
+      fields = %{"is_error" => true, "api_error_status" => 529}
+      assert classify_result(1, ["boom"], fields).category == :rate_limited
+    end
+
+    test "api_error_status 402 => :credit_exhausted" do
+      fields = %{"is_error" => true, "api_error_status" => 402}
+      assert classify_result(1, ["boom"], fields).category == :credit_exhausted
+    end
+
+    test "api_error_status 5xx => :gateway_error" do
+      for status <- [500, 502, 503] do
+        fields = %{"is_error" => true, "api_error_status" => status}
+        assert classify_result(1, ["boom"], fields).category == :gateway_error
+      end
+    end
+
+    test "a structured 5xx outranks auth-shaped prose in the transcript" do
+      lines = ["the credentials token expired earlier, 401"]
+      fields = %{"is_error" => true, "api_error_status" => 503}
+
+      assert classify_result(1, lines, fields).category == :gateway_error
+    end
+
+    test "terminal_reason max_turns => :max_turns" do
+      fields = %{
+        "subtype" => "error_max_turns",
+        "is_error" => true,
+        "terminal_reason" => "max_turns"
+      }
+
+      reason = classify_result(1, ["boom"], fields)
+      assert reason.category == :max_turns
+      assert reason.summary =~ "max"
+    end
+
+    test "subtype error_max_turns alone => :max_turns" do
+      fields = %{"subtype" => "error_max_turns", "is_error" => true}
+
+      assert classify_result(1, ["boom"], fields).category == :max_turns
+    end
+
+    test "an error result with no structured cause falls back to the text heuristics" do
+      fields = %{"subtype" => "error_during_execution", "is_error" => true}
+
+      assert classify_result(1, ["Invalid API key"], fields).category == :auth_expired
+    end
+
+    test "a missing result event falls back to the text heuristics" do
+      assert StopReason.classify(1, ["Invalid API key"], "claude", result: nil).category ==
+               :auth_expired
+
+      assert StopReason.classify(1, ["API Error: 502 Bad Gateway"], "claude").category ==
+               :gateway_error
+    end
+
+    test "another provider's result is not read" do
+      fields = %{"is_error" => true, "api_error_status" => 429}
+
+      assert classify_result(1, ["boom"], fields, "codex").category == :crashed
+    end
+
+    test ":max_turns has a label" do
+      assert StopReason.label(%StopReason{category: :max_turns, summary: "s", exit_status: 1}) =~
+               "turn"
+    end
+  end
+
   describe "label/1 covers every category" do
     # Every member of the `category` type, so a newly added reason without a
     # label clause fails here instead of crashing Worker.fail_stopped/2.

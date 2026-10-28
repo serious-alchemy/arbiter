@@ -46,6 +46,10 @@ defmodule Arbiter.Worker.StopReason do
       session was healthy, the transport layer dropped the request.
       Remediation: auto-resume — the session context is intact, a retry should
       succeed once connectivity recovers.
+    * `:max_turns` — the Claude CLI's own `result` event says the run hit its
+      turn limit (`subtype: "error_max_turns"` / `terminal_reason: "max_turns"`).
+      Only ever produced from the structured result; retrying identically hits
+      the same limit, so it is not auto-resumed.
     * `:context_thrash` — the agent CLI's own autocompact loop detector fired
       ("Autocompact is thrashing: the context refilled to the limit within N
       turns of the previous compact, N times in a row") and the session
@@ -216,6 +220,7 @@ defmodule Arbiter.Worker.StopReason do
           | :credit_exhausted
           | :rate_limited
           | :gateway_error
+          | :max_turns
           | :session_not_found
           | :context_thrash
           | :killed
@@ -575,6 +580,8 @@ defmodule Arbiter.Worker.StopReason do
     haystack = signature_haystack(output_lines)
     signal = signal_for(exit_status)
 
+    structured = structured_failure(provider, result)
+
     clean_end? =
       clean_completion?(exit_status, output_lines, provider) or
         clean_result?(exit_status, provider, result)
@@ -724,6 +731,14 @@ defmodule Arbiter.Worker.StopReason do
           signal: signal,
           retry_after: retry_after
         }
+
+      # bd-bjewzj (#1090): the CLI's own `result` fields (`authentication_failed`,
+      # `api_error_status`, `terminal_reason`) say how the run ended, so they are read ahead
+      # of the text regexes below — those match prose anywhere in the tail and produced the
+      # false "credentials expired" verdict of 2026-10-27. Absent fields (older CLI, truncated
+      # stream, no result event) leave `structured` nil and the text heuristics decide.
+      not clean_end? and structured != nil ->
+        structured_reason(structured, exit_status, signal)
 
       # bd-czvxfs: a run that finished cleanly (`clean_completion?/3`) is not an auth death on
       # the strength of earlier auth-looking text (a Codex MCP transport warning; a Claude
@@ -1266,6 +1281,7 @@ defmodule Arbiter.Worker.StopReason do
         :rate_limited -> "rate-limited"
         :session_not_found -> "session not found — resume in briefing mode (--mode briefing)"
         :gateway_error -> "gateway error (proxy/upstream)"
+        :max_turns -> "hit the max-turns limit (agent ran out of turns)"
         :context_thrash -> "context window thrashed (autocompact loop)"
         :killed -> "killed by signal #{reason.signal}"
         :memory_cap_exceeded -> "memory cap exceeded (worker process tree OOM-killed)"
@@ -1443,6 +1459,94 @@ defmodule Arbiter.Worker.StopReason do
   end
 
   defp clean_result?(_exit_status, _provider, _result), do: false
+
+  # bd-bjewzj: the failure verdict carried by a Claude `result` event's structured fields,
+  # or nil when it carries none (so the text heuristics decide). 401 is the only status read
+  # as auth (a 403 may be a plain permission refusal); 429/529 are rate limiting, 402 is
+  # billing, any other 5xx is the transient upstream class.
+  defp structured_failure(provider, %{} = result) when provider in [nil, "claude"] do
+    raw = Map.get(result, :raw) || %{}
+
+    cond do
+      raw["authentication_failed"] == true or raw["error"] == "authentication_failed" ->
+        :auth_expired
+
+      status_failure = status_failure(raw["api_error_status"]) ->
+        status_failure
+
+      raw["terminal_reason"] == "max_turns" or raw["subtype"] == "error_max_turns" ->
+        :max_turns
+
+      true ->
+        nil
+    end
+  end
+
+  defp structured_failure(_provider, _result), do: nil
+
+  defp status_failure(401), do: :auth_expired
+  defp status_failure(402), do: :credit_exhausted
+  defp status_failure(status) when status in [429, 529], do: :rate_limited
+  defp status_failure(status) when is_integer(status) and status in 500..599, do: :gateway_error
+  defp status_failure(_status), do: nil
+
+  defp structured_reason(:auth_expired, exit_status, signal) do
+    %__MODULE__{
+      category: :auth_expired,
+      summary:
+        "agent could not authenticate (the CLI's result reported an authentication failure)",
+      remediation:
+        "Re-authenticate the agent CLI (Claude: refresh ~/.claude/.credentials.json via " <>
+          "`claude` login), then re-dispatch.",
+      exit_status: exit_status,
+      signal: signal
+    }
+  end
+
+  defp structured_reason(:credit_exhausted, exit_status, signal) do
+    %__MODULE__{
+      category: :credit_exhausted,
+      summary: "agent ran out of credits (the CLI's result reported API status 402)",
+      remediation: "Top up the provider account or rotate to a funded API key, then re-dispatch.",
+      exit_status: exit_status,
+      signal: signal
+    }
+  end
+
+  defp structured_reason(:rate_limited, exit_status, signal) do
+    %__MODULE__{
+      category: :rate_limited,
+      summary:
+        "agent was rate-limited / the API was overloaded (the CLI's result reported 429/529)",
+      remediation: "Usually transient — retry with backoff, or reduce concurrent workers.",
+      exit_status: exit_status,
+      signal: signal
+    }
+  end
+
+  defp structured_reason(:gateway_error, exit_status, signal) do
+    %__MODULE__{
+      category: :gateway_error,
+      summary: "the API returned a 5xx error (the CLI's result reported an upstream failure)",
+      remediation:
+        "Transient upstream failure. Auto-resuming the session — if retries are exhausted, " <>
+          "check proxy logs.",
+      exit_status: exit_status,
+      signal: signal
+    }
+  end
+
+  defp structured_reason(:max_turns, exit_status, signal) do
+    %__MODULE__{
+      category: :max_turns,
+      summary: "agent hit its max-turns limit before finishing (the CLI's result reported it)",
+      remediation:
+        "Retrying identically hits the same limit. Split the task, raise the CLI's " <>
+          "max-turns setting, or resume with narrower instructions.",
+      exit_status: exit_status,
+      signal: signal
+    }
+  end
 
   # `ClaudeSession`'s init / result display lines (oldest-first): the last one tells
   # whether the final session started and never finished, errored, or succeeded.
