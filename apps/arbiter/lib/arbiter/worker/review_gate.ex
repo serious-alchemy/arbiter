@@ -7306,6 +7306,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     with :remote_possible <- fix_round_remote_possible(state, ws),
          {:ok, node} <- fix_round_node(state, ws),
+         {:ok, node} <- fix_round_image(node, state, ws),
          {:ok, node, seed} <- seed_fix_round(node, state, ws) do
       {:ok, put_fix_node(state, node, seed)}
     else
@@ -7359,6 +7360,19 @@ defmodule Arbiter.Worker.ReviewGate do
       {:ok, {:node, node}} -> {:ok, node}
       {:error, _} = held -> held
     end
+  end
+
+  # A registry node needs the round's image published first; a publish that fails puts the
+  # round on the primary (or holds it under `remote_only`) instead of failing at the spawn.
+  defp fix_round_image(node, state, ws) do
+    PassPlacement.ensure_image(node, %{
+      task_id: state.task_id,
+      workspace: ws,
+      repo: Map.get(state, :repo),
+      repo_path: PrivateClone.main_repo(Map.get(state, :worktree_path)),
+      mode: Placement.mode(ws),
+      image_opts: Map.get(state, :image_opts)
+    })
   end
 
   defp seed_fix_round(node, state, ws) do

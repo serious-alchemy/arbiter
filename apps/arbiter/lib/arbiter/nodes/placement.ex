@@ -622,6 +622,7 @@ defmodule Arbiter.Nodes.Placement do
       mode: :remote_only,
       nodes_known: 1,
       image_error: reason,
+      phrase: "the registry image is not available (#{inspect(reason, limit: 10)})",
       message:
         "held — the registry image for #{request.task_id} is not available " <>
           "(#{inspect(reason)}); worker.placement is remote_only, so it does not run on " <>

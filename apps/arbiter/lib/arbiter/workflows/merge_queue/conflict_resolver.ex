@@ -229,6 +229,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
              context.workspace || maybe_load_workspace(task.workspace_id)
            ),
          {:ok, node} <- place_pass(task, context, provider, args),
+         {:ok, node} <- ensure_node_image(node, task, context, args),
          :ok <- host_fetch(context, host_git?(context, provider)),
          {:ok, worktree_path} <- create_worktree(context, node),
          {:ok, node, seed} <- seed_node(node, worktree_path, context),
@@ -274,6 +275,20 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       {:ok, {:node, row}} -> {:ok, row}
       {:error, _} = held -> held
     end
+  end
+
+  # A node that pulls its image from the registry needs it published first. A publish that
+  # fails is a placement decision (primary, or a hold under `remote_only`), not a spawn
+  # failure the Watchdog would count as an attempt (`PassPlacement.ensure_image/2`).
+  defp ensure_node_image(node, task, context, args) do
+    PassPlacement.ensure_image(node, %{
+      task_id: task.id,
+      workspace: context.workspace,
+      repo: context.repo,
+      repo_path: context.repo_path,
+      mode: Placement.mode(context.workspace),
+      image_opts: Map.get(args, :image_opts)
+    })
   end
 
   # bd-bg87oz: the home clone is brought to the forge's branch head and target tip
