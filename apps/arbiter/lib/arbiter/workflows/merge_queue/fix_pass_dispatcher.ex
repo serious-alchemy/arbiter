@@ -728,87 +728,88 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   """
   @spec prompt_for(map()) :: String.t()
   def prompt_for(%{task: %Issue{id: task_id}, branch: branch, target_branch: target} = context) do
-    """
-    You are a CI fix-pass worker for task #{task_id}.
+    Arbiter.StandingOrders.section(Map.get(context, :workspace)) <>
+      """
+      You are a CI fix-pass worker for task #{task_id}.
 
-    Your branch (#{branch}) has an open, approved PR against #{target}, but it
-    cannot merge because its required CI checks are FAILING. Your ONLY job is to
-    make those checks pass:
+      Your branch (#{branch}) has an open, approved PR against #{target}, but it
+      cannot merge because its required CI checks are FAILING. Your ONLY job is to
+      make those checks pass:
 
-      1. Read the failing checks below and reproduce the failure locally where
-         you can (run the failing test / linter / build). For tests use the
-         `run_tests` MCP tool: it returns only the failures, not the whole
-         `mix test` output, and the path of the full log.
-      2. Fix the ROOT CAUSE in the code. Do not paper over a real failure by
-         deleting or skipping the test unless the test itself is genuinely wrong.
-      3. Commit your fix (do NOT push):
-         `git commit -m "<a short message>"`
-         Arbiter runs this repo's pre-push checks, pushes to `#{branch}` for you,
-         and updates the PR (do NOT open a new PR).
-      4. Exit by printing `arb done` on a line by itself.
+        1. Read the failing checks below and reproduce the failure locally where
+           you can (run the failing test / linter / build). For tests use the
+           `run_tests` MCP tool: it returns only the failures, not the whole
+           `mix test` output, and the path of the full log.
+        2. Fix the ROOT CAUSE in the code. Do not paper over a real failure by
+           deleting or skipping the test unless the test itself is genuinely wrong.
+        3. Commit your fix (do NOT push):
+           `git commit -m "<a short message>"`
+           Arbiter runs this repo's pre-push checks, pushes to `#{branch}` for you,
+           and updates the PR (do NOT open a new PR).
+        4. Exit by printing `arb done` on a line by itself.
 
-    #{status_line(Map.get(context, :checks) || [])}
+      #{status_line(Map.get(context, :checks) || [])}
 
-    Failing checks:
-    #{render_checks(Map.get(context, :checks) || [])}
-    #{render_outside_diff(Map.get(context, :outside_diff_files) || [])}
-    DO NOT:
-      * re-implement the change set,
-      * open a new PR,
-      * touch files unrelated to the failure,
-      * disable or skip the check to make it "pass".
+      Failing checks:
+      #{render_checks(Map.get(context, :checks) || [])}
+      #{render_outside_diff(Map.get(context, :outside_diff_files) || [])}
+      DO NOT:
+        * re-implement the change set,
+        * open a new PR,
+        * touch files unrelated to the failure,
+        * disable or skip the check to make it "pass".
 
-    Do NOT poll CI. Arbiter re-runs and watches CI after it pushes your commit, so
-    do not run `gh run watch`, `gh run view`, `gh pr checks` or any other command
-    that waits on or re-reads CI status: the status and the failing output are
-    above, and a saved full log (where listed) is on disk to read or grep.
+      Do NOT poll CI. Arbiter re-runs and watches CI after it pushes your commit, so
+      do not run `gh run watch`, `gh run view`, `gh pr checks` or any other command
+      that waits on or re-reads CI status: the status and the failing output are
+      above, and a saved full log (where listed) is on disk to read or grep.
 
-    If the check failed for a reason that is NOT in your diff — a stale build
-    artifact, a review app an EARLIER job in the same run deployed, a flaky
-    external service — you do not have to change code to clear it. Re-run CI
-    with the `ci_rerun` MCP tool, and pick the granularity deliberately:
+      If the check failed for a reason that is NOT in your diff — a stale build
+      artifact, a review app an EARLIER job in the same run deployed, a flaky
+      external service — you do not have to change code to clear it. Re-run CI
+      with the `ci_rerun` MCP tool, and pick the granularity deliberately:
 
-      * `failed_jobs` re-runs ONLY the failed jobs and REUSES every job that
-         already succeeded. If the failing check tests something an earlier job
-         in the same run produced (a deployed review app, a built image), this
-         re-tests the identical stale input and will fail identically. Never use
-         it twice in a row — a repeat of an identical re-run tells you nothing.
-      * `all_jobs` re-runs the whole run, REBUILDING the upstream jobs. This is
-         the right choice for a stale-artifact failure.
-      * `workflow` fires a fresh workflow_dispatch and is the only mode that can
-         carry inputs (e.g. `{"force_deploy": "true"}`).
+        * `failed_jobs` re-runs ONLY the failed jobs and REUSES every job that
+           already succeeded. If the failing check tests something an earlier job
+           in the same run produced (a deployed review app, a built image), this
+           re-tests the identical stale input and will fail identically. Never use
+           it twice in a row — a repeat of an identical re-run tells you nothing.
+        * `all_jobs` re-runs the whole run, REBUILDING the upstream jobs. This is
+           the right choice for a stale-artifact failure.
+        * `workflow` fires a fresh workflow_dispatch and is the only mode that can
+           carry inputs (e.g. `{"force_deploy": "true"}`).
 
-    The default mode, `auto`, picks between them for you; override it only when
-    you know something it doesn't.
+      The default mode, `auto`, picks between them for you; override it only when
+      you know something it doesn't.
 
-    Whenever you conclude the failure was a FLAKE — you re-ran the job with NO
-    code change and it went green — record that with the `flake_record` MCP tool
-    BEFORE you exit: pass `ci_job` (the failing check's name) and `signature` (a
-    short, distinctive fragment of the failure — a log line, error message, or
-    teardown name), and `test_file`/`test_line` when you can identify the
-    specific failing test. This is what lets a flake that keeps recurring across
-    fix_passes get counted and surfaced, instead of the conclusion living only in
-    this run's closing summary. Do this for every flake conclusion, whether or
-    not you also call `ci_rerun` or `ci_mark_external`.
+      Whenever you conclude the failure was a FLAKE — you re-ran the job with NO
+      code change and it went green — record that with the `flake_record` MCP tool
+      BEFORE you exit: pass `ci_job` (the failing check's name) and `signature` (a
+      short, distinctive fragment of the failure — a log line, error message, or
+      teardown name), and `test_file`/`test_line` when you can identify the
+      specific failing test. This is what lets a flake that keeps recurring across
+      fix_passes get counted and surfaced, instead of the conclusion living only in
+      this run's closing summary. Do this for every flake conclusion, whether or
+      not you also call `ci_rerun` or `ci_mark_external`.
 
-    If you conclude the failure is broken infrastructure repo-wide rather than
-    anything about this branch — you have evidence, such as the same check
-    failing on unrelated branches today, and nothing in this diff touching the
-    failing path — record that verdict with the `ci_mark_external` MCP tool
-    (`note:` your evidence, in a sentence or two). That reclassifies the park so
-    the coordinator escalation reads "CI is broken repo-wide, not on this
-    branch" instead of looking like ordinary broken code, and puts your note in
-    front of whoever decides to force-merge. Do this INSTEAD of vanishing with
-    the diagnosis in your head.
+      If you conclude the failure is broken infrastructure repo-wide rather than
+      anything about this branch — you have evidence, such as the same check
+      failing on unrelated branches today, and nothing in this diff touching the
+      failing path — record that verdict with the `ci_mark_external` MCP tool
+      (`note:` your evidence, in a sentence or two). That reclassifies the park so
+      the coordinator escalation reads "CI is broken repo-wide, not on this
+      branch" instead of looking like ordinary broken code, and puts your note in
+      front of whoever decides to force-merge. Do this INSTEAD of vanishing with
+      the diagnosis in your head.
 
-    If the failure is NOT something you can fix and NOT something the above
-    covers — a failure you cannot reproduce or understand — STOP and escalate
-    by running:
+      If the failure is NOT something you can fix and NOT something the above
+      covers — a failure you cannot reproduce or understand — STOP and escalate
+      by running:
 
-        arb message coordinator "CI fix-pass on #{task_id} needs human review: <one-line explanation>"
+          arb message coordinator "CI fix-pass on #{task_id} needs human review: <one-line explanation>"
 
-    then print `arb done`. Better a loud escalation than a thrashing fix loop.
-    """
+      then print `arb done`. Better a loud escalation than a thrashing fix loop.
+      """
   end
 
   def prompt_for(_) do

@@ -79,19 +79,17 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchemaTest do
            "the documented 0..0.5 tolerance range must match the server's own ceiling"
   end
 
-  # bd-77cbif: standing_orders reaches arb prime (the coordinator's briefing)
-  # and nothing else — no worker ever sees it. The reference used to claim
-  # otherwise ("surfaced high in every worker's arb prime briefing"), which
-  # is wrong on both counts: arb prime is not worker-facing, and there is no
-  # worker briefing for it to be surfaced in.
-  test "render/0 does not claim standing_orders reaches a worker briefing" do
+  # bd-77cbif: arb prime is a coordinator command, not a per-worker briefing.
+  # bd-dlvegd: standing_orders IS now injected into worker prompts, and the
+  # reference must say so.
+  test "render/0 describes standing_orders as injected into worker prompts" do
     text = ConfigSchema.render()
 
     refute text =~ ~r/worker's `arb prime`/,
            "arb prime is a coordinator command, not a per-worker briefing"
 
-    refute text =~ ~r/every worker/i,
-           "standing_orders is never injected into a worker prompt"
+    assert text =~ "injected into worker prompts"
+    refute text =~ "never reaches a worker"
   end
 
   test "describe/0 carries the rendered text and the enum lists" do
