@@ -210,6 +210,24 @@ defmodule Arbiter.Quota.CodexTest do
       assert result.message =~ "500"
       assert result.auth_expired == false
     end
+
+    # Req's default retry sleeps 1s+2s+4s on a 5xx; the quota poll runs again
+    # next cycle, so one attempt is enough (and a CI run does not crawl).
+    test "a 5xx is attempted once, not retried with backoff" do
+      ws = workspace!()
+      calls = :counters.new(1, [])
+
+      Req.Test.stub(@stub_name, fn conn ->
+        :counters.add(calls, 1, 1)
+        Plug.Conn.send_resp(conn, 503, "")
+      end)
+
+      {micros, result} = :timer.tc(fn -> Codex.fetch(ws.id, credentials: creds()) end)
+
+      assert result.message =~ "503"
+      assert :counters.get(calls, 1) == 1
+      assert micros < 1_000_000
+    end
   end
 
   describe "read_credentials/1" do
