@@ -181,6 +181,8 @@ defmodule Arbiter.Loop.FailureClassifier do
     # which waiting primitives work here, which is only actionable if the
     # cause is visible as its own bucket.
     async_wait_abandoned: {:agent_quality, :async_wait_abandoned},
+    # Codex printed the sentinel through a shell tool; the work is done.
+    sentinel_in_tool_output: {:agent_quality, :sentinel_in_tool_output},
     # bd-7wymls: headless agy ended the turn on a `:strict` permission
     # soft-deny. The policy did its job; nothing about the agent's work is
     # implied, so it is operational (a policy/allowlist question).

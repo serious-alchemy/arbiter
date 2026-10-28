@@ -3681,7 +3681,7 @@ defmodule Arbiter.Worker do
       node_interrupted?(session) ->
         interrupt_node_run(state, port, session)
 
-      run_signalled_done?(state) ->
+      signalled_done?(state, session) ->
         on_claude_done(state)
 
       # bd-2da6ay: a non-reviewable no-PR (`task`/`research`) worker whose subprocess
@@ -3709,6 +3709,16 @@ defmodule Arbiter.Worker do
         maybe_resume_continuation(state, session)
     end
   end
+
+  # `arb done` seen in the agent's message text, or — a Codex run that exited 0
+  # after echoing it through its last shell command — the sentinel never reached
+  # the message text but the run did finish. on_claude_done/1's commit gate
+  # still requires a clean tree with commits ahead, so unfinished work is
+  # nudged, not merged.
+  defp signalled_done?(state, session),
+    do:
+      run_signalled_done?(state) or
+        classify_stop(session).category == :sentinel_in_tool_output
 
   defp node_interrupted?(session),
     do:

@@ -98,6 +98,10 @@ defmodule Arbiter.Worker.StopReason do
       signature.
     * `:exited_without_done` — clean exit (status 0) but the worker never
       emitted `arb done`. It quit early without completing the task.
+    * `:sentinel_in_tool_output` — a Codex-only refinement of
+      `:exited_without_done`: clean exit whose last shell command was an
+      echo/printf of `arb done` (the harness only trusts the agent's own message
+      text). Not a crash; the worker routes it to the commit gate as a completion.
     * `:async_wait_abandoned` — a *refinement* of `:exited_without_done`
       (bd-606zlr): the clean exit happened immediately after the agent armed
       an asynchronous wait — a `Monitor`, a `ScheduleWakeup`, or a
@@ -234,6 +238,7 @@ defmodule Arbiter.Worker.StopReason do
           | :agent_print_timeout
           | :exited_without_done
           | :async_wait_abandoned
+          | :sentinel_in_tool_output
           | :permission_denied
           | :stalled
           | :preflight_timeout
@@ -520,6 +525,11 @@ defmodule Arbiter.Worker.StopReason do
   # call plus its output, so a narrow terminal window is what distinguishes
   # "armed and abandoned" from "armed and handled".
   @async_arm_window 12
+
+  # The sentinel as a shell tool's output line, and the command that produced it
+  # (an echo/printf of the sentinel — not a grep that happened to print it).
+  @sentinel_tool_line ~r/\A⏴\s*[^\p{L}\p{N}]*arb done[^\p{L}\p{N}]*\z/u
+  @sentinel_echo_command ~r/\A⏵ \$.*\b(?:printf|echo)\b.*arb done/u
 
   @doc """
   Classify a stop from the subprocess exit status and captured output.
@@ -863,6 +873,21 @@ defmodule Arbiter.Worker.StopReason do
       # plain clean-exit clause it refines. Scoped to `exit_status == 0`
       # because a crash that happens to have backgrounded something earlier is
       # a crash — the exit status stays authoritative.
+      exit_status == 0 and sentinel_in_tool_output?(output_lines, provider) ->
+        %__MODULE__{
+          category: :sentinel_in_tool_output,
+          summary:
+            "agent exited cleanly and its last shell command printed `arb done`, but the " <>
+              "sentinel appeared only in tool output, never in the agent's own message " <>
+              "text, so the harness did not see it",
+          remediation:
+            "Not a crash. The worker treats this as completion when the worktree is clean " <>
+              "with commits ahead (the commit gate decides); otherwise resume it and ask " <>
+              "for `arb done` as the final line of its own message, not via a tool.",
+          exit_status: 0,
+          signal: nil
+        }
+
       exit_status == 0 and abandoned_async_wait?(output_lines, provider) ->
         %__MODULE__{
           category: :async_wait_abandoned,
@@ -1275,37 +1300,101 @@ defmodule Arbiter.Worker.StopReason do
   def label(%__MODULE__{category: category} = reason) do
     base =
       case category do
-        :auth_expired -> "credentials expired"
-        :quota_exhausted -> "5h usage limit reached"
-        :credit_exhausted -> "credits exhausted"
-        :rate_limited -> "rate-limited"
-        :session_not_found -> "session not found — resume in briefing mode (--mode briefing)"
-        :gateway_error -> "gateway error (proxy/upstream)"
-        :max_turns -> "hit the max-turns limit (agent ran out of turns)"
-        :context_thrash -> "context window thrashed (autocompact loop)"
-        :killed -> "killed by signal #{reason.signal}"
-        :memory_cap_exceeded -> "memory cap exceeded (worker process tree OOM-killed)"
-        :spend_cap -> "spend cap reached (parked by the guardrail tier)"
-        :trust_suspended -> "subject suspended after a critical guardrail event (parked)"
-        :spawn_exec_failed -> "spawn failed (no output — exec error)"
-        :container_create_failed -> "container creation failed (infra, before the agent started)"
-        :crashed -> "crashed"
-        :stream_schema_drift -> "agent CLI stream schema not understood (harness bug)"
-        :agent_print_timeout -> "agy print-mode turn timed out (partial output only)"
-        :exited_without_done -> "exited without completing"
-        :async_wait_abandoned -> "abandoned an async wait (background task never drained)"
-        :permission_denied -> "strict permission policy denied a command (agy ended the turn)"
-        :stalled -> "stalled (no output)"
-        :preflight_timeout -> "auth pre-flight probe timed out"
-        :missing_worktree -> "no worktree provisioned (nothing to integrate)"
-        :workspace_destroyed -> "workspace destroyed mid-run (worktree gone from disk)"
-        :tampered_clone -> "the worker replaced its clone's .git (refused, not trusted)"
-        :spawn_failed -> "spawn failed (dispatch error after worker registration)"
-        :model_unavailable -> "model unavailable for this account"
-        :node_lost -> "node lost (run interrupted)"
-        :pod_disrupted -> "pod disrupted (run interrupted)"
-        :placement_refused -> "node refused the run (held)"
-        :egress_denied -> "egress denied by the worker jail (host not allowlisted)"
+        :auth_expired ->
+          "credentials expired"
+
+        :quota_exhausted ->
+          "5h usage limit reached"
+
+        :credit_exhausted ->
+          "credits exhausted"
+
+        :rate_limited ->
+          "rate-limited"
+
+        :session_not_found ->
+          "session not found — resume in briefing mode (--mode briefing)"
+
+        :gateway_error ->
+          "gateway error (proxy/upstream)"
+
+        :max_turns ->
+          "hit the max-turns limit (agent ran out of turns)"
+
+        :context_thrash ->
+          "context window thrashed (autocompact loop)"
+
+        :killed ->
+          "killed by signal #{reason.signal}"
+
+        :memory_cap_exceeded ->
+          "memory cap exceeded (worker process tree OOM-killed)"
+
+        :spend_cap ->
+          "spend cap reached (parked by the guardrail tier)"
+
+        :trust_suspended ->
+          "subject suspended after a critical guardrail event (parked)"
+
+        :spawn_exec_failed ->
+          "spawn failed (no output — exec error)"
+
+        :container_create_failed ->
+          "container creation failed (infra, before the agent started)"
+
+        :crashed ->
+          "crashed"
+
+        :stream_schema_drift ->
+          "agent CLI stream schema not understood (harness bug)"
+
+        :agent_print_timeout ->
+          "agy print-mode turn timed out (partial output only)"
+
+        :exited_without_done ->
+          "exited without completing"
+
+        :async_wait_abandoned ->
+          "abandoned an async wait (background task never drained)"
+
+        :sentinel_in_tool_output ->
+          "printed `arb done` only in tool output (not the agent's message)"
+
+        :permission_denied ->
+          "strict permission policy denied a command (agy ended the turn)"
+
+        :stalled ->
+          "stalled (no output)"
+
+        :preflight_timeout ->
+          "auth pre-flight probe timed out"
+
+        :missing_worktree ->
+          "no worktree provisioned (nothing to integrate)"
+
+        :workspace_destroyed ->
+          "workspace destroyed mid-run (worktree gone from disk)"
+
+        :tampered_clone ->
+          "the worker replaced its clone's .git (refused, not trusted)"
+
+        :spawn_failed ->
+          "spawn failed (dispatch error after worker registration)"
+
+        :model_unavailable ->
+          "model unavailable for this account"
+
+        :node_lost ->
+          "node lost (run interrupted)"
+
+        :pod_disrupted ->
+          "pod disrupted (run interrupted)"
+
+        :placement_refused ->
+          "node refused the run (held)"
+
+        :egress_denied ->
+          "egress denied by the worker jail (host not allowlisted)"
       end
 
     case reason.exit_status do
@@ -1636,6 +1725,34 @@ defmodule Arbiter.Worker.StopReason do
 
   defp blank_output?(output_lines) do
     Enum.all?(output_lines, fn line -> is_binary(line) and String.trim(line) == "" end)
+  end
+
+  # Codex only: did the run's LAST tool call echo the sentinel itself
+  # (`printf 'arb done\n'`) and nothing run after it? `output_lines` is
+  # oldest-first. Scoped to the final command block (its `⏵ $` header through
+  # the lines up to the end, which may include trailing agent prose), and the
+  # command text must itself be an echo/printf of the sentinel — so a grep that
+  # merely printed `arb done`, or any earlier command, never qualifies.
+  defp sentinel_in_tool_output?(output_lines, "codex") do
+    case output_lines |> Enum.filter(&is_binary/1) |> last_command_block() do
+      [header | rest] ->
+        Regex.match?(@sentinel_echo_command, header) and
+          Enum.any?(rest, &Regex.match?(@sentinel_tool_line, &1))
+
+      [] ->
+        false
+    end
+  end
+
+  defp sentinel_in_tool_output?(_output_lines, _provider), do: false
+
+  defp last_command_block(lines) do
+    case Enum.take(lines, -@async_arm_window * 4)
+         |> Enum.reverse()
+         |> Enum.split_while(&(not String.starts_with?(&1, "⏵ $"))) do
+      {_, []} -> []
+      {tail, [header | _]} -> [header | Enum.reverse(tail)]
+    end
   end
 
   # bd-606zlr: did the run end with an asynchronous wait armed and never

@@ -292,9 +292,16 @@ defmodule Arbiter.Agents.Codex.ConfigDir do
       (`notes` / `qa_notes` / `deployment_notes` — your own task only)
     - inspect your workspace config → `workspace_show`
 
-    Use `arb` and the shell for everything else — git, tests, and printing the
-    `arb done` sentinel, which is still how you signal completion. If the tools
-    are not present, fall back to the `arb` commands in your prompt.
+    Use `arb` and the shell for everything else — git, tests, and the like. If
+    the tools are not present, fall back to the `arb` commands in your prompt.
+
+    ## Completion sentinel
+
+    The `arb done` sentinel must be a line of your own **final message**, written
+    by you as the agent. The harness reads only your message text: never emit it
+    through a tool, and never echo or `printf` it from a shell command — output
+    from a command is not seen as your sentinel. The same goes for any `VERDICT:`
+    line.
     """
   end
 

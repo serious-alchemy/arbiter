@@ -435,6 +435,7 @@ defmodule Arbiter.Agents.Preflight do
       # auth verdict must not flip just because its output happened to refine
       # into the async-wait category.
       :async_wait_abandoned -> :ok
+      :sentinel_in_tool_output -> :ok
       _ -> {:error, reason}
     end
   end
