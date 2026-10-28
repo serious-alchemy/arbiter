@@ -4893,6 +4893,8 @@ defmodule Arbiter.Worker.Dispatch do
               |> Keyword.put(:worktree_path, worktree_path)
               |> Keyword.put(:tracker_context, tracker_context)
               |> Keyword.put(:adapter, adapter)
+              # bd-dlvegd: standing orders are rendered into the prompt from this.
+              |> Keyword.put(:workspace, workspace)
               # bd-dh1gg1: a container holds no forge credential (the host's
               # `~/.ssh` is not mounted), so the host pushes the branch when the
               # run completes; the prompt must not send the worker to push.
