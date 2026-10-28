@@ -604,6 +604,94 @@ defmodule Arbiter.Worker.Image.PublisherTest do
                Enum.any?(msgs, &(match?({:podman, _}, &1) and inspect(&1) =~ "gh-token"))
     end
 
+    defp gitlab_ws(image_extra \\ %{}, secrets \\ %{}) do
+      workspace(
+        %{
+          "repos" => %{
+            "vstim" => %{
+              "image" =>
+                Map.merge(
+                  %{"registry" => "registry.gitlab.com/serious-alchemy/vstim/vstim"},
+                  image_extra
+                )
+            }
+          }
+        },
+        secrets
+      )
+    end
+
+    test "a GitLab registry path gets its credential as an auth file keyed by the GitLab host",
+         %{opts: opts, ctx: ctx} do
+      ws =
+        gitlab_ws(
+          %{"credentials_ref" => "secret:GITLAB"},
+          %{"GITLAB" => "gitlab+deploy-token-1:glpat-NEVER-LOGGED"}
+        )
+
+      assert {:ok, result} = Publisher.ensure_ready(Map.put(ctx, :workspace, ws), opts)
+
+      assert result.ref =~
+               ~r|\Aregistry\.gitlab\.com/serious-alchemy/vstim/vstim/vstim/worker@sha256:|
+
+      msgs = drain()
+      pushes = for {:push, remote} <- msgs, do: remote
+      assert pushes != []
+      assert Enum.all?(pushes, &String.starts_with?(&1, "registry.gitlab.com/serious-alchemy/"))
+
+      # Every push carried the GitLab login, and only that one.
+      auths = for {:authfile, body, 0o600} <- msgs, do: Jason.decode!(body)["auths"]
+      assert length(auths) == length(pushes)
+
+      for auth <- auths do
+        assert Map.keys(auth) == ["registry.gitlab.com"]
+
+        assert auth["registry.gitlab.com"]["auth"] ==
+                 Base.encode64("gitlab+deploy-token-1:glpat-NEVER-LOGGED")
+      end
+
+      refute inspect(for({:podman, args} <- msgs, do: args)) =~ "glpat-NEVER-LOGGED"
+    end
+
+    test "a GitLab repo registry with no credentials_ref uses the nodes.registry login on that host",
+         %{opts: opts, ctx: ctx} do
+      config = %{
+        registry: "registry.gitlab.com/serious-alchemy/arbiter",
+        username: "deploy",
+        password: @password
+      }
+
+      assert {:ok, _} =
+               Publisher.ensure_ready(
+                 Map.put(ctx, :workspace, gitlab_ws()),
+                 Keyword.put(opts, :config, config)
+               )
+
+      auths = for {:authfile, body, 0o600} <- drain(), do: Jason.decode!(body)["auths"]
+      assert auths != []
+      expected = Base.encode64("deploy:" <> @password)
+      assert Enum.all?(auths, &(&1["registry.gitlab.com"]["auth"] == expected))
+    end
+
+    test "a denied push to a registry with no login says so, without echoing any secret",
+         %{opts: opts, ctx: ctx} do
+      denied =
+        runner(self(), %{
+          "push" => fn _ -> {"Error: ... requested access to the resource is denied", 125} end
+        })
+
+      assert {:error, {:push_failed, remote, 125, tail}} =
+               Publisher.ensure_ready(
+                 Map.put(ctx, :workspace, gitlab_ws()),
+                 Keyword.put(opts, :runner, denied)
+               )
+
+      assert remote =~ "registry.gitlab.com/serious-alchemy/vstim/vstim/vstim/worker:"
+      assert tail =~ "requested access to the resource is denied"
+      assert tail =~ "no registry login is configured for registry.gitlab.com"
+      refute tail =~ @password
+    end
+
     test "other repos of that workspace still go to nodes.registry", %{opts: opts, ctx: ctx} do
       ctx = ctx |> Map.put(:workspace, ghcr()) |> Map.put(:repo, "other")
       assert {:ok, result} = Publisher.ensure_ready(ctx, opts)

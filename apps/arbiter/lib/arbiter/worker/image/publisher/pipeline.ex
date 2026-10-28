@@ -494,7 +494,18 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   defp guard({out, 0}, _kind, _remote, _cfg), do: {out, 0}
 
   defp guard({out, status}, kind, remote, cfg),
-    do: {:error, {kind, remote, status, tail(Registry.redact(out, cfg))}}
+    do: {:error, {kind, remote, status, tail(Registry.redact(out, cfg)) <> no_login_hint(cfg)}}
+
+  # A push to a registry we hold no login for is anonymous, which a private registry answers
+  # with a bare "access denied" that reads like a bad token. Say which it was (never a secret).
+  defp no_login_hint(%Registry{username: user, password: pw})
+       when is_binary(user) and is_binary(pw),
+       do: ""
+
+  defp no_login_hint(%Registry{host: host}),
+    do:
+      "\n(no registry login is configured for #{host}: set the repo's image.credentials_ref " <>
+        "or nodes.registry credentials)"
 
   defp read_digest(path, remote) do
     with {:ok, body} <- File.read(path),

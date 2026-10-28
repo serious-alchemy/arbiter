@@ -140,4 +140,54 @@ defmodule Arbiter.Worker.PassPlacementTest do
       assert refs["refs/remotes/origin/" <> target] == tip
     end
   end
+
+  describe "ensure_image/2 (bd-ael5hi)" do
+    @tag_ref "registry.gitlab.com/g/p/vstim/worker:abc"
+
+    defp image_ctx(mode, publish) do
+      %{
+        task_id: "img-1",
+        workspace: nil,
+        repo: "vstim",
+        repo_path: "/repo",
+        mode: mode,
+        image_opts: [image: @tag_ref, publish: [stub: publish]]
+      }
+    end
+
+    defp registry_node, do: %{id: "n", name: "mesaana", caps: %{"image" => "registry"}}
+
+    test "a local pass and a node that builds its own image publish nothing" do
+      boom = fn _ -> flunk("must not publish") end
+      assert {:ok, nil} = PassPlacement.ensure_image(nil, image_ctx(:prefer_remote, boom))
+
+      node = %{id: "n", name: "plain", caps: %{}}
+      assert {:ok, ^node} = PassPlacement.ensure_image(node, image_ctx(:prefer_remote, boom))
+    end
+
+    test "a registry node whose image publishes is kept" do
+      ok = fn _ -> {:ok, %{ref: "x@sha256:" <> String.duplicate("a", 64)}} end
+      node = registry_node()
+      assert {:ok, ^node} = PassPlacement.ensure_image(node, image_ctx(:prefer_remote, ok))
+    end
+
+    test "a failed publish falls back to the primary under prefer_remote" do
+      denied = fn _ -> {:error, {:push_failed, @tag_ref, 125, "denied"}} end
+
+      assert {:ok, nil} =
+               PassPlacement.ensure_image(registry_node(), image_ctx(:prefer_remote, denied))
+    end
+
+    test "a failed publish holds under remote_only, naming the cause" do
+      denied = fn _ -> {:error, {:push_failed, @tag_ref, 125, "denied"}} end
+
+      assert {:error, {:no_node_capacity, info}} =
+               PassPlacement.ensure_image(registry_node(), image_ctx(:remote_only, denied))
+
+      assert info.image_error ==
+               {:image_unavailable, {:push_failed, @tag_ref, 125, "denied"}}
+
+      assert info.message =~ "push_failed"
+    end
+  end
 end

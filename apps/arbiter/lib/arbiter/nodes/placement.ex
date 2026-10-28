@@ -614,7 +614,8 @@ defmodule Arbiter.Nodes.Placement do
   `{:no_node_capacity, info}` shape as a full fleet, so every caller already
   holds the card and retries.
   """
-  @spec image_hold(request(), term()) :: info()
+  @spec image_hold(%{required(:task_id) => String.t(), optional(atom()) => term()}, term()) ::
+          info()
   def image_hold(request, reason) do
     %{
       task_id: request.task_id,
@@ -622,6 +623,7 @@ defmodule Arbiter.Nodes.Placement do
       mode: :remote_only,
       nodes_known: 1,
       image_error: reason,
+      phrase: "the registry image is not available (#{inspect(reason, limit: 10)})",
       message:
         "held — the registry image for #{request.task_id} is not available " <>
           "(#{inspect(reason)}); worker.placement is remote_only, so it does not run on " <>

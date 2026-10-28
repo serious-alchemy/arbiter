@@ -58,6 +58,63 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassRemoteTest do
     assert Registry.lookup(Placement.Registry, ctx.issue.id) == []
   end
 
+  describe "a registry node whose worker image cannot be published" do
+    @image_tag "registry.gitlab.com/g/p/vstim/worker:abc"
+    @publish_denied {:push_failed, "registry.gitlab.com/g/p/vstim/worker:abc", 125,
+                     "requested access to the resource is denied"}
+
+    defp registry_node, do: node_row(caps: %{"image" => "registry"})
+
+    defp failing_publish(test) do
+      [
+        image: @image_tag,
+        publish: [
+          stub: fn _ctx ->
+            send(test, :publish_attempted)
+            {:error, @publish_denied}
+          end
+        ]
+      ]
+    end
+
+    test "prefer_remote runs the pass on the primary instead of failing the spawn", ctx do
+      %{worker_pid: pid} =
+        pass!(ctx, nodes: [registry_node()], image_opts: failing_publish(self()))
+
+      assert_received :publish_attempted
+      refute Map.has_key?(Worker.state(pid).meta, :placed_node_id)
+      assert Registry.lookup(Placement.Registry, ctx.issue.id) == []
+    end
+
+    test "remote_only holds the pass with the publish failure named, and starts no worker", ctx do
+      set_placement!(ctx.ws, "remote_only")
+
+      assert {:error, {:no_node_capacity, info}} =
+               dispatch(ctx, nodes: [registry_node()], image_opts: failing_publish(self()))
+
+      assert info.image_error == {:image_unavailable, @publish_denied}
+      assert info.phrase =~ "image"
+      assert info.message =~ "denied"
+      assert Worker.whereis(ctx.issue.id) == nil
+      assert Registry.lookup(Placement.Registry, ctx.issue.id) == []
+    end
+
+    test "a publish that works keeps the pass on the node", ctx do
+      ok = [
+        image: @image_tag,
+        publish: [
+          stub: fn _ctx ->
+            {:ok,
+             %{ref: "registry.gitlab.com/g/p/vstim/worker@sha256:" <> String.duplicate("a", 64)}}
+          end
+        ]
+      ]
+
+      %{worker_pid: pid} = pass!(ctx, nodes: [registry_node()], image_opts: ok)
+      assert %{meta: %{placed_node_id: "node-a"}} = Worker.state(pid)
+    end
+  end
+
   test "it stays on the primary when no node has room", ctx do
     %{worker_pid: pid} = pass!(ctx, nodes: [node_row(live: 2, max: 2)])
 
@@ -140,23 +197,31 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassRemoteTest do
   end
 
   defp pass!(ctx, opts) do
-    placement = [remote_available?: true] ++ Keyword.take(opts, [:nodes])
-
-    {:ok, %{worker_pid: pid} = info} =
-      FixPassDispatcher.dispatch(%{
-        task_id: ctx.issue.id,
-        workspace_id: ctx.ws.id,
-        repo_path: ctx.repo,
-        repo: "test/repo",
-        checks: [],
-        start_claude: false,
-        placement_opts: placement,
-        slot_admitted: true,
-        pr_status: fn -> {:ok, %{status: :open, pipeline: :failed}} end
-      })
-
+    {:ok, %{worker_pid: pid} = info} = dispatch(ctx, opts)
     on_exit(fn -> stop_quietly(pid) end)
     info
+  end
+
+  defp dispatch(ctx, opts) do
+    placement = [remote_available?: true] ++ Keyword.take(opts, [:nodes])
+
+    FixPassDispatcher.dispatch(%{
+      task_id: ctx.issue.id,
+      workspace_id: ctx.ws.id,
+      repo_path: ctx.repo,
+      repo: "test/repo",
+      checks: [],
+      start_claude: false,
+      placement_opts: placement,
+      image_opts: Keyword.get(opts, :image_opts, []),
+      slot_admitted: true,
+      pr_status: fn -> {:ok, %{status: :open, pipeline: :failed}} end
+    })
+  end
+
+  defp set_placement!(ws, mode) do
+    config = put_in(ws.config, ["worker", "placement"], mode)
+    Ash.update!(ws, %{config: config}, action: :update)
   end
 
   # A ticket Merging with PR #77, its branch pushed.

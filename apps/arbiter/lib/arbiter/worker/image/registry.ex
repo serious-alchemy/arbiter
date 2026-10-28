@@ -119,7 +119,8 @@ defmodule Arbiter.Worker.Image.Registry do
         fetch(opts)
 
       %{registry: registry} = image ->
-        with {:ok, {user, password}} <- credentials(image.credentials_ref, workspace) do
+        with {:ok, {user, password}} <-
+               credentials(image.credentials_ref, workspace, host(registry), opts) do
           {:ok,
            %__MODULE__{
              registry: registry,
@@ -147,8 +148,16 @@ defmodule Arbiter.Worker.Image.Registry do
 
   defp install_raw(opts) do
     case Keyword.get(opts, :config) do
-      %{} = config -> config
-      _ -> %{registry: Settings.nodes_registry(), insecure?: Settings.nodes_registry_insecure?()}
+      %{} = config ->
+        config
+
+      _ ->
+        %{
+          registry: Settings.nodes_registry(),
+          username: Settings.nodes_registry_username(),
+          password: Settings.nodes_registry_password(),
+          insecure?: Settings.nodes_registry_insecure?()
+        }
     end
   end
 
@@ -156,7 +165,22 @@ defmodule Arbiter.Worker.Image.Registry do
   defp hostname("[" <> _ = host), do: host |> String.split("]") |> hd() |> Kernel.<>("]")
   defp hostname(host), do: host |> String.split(":", parts: 2) |> hd()
 
-  defp credentials(nil, _workspace), do: {:ok, {nil, nil}}
+  # No `credentials_ref`: a repo registry on the very host `nodes.registry` names (two GitLab
+  # projects under one registry host, say) pushes with that install-wide login rather than
+  # anonymously, which GitLab and GHCR answer with "requested access to the resource is
+  # denied". Any other host stays anonymous: one registry's token is never sent to another.
+  defp credentials(nil, _workspace, host, opts) do
+    with %{registry: registry, username: user, password: password}
+         when is_binary(registry) and is_binary(user) and user != "" and is_binary(password) and
+                password != "" <- install_raw(opts),
+         true <- host(registry) == host do
+      {:ok, {user, password}}
+    else
+      _ -> {:ok, {nil, nil}}
+    end
+  end
+
+  defp credentials(ref, workspace, _host, _opts), do: credentials(ref, workspace)
 
   defp credentials(ref, workspace) do
     secrets = CredentialsRef.embed_secrets(%{}, workspace_secrets(workspace))

@@ -51,6 +51,8 @@ defmodule Arbiter.Worker.PassPlacement do
   alias Arbiter.Nodes.Refusal
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
+  alias Arbiter.Worker.ContainerSpawn
+  alias Arbiter.Worker.Image.Publisher
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.Worktree
 
@@ -101,6 +103,52 @@ defmodule Arbiter.Worker.PassPlacement do
 
   defp workspace_id(%{id: id}, _attrs) when is_binary(id), do: id
   defp workspace_id(_workspace, attrs), do: Map.get(attrs, :workspace_id)
+
+  @doc """
+  Publish the run image for `node` before the pass is committed to it, as
+  `Arbiter.Worker.Dispatch` does for a ticket's run. A node that pulls its image from the
+  registry needs it published first; a publish that fails (a registry that refuses the
+  push, a repo with no `origin`, ...) is a placement decision, not a spawn failure that
+  the Watchdog would count as an attempt (`Publisher.fallback/2`): `prefer_remote` runs the
+  pass on the primary (`{:ok, nil}`, the node's slot given back), `remote_only` holds it
+  (`{:error, {:no_node_capacity, info}}`, `info.image_error` naming the cause).
+
+  `ctx`: `:task_id`, `:workspace`, `:repo`, `:repo_path` (the main checkout the image is
+  planned from), `:mode` (`worker.placement`) and optionally `:image_opts`
+  (`ContainerSpawn.preflight_image/3`'s `:image` / `:publish`). A node that builds its own
+  image (and `nil`, a local pass) publishes nothing.
+  """
+  @spec ensure_image(map() | nil, map()) ::
+          {:ok, map() | nil} | {:error, {:no_node_capacity, map()}}
+  def ensure_image(nil, _ctx), do: {:ok, nil}
+
+  def ensure_image(node, ctx) do
+    opts =
+      [workspace: ctx.workspace, repo: ctx.repo] ++
+        Keyword.take(Map.get(ctx, :image_opts) || [], [:image, :publish])
+
+    case ContainerSpawn.preflight_image(ctx.repo_path, node, opts) do
+      :ok -> {:ok, node}
+      {:error, reason} -> image_unavailable(node, ctx, reason)
+    end
+  end
+
+  defp image_unavailable(node, ctx, reason) do
+    release(ctx.task_id)
+
+    case Publisher.fallback(ctx.mode, reason) do
+      {:hold, reason} ->
+        {:error, {:no_node_capacity, Placement.image_hold(%{task_id: ctx.task_id}, reason)}}
+
+      {:local, reason} ->
+        Logger.warning(
+          "PassPlacement: no registry image for #{ctx.task_id} on #{node_name(node)} " <>
+            "(#{inspect(reason, limit: 10)}); running on the primary"
+        )
+
+        {:ok, nil}
+    end
+  end
 
   @doc "Give back the slot `place/2` reserved for `task_id` on a node."
   @spec release(String.t()) :: :ok
