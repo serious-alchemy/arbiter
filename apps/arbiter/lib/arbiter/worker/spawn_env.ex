@@ -32,6 +32,21 @@ defmodule Arbiter.Worker.SpawnEnv do
   linked account). A `nil` provider is treated as `"claude"`, the historical
   default of the bare `ClaudeSession.start/1` callers.
 
+  The stripped credential names live in one place, `credential_names/0`
+  (`@own_credentials` below, plus any `CODEX_*` other than `CODEX_HOME`):
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`,
+  `OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
+  `GOOGLE_GENAI_API_KEY`, `ANTIGRAVITY_API_KEY`. Ambient copies are never
+  inherited (allowlist); only the selected account's own pairs arrive via
+  `extras`.
+
+  ## Spawn backends
+
+  Every backend routes through `port_env/2` / `cmd_env/2`: local
+  (`ClaudeSession`), podman (`ContainerSpawn` consumes the port args built by
+  `ClaudeSession`), remote/cluster (`NodeAgent.Run` ships those same port args),
+  plus the doctor canary, replay, discovery, review and quota helpers.
+
   ## Deliberate omissions and exceptions
 
     * `SSH_AUTH_SOCK` — dropped. git over ssh must use a key file in `~/.ssh`
@@ -85,11 +100,28 @@ defmodule Arbiter.Worker.SpawnEnv do
   @own_credentials %{
     "claude" => ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY),
     "codex" => ~w(OPENAI_API_KEY CODEX_API_KEY),
-    "gemini" => ~w(GEMINI_API_KEY GOOGLE_GENAI_API_KEY ANTIGRAVITY_API_KEY)
+    "gemini" => ~w(GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_GENAI_API_KEY ANTIGRAVITY_API_KEY)
   }
   @all_credentials @own_credentials |> Map.values() |> List.flatten() |> MapSet.new()
 
   @type pair :: {String.t(), String.t() | false}
+
+  @doc """
+  Every provider-credential variable this module strips, the single source of
+  truth (see the moduledoc). Any other `CODEX_*` name except the `CODEX_HOME`
+  config dir is also treated as a codex credential.
+  """
+  @spec credential_names() :: [String.t()]
+  def credential_names, do: @all_credentials |> MapSet.to_list() |> Enum.sort()
+
+  # The provider owning `name` as a credential, or `nil` for a non-credential.
+  defp credential_owner(name) do
+    cond do
+      name == "CODEX_HOME" -> nil
+      String.starts_with?(name, "CODEX_") -> "codex"
+      true -> Enum.find_value(@own_credentials, fn {p, names} -> name in names && p end)
+    end
+  end
 
   @doc "Whether `name` is copied from the server's environment into a worker's."
   @spec allowed?(String.t()) :: boolean()
@@ -128,10 +160,11 @@ defmodule Arbiter.Worker.SpawnEnv do
   """
   @spec drop_foreign_credentials([pair()], String.t() | atom() | nil) :: [pair()]
   def drop_foreign_credentials(pairs, provider) do
-    own = provider |> normalize_provider() |> then(&Map.get(@own_credentials, &1, []))
+    provider = normalize_provider(provider)
 
     Enum.reject(pairs, fn {name, _} ->
-      MapSet.member?(@all_credentials, name) and name not in own
+      owner = credential_owner(name)
+      owner != nil and owner != provider
     end)
   end
 
