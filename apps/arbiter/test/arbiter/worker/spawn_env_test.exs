@@ -215,4 +215,54 @@ defmodule Arbiter.Worker.SpawnEnvTest do
       end
     end
   end
+
+  describe "ambient provider credentials (#1092)" do
+    @ambient ~w(ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY
+                CODEX_API_KEY GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_GENAI_API_KEY
+                ANTIGRAVITY_API_KEY)
+
+    setup do
+      previous = Map.new(@ambient, &{&1, System.get_env(&1)})
+      Enum.each(@ambient, &System.put_env(&1, "ambient-#{&1}"))
+
+      on_exit(fn ->
+        Enum.each(previous, fn
+          {k, nil} -> System.delete_env(k)
+          {k, v} -> System.put_env(k, v)
+        end)
+      end)
+    end
+
+    test "no ambient credential reaches a claude, codex or gemini child" do
+      for provider <- ~w(claude codex gemini) do
+        env = [] |> SpawnEnv.port_env(provider) |> child_env()
+
+        for name <- @ambient do
+          refute Map.has_key?(env, name), "#{name} leaked into #{provider} env"
+        end
+      end
+    end
+
+    test "a foreign credential in extras is dropped, the provider's own and config kept" do
+      extras = Enum.map(@ambient, &{&1, "extra"}) ++ [{"CODEX_HOME", "/x"}]
+
+      claude = extras |> SpawnEnv.port_env("claude") |> child_env()
+      assert claude["CLAUDE_CODE_OAUTH_TOKEN"] == "extra"
+      refute Map.has_key?(claude, "OPENAI_API_KEY")
+      refute Map.has_key?(claude, "GOOGLE_API_KEY")
+
+      codex = extras |> SpawnEnv.port_env("codex") |> child_env()
+      assert codex["CODEX_API_KEY"] == "extra"
+      assert codex["CODEX_HOME"] == "/x"
+      refute Map.has_key?(codex, "ANTHROPIC_API_KEY")
+
+      gemini = extras |> SpawnEnv.port_env("gemini") |> child_env()
+      assert gemini["GOOGLE_API_KEY"] == "extra"
+      refute Map.has_key?(gemini, "CODEX_API_KEY")
+    end
+
+    test "credential_names/0 is the single list of stripped credential vars" do
+      assert Enum.sort(@ambient) -- SpawnEnv.credential_names() == []
+    end
+  end
 end
