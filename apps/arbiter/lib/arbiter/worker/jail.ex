@@ -15,7 +15,10 @@ defmodule Arbiter.Worker.Jail do
   instead of `--bind`ing it, for worktree-backed review dispatches: the
   reviewer read-only posture (`Dispatch.review_security_policy/2` denies
   `Edit`/`Write`/`NotebookEdit`) becomes an OS guarantee instead of a deny
-  rule agy's native writes ignore.
+  rule agy's native writes ignore. A read-only worktree still gets a writable
+  `_build` and `deps` (bd-97y349, `worktree_scratch`): `--bind`s laid over the
+  `--ro-bind`, so a reviewer can compile and run a targeted `mix test` while every
+  source file stays unmodifiable.
 
   ## What is writable
 
@@ -206,6 +209,7 @@ defmodule Arbiter.Worker.Jail do
           optional(:readonly_paths) => [String.t()],
           optional(:env) => [{String.t(), String.t()}],
           optional(:worktree_readonly) => boolean(),
+          optional(:worktree_scratch) => [String.t()],
           optional(:mask_paths) => [String.t()],
           optional(:secret_files) => [String.t()],
           optional(:hide) => Hide.t() | nil,
@@ -289,6 +293,8 @@ defmodule Arbiter.Worker.Jail do
           network_env(network) ++
             ssh_env(network, git_ssh_key) ++ toolchain_env ++ Keyword.get(opts, :env, []),
         worktree_readonly: Keyword.get(opts, :worktree_readonly, false),
+        worktree_scratch:
+          worktree_scratch(worktree, Keyword.get(opts, :worktree_readonly, false)),
         readonly_paths: readonly_paths(Keyword.get(opts, :readonly_paths, [])),
         network: network,
         ssh_agent: ssh_agent,
@@ -569,6 +575,7 @@ defmodule Arbiter.Worker.Jail do
       network_args(Map.get(spec, :network)),
       Enum.flat_map(Map.get(spec, :writable_paths, []), &["--bind-try", &1, &1]),
       if(Map.get(spec, :worktree_readonly, false), do: ro_bind(worktree), else: bind(worktree)),
+      Enum.flat_map(Map.get(spec, :worktree_scratch, []), &bind/1),
       if(home, do: bind(home) ++ ["--setenv", "HOME", home], else: []),
       Enum.flat_map(Map.get(spec, :readonly_paths, []), &["--ro-bind-try", &1, &1]),
       git_args(Map.get(spec, :git), worktree),
@@ -943,6 +950,24 @@ defmodule Arbiter.Worker.Jail do
   defp clone_guard_args(_git, _common), do: []
 
   defp bind(path), do: ["--bind", path, path]
+
+  # bd-97y349: subdirectories of a read-only worktree a build must write to
+  # (`mix test` creates `_build`, and a dep compile can touch `deps`). Each is a
+  # real directory the jail binds writable over the read-only worktree, so the
+  # source stays unmodifiable while a reviewer can compile and run a targeted
+  # test. A name that is a symlink is replaced by an empty directory first
+  # (`real_dir/1`): binding it would make its target writable. A name that cannot
+  # be made a directory is simply left read-only.
+  @worktree_scratch ~w(_build deps)
+
+  defp worktree_scratch(worktree, true) do
+    Enum.flat_map(@worktree_scratch, fn name ->
+      path = Path.join(worktree, name)
+      if real_dir(path) == :ok, do: [path], else: []
+    end)
+  end
+
+  defp worktree_scratch(_worktree, _readonly), do: []
 
   defp readonly_paths(paths) when is_list(paths),
     do: Enum.filter(paths, &(is_binary(&1) and Path.type(&1) == :absolute))
