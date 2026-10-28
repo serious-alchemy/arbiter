@@ -58,9 +58,12 @@ defmodule Arbiter.Trackers.Sync do
   duplicate comment on retry.
   """
 
+  require Ash.Query
   require Logger
 
   alias Arbiter.Messages.CoordinatorNotifier
+  alias Arbiter.Messages.Message
+  alias Arbiter.Tasks.Attention
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
@@ -635,7 +638,8 @@ defmodule Arbiter.Trackers.Sync do
       message:
         "the tracker gates this transition on field(s) the task hasn't produced: " <>
           "#{Enum.join(names, ", ")}. Produce the value(s) on the task " <>
-          "(e.g. qa_notes / deployment_notes) and re-run the sync"
+          "(e.g. qa_notes / deployment_notes) and re-run this ticket's sync with " <>
+          "`ticket_sync_lifecycle` (id + the failing event, e.g. pr_opened)"
     }
   end
 
@@ -705,6 +709,63 @@ defmodule Arbiter.Trackers.Sync do
     ensure_failure_dedup_table()
     now = System.monotonic_time(:millisecond)
     :ets.insert(@failure_dedup_table, {{task_id, event}, now})
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  @doc """
+  Re-fire ONE ticket's `event` transition after the operator fixed whatever
+  made it fail (e.g. populated a gated tracker field). Unlike `tracker_sync`
+  this touches only `issue` — never a workspace-wide reconcile.
+
+  The 5-minute escalation dedup entry for `(issue, event)` is dropped first so
+  a repeat failure re-escalates; on success the ticket's open
+  `:tracker_sync_failed` escalation is resolved (and a `:tracker_sync`
+  attention cause cleared). Returns what `transition_event/2` returns.
+  """
+  @spec retry_lifecycle(Issue.t(), atom()) ::
+          :ok | {:skipped, :upstream_past_target} | {:error, term()}
+  def retry_lifecycle(%Issue{} = issue, event) when is_atom(event) do
+    failure_dedup_forget(issue.id, event)
+    Trackers.prepare(issue, load_workspace(issue.workspace_id))
+
+    case transition_event(issue, event) do
+      {:error, _} = err ->
+        err
+
+      ok ->
+        resolve_sync_escalations(issue)
+        ok
+    end
+  end
+
+  defp resolve_sync_escalations(%Issue{id: id}) do
+    Message
+    |> Ash.Query.filter(
+      task_ref == ^id and kind == :escalation and escalation_kind == :tracker_sync_failed and
+        is_nil(cleared_at)
+    )
+    |> Ash.read!()
+    |> Enum.each(&Ash.update(&1, %{}, action: :resolve))
+
+    case Ash.get(Issue, id) do
+      {:ok, %Issue{attention_cause: :tracker_sync_failed}} -> Attention.clear(id, :sync_retried)
+      _ -> :ok
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "Trackers.Sync: could not resolve escalation for #{id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  defp failure_dedup_forget(task_id, event) do
+    :ets.delete(@failure_dedup_table, {task_id, event})
     :ok
   rescue
     _ -> :ok
