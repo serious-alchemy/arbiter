@@ -1370,9 +1370,8 @@ defmodule Arbiter.Reviews.ExternalReview do
     %{error: message}
   end
 
-  defp engagement_reason(reason) do
-    if is_exception(reason), do: Exception.message(reason), else: inspect(reason)
-  end
+  # `Ash.create/2` only ever errors with an exception struct.
+  defp engagement_reason(reason), do: Exception.message(reason)
 
   # Create the engagement Issue in one atomic action. review_only + the
   # ReviewPatrol baseline/cursor + automation mode are set at create time (the
