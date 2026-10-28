@@ -418,10 +418,15 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
     }
   end
 
-  defp extras_text(extras) do
-    if text = OutdatedNodes.text(extras[:outdated_nodes] || [], extras[:tag] || "") do
-      IO.puts(text)
+  defp outdated_nodes_text(extras) do
+    case OutdatedNodes.text(extras[:outdated_nodes] || [], extras[:tag] || "") do
+      nil -> :ok
+      text -> IO.puts(text)
     end
+  end
+
+  defp extras_text(extras) do
+    outdated_nodes_text(extras)
 
     if repo = extras[:release_repo] do
       IO.puts("Release source: #{repo} (#{extras[:release_repo_source_text]})")
