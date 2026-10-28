@@ -2950,9 +2950,9 @@ defmodule Arbiter.Worker.Dispatch do
     request = node_request(task, workspace, opts)
     gate_opts = node_gate_opts(task, opts)
 
-    case LocalCapacity.gate(request, gate_opts) do
+    case LocalCapacity.gate_with_reason(request, gate_opts) do
       {:ok, {:node, node}} -> image_gate(task, workspace, request, node, opts, gate_opts)
-      {:ok, :local} -> {:ok, opts}
+      {:ok, :local, why} -> {:ok, put_outdated_note(opts, request, why)}
       {:error, _} = held -> held
     end
   rescue
@@ -2960,6 +2960,21 @@ defmodule Arbiter.Worker.Dispatch do
       Logger.warning("Dispatch: node placement crashed for #{task.id}: #{Exception.message(e)}")
       {:ok, opts}
   end
+
+  # bd-5u99ki: a `prefer_remote` run that stayed on the primary because every remote node was
+  # outdated records that in its routing decision (`recorded_decision/1`), so `worker show`,
+  # the board card and prime say why the remote capacity went unused.
+  defp put_outdated_note(opts, request, {:node_outdated, skipped}) do
+    note = %{
+      "fell_back_to" => "primary",
+      "mode" => to_string(request.mode),
+      "remote_skipped" => Placement.skipped_phrase(skipped)
+    }
+
+    Keyword.put(opts, :placement_note, note)
+  end
+
+  defp put_outdated_note(opts, _request, _why), do: opts
 
   # K8 (A2): a node that pulls its image from the registry needs it published
   # first. Do that here, before the run is committed to the node, so a publish
