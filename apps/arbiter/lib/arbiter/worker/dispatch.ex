@@ -2957,8 +2957,22 @@ defmodule Arbiter.Worker.Dispatch do
     end
   rescue
     e ->
-      Logger.warning("Dispatch: node placement crashed for #{task.id}: #{Exception.message(e)}")
-      {:ok, opts}
+      # Fail closed: a crash in the capacity check must not admit the run ungated past the cap.
+      Logger.error(
+        "Dispatch: node capacity check crashed for #{task.id}; holding the run: " <>
+          Exception.message(e)
+      )
+
+      {:error,
+       {:no_node_capacity,
+        %{
+          task_id: task.id,
+          node: nil,
+          error: Exception.message(e),
+          message:
+            "held — the node capacity check crashed for #{task.id} (#{Exception.message(e)}); " <>
+              "the run is not admitted until the check succeeds."
+        }}}
   end
 
   # bd-5u99ki: a `prefer_remote` run that stayed on the primary because every remote node was
