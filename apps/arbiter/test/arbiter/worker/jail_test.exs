@@ -264,6 +264,22 @@ defmodule Arbiter.Worker.JailTest do
       assert ["--chdir", "/w/wt"] in Enum.chunk_every(argv, 2, 1)
     end
 
+    test "worktree_scratch paths are bound writable after the read-only worktree (bd-97y349)" do
+      spec =
+        @spec_linked
+        |> Map.put(:worktree_readonly, true)
+        |> Map.put(:worktree_scratch, ["/w/wt/_build", "/w/wt/deps"])
+
+      argv = Jail.argv(spec, ["codex"])
+
+      assert {"/w/wt", "/w/wt"} in flag_pairs(argv, "--ro-bind")
+      assert {"/w/wt/_build", "/w/wt/_build"} in flag_pairs(argv, "--bind")
+      assert {"/w/wt/deps", "/w/wt/deps"} in flag_pairs(argv, "--bind")
+
+      assert Enum.find_index(argv, &(&1 == "/w/wt/_build")) >
+               Enum.find_index(argv, &(&1 == "/w/wt"))
+    end
+
     test "readonly_paths are ro-bound after the writable home so they win over it (bd-az8ycn)" do
       spec = Map.put(@spec_linked, :readonly_paths, ["/h/agy/.qwen-system"])
       argv = Jail.argv(spec, ["qwen"])
@@ -1346,6 +1362,35 @@ defmodule Arbiter.Worker.JailTest do
       assert status == 0, out
       assert out =~ "INSIDE_EROFS"
       refute File.exists?(Path.join(wt, "inside.txt"))
+    end
+
+    test "a read-only worktree keeps `_build` and `deps` writable and the source read-only (bd-97y349)",
+         %{base: base} do
+      %{wt: wt} = git_repo!(base)
+      File.write!(Path.join(wt, "mix.exs"), "# source\n")
+      outside = Path.join(base, "outside")
+      File.mkdir_p!(outside)
+      # a committed `_build` symlink must not turn into a writable bind of its target
+      File.ln_s!(outside, Path.join(wt, "_build"))
+
+      stub =
+        ~s(mkdir -p "$WT/_build/test/lib" && echo b > "$WT/_build/test/lib/x" && echo BUILD_OK; ) <>
+          ~s(echo d > "$WT/deps/y" && echo DEPS_OK; ) <>
+          ~s({ echo x > "$WT/mix.exs"; } 2>&1 | grep -qi 'read-only file system' && echo SRC_EROFS; ) <>
+          ~s({ echo x > "$WT/new.ex"; } 2>&1 | grep -qi 'read-only file system' && echo NEW_EROFS)
+
+      {:ok, argv} = Jail.wrap(["sh", "-c", stub], worktree: wt, worktree_readonly: true)
+      [bwrap | args] = argv
+
+      {out, status} =
+        System.cmd(bwrap, args, stderr_to_stdout: true, env: [{"LC_ALL", "C"}, {"WT", wt}])
+
+      assert status == 0, out
+      for marker <- ~w(BUILD_OK DEPS_OK SRC_EROFS NEW_EROFS), do: assert(out =~ marker, out)
+      assert File.read!(Path.join(wt, "mix.exs")) == "# source\n"
+      refute File.exists?(Path.join(wt, "new.ex"))
+      assert File.read!(Path.join(wt, "_build/test/lib/x")) == "b\n"
+      assert File.ls!(outside) == []
     end
 
     test "the exit status of the jailed command is propagated", %{base: base} do

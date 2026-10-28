@@ -9358,9 +9358,11 @@ defmodule Arbiter.Worker.ReviewGate do
     You are working in a DETACHED, READ-ONLY checkout made for this review round
     only: `#{path}`, at commit `#{sha}` — the head of `origin/#{state.branch}` as
     it stood after the ReviewGate pushed it. It is not the implementer's
-    worktree. Edit/Write are denied here; do not commit or push from it. You may
-    run tests in it (same timeout rule as below). It is deleted when this round
-    ends.
+    worktree. Edit/Write are denied here and the source tree is read-only; do not
+    commit or push from it. `_build` and `deps` are writable (pre-seeded with the
+    implementer's compiled deps), so you may compile and run targeted tests in it,
+    e.g. `timeout 120 mix test path/to/file_test.exs` (same timeout rule as below).
+    It is deleted when this round ends.
 
     """
   end
