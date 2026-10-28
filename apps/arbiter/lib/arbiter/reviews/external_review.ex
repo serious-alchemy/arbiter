@@ -73,6 +73,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
   alias Arbiter.Workflows.CodeReview
   alias Arbiter.Workflows.CodeReview.DiffScope
+  alias Arbiter.Workflows.PatrolRepoScope
   alias Arbiter.Workflows.ReviewPatrolSupervisor
 
   @task_supervisor Arbiter.Reviews.TaskSupervisor
@@ -1174,10 +1175,18 @@ defmodule Arbiter.Reviews.ExternalReview do
       check_usage: Map.get(final, :check_usage),
       # The id of the review_only engagement created (or adopted) for this PR,
       # or nil when follow-up was off / disabled.
-      engagement: engagement && engagement.id,
-      engagement_created: (engagement && engagement.created) || false
+      engagement: engagement && Map.get(engagement, :id),
+      engagement_created: (engagement && Map.get(engagement, :created)) || false
     }
+    |> put_engagement_error(engagement)
   end
+
+  # Follow-up was wanted but the engagement could not be opened (bd-7do39e):
+  # say so on the result instead of a bare `engagement: nil`.
+  defp put_engagement_error(result, %{error: error}),
+    do: Map.put(result, :engagement_error, error)
+
+  defp put_engagement_error(result, _engagement), do: result
 
   defp safe_link(adapter, mr_ref) do
     adapter.link_for(mr_ref)
@@ -1232,7 +1241,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       # Verify the PR's repo is in the configured patrol repos
       repo_match? =
         Enum.any?(repos, fn repo ->
-          Arbiter.Workflows.PatrolRepoScope.ref_matches_repo?(mr_ref, repo)
+          PatrolRepoScope.ref_matches_repo?(mr_ref, repo)
         end)
 
       case ReviewAutomation.repo_override_mode(config, repo_name) do
@@ -1280,24 +1289,17 @@ defmodule Arbiter.Reviews.ExternalReview do
         # The dedup read itself failed. Fail closed: an open engagement *may*
         # exist and we can't tell, so skip creation rather than risk a duplicate
         # (the exact thing the dedup guards against). A later dispatch retries.
-        Logger.warning(
-          "ExternalReview: dedup read failed for #{mr_ref}; skipping engagement creation " <>
-            "to avoid a possible duplicate"
+        engagement_failed(
+          prepared,
+          "dedup read failed; skipped engagement creation to avoid a possible duplicate"
         )
-
-        nil
 
       nil ->
         do_create_engagement(prepared, opts, findings, verdict)
     end
   rescue
     e ->
-      Logger.warning(
-        "ExternalReview: engagement creation crashed for #{prepared.mr_ref}: " <>
-          Exception.message(e)
-      )
-
-      nil
+      engagement_failed(prepared, "engagement creation crashed: #{Exception.message(e)}")
   end
 
   defp create_engagement(_prepared, _opts, _findings, _verdict), do: nil
@@ -1341,13 +1343,40 @@ defmodule Arbiter.Reviews.ExternalReview do
         %{id: issue.id, created: true}
 
       {:error, reason} ->
-        Logger.warning(
-          "ExternalReview: failed to open engagement for #{mr_ref}: #{inspect(reason)}"
-        )
-
-        nil
+        engagement_failed(prepared, "failed to open engagement: #{engagement_reason(reason)}")
     end
   end
+
+  # Log, raise a coordinator-mailbox message, and hand back the error so the
+  # tool result carries `engagement_error` rather than a silent `engagement: nil`.
+  defp engagement_failed(%{mr_ref: mr_ref} = prepared, message) do
+    Logger.warning("ExternalReview: #{message} (#{mr_ref})")
+
+    ws_id = prepared.workspace && prepared.workspace.id
+
+    safe_call(fn ->
+      Arbiter.Messages.Escalation.post(%{
+        kind: :engagement_failed,
+        from_ref: "external_review",
+        workspace_id: ws_id,
+        task_ref: String.slice(mr_ref, 0, 255),
+        subject: "Review follow-up engagement not created: #{mr_ref}",
+        body:
+          "The verdict for #{mr_ref} was posted, but ReviewPatrol follow-up is NOT active: " <>
+            message
+      })
+    end)
+
+    %{error: message}
+  end
+
+  defp engagement_reason(%{__struct__: _} = e) do
+    Exception.message(e)
+  rescue
+    _ -> inspect(e)
+  end
+
+  defp engagement_reason(reason), do: inspect(reason)
 
   # Create the engagement Issue in one atomic action. review_only + the
   # ReviewPatrol baseline/cursor + automation mode are set at create time (the
@@ -1391,7 +1420,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       # bare name / forge slug this review ran against; `configured_key/2` maps
       # it onto the `repo_paths` key, and yields nil (leaving the create to
       # resolve normally) when it maps to nothing.
-      |> maybe_put(:repo, IssueRepo.configured_key(ws_id, Map.get(prepared, :repo_name)))
+      |> maybe_put(:repo, engagement_repo_key(prepared))
       |> maybe_put(:last_reviewed_sha, head_sha)
       |> maybe_put(:last_seen_comment_id, watermark)
       |> maybe_put(:last_verdict, verdict_or_nil(verdict, report_only))
@@ -1399,6 +1428,18 @@ defmodule Arbiter.Reviews.ExternalReview do
       |> put_tracker_context(opts, prepared.workspace)
 
     Ash.create(Issue, attrs)
+  end
+
+  # The `repo_paths` key owning this PR: the review's repo name first, then the
+  # full forge slug embedded in the `mr_ref` (the same slug
+  # `PatrolRepoScope.ref_matches_repo?/2` matches on), which `configured_key/2`
+  # maps via each checkout's `origin` when the names differ (bd-7do39e).
+  defp engagement_repo_key(%{workspace: %Workspace{id: ws_id}, mr_ref: mr_ref} = prepared) do
+    IssueRepo.configured_key(ws_id, Map.get(prepared, :repo_name)) ||
+      case PatrolRepoScope.repo_of_ref(mr_ref) do
+        {:ok, slug} -> IssueRepo.configured_key(ws_id, slug)
+        :bare -> nil
+      end
   end
 
   defp verdict_or_nil(_verdict, true), do: nil
