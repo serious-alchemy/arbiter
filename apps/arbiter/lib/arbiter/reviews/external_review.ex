@@ -1352,7 +1352,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   defp engagement_failed(%{mr_ref: mr_ref} = prepared, message) do
     Logger.warning("ExternalReview: #{message} (#{mr_ref})")
 
-    ws_id = prepared.workspace && prepared.workspace.id
+    ws_id = prepared.workspace.id
 
     safe_call(fn ->
       Arbiter.Messages.Escalation.post(%{
@@ -1370,13 +1370,9 @@ defmodule Arbiter.Reviews.ExternalReview do
     %{error: message}
   end
 
-  defp engagement_reason(%{__struct__: _} = e) do
-    Exception.message(e)
-  rescue
-    _ -> inspect(e)
+  defp engagement_reason(reason) do
+    if is_exception(reason), do: Exception.message(reason), else: inspect(reason)
   end
-
-  defp engagement_reason(reason), do: inspect(reason)
 
   # Create the engagement Issue in one atomic action. review_only + the
   # ReviewPatrol baseline/cursor + automation mode are set at create time (the
