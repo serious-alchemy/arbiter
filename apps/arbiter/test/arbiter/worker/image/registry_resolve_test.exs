@@ -103,6 +103,29 @@ defmodule Arbiter.Worker.Image.RegistryResolveTest do
       assert {cfg.username, cfg.password} == {nil, nil}
     end
 
+    test "a repo registry on the install registry's host, with no credentials_ref, uses the install login" do
+      install = %{
+        registry: "registry.gitlab.com/serious-alchemy/arbiter",
+        username: "deploy",
+        password: "inst-pw"
+      }
+
+      ws = workspace(image(%{"registry" => "registry.gitlab.com/serious-alchemy/vstim/vstim"}))
+
+      assert {:ok, cfg} = Registry.resolve(ws, "vstim", config: install)
+      assert cfg.registry == "registry.gitlab.com/serious-alchemy/vstim/vstim"
+      assert cfg.origin == :config
+      assert {cfg.username, cfg.password} == {"deploy", "inst-pw"}
+      refute inspect(cfg) =~ "inst-pw"
+    end
+
+    test "a repo registry on another host than nodes.registry never borrows its login" do
+      ws = workspace(image(%{"registry" => "registry.gitlab.com/serious-alchemy/vstim/vstim"}))
+
+      assert {:ok, cfg} = Registry.resolve(ws, "vstim", config: @install)
+      assert {cfg.username, cfg.password} == {nil, nil}
+    end
+
     test "a repo that changes the registry does not inherit the workspace's credential" do
       ws =
         workspace(
