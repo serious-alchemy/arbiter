@@ -34,6 +34,26 @@ defmodule Arbiter.Board.AutopilotStaleDispatchTest do
   defp start(opts \\ []) do
     test = self()
     {:ok, closed} = Agent.start_link(fn -> MapSet.new() end)
+    {:ok, dispatched} = Agent.start(fn -> [] end)
+
+    # The fake dispatch runs under the global Arbiter.TaskSupervisor and blocks
+    # on :release; kill any still parked at exit so it can't outlive the test
+    # (bd-5ljhfg: a leaked child made every later DataCase test wait 5s).
+    on_exit(fn ->
+      for task <- Agent.get(dispatched, & &1) do
+        ref = Process.monitor(task)
+        Process.exit(task, :kill)
+
+        receive do
+          {:DOWN, ^ref, :process, ^task, _} -> :ok
+        end
+      end
+
+      # No fake dispatch outlives the test on the global supervisor.
+      leaked = Task.Supervisor.children(Arbiter.TaskSupervisor)
+      assert Enum.filter(Agent.get(dispatched, & &1), &(&1 in leaked)) == []
+      Agent.stop(dispatched)
+    end)
 
     defaults = [
       name: nil,
@@ -46,11 +66,15 @@ defmodule Arbiter.Board.AutopilotStaleDispatchTest do
       ticket_closed?: fn id -> Agent.get(closed, &MapSet.member?(&1, id)) end,
       snapshot: fn _ -> board("bd-1") end,
       dispatch: fn id ->
+        task = self()
+        Agent.update(dispatched, &[task | &1])
         send(test, {:dispatched, id, self()})
 
         if id == "bd-1" do
           receive do
             :release -> {:ok, %{task_id: id}}
+          after
+            30_000 -> {:error, :never_released}
           end
         else
           {:ok, %{task_id: id}}

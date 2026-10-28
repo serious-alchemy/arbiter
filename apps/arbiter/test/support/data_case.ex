@@ -16,6 +16,8 @@ defmodule Arbiter.DataCase do
 
   use ExUnit.CaseTemplate
 
+  require Logger
+
   using do
     quote do
       alias Arbiter.Repo
@@ -256,19 +258,48 @@ defmodule Arbiter.DataCase do
     _, _ -> :ok
   end
 
+  # Waits up to `timeout` ms for each child of `name` to exit. A child still
+  # alive after that is a leak (a task blocked forever); it is killed and
+  # logged by initial call, so one leaker costs one wait rather than 5s on
+  # every later DataCase test (bd-5ljhfg).
   @doc false
-  def drain_task_supervisor(name) do
+  def drain_task_supervisor(name, timeout \\ 5_000) do
     name
     |> children_of(&Task.Supervisor.children/1)
     |> Enum.each(fn child_pid ->
       ref = Process.monitor(child_pid)
+      description = describe_process(child_pid)
 
       receive do
-        {:DOWN, ^ref, :process, ^child_pid, _reason} -> :ok
+        {:DOWN, ^ref, :process, ^child_pid, _reason} ->
+          :ok
       after
-        5_000 -> Process.demonitor(ref, [:flush])
+        timeout ->
+          Process.exit(child_pid, :kill)
+
+          receive do
+            {:DOWN, ^ref, :process, ^child_pid, _reason} -> :ok
+          after
+            1_000 -> Process.demonitor(ref, [:flush])
+          end
+
+          Logger.error(
+            "DataCase: #{inspect(name)} child #{inspect(child_pid)} (#{description}) " <>
+              "did not exit within #{timeout}ms; killed. A test leaked it."
+          )
       end
     end)
+  end
+
+  defp describe_process(pid) do
+    case Process.info(pid, [:dictionary, :current_function]) do
+      nil ->
+        "already exited"
+
+      info ->
+        initial = info |> Keyword.get(:dictionary, []) |> Keyword.get(:"$initial_call")
+        "initial_call: #{inspect(initial)}, current_function: #{inspect(info[:current_function])}"
+    end
   end
 
   @doc """
