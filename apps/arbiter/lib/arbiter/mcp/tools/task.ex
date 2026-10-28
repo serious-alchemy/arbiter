@@ -29,6 +29,7 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Tasks.Rank
   alias Arbiter.Tasks.Verification
   alias Arbiter.Tasks.WorkerFiling
+  alias Arbiter.Trackers.Sync
   alias Arbiter.Usage.Estimate
 
   # P-08: `append_notes` appends to `notes` server-side (atomic, so it can't
@@ -244,6 +245,7 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
          :ok <- Tools.authorize_subtree(scope, issue.id),
          {:ok, attrs} <- progress_attrs(args),
+         {:ok, attrs} <- reject_tool_markup(attrs),
          {:ok, attrs} <- refine_field_gate(scope, attrs) do
       case Ash.update(issue, attrs, action: :update) do
         {:ok, updated} -> {:ok, Tools.serialize_ticket(updated, args)}
@@ -588,6 +590,7 @@ defmodule Arbiter.MCP.Tools.Task do
          :ok <- Tools.authorize_subtree(scope, issue.id),
          {:ok, args} <- edit_permissions(issue, args),
          {:ok, attrs} <- Tools.collect_attrs(args, task_update_spec()),
+         {:ok, attrs} <- reject_tool_markup(attrs),
          {:ok, attrs} <- refine_field_gate(scope, attrs) do
       case {map_size(attrs), assignee_warnings} do
         {0, []} ->
@@ -677,6 +680,73 @@ defmodule Arbiter.MCP.Tools.Task do
         {:ok, reopened} -> {:ok, Tools.serialize_ticket(reopened, args)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
       end
+    end
+  end
+
+  # ---- task_sync_lifecycle ------------------------------------------------
+
+  @sync_events ~w(pr_opened approved_unmerged merged closed)
+
+  @doc """
+  Re-fire one ticket's tracker lifecycle transition (`Sync.retry_lifecycle/2`)
+  — the per-ticket retry for a `tracker sync failed` escalation once the gated
+  field is fixed. Never a workspace-wide reconcile. Coordinator only.
+  """
+  @spec task_sync_lifecycle(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_sync_lifecycle(%Scope{} = scope, args) do
+    event = Map.get(args, "event") || "pr_opened"
+
+    with {:ok, id} <- Tools.resolve_task_id(scope, args),
+         {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id),
+         :ok <- check_sync_event(event),
+         :ok <- check_sync_tracker(issue) do
+      case Sync.retry_lifecycle(issue, String.to_existing_atom(event)) do
+        :ok ->
+          {:ok, %{id: issue.id, event: event, result: "synced"}}
+
+        {:skipped, reason} ->
+          {:ok, %{id: issue.id, event: event, result: "skipped", reason: to_string(reason)}}
+
+        {:error, reason} ->
+          {:error, {:invalid, "tracker sync failed for #{event}: #{sync_reason(reason)}"}}
+      end
+    end
+  end
+
+  defp check_sync_event(event) when event in @sync_events, do: :ok
+
+  defp check_sync_event(_),
+    do: {:error, {:invalid, "event must be one of: #{Enum.join(@sync_events, ", ")}"}}
+
+  defp check_sync_tracker(%Issue{tracker_type: type, tracker_ref: ref})
+       when type not in [nil, :none] and is_binary(ref) and ref != "",
+       do: :ok
+
+  defp check_sync_tracker(_), do: {:error, {:invalid, "ticket has no linked tracker issue"}}
+
+  defp sync_reason(%{message: msg}) when is_binary(msg), do: msg
+  defp sync_reason(reason), do: inspect(reason)
+
+  # ---- tool-call markup guard ---------------------------------------------
+
+  # A worker's tool-call markup can leak into a string value (`…</qa_notes>
+  # <parameter name="deployment_notes">…`). Stored, it corrupts the field and
+  # leaves the real one unset, so the write is refused naming the field.
+  @markup ~r/<\/(?:notes|append_notes|qa_notes|deployment_notes|pr_body|description|acceptance|title)>|<parameter\s+name\s*=|<\/?antml:/
+
+  defp reject_tool_markup(attrs) do
+    bad = Enum.find(attrs, fn {_k, v} -> is_binary(v) and Regex.match?(@markup, v) end)
+
+    case bad do
+      nil ->
+        {:ok, attrs}
+
+      {field, _} ->
+        {:error,
+         {:invalid,
+          "`#{field}` contains tool-call markup (e.g. `</qa_notes>` or `<parameter name=`) — " <>
+            "the call's parameters leaked into this value. Resend each field as its own argument."}}
     end
   end
 

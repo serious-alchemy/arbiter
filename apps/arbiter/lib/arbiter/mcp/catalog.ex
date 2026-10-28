@@ -32,6 +32,7 @@ defmodule Arbiter.MCP.Catalog do
   | `ticket_update` | coordinator | `Ash.update(issue, …, action: :update)` |
   | `ticket_close` | coordinator | `Ash.update(issue, …, action: :close)` |
   | `ticket_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
+  | `ticket_sync_lifecycle` | coordinator | `Arbiter.Trackers.Sync.retry_lifecycle/2` (one ticket's tracker transition) |
   | `ticket_promote` | coordinator | `Ash.update(issue, …, action: :promote_to_ready)` |
   | `ticket_demote` | coordinator | `Ash.update(issue, …, action: :return_to_backlog)` |
   | `ticket_rank` | coordinator | `Ash.update(issue, …, action: :set_rank)` |
@@ -913,6 +914,29 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.task_reopen/2
+    },
+    %{
+      name: "ticket_sync_lifecycle",
+      tiers: @coordinator,
+      description:
+        "Re-fire ONE ticket's tracker lifecycle transition (e.g. `pr_opened` after fixing a gated " <>
+          "field such as `deployment_notes` that made the `tracker sync failed` escalation). Touches " <>
+          "only this ticket — unlike `tracker_sync`, which reconciles the whole workspace. On success " <>
+          "the ticket's open `tracker sync failed` escalation is resolved.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
+          "event" => %{
+            "type" => "string",
+            "enum" => ~w(pr_opened approved_unmerged merged closed),
+            "description" => "The lifecycle event to re-fire (default `pr_opened`)."
+          }
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.task_sync_lifecycle/2
     },
     %{
       name: "ticket_verify",
