@@ -1865,6 +1865,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate dep_add(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_remove(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_list(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate dep_list_default_limit(), to: Arbiter.MCP.Tools.Task
 
   defdelegate workspace_show(scope, args), to: Arbiter.MCP.Tools.Workspace
   defdelegate workspace_config_get(scope, args), to: Arbiter.MCP.Tools.Workspace

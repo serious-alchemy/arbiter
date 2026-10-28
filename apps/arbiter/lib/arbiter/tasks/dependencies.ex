@@ -67,7 +67,10 @@ defmodule Arbiter.Tasks.Dependencies do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
-  @type error_reason :: :invalid_type | :not_found | :cross_workspace | :cyclic
+  # Ids per `id in ^ids` read; keeps each query well under SQLite's expression-depth limit (1000).
+  @id_chunk 500
+
+  @type error_reason :: :invalid_type | :not_found | :cross_workspace | :cyclic | :invalid_cursor
   @type error :: {error_reason(), String.t()} | Ash.Error.Invalid.t()
 
   @empty_groups %{
@@ -244,16 +247,90 @@ defmodule Arbiter.Tasks.Dependencies do
     with {:ok, type} <- cast_optional_type(Keyword.get(opts, :type)) do
       edges =
         Dependency
-        |> Ash.Query.load([:from_issue, :to_issue])
-        |> Ash.Query.sort(created_at: :asc)
+        |> Ash.Query.sort(created_at: :asc, id: :asc)
         |> filter_workspace(Keyword.get(opts, :workspace_id))
         |> filter_issue(Keyword.get(opts, :issue_id))
         |> filter_type(type)
         |> Ash.read!()
 
-      {:ok, Enum.map(edges, &%{edge: &1, from: &1.from_issue, to: &1.to_issue})}
+      {:ok, with_endpoints(edges)}
     end
   end
+
+  @doc """
+  One keyset-paginated page of `list/1` (same filters), oldest-first.
+
+  Options: everything `list/1` takes plus `:limit` (required, positive) and
+  `:cursor` (the opaque `next_cursor` of the previous page). Returns
+  `{:ok, rows, next_cursor}` where `next_cursor` is `nil` on the last page, or
+  `{:error, {:invalid_cursor, message}}`.
+  """
+  @spec list_page(keyword()) :: {:ok, [map()], String.t() | nil} | {:error, error()}
+  def list_page(opts) do
+    limit = Keyword.fetch!(opts, :limit)
+
+    with {:ok, type} <- cast_optional_type(Keyword.get(opts, :type)),
+         {:ok, after_key} <- decode_cursor(Keyword.get(opts, :cursor)) do
+      edges =
+        Dependency
+        |> Ash.Query.sort(created_at: :asc, id: :asc)
+        |> filter_workspace(Keyword.get(opts, :workspace_id))
+        |> filter_issue(Keyword.get(opts, :issue_id))
+        |> filter_type(type)
+        |> filter_after(after_key)
+        |> Ash.Query.limit(limit + 1)
+        |> Ash.read!()
+
+      {page, rest} = Enum.split(edges, limit)
+      next = if rest == [], do: nil, else: encode_cursor(List.last(page))
+      {:ok, with_endpoints(page), next}
+    end
+  end
+
+  # Endpoints are fetched in chunks rather than via `Ash.Query.load/2`: that
+  # emits one `id = ? OR id = ? …` chain over the whole edge set, which SQLite
+  # refuses past ~1,000 terms ("Expression tree is too large", bd-a1ar6n).
+  defp with_endpoints(edges) do
+    ids = edges |> Enum.flat_map(&[&1.from_issue_id, &1.to_issue_id]) |> Enum.uniq()
+    issues = fetch_issues(ids)
+
+    Enum.map(edges, fn e ->
+      %{edge: e, from: Map.fetch!(issues, e.from_issue_id), to: Map.fetch!(issues, e.to_issue_id)}
+    end)
+  end
+
+  defp fetch_issues(ids) do
+    ids
+    |> Enum.chunk_every(@id_chunk)
+    |> Enum.flat_map(fn chunk ->
+      Issue |> Ash.Query.filter(id in ^chunk) |> Ash.read!()
+    end)
+    |> Map.new(&{&1.id, &1})
+  end
+
+  defp filter_after(query, nil), do: query
+
+  defp filter_after(query, {ts, id}) do
+    Ash.Query.filter(query, created_at > ^ts or (created_at == ^ts and id > ^id))
+  end
+
+  defp encode_cursor(%Dependency{created_at: ts, id: id}) do
+    Base.url_encode64("#{DateTime.to_iso8601(ts)}|#{id}", padding: false)
+  end
+
+  defp decode_cursor(nil), do: {:ok, nil}
+
+  defp decode_cursor(cursor) when is_binary(cursor) do
+    with {:ok, raw} <- Base.url_decode64(cursor, padding: false),
+         [ts, id] when id != "" <- String.split(raw, "|", parts: 2),
+         {:ok, dt, _} <- DateTime.from_iso8601(ts) do
+      {:ok, {dt, id}}
+    else
+      _ -> {:error, {:invalid_cursor, "`cursor` is not a cursor returned by a previous page"}}
+    end
+  end
+
+  defp decode_cursor(_), do: decode_cursor("")
 
   defp filter_workspace(query, nil), do: query
 
@@ -514,9 +591,6 @@ defmodule Arbiter.Tasks.Dependencies do
       |> Enum.map(&other_endpoint(&1, issue_id))
       |> Enum.uniq()
 
-    Issue
-    |> Ash.Query.filter(id in ^ids)
-    |> Ash.read!()
-    |> Map.new(&{&1.id, &1})
+    fetch_issues(ids)
   end
 end

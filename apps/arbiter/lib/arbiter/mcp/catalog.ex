@@ -1239,8 +1239,8 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "List dependency edges in the workspace. Coordinator or worker — a worker with no " <>
           "`workspace` arg sees its own workspace's edges; naming a different one is refused, " <>
-          "the same rule dep_add/dep_remove already apply. With no `issue_id`, lists every edge " <>
-          "in the workspace; with `issue_id`, lists that ticket's edges in both directions " <>
+          "the same rule dep_add/dep_remove already apply. Paginated (`limit`/`cursor`). With no `issue_id`, lists the edges " <>
+          "in the workspace page by page; with `issue_id`, lists that ticket's edges in both directions " <>
           "instead. Each row carries both endpoints' id/title/state/priority, so a live edge " <>
           "is distinguishable from a closed↔closed one without a second lookup. A symmetric " <>
           "edge (`conflicts_with`) is never doubled — it's stored once, directed, and appears " <>
@@ -1259,6 +1259,16 @@ defmodule Arbiter.MCP.Catalog do
           "type" => %{
             "type" => "string",
             "description" => "Optional edge type to filter by."
+          },
+          "limit" => %{
+            "type" => "integer",
+            "description" => "Page size (default 200, max 500). Edges come oldest first."
+          },
+          "cursor" => %{
+            "type" => "string",
+            "description" =>
+              "The `next_cursor` of the previous page; omit for the first page. " <>
+                "A result without `next_cursor` is the last page."
           }
         },
         "additionalProperties" => false
