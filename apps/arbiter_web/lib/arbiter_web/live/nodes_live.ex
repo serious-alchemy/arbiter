@@ -72,6 +72,7 @@ defmodule ArbiterWeb.NodesLive do
      socket
      |> assign(:page_title, "Nodes")
      |> assign(:add, nil)
+     |> assign(:upgrade_help, nil)
      |> assign(:cap_errors, %{})
      |> assign(:node_id, nil)
      |> assign(:node, nil)
@@ -251,7 +252,17 @@ defmodule ArbiterWeb.NodesLive do
         {:noreply, put_flash(socket, :error, "Unknown node.")}
 
       node ->
-        case Nodes.upgrade(node, actor()) do
+        case upgrade_node(node, socket.assigns.overview) do
+          {:needs_operator, command} ->
+            helm? =
+              Enum.any?(
+                socket.assigns.overview.nodes,
+                &(&1.id == node.id and &1[:install_method] == "helm")
+              )
+
+            {:noreply,
+             assign(socket, :upgrade_help, %{name: node.name, command: command, helm?: helm?})}
+
           {:ok, %{version: v}} ->
             {:noreply,
              socket |> put_flash(:info, "#{node.name}: upgrading to #{v}.") |> refresh()}
@@ -264,6 +275,9 @@ defmodule ArbiterWeb.NodesLive do
         end
     end
   end
+
+  def handle_event("dismiss_upgrade_help", _params, socket),
+    do: {:noreply, assign(socket, :upgrade_help, nil)}
 
   def handle_event("remove", %{"id" => id}, socket) do
     case node_ref(id) do
@@ -310,6 +324,21 @@ defmodule ArbiterWeb.NodesLive do
        %{}
        |> then(&if(name = blank_to_nil(params["name"]), do: Map.put(&1, :name, name), else: &1))
        |> then(&if(max_workers, do: Map.put(&1, :max_workers, max_workers), else: &1))}
+    end
+  end
+
+  # bd-4kvxun: a node that cannot self-upgrade is never queued an upgrade it would refuse;
+  # the operator gets the exact command instead.
+  defp upgrade_node(node, overview) do
+    row = Enum.find(overview.nodes, &(&1.id == node.id))
+
+    if row && row[:self_upgrade?] == false && row[:upgrade_command] do
+      {:needs_operator, row.upgrade_command}
+    else
+      case Nodes.upgrade(node, actor()) do
+        {:error, :needs_operator} when not is_nil(row) -> {:needs_operator, row[:upgrade_command]}
+        other -> other
+      end
     end
   end
 
@@ -599,6 +628,7 @@ defmodule ArbiterWeb.NodesLive do
       coordinator_inbox_now={@coordinator_inbox_now}
     >
       <div id="nodes-page" class="p-4 sm:p-6 max-w-7xl mx-auto space-y-5">
+        <.upgrade_help :if={@upgrade_help} help={@upgrade_help} />
         <%= if @live_action == :show and @node do %>
           <.detail node={@node} row={@node_row} events={@events} />
         <% else %>
@@ -614,6 +644,43 @@ defmodule ArbiterWeb.NodesLive do
         <.add_modal :if={@add} add={@add} registry_set?={@registry_set?} nodes={@overview.nodes} />
       </div>
     </Layouts.app>
+    """
+  end
+
+  attr :help, :map, required: true
+
+  defp upgrade_help(assigns) do
+    ~H"""
+    <section
+      id="upgrade-operator-help"
+      class="rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention)] p-4 space-y-2 text-[12.5px]"
+    >
+      <h2 class="m-0 text-[13px] font-semibold text-[var(--text-title)]">
+        {@help.name} cannot upgrade itself
+      </h2>
+      <p class="m-0 text-[var(--text-secondary)]">
+        {if @help.helm?,
+          do: "Nothing was queued: its Helm release owns the Deployment. Run this to upgrade it:",
+          else:
+            "Nothing was queued: its controller cannot patch its own Deployment. Run this to upgrade it:"}
+      </p>
+      <div class="flex items-start gap-2">
+        <code
+          id="upgrade-operator-command"
+          class="min-w-0 flex-1 break-all rounded-[var(--radius-field)] bg-[var(--surface-field)] px-2.5 py-2 text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
+        >
+          {@help.command}
+        </code>
+        <Core.copy_id
+          id={@help.command}
+          dom_id="copy-upgrade-operator-command"
+          label="Copy the upgrade command"
+        />
+      </div>
+      <Core.button id="dismiss-upgrade-help" size="sm" phx-click="dismiss_upgrade_help">
+        Dismiss
+      </Core.button>
+    </section>
     """
   end
 
@@ -859,6 +926,13 @@ defmodule ArbiterWeb.NodesLive do
         >
           upgrade command
         </.link>
+        <span
+          :if={@row[:upgrade_refused]}
+          id={"upgrade-refused-#{@row.id}"}
+          class="block text-[10.5px] text-[var(--arb-attention)]"
+        >
+          upgrade refused: needs operator (helm)
+        </span>
       </td>
       <td class="px-3 py-2 font-[family-name:var(--font-mono)] text-[11.5px]" data-role="version">
         {@row.agent_version || "—"}
@@ -1688,6 +1762,15 @@ defmodule ArbiterWeb.NodesLive do
             label="labels"
             value={if(@row.labels == [], do: "—", else: Enum.join(@row.labels, ", "))}
           />
+          <div :if={@row[:kind] == :cluster} id="node-self-upgrade">
+            <.fact label="can self-upgrade" value={if(@row.self_upgrade?, do: "yes", else: "no")} />
+          </div>
+          <div :if={@row.upgrade_pending_to} id="node-upgrade-pending">
+            <.fact label="upgrade" value={"pending -> #{@row.upgrade_pending_to}"} />
+          </div>
+          <div :if={@row[:upgrade_refused]} id="node-upgrade-refused">
+            <.fact label="upgrade" value="upgrade refused: needs operator (helm)" />
+          </div>
           <.fact label="last heartbeat" value={ago(@row.last_heartbeat_at)} />
           <.fact label="enrolled" value={Calendar.strftime(@node.enrolled_at, "%Y-%m-%d %H:%M UTC")} />
         </section>
@@ -1710,7 +1793,10 @@ defmodule ArbiterWeb.NodesLive do
       </div>
 
       <section
-        :if={@row && @row[:kind] == :cluster && @row[:image] && @row.health in [:outdated, :ahead]}
+        :if={
+          @row && @row[:kind] == :cluster && (@row[:image] || @row[:upgrade_command]) &&
+            @row.health in [:outdated, :ahead]
+        }
         id="node-upgrade"
         class="rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention)] p-4 space-y-2 text-[12.5px]"
       >

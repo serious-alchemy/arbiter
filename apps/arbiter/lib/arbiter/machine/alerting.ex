@@ -56,7 +56,8 @@ defmodule Arbiter.Machine.Alerting do
     CoordinatorNotifier.machine_derated(ws_id, machine, snapshot)
   end
 
-  defp workspace_id do
+  @doc false
+  def workspace_id do
     case Ash.read(Workspace) do
       {:ok, [_ | _] = workspaces} ->
         workspaces |> Enum.min_by(& &1.created_at, DateTime) |> Map.fetch!(:id)

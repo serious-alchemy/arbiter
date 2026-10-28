@@ -33,6 +33,7 @@ defmodule Arbiter.Alerts.SystemAlert do
     :credential_expired,
     :deploy_failing,
     :machine_derate,
+    :node_upgrade_refused,
     :overage_alert,
     :quota_poll_failing,
     :quota_snapshot_stale,

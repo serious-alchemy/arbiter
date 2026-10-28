@@ -720,6 +720,43 @@ defmodule ArbiterWeb.NodesLiveTest do
       assert has_element?(view, "#upgrade-help-#{node.id}")
     end
 
+    test "Upgrade on a helm node shows the operator command and queues nothing", %{conn: conn} do
+      node =
+        cluster_node!("helm", %{
+          "self_upgrade" => false,
+          "namespace" => "ci-workers",
+          "install" => %{"method" => "helm", "release" => "arbiter-node"}
+        })
+
+      {:ok, view, _} = live(conn, ~p"/nodes")
+      view |> element("#upgrade-#{node.id}") |> render_click()
+
+      assert has_element?(view, "#upgrade-operator-command")
+      assert has_element?(view, "#copy-upgrade-operator-command")
+      assert text_of(view, "#upgrade-operator-command") =~ "helm upgrade arbiter-node"
+      assert text_of(view, "#upgrade-operator-command") =~ "--set image.tag=v9.9.9"
+      assert Nodes.get_node(node.id).upgrade_pending_to == nil
+    end
+
+    test "the page shows whether the node can self-upgrade", %{conn: conn} do
+      helm = cluster_node!("helm", %{"self_upgrade" => false})
+      auto = cluster_node!("auto", %{"self_upgrade" => true})
+
+      {:ok, view, _} = live(conn, ~p"/nodes/#{helm.id}")
+      assert text_of(view, "#node-self-upgrade") =~ "no"
+      {:ok, view, _} = live(conn, ~p"/nodes/#{auto.id}")
+      assert text_of(view, "#node-self-upgrade") =~ "yes"
+    end
+
+    test "a refused upgrade is shown instead of pending", %{conn: conn} do
+      node = cluster_node!("auto", %{"self_upgrade" => true})
+      {:ok, _} = Nodes.upgrade(node, @operator)
+      :ok = Nodes.upgrade_refused(node.id)
+
+      {:ok, view, _} = live(conn, ~p"/nodes/#{node.id}")
+      assert text_of(view, "#node-upgrade-refused") =~ "upgrade refused: needs operator (helm)"
+    end
+
     test "a node that patches itself is not given a command to run", %{conn: conn} do
       node = cluster_node!("auto", %{"self_upgrade" => true})
       {:ok, view, _} = live(conn, ~p"/nodes/#{node.id}")

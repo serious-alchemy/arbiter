@@ -95,7 +95,7 @@ defmodule Arbiter.Nodes.Node do
 
     # bd-5v5od0: the upgrade an operator asked for, kept until the node reports that version.
     update :set_upgrade_pending do
-      accept [:upgrade_pending_to]
+      accept [:upgrade_pending_to, :upgrade_refused_reason]
     end
 
     update :touch do
@@ -177,6 +177,13 @@ defmodule Arbiter.Nodes.Node do
 
       description "bd-5v5od0: the version `arb node upgrade` asked this node to move to; " <>
                     "re-sent on every connect until the node's hello reports it."
+    end
+
+    attribute :upgrade_refused_reason, :string do
+      public? true
+
+      description "bd-4kvxun: why the node's controller refused the requested upgrade " <>
+                    "(it needs the operator); cleared by the next upgrade request."
     end
 
     attribute :revoked_at, :utc_datetime_usec, public?: true

@@ -70,7 +70,8 @@ defmodule ArbiterWeb.Api.NodeJSON do
       :pending,
       :image,
       :upgrade_command,
-      :upgrade_pending_to
+      :upgrade_pending_to,
+      :upgrade_refused
     ])
     |> Map.put(:max_workers, row.override)
     |> Map.put(:self_upgrade, Map.get(row, :self_upgrade?, false))

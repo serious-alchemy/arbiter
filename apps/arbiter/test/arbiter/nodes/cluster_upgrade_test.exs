@@ -103,6 +103,73 @@ defmodule Arbiter.Nodes.ClusterUpgradeTest do
     end
   end
 
+  describe "a node that cannot self-upgrade (bd-4kvxun)" do
+    alias Arbiter.Alerts
+    alias Arbiter.Tasks.Workspace
+
+    @helm %{
+      "self_upgrade" => false,
+      "namespace" => "ci-workers",
+      "install" => %{"method" => "helm", "release" => "arbiter-node"}
+    }
+
+    test "Nodes.upgrade queues nothing and says it needs the operator" do
+      node = enroll!("k3s", "cluster")
+      attach!(node, hello(@helm))
+
+      assert {:error, :needs_operator} = Nodes.upgrade(node, @operator)
+      assert Nodes.get_node(node.id).upgrade_pending_to == nil
+      refute_receive {:node_session, {:upgrade, _}}, 20
+    end
+
+    test "the row says whether it can self-upgrade" do
+      helm = enroll!("helm", "cluster")
+      attach!(helm, hello(@helm))
+      assert row(helm).self_upgrade? == false
+
+      auto = enroll!("auto", "cluster")
+      attach!(auto, hello(%{"self_upgrade" => true}))
+      assert row(auto).self_upgrade? == true
+    end
+
+    test "a refusal by the controller replaces pending with refused and alerts once" do
+      Ash.create!(Workspace, %{name: "refusal-#{System.unique_integer([:positive])}"})
+      node = enroll!("auto", "cluster")
+      attach!(node, hello(%{"self_upgrade" => true}))
+      assert {:ok, _} = Nodes.upgrade(node, @operator)
+      assert Nodes.get_node(node.id).upgrade_pending_to == @release
+
+      hb = %{"seq" => 1, "upgrade" => %{"state" => "disabled", "version" => @release}}
+      {:ok, _} = Arbiter.Nodes.Session.heartbeat(node.id, hb)
+      {:ok, _} = Arbiter.Nodes.Session.heartbeat(node.id, %{hb | "seq" => 2})
+
+      refreshed = Nodes.get_node(node.id)
+      assert refreshed.upgrade_pending_to == nil
+      assert refreshed.upgrade_refused_reason =~ "needs operator"
+
+      row = row(node)
+      assert row.upgrade_pending_to == nil
+      assert row.upgrade_refused =~ "needs operator"
+
+      assert [_] = Enum.filter(Alerts.active(kind: :node_upgrade_refused), &(&1.key == node.id))
+    end
+
+    test "a refused upgrade settles and its alert clears once the node reports the release" do
+      Ash.create!(Workspace, %{name: "settle-#{System.unique_integer([:positive])}"})
+      node = enroll!("auto", "cluster")
+      attach!(node, hello(%{"self_upgrade" => true}))
+      assert {:ok, _} = Nodes.upgrade(node, @operator)
+      Nodes.upgrade_refused(node.id)
+      assert Nodes.get_node(node.id).upgrade_refused_reason
+      assert [_] = Enum.filter(Alerts.active(kind: :node_upgrade_refused), &(&1.key == node.id))
+
+      :ok = Nodes.settle_pending_upgrade(node.id, @release)
+
+      assert Nodes.get_node(node.id).upgrade_refused_reason == nil
+      assert [] = Enum.filter(Alerts.active(kind: :node_upgrade_refused), &(&1.key == node.id))
+    end
+  end
+
   describe "Nodes.upgrade/2" do
     test "pushes the image to a connected cluster node and audits it" do
       node = enroll!("k3s", "cluster")
@@ -189,7 +256,7 @@ defmodule Arbiter.Nodes.ClusterUpgradeTest do
 
       assert row.upgrade_command ==
                "helm upgrade arbiter-node oci://ghcr.io/acme/charts/arbiter-node " <>
-                 "--version 9.9.9 -n ci-workers --reset-then-reuse-values --set image.tag=v9.9.9"
+                 "--version 9.9.9 -n ci-workers --reset-then-reuse-values --set image.tag=v9.9.9 --wait"
     end
 
     test "nodes.chart_ref wins over the chart the node reports" do

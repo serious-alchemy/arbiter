@@ -626,7 +626,7 @@ defmodule Arbiter.Nodes do
   @spec upgrade(Node.t(), Actor.t() | String.t() | nil) ::
           {:ok, %{version: String.t(), sha256: String.t()}}
           | {:ok, %{version: String.t(), image: String.t()}}
-          | {:error, :offline | :revoked | :unavailable | :not_found}
+          | {:error, :offline | :revoked | :unavailable | :not_found | :needs_operator}
   def upgrade(%Node{id: id}, actor) do
     case get_node(id) do
       nil ->
@@ -640,6 +640,7 @@ defmodule Arbiter.Nodes do
         # accepts the notify and drops it, so the next connect delivers it (bd-5v5od0).
         with {:ok, upgrade} <- upgrade_spec(node),
              :continue <- already_on?(node, upgrade.version),
+             :ok <- operator_not_needed(node),
              {:ok, _} <- set_upgrade_pending(node, upgrade.version),
              pid when is_pid(pid) <- Registry.lookup(node.id) || {:error, :offline} do
           Registry.notify(node.id, {:upgrade, upgrade_payload(upgrade)})
@@ -673,8 +674,61 @@ defmodule Arbiter.Nodes do
     end
   end
 
-  defp set_upgrade_pending(node, version),
-    do: Ash.update(node, %{upgrade_pending_to: version}, action: :set_upgrade_pending)
+  # bd-4kvxun: a cluster node that reports it cannot patch its own Deployment (self-upgrade
+  # off, or a Helm install, which Helm owns) is never queued an upgrade it would refuse: the
+  # caller shows the operator command instead. A node that does not say (older controller,
+  # offline) is let through as before.
+  defp operator_not_needed(node) do
+    case Session.snapshot(node.id) do
+      %{kind: "cluster", caps: %{} = caps} ->
+        if get_in(caps, ["install", "method"]) == "helm" or caps["self_upgrade"] == false,
+          do: {:error, :needs_operator},
+          else: :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp set_upgrade_pending(node, version) do
+    result =
+      Ash.update(node, %{upgrade_pending_to: version, upgrade_refused_reason: nil},
+        action: :set_upgrade_pending
+      )
+
+    if node.upgrade_refused_reason,
+      do: Arbiter.Messages.CoordinatorNotifier.node_upgrade_refused_cleared(node.id)
+
+    result
+  end
+
+  @needs_operator "needs operator (helm)"
+
+  @doc """
+  A cluster node's controller refused the pending upgrade because it needs the operator
+  (bd-4kvxun). The pending marker becomes a refusal reason, shown instead of `pending`, and the
+  coordinator gets one alert. A no-op with nothing pending, so a heartbeat that repeats the
+  refusal does not raise it again.
+  """
+  @spec upgrade_refused(String.t()) :: :ok
+  def upgrade_refused(node_id) do
+    with %Node{upgrade_pending_to: version} = node when is_binary(version) <- get_node(node_id),
+         {:ok, _} <-
+           Ash.update(node, %{upgrade_pending_to: nil, upgrade_refused_reason: @needs_operator},
+             action: :set_upgrade_pending
+           ) do
+      record(:upgraded, node.id, "system", %{"refused" => @needs_operator, "version" => version})
+
+      Arbiter.Messages.CoordinatorNotifier.node_upgrade_refused(
+        Arbiter.Machine.Alerting.workspace_id(),
+        node,
+        version,
+        @needs_operator
+      )
+    end
+
+    :ok
+  end
 
   @doc """
   Drop a node's pending upgrade once its hello reports the requested version
@@ -682,12 +736,33 @@ defmodule Arbiter.Nodes do
   """
   @spec settle_pending_upgrade(String.t(), String.t() | nil) :: :ok
   def settle_pending_upgrade(node_id, agent_version) do
-    with %Node{upgrade_pending_to: pending} = node when is_binary(pending) <- get_node(node_id),
-         true <- strip_v(pending) == strip_v(agent_version) do
-      Ash.update(node, %{upgrade_pending_to: nil}, action: :set_upgrade_pending)
+    case get_node(node_id) do
+      %Node{upgrade_pending_to: pending} = node when is_binary(pending) ->
+        if strip_v(pending) == strip_v(agent_version), do: settle(node)
+
+      # A refused upgrade has no pending marker: the operator's manual upgrade settles it
+      # once the node reports the release this primary serves.
+      %Node{upgrade_refused_reason: reason} = node when is_binary(reason) ->
+        tag = Agent.release_tag()
+
+        if is_binary(tag) and is_binary(agent_version) and
+             strip_v(tag) == strip_v(agent_version),
+           do: settle(node)
+
+      _ ->
+        :ok
     end
 
     :ok
+  end
+
+  defp settle(node) do
+    _ =
+      Ash.update(node, %{upgrade_pending_to: nil, upgrade_refused_reason: nil},
+        action: :set_upgrade_pending
+      )
+
+    Arbiter.Messages.CoordinatorNotifier.node_upgrade_refused_cleared(node.id)
   end
 
   defp strip_v("v" <> rest), do: rest

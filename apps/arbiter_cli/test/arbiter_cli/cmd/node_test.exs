@@ -752,6 +752,16 @@ defmodule ArbiterCli.Cmd.NodeTest do
   end
 
   describe "show" do
+    test "show names a refused upgrade instead of pending (bd-4kvxun)" do
+      stub_get("/api/nodes/box-1", %{
+        "node" => Map.put(@node, "upgrade_refused", "needs operator (helm)")
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["show", "box-1"]) end)
+      assert out =~ "upgrade refused: needs operator (helm)"
+      refute out =~ "pending"
+    end
+
     test "prints the node's details" do
       stub_get("/api/nodes/box-1", %{"node" => @node})
       {out, _err, 0} = capture(fn -> Node.run(["show", "box-1"]) end)
