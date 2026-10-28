@@ -704,4 +704,22 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert {:ok, _} = dispatch(Ash.get!(Issue, issue.id))
     end
   end
+
+  describe "a crash in the capacity check" do
+    test "fails closed: the run is held, not admitted", %{ws: ws} do
+      put_app_env(:arbiter, :local_hardware, :bogus)
+      issue = ready!(ws, "capacity check crash")
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:no_node_capacity, %{task_id: id}}} =
+                   dispatch(issue)
+
+          assert id == issue.id
+        end)
+
+      assert log =~ "node capacity check crashed for #{issue.id}"
+      refute Ash.get!(Issue, issue.id).state == :active
+    end
+  end
 end
