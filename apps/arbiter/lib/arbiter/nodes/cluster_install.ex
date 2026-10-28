@@ -349,7 +349,7 @@ defmodule Arbiter.Nodes.ClusterInstall do
   def helm_upgrade_command(release, chart, version, namespace),
     do:
       "helm upgrade #{release} #{chart} --version #{version} -n #{namespace} " <>
-        "--reset-then-reuse-values --set image.tag=v#{version}"
+        "--reset-then-reuse-values --set image.tag=v#{version} --wait"
 
   @doc """
   KH13 (§20.10): one command per registry that names a pull secret, creating it with a

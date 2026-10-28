@@ -156,7 +156,22 @@ defmodule Arbiter.NodeAgent.Backend.K8s do
         "degraded" => report.degraded
       }
       |> put_present("readiness", report.readiness)
+      |> put_present("upgrade", refused_upgrade())
     end)
+  end
+
+  # bd-4kvxun: the controller's upgrade status when it declined the upgrade (self-upgrade is
+  # off): the primary turns the node's pending upgrade into a refusal.
+  defp refused_upgrade do
+    case Arbiter.NodeAgent.Status.get() do
+      %{"upgrade" => %{"state" => "disabled"} = upgrade} ->
+        Map.take(upgrade, ["state", "version"])
+
+      _ ->
+        nil
+    end
+  catch
+    :exit, _ -> nil
   end
 
   @impl true

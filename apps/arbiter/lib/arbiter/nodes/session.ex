@@ -1430,6 +1430,7 @@ defmodule Arbiter.Nodes.Session do
       state
       |> heartbeat_degraded(payload)
       |> heartbeat_readiness(payload)
+      |> heartbeat_upgrade(payload)
       |> heartbeat_capacity(payload["capacity"])
       |> heartbeat_stages(payload["runs"])
 
@@ -1510,6 +1511,15 @@ defmodule Arbiter.Nodes.Session do
     do: put_info(state, :readiness, readiness("cluster", block))
 
   defp heartbeat_readiness(state, _payload), do: state
+
+  # bd-4kvxun: a cluster controller that says its upgrade `disabled` (self-upgrade is off, the
+  # operator runs it) turns the node's pending upgrade into a refusal. A no-op without one.
+  defp heartbeat_upgrade(state, %{"upgrade" => %{"state" => "disabled"}}) do
+    Nodes.upgrade_refused(state.node_id)
+    state
+  end
+
+  defp heartbeat_upgrade(state, _payload), do: state
 
   defp heartbeat_capacity(state, %{} = capacity), do: put_node_capacity(state, capacity)
   defp heartbeat_capacity(state, _none), do: state

@@ -939,12 +939,19 @@ defmodule ArbiterCli.Cmd.Node do
 
   defp print_upgrade_pending(_n), do: :ok
 
+  # bd-4kvxun: a controller that needs the operator refused the upgrade; shown, not `pending`.
+  defp print_upgrade_refused(%{"upgrade_refused" => reason}) when is_binary(reason),
+    do: IO.puts("  upgrade:       upgrade refused: #{reason}")
+
+  defp print_upgrade_refused(_n), do: :ok
+
   defp print_node(n) do
     IO.puts("#{n["name"]}")
     IO.puts("  id:            #{n["id"]}")
     IO.puts("  status:        #{n["status"]}")
     IO.puts("  version:       #{n["agent_version"] || "-"}")
     print_upgrade_pending(n)
+    print_upgrade_refused(n)
     IO.puts("  max workers: #{n["max"] || n["max_workers"] || "unknown"}#{cap_detail(n)}")
     if line = derate_line(n), do: IO.puts(line)
     IO.puts("  pinned to:     #{pinned(n["workspace_ids"])}")

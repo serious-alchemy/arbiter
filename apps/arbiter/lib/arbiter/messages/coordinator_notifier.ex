@@ -1220,6 +1220,29 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   def machine_derated(_ws_id, _machine, _info), do: :ok
 
+  @doc """
+  A cluster node's controller refused a requested upgrade because it needs the operator
+  (bd-4kvxun). One alert per node, refreshed rather than repeated; cleared by
+  `node_upgrade_refused_cleared/1`. Best-effort, returns `:ok`.
+  """
+  @spec node_upgrade_refused(String.t() | nil, map(), String.t(), String.t()) :: :ok
+  def node_upgrade_refused(ws_id, %{id: id, name: name}, version, reason)
+      when is_binary(ws_id) do
+    detail =
+      "#{name} refused the upgrade to #{version}: #{reason}. Its controller cannot patch its own " <>
+        "Deployment, so the operator runs the upgrade command shown on the node page " <>
+        "(`arb node show #{name}`)."
+
+    raise_alert(:node_upgrade_refused, id, ws_id, "#{name} upgrade refused: #{reason}", detail)
+  end
+
+  def node_upgrade_refused(_ws_id, _node, _version, _reason), do: :ok
+
+  @doc "Clear a node's refused-upgrade alert (bd-4kvxun). A no-op when none is active."
+  @spec node_upgrade_refused_cleared(String.t()) :: :ok
+  def node_upgrade_refused_cleared(node_id) when is_binary(node_id),
+    do: clear_alert(:node_upgrade_refused, node_id)
+
   @doc "Clear a machine's hard-derate alert (bd-6w7usy). A no-op when none is active."
   @spec machine_derate_cleared(String.t()) :: :ok
   def machine_derate_cleared(machine) when is_binary(machine),

@@ -213,7 +213,8 @@ defmodule Arbiter.Nodes.Overview do
       upgrade_command: nil,
       self_upgrade?: self_upgrade?,
       install_method: install["method"],
-      upgrade_pending_to: node.upgrade_pending_to
+      upgrade_pending_to: node.upgrade_pending_to,
+      upgrade_refused: node.upgrade_refused_reason
     }
 
     with :cluster <- kind(node, snapshot),
