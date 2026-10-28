@@ -220,6 +220,34 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.BackupTest do
                Enum.drop(names, 3)
     end
 
+    test "operator-made snapshots in another name format are never pruned or counted", %{
+      home: home
+    } do
+      snapshots = Path.join(home, "snapshots")
+      File.mkdir_p!(snapshots)
+
+      foreign =
+        for i <- 1..6 do
+          name = "arbiter-pre-v0.2.#{i}-20261008-12000#{i}.sqlite3"
+          File.write!(Path.join(snapshots, name), @magic)
+          name
+        end
+
+      auto =
+        for i <- 1..7 do
+          name = "arbiter-pre-v#{i}-2026010#{i}T000000Z.sqlite3"
+          File.write!(Path.join(snapshots, name), @magic)
+          name
+        end
+
+      removed = Backup.prune(snapshots, Path.join(snapshots, List.last(auto)))
+
+      assert Enum.sort(removed) == Enum.sort(Enum.take(auto, 2))
+      remaining = File.ls!(snapshots)
+      assert Enum.all?(foreign, &(&1 in remaining))
+      assert Enum.all?(Enum.drop(auto, 2), &(&1 in remaining))
+    end
+
     test "ARB_DEPLOY_BACKUP_RETAIN configures the count", %{home: home} do
       System.put_env("ARB_DEPLOY_BACKUP_RETAIN", "2")
       snapshots = Path.join(home, "snapshots")
