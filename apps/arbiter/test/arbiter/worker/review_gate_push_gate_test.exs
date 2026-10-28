@@ -315,6 +315,63 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
     end
   end
 
+  describe "a push GitHub refuses for the missing `workflows` permission" do
+    defp reject_origin_pushes(tmp, message) do
+      hook = Path.join([tmp, "origin.git", "hooks", "pre-receive"])
+      File.write!(hook, "#!/bin/sh\necho '#{message}' >&2\nexit 1\n")
+      File.chmod!(hook, 0o755)
+    end
+
+    @refusal "! [remote rejected] (refusing to allow a GitHub App to create or update " <>
+               "workflow `.github/workflows/ci.yml` without `workflows` permission)"
+
+    test "parks :needs_operator_push, naming the file, branch, head and the commands",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-wf"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      mine = commit_in(wt, "wf.txt", "workflow edit\n")
+      reject_origin_pushes(tmp, @refusal)
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 20_000)
+
+      assert Ash.get!(Issue, task.id).attention_cause == :needs_operator_push
+
+      {git_dir, 0} = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], wt)
+      refute File.exists?(Path.join(String.trim(git_dir), "review_gate_push_check_ran"))
+
+      wait_until(fn -> escalations(ws, task) != [] end)
+      body = hd(escalations(ws, task)).body
+      assert body =~ ".github/workflows/ci.yml"
+      assert body =~ branch
+      assert body =~ mine
+      assert body =~ "HEAD:refs/heads/#{branch}"
+      assert body =~ "arb worker resume #{task.id}"
+    end
+
+    test "any other rejection still parks :head_not_pushed", %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-prot"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      _mine = commit_in(wt, "x.txt", "x\n")
+      reject_origin_pushes(tmp, "branch is protected")
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 20_000)
+
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+    end
+  end
+
   describe "the worktree-on-another-branch shape (AC1)" do
     # bd-2jkrqu review round 1, finding 1: `push_gate/1` runs
     # before anything else in a round, and `PushState.ensure_pushed/3` pushes

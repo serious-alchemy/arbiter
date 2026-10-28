@@ -519,4 +519,85 @@ defmodule Arbiter.Reviews.PushStateTest do
       assert {:ok, ^head} = PushState.reviewable_head(repo, b)
     end
   end
+
+  # ---- workflows-permission rejection --------------------------------------
+
+  @workflow_refusal "refusing to allow a GitHub App to create or update workflow " <>
+                      "`.github/workflows/ci.yml` without `workflows` permission"
+
+  defp reject_pushes_with(tmp, message) do
+    hook = Path.join([tmp, "origin.git", "hooks", "pre-receive"])
+    File.write!(hook, "#!/bin/sh\necho '#{message}' >&2\nexit 1\n")
+    File.chmod!(hook, 0o755)
+  end
+
+  describe "classify_rejection/1" do
+    test "names every workflow file GitHub refuses to let the App touch" do
+      out = """
+      remote: error: GH013: Repository rule violations found
+       ! [remote rejected] feature/x -> feature/x (#{@workflow_refusal})
+       ! [remote rejected] feature/x -> feature/x (refusing to allow a GitHub App to create or update workflow `.github/workflows/release.yml` without `workflows` permission)
+      """
+
+      assert {:needs_operator_push, [".github/workflows/ci.yml", ".github/workflows/release.yml"]} =
+               PushState.classify_rejection(out)
+    end
+
+    test "the permission text without a named path still classifies, with no files" do
+      assert {:needs_operator_push, []} =
+               PushState.classify_rejection("rejected: without `workflows` permission")
+    end
+
+    test "any other rejection is :push_failed" do
+      for out <- [
+            "! [rejected] feature/x -> feature/x (non-fast-forward)",
+            "remote: Permission to o/r.git denied",
+            "",
+            nil
+          ] do
+        assert PushState.classify_rejection(out) == :push_failed
+      end
+    end
+  end
+
+  describe "ensure_pushed/3 against a workflows-permission refusal" do
+    test "returns {:needs_operator_push, files} rather than :push_failed", %{tmp: tmp} do
+      repo = init_repo(tmp)
+      b = branch(repo, "feature/wf")
+      commit(repo, "a.txt")
+      reject_pushes_with(tmp, @workflow_refusal)
+
+      assert {:error, {:needs_operator_push, [".github/workflows/ci.yml"]}, state} =
+               PushState.ensure_pushed(repo, b)
+
+      assert state.local_head == sha(repo, "HEAD")
+    end
+
+    test "another rejection still returns :push_failed", %{tmp: tmp} do
+      repo = init_repo(tmp)
+      b = branch(repo, "feature/other")
+      commit(repo, "a.txt")
+      reject_pushes_with(tmp, "branch is protected")
+
+      assert {:error, :push_failed, _state} = PushState.ensure_pushed(repo, b)
+    end
+  end
+
+  describe "ssh_remote/1" do
+    test "rewrites an https GitHub remote to its ssh form" do
+      assert PushState.ssh_remote("https://github.com/acme/widgets.git") ==
+               "git@github.com:acme/widgets.git"
+
+      assert PushState.ssh_remote("https://x-access-token:tok@github.com/acme/widgets") ==
+               "git@github.com:acme/widgets.git"
+    end
+
+    test "leaves an ssh remote alone and gives up on an unknown shape" do
+      assert PushState.ssh_remote("git@github.com:acme/widgets.git") ==
+               "git@github.com:acme/widgets.git"
+
+      assert PushState.ssh_remote("/some/local/path") == nil
+      assert PushState.ssh_remote(nil) == nil
+    end
+  end
 end

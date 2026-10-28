@@ -209,6 +209,18 @@ defmodule Arbiter.Worker.GitCredential do
          not container_credential?(entry, Keyword.get(opts, :remote_node?, false)))
   end
 
+  @doc """
+  The kind of git credential registered for `repo` in `workspace`
+  (`:github_app`, `:deploy_key`, ...), or `nil` when none is.
+  """
+  @spec kind(map() | nil, String.t() | nil) :: kind() | nil
+  def kind(workspace, repo) do
+    case repo_entry(block(workspace), repo) do
+      %{"kind" => kind} when kind in @kinds -> String.to_existing_atom(kind)
+      _ -> nil
+    end
+  end
+
   defp repo_entry(block, repo) when is_binary(repo) and repo != "" do
     case block do
       %{"repos" => %{} = repos} ->

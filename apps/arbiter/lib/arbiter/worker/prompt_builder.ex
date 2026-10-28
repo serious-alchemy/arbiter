@@ -433,6 +433,31 @@ defmodule Arbiter.Worker.PromptBuilder do
     """
   end
 
+  # A GitHub App token is never granted the `workflows` permission (workflow
+  # files run with repo secrets, so an agent-held token able to edit them could
+  # exfiltrate CI secrets), so GitHub refuses a push touching
+  # `.github/workflows/`. Tell the worker up front instead of letting it fight
+  # the rejection.
+  defp workflow_push_section(opts) do
+    if Keyword.get(opts, :git_credential_kind) == :github_app,
+      do: "\n" <> workflow_push_note() <> "\n",
+      else: ""
+  end
+
+  @doc """
+  The briefing paragraph for a worker whose git credential is a GitHub App
+  token: it cannot push changes under `.github/workflows/`.
+  """
+  @spec workflow_push_note() :: String.t()
+  def workflow_push_note do
+    """
+    WORKFLOW FILES — this run's git credential is a GitHub App token, which is
+    not allowed to create or update anything under `.github/workflows/`. Make
+    such changes and commit them as usual; do not try to work around the
+    restriction. An operator will push the branch.
+    """
+  end
+
   defp push_clause(opts) do
     if Keyword.get(opts, :sandbox_backend) == :podman, do: "", else: ", and push it"
   end
@@ -458,7 +483,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{isolation_section}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
-    #{test_tool_section(opts)}#{commit_gate_section(Keyword.get(opts, :prepush_steps), test_tool?(opts), nil)}#{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
+    #{test_tool_section(opts)}#{commit_gate_section(Keyword.get(opts, :prepush_steps), test_tool?(opts), nil)}#{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{workflow_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
     Work the task to completion: load context, design, implement, test,
     commit on this branch#{push_clause(opts)}.
 

@@ -843,6 +843,27 @@ defmodule Arbiter.Worker.PromptBuilderTest do
     end
   end
 
+  describe "workflow-file push note for a GitHub App credential" do
+    test "a github_app credential tells the worker .github/workflows/ changes need an operator push" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), git_credential_kind: :github_app)
+
+      assert prompt =~ ".github/workflows/"
+      assert prompt =~ "operator will push the branch"
+    end
+
+    test "other credential kinds and no credential carry no such note" do
+      for opts <- [
+            [git_credential_kind: :deploy_key],
+            [git_credential_kind: :token],
+            [git_credential_kind: :gitlab_project_token],
+            [git_credential_kind: nil],
+            []
+          ] do
+        refute PromptBuilder.prompt_for_task(task(%{}), opts) =~ "operator will push the branch"
+      end
+    end
+  end
+
   describe "podman push-access block (bd-capkj9)" do
     test "a podman work prompt says the host pushes and a failed push is not a reason to withhold arb done" do
       prompt = PromptBuilder.prompt_for_task(task(%{}), sandbox_backend: :podman)
