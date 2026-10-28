@@ -1932,15 +1932,22 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       booted_at = Arbiter.Boot.Time.booted_at()
       stale? = DateTime.compare(booted_at, merged_at) == :lt
 
+      repo = Map.get(snapshot, :repo) || task_repo(task_id)
+
       restart_line =
-        if stale? do
-          "The running server booted before this merge (boot #{iso(booted_at)}, " <>
-            "merge #{iso(merged_at)}), so it is still on the old code — " <>
-            "**restart it first**, then observe."
-        else
-          "The running server booted after this merge (boot #{iso(booted_at)}, " <>
-            "merge #{iso(merged_at)}), so the merged code is already loaded — " <>
-            "observe it directly; no restart needed."
+        cond do
+          not own_repo?(Map.get(snapshot, :workspace_id), repo) ->
+            nil
+
+          stale? ->
+            "The running server booted before this merge (boot #{iso(booted_at)}, " <>
+              "merge #{iso(merged_at)}), so it is still on the old code — " <>
+              "**restart it first**, then observe."
+
+          true ->
+            "The running server booted after this merge (boot #{iso(booted_at)}, " <>
+              "merge #{iso(merged_at)}), so the merged code is already loaded — " <>
+              "observe it directly; no restart needed."
         end
 
       body =
@@ -1962,6 +1969,29 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
       {"#{task_id} merged — awaiting verification (restart and observe)", body}
     end)
+  end
+
+  # Whether `repo` is the installation's own Arbiter repo — the only repo whose
+  # merge the running server's boot time says anything about. No repo is treated
+  # as own (legacy single-repo case). Otherwise the repo's mapped checkout
+  # (`LocalCompare.repo_path/2`) must equal `Paths.primary_checkout/0`
+  # (`ARB_PRIMARY_CHECKOUT` / configured checkout); an unmapped repo falls back
+  # to matching the checkout's directory name.
+  defp own_repo?(_ws_id, repo) when not is_binary(repo) or repo == "", do: true
+
+  defp own_repo?(ws_id, repo) do
+    workspace =
+      case is_binary(ws_id) && Ash.get(Workspace, ws_id) do
+        {:ok, ws} -> ws
+        _ -> nil
+      end
+
+    primary = Arbiter.Config.Paths.primary_checkout()
+
+    case Arbiter.Mergers.LocalCompare.repo_path(workspace, repo) do
+      nil -> is_binary(primary) and Path.basename(primary) == Path.basename(repo)
+      path -> is_binary(primary) and Path.expand(path) == Path.expand(primary)
+    end
   end
 
   defp block_subject(task_id, reason), do: "#{task_id} merge blocked — #{block_label(reason)}"
