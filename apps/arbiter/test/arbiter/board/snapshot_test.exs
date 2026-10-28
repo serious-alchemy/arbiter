@@ -543,6 +543,24 @@ defmodule Arbiter.Board.SnapshotTest do
       assert [%{id: "bd-a", activity: "round 2 review"}] = board.in_progress
     end
 
+    # bd-5u99ki: a run kept on the primary because every remote node was outdated says so.
+    test "a card carries the remote-skipped note from the run's routing decision" do
+      note = "remote skipped: mesaana outdated (0.2.88 < 0.2.90)"
+
+      decision = %{"placement" => %{"remote_skipped" => note, "fell_back_to" => "primary"}}
+
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :working, %{meta: %{provider: "claude", routing_decision: decision}}),
+            worker("bd-b", :working, %{meta: %{provider: "claude"}})
+          ]
+        )
+
+      assert [%{id: "bd-a", remote_skipped: ^note}, %{id: "bd-b", remote_skipped: nil}] =
+               Enum.sort_by(board.in_progress, & &1.id)
+    end
+
     test "an author-only card's provider is the author's own" do
       board = derive(workers: [worker("bd-a", :working, %{meta: %{provider: "codex"}})])
 

@@ -1618,6 +1618,15 @@ defmodule ArbiterWeb.BoardLive do
             class="size-3.5 text-[var(--text-label)]"
           />
           <.node_badge :if={@column == "in_progress"} node_name={@card[:node_name]} />
+          <span
+            :if={@column == "in_progress" and @card[:remote_skipped]}
+            data-remote-skipped={@card.remote_skipped}
+            title={@card.remote_skipped}
+            aria-label={@card.remote_skipped}
+            class="inline-flex items-center text-amber-500"
+          >
+            <.icon name="hero-exclamation-triangle-micro" class="size-3.5" />
+          </span>
           <%!-- bd-aw2cyt: the pulse is a claim that something is running.
                Only a card with a live agent gets it. --%>
           <span
