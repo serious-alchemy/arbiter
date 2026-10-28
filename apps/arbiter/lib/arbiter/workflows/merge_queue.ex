@@ -82,37 +82,72 @@ defmodule Arbiter.Workflows.MergeQueue do
   ## Base-aware serialized merge (#354, Phase 3)
 
   Phase 2's conflict resolver (above) is *reactive*: it rebases a PR after a
-  conflict has already appeared. The durable fix is to keep in-flight PRs
-  continuously rebased as the integration branch moves, and to merge them one
-  at a time against a frozen base so two individually-clean PRs can't break
-  together when merged in sequence. This is that base-aware serialized merge:
+  conflict has already appeared. The durable fix is to rebase PRs onto the
+  integration branch as it moves, and to merge them one at a time against a
+  frozen base so two individually-clean PRs can't break together when merged in
+  sequence. This is that base-aware serialized merge:
 
-  ### Continuous auto-update-branch
+  ### Front-of-queue sync (bd-d4m8qf / #1063)
 
-  Every poll, each **approved** item whose PR reports `block_reason:
-  :behind_base` (GitHub `mergeable_state == "behind"` — i.e. the base advanced
-  under it) is rebased forward via `adapter.update_branch/1` and parked at
-  `:updating_base` until the next poll observes it caught up. This surfaces a
-  base-introduced conflict *early* (a 1-commit rebase) rather than late (a
-  full-PR rebase at merge time): when the rebase can't apply, the very next
-  `get/1` reports `conflicting: true` and the existing conflict-resolver path
-  (Phase 2) takes over. Adapters without `update_branch/1` simply skip this
-  step — the queue degrades to its pre-Phase-3 behaviour. Note: the `Direct`
-  adapter implements `update_branch/1` but bypasses the queue entirely (it
-  transitions to `:done` immediately on enqueue), so Phase 3 rebase logic is
-  moot for Direct-strategy tasks.
+  The approved items merging into one target branch (a `repo` + `base`) form
+  that branch's *train*, and its **queue head** is the only one the queue syncs
+  or merges. Every other train item waits for it (`waiting_for_head`, shown in
+  `queue_view/2` and logged once when the wait starts) and spends nothing: no
+  update-branch, no merge-time freshness sync, none of its
+  `merge.max_freshness_syncs` budget. When the head merges or leaves the train,
+  the next item takes its place on the following poll and is synced once, onto
+  everything merged ahead of it: a coalesced merge train, on any forge (GitLab's
+  own merge trains are not available on Free). Syncing every approved PR
+  whenever its target moved only made each of them stale again at the next
+  merge, at the price of a pipeline each time.
+
+  The head keeps its place until it merges or leaves the train (a conflict,
+  requested changes, a lost approval), even when an item ahead of it in queue
+  order joins: that one waits and goes next, because taking the place from a
+  head whose sync and CI are under way would waste them. A head that cannot
+  progress on its own hands its place on:
+
+    * at once when the freshness gate or the coverage wait has parked it on its
+      head (a parked PR the forge calls behind still syncs, which moves its head);
+    * after `head_stall_grace_ticks/0` ticks in a row when its CI failed, the
+      forge names another block or closed the PR, its polls fail, or its
+      update-branch fails or is never applied;
+    * after `head_ci_wait_ticks/0` ticks in CI on one head SHA (a pipeline that
+      never finishes).
+
+  A head the merge guards refuse has nothing under way to protect, so it keeps
+  only its queue order, as at the old admission: it is re-tried while it is the
+  front, and an item ahead of it in queue order leads. At most one head merges
+  per tick.
+
+  ### Auto-update-branch
+
+  An **approved** item whose PR reports `block_reason: :behind_base` (GitHub
+  `mergeable_state == "behind"` — the base advanced under it) parks at
+  `:behind_base`. As its train's head it is rebased forward via
+  `adapter.update_branch/1` and parked at `:updating_base` until the next poll
+  observes it caught up. When the rebase can't apply, the next `get/1` reports
+  `conflicting: true` and the existing conflict-resolver path (Phase 2) takes
+  over; a follower that conflicts with the moved base is caught the same way,
+  because the forge reports the conflict without a sync. Adapters without
+  `update_branch/1` simply skip this step — the queue degrades to its
+  pre-Phase-3 behaviour. Note: the `Direct` adapter implements
+  `update_branch/1` but bypasses the queue entirely (it transitions to `:done`
+  immediately on enqueue), so Phase 3 rebase logic is moot for Direct-strategy
+  tasks.
 
   ### Serialized merge admission
 
   `poll_all/1` advances every item up to — but not through — the merge: an
   approved, CI-clean, up-to-date item parks at `:ready_to_merge` instead of
-  merging inline. A second queue-level pass (`admit_one_merge/2`) then merges
-  **at most one** item per cycle: the front of the queue, ordered by task
-  priority then enqueue time. After it merges, `main` advances; on the next
-  poll the followers report `:behind_base`, are `update_branch`'d onto the new
-  head, and only then become eligible — so each PR rebases onto the post-merge
-  head before its own merge. A PR that was `:ready_to_merge` but is now behind
-  (because the base moved) drops back to `:updating_base` automatically.
+  merging inline. A second queue-level pass (`advance_queue_heads/2`) then acts
+  on each train's head alone, in queue order: it syncs a `:behind_base` head,
+  merges a `:ready_to_merge` one (after the merge-time freshness check, which
+  may sync it first) unless another head has merged this tick, and otherwise
+  waits while the head's sync lands or its CI runs. After the head merges its
+  target advances, and the next head is synced onto the new tip before its own
+  merge. A PR that was `:ready_to_merge` but is now behind (because the base
+  moved) drops back to `:behind_base` automatically.
 
   This governs the **queue-driven** merge lane (auto-merge off, the merge queue is
   the merger). The per-worker Watchdog's review-gate fast-merge is the explicit
@@ -258,10 +293,24 @@ defmodule Arbiter.Workflows.MergeQueue do
   # `merge.max_freshness_syncs` (`MergeFreshness.max_syncs/1`).
   @freshness_wait_ticks 10
 
+  # bd-d4m8qf. Ticks a stalled queue head keeps its place before the next item
+  # takes over. A block the forge reports right after the head's own sync (no
+  # pipeline registered yet, a check about to be re-run) is not a reason to hand
+  # its place on; one that outlasts this is.
+  @head_stall_grace_ticks 3
+
+  # bd-d4m8qf. Ticks a queue head may sit in CI on one head SHA before it is
+  # taken to be waiting on a pipeline that will not finish (a required check
+  # that never starts, no runner) and the next item takes over: two hours at the
+  # default 30s poll. Generous on purpose: a long pipeline must be allowed to run
+  # its course, and handing the place on mid-run wastes it.
+  @head_ci_wait_ticks 240
+
   @typedoc "Status atom for an in-flight item."
   @type status ::
           :opening
           | :awaiting_approval
+          | :behind_base
           | :updating_base
           | :ci_running
           | :ready_to_merge
@@ -296,7 +345,18 @@ defmodule Arbiter.Workflows.MergeQueue do
           freshness_synced_head: String.t() | nil,
           freshness_syncs: non_neg_integer(),
           freshness_waits: non_neg_integer(),
-          freshness_parked_head: String.t() | nil
+          freshness_parked_head: String.t() | nil,
+          waiting_for_head: String.t() | nil,
+          queue_head:
+            %{
+              stalls: non_neg_integer(),
+              ci_wait: {String.t() | nil, pos_integer()} | nil,
+              synced_from: String.t() | nil,
+              refused?: boolean()
+            }
+            | nil,
+          poll_failed?: boolean(),
+          last_block_reason: atom() | nil
         }
 
   defmodule State do
@@ -351,7 +411,9 @@ defmodule Arbiter.Workflows.MergeQueue do
   Return the queue's items in merge-admission order (front of the queue first),
   projected to the display fields the dashboard renders (#354, Phase 3). This is
   the queue view: each entry carries its 1-based queue `position`, current
-  `status`, task `priority`, and MR ref. A pure state projection — answers
+  `status`, task `priority`, and MR ref, and whether it is its target branch's
+  queue head (`queue_head`) or the task id of the head it waits for
+  (`waiting_for_head`, bd-d4m8qf). A pure state projection — answers
   immediately even while a poll cycle is in flight (use a short call timeout).
   """
   @spec queue_view(GenServer.server(), timeout()) :: [map()]
@@ -375,6 +437,22 @@ defmodule Arbiter.Workflows.MergeQueue do
   """
   @spec coverage_unknown_grace_ticks() :: pos_integer()
   def coverage_unknown_grace_ticks, do: @coverage_unknown_grace_ticks
+
+  @doc """
+  How many consecutive ticks a queue head that cannot progress on its own (its
+  CI failed, the forge names another block or closed the PR, its polls fail, or
+  its update-branch fails or is never applied) keeps its place before the next
+  item takes over (bd-d4m8qf).
+  """
+  @spec head_stall_grace_ticks() :: pos_integer()
+  def head_stall_grace_ticks, do: @head_stall_grace_ticks
+
+  @doc """
+  How many consecutive ticks a queue head may sit in CI on one head SHA before
+  the next item takes over (bd-d4m8qf).
+  """
+  @spec head_ci_wait_ticks() :: pos_integer()
+  def head_ci_wait_ticks, do: @head_ci_wait_ticks
 
   # ---- GenServer callbacks ------------------------------------------------
 
@@ -828,46 +906,265 @@ defmodule Arbiter.Workflows.MergeQueue do
       Limiter.with_priority(:background, :merge_queue, fn ->
         # Pass 1: poll + advance each item up to (but not through) the merge.
         # Items that are approved, CI-clean, and up-to-date park at
-        # :ready_to_merge; behind-base items are rebased forward and park at
-        # :updating_base.
+        # :ready_to_merge; approved items behind their base park at
+        # :behind_base, for pass 2 to sync if they head their train.
         Enum.map_reduce(items, state, fn item, acc -> poll_item(acc, item) end)
       end)
 
-    # Pass 2: serialized merge admission — merge at most one front-of-queue item
-    # per cycle so the queue integrates one PR at a time against a frozen base
-    # (Phase 3, base-aware serialized merge). Runs at :foreground (see above).
-    {advanced, state} = admit_one_merge(state, advanced)
+    # Pass 2: the queue head — the only item that is synced or merged (bd-d4m8qf),
+    # so the queue integrates one PR at a time against a frozen base (Phase 3,
+    # base-aware serialized merge). Runs at :foreground (see above).
+    {advanced, state} = advance_queue_heads(state, advanced)
 
     # Drop items that have reached :done — they've been closed already.
     advanced = Enum.reject(advanced, &(&1.status == :done))
     %{state | items: advanced}
   end
 
-  # Serialized merge admission (#354, Phase 3). Among the items parked at
-  # :ready_to_merge, merge exactly ONE — the front of the queue, ordered by task
-  # priority (0 = P0 highest) then enqueue time. Merging one-at-a-time is what
-  # serializes the integration: once the front merges, `main` advances, the
-  # followers fall :behind_base on the next poll, and each is rebased onto the
-  # new head before it becomes eligible. Merging only among :ready_to_merge
-  # candidates (rather than strictly blocking on an unready higher-priority
-  # item) keeps the queue from stalling behind a PR still in review.
-  defp admit_one_merge(state, items) do
-    case next_to_merge(items) do
-      nil ->
-        {items, state}
+  # ---- the queue head: front-of-queue sync (bd-d4m8qf / #1063) -------------
 
-      front ->
-        {merged, state} = try_merge(state, front)
-        {replace_item(items, merged), state}
+  # An approved item on its way to the merge: waiting for a sync, syncing, in CI
+  # or ready. These are the items the queue head is chosen from.
+  @train_statuses [:behind_base, :updating_base, :ci_running, :ready_to_merge]
+
+  # Serialized merge admission (#354, Phase 3), extended to the sync (bd-d4m8qf).
+  # Each target branch has one queue head, the only item there the queue syncs
+  # or merges. Every other train item waits for it: no update-branch, no
+  # freshness sync, no merge attempt, no sync budget spent. Syncing every
+  # approved follower on every move of the target only made each of them stale
+  # again at the next merge, at the price of a pipeline and a slice of its
+  # budget each time. A follower syncs once, when it reaches the front.
+  #
+  # The head keeps its place until it merges or leaves the train; then the
+  # front of the train takes over, ordered by task priority (0 = P0 highest)
+  # then enqueue time. An item that joins (or rejoins) the train ahead of the
+  # head in that order waits too: taking the place from a head whose sync and
+  # CI are under way would make it stale and waste them. Choosing only among
+  # train items (rather than strictly blocking on an unready higher-priority
+  # item) keeps the queue from stalling behind a PR still in review.
+  #
+  # The heads act in queue order, and at most one of them merges per tick, as
+  # the serialized admission always did: two items whose repo the queue resolves
+  # differently (one with no run on record) can still share a forge target.
+  defp advance_queue_heads(state, items) do
+    leads =
+      items
+      |> Enum.filter(&in_train?/1)
+      |> Enum.group_by(&queue_target(state, &1))
+      |> Enum.flat_map(fn {_target, train} -> lead(Enum.sort_by(train, &queue_order_key/1)) end)
+      |> Enum.sort_by(fn {head, _waiting, _new?} -> queue_order_key(head) end)
+
+    # `Map.merge/2` and `Map.get/3` on the head fields: items enqueued before
+    # they existed (a running queue across a code reload) read them as unset.
+    items = Enum.map(items, &Map.merge(&1, %{waiting_for_head: nil, queue_head: nil}))
+
+    {items, state, _merged?} =
+      Enum.reduce(leads, {items, state, false}, fn {head, waiting, new?}, acc ->
+        advance_lead(acc, head, waiting, new?)
+      end)
+
+    {items, state}
+  end
+
+  # A train item parked on its current head (a freshness sync or a coverage
+  # wait gave up on it, and paged) is out until the head moves: it can neither
+  # lead nor wait. Unless the forge calls it behind: syncing it is what moves
+  # its head, as it always was.
+  defp in_train?(item) do
+    item.status in @train_statuses and (item.status == :behind_base or not parked?(item))
+  end
+
+  defp parked?(item) do
+    head = Map.get(item, :last_head_sha)
+
+    (is_binary(head) and item.freshness_parked_head == head) or
+      coverage_parked_on?(item, head)
+  end
+
+  # Merging an item moves its target branch and nothing else, so a PR into
+  # another branch or another repo never waits behind this head.
+  defp queue_target(state, item), do: {item.repo, item.base || state.base}
+
+  # A train's head, the items waiting behind it (not those stalled on a block
+  # of their own) and whether the head has just taken its place.
+  defp lead(train) do
+    case pick_head(train) do
+      nil ->
+        []
+
+      head ->
+        incumbent? =
+          Enum.any?(train, &(&1.task_id == head.task_id and Map.get(&1, :queue_head) != nil))
+
+        waiting = Enum.reject(train, &(&1.task_id == head.task_id or stalled?(&1)))
+        [{head, waiting, not incumbent?}]
     end
   end
 
-  defp next_to_merge(items) do
-    items
-    |> Enum.filter(&(&1.status == :ready_to_merge))
-    |> Enum.sort_by(&queue_order_key/1)
-    |> List.first()
+  defp advance_lead({items, state, merged?}, head, waiting, new?) do
+    log_queue_head(state, head, waiting, new?)
+    {advanced, state, outcome} = advance_head(state, head, merged?)
+    advanced = note_outcome(head, advanced, outcome)
+    waiting_ids = Enum.map(waiting, & &1.task_id)
+
+    items =
+      Enum.map(items, fn item ->
+        cond do
+          item.task_id == head.task_id -> advanced
+          item.task_id in waiting_ids -> wait_for(item, head.task_id)
+          true -> item
+        end
+      end)
+
+    {items, state, merged? or outcome == :merged}
   end
+
+  # Said once per change rather than on every tick: when an item takes the
+  # head's place, and when a follower starts waiting behind a head.
+  defp log_queue_head(state, head, waiting, new?) do
+    if new? do
+      Logger.info(
+        "MergeQueue: #{item_branch_label(head)} is the queue head for " <>
+          "#{target_label(state, head)} (#{length(waiting)} waiting behind it); only it is " <>
+          "synced or merged"
+      )
+    end
+
+    for item <- waiting, Map.get(item, :waiting_for_head) != head.task_id do
+      Logger.info(
+        "MergeQueue: #{item_branch_label(item)} is waiting for queue head " <>
+          "#{item_branch_label(head)}; not synced until it reaches the front"
+      )
+    end
+
+    :ok
+  end
+
+  defp target_label(state, item) do
+    {repo, base} = queue_target(state, item)
+    Enum.map_join(Enum.reject([repo, base], &is_nil/1), "/", &to_string/1)
+  end
+
+  # The incumbent keeps its place unless it cannot claim it: refused at its
+  # merge last tick (no sync or CI under way to protect, so its queue order is
+  # all it has, as at the old admission), no progress for more than
+  # @head_stall_grace_ticks ticks in a row, or in CI on one head for more than
+  # @head_ci_wait_ticks. Then, or with no incumbent, the front item that can
+  # progress leads.
+  defp pick_head(train) do
+    case Enum.find(train, &Map.get(&1, :queue_head)) do
+      nil -> front(train)
+      %{queue_head: %{refused?: true}} -> front(train)
+      incumbent -> keep_or_hand_on(incumbent, train)
+    end
+  end
+
+  defp keep_or_hand_on(%{queue_head: watch} = incumbent, train) do
+    watch = %{
+      watch
+      | stalls: if(stuck?(incumbent, watch), do: watch.stalls + 1, else: 0),
+        ci_wait: ci_wait(incumbent, watch.ci_wait)
+    }
+
+    case hand_on_reason(incumbent, watch) do
+      nil ->
+        Map.merge(incumbent, %{queue_head: watch, waiting_for_head: nil})
+
+      why ->
+        Logger.warning(
+          "MergeQueue: queue head #{item_branch_label(incumbent)} #{why}; handing its place " <>
+            "to the next item"
+        )
+
+        front(Enum.reject(train, &(&1.task_id == incumbent.task_id)))
+    end
+  end
+
+  defp hand_on_reason(item, %{stalls: stalls}) when stalls > @head_stall_grace_ticks do
+    "made no progress for #{stalls} ticks (forge block " <>
+      "#{inspect(Map.get(item, :last_block_reason))}, last error #{inspect(item.last_error)})"
+  end
+
+  defp hand_on_reason(_item, %{ci_wait: {sha, ticks}}) when ticks > @head_ci_wait_ticks,
+    do: "has been in CI on #{inspect(sha)} for #{ticks} ticks"
+
+  defp hand_on_reason(_item, _watch), do: nil
+
+  defp front(train) do
+    case Enum.find(train, &(not stalled?(&1))) do
+      nil -> nil
+      head -> Map.merge(head, %{queue_head: new_watch(), waiting_for_head: nil})
+    end
+  end
+
+  # The queue head's own bookkeeping: ticks in a row of no progress, ticks in CI
+  # on one head SHA, the head SHA the queue last synced it from, and whether its
+  # merge was refused last tick.
+  defp new_watch, do: %{stalls: 0, ci_wait: nil, synced_from: nil, refused?: false}
+
+  # An item in CI is waiting for its pipeline. One whose forge names a block
+  # (CI failed or was cancelled, a draft, an unmet approval or branch rule, the
+  # PR closed) is waiting for something the queue cannot do for it, so it cannot
+  # lead.
+  defp stalled?(%{status: :ci_running} = item), do: not is_nil(Map.get(item, :last_block_reason))
+  defp stalled?(_item), do: false
+
+  # No progress since the last tick: stalled, its poll failed, or still behind
+  # on the very head it was last synced from (the update-branch failed, or the
+  # forge accepted it and never applied it). Judged on this tick's poll, so a
+  # head whose CI is re-run keeps its place.
+  defp stuck?(item, watch) do
+    head = Map.get(item, :last_head_sha)
+
+    stalled?(item) or Map.get(item, :poll_failed?, false) or
+      (item.status == :behind_base and is_binary(head) and head == watch.synced_from)
+  end
+
+  # Ticks in a row the head has been in CI, with no block named, on its head SHA.
+  defp ci_wait(%{status: :ci_running} = item, wait) do
+    sha = Map.get(item, :last_head_sha)
+
+    cond do
+      stalled?(item) -> nil
+      match?({^sha, _}, wait) -> {sha, elem(wait, 1) + 1}
+      true -> {sha, 1}
+    end
+  end
+
+  defp ci_wait(_item, _wait), do: nil
+
+  # The head is synced when the forge calls it behind, merged when it is ready
+  # (unless another head merged this tick), and otherwise left alone while its
+  # sync lands or its CI runs.
+  defp advance_head(state, %{status: :behind_base} = head, _merged?) do
+    state = for_item(state, head)
+
+    {synced, state} =
+      Limiter.with_priority(:background, :merge_queue, fn -> update_base(state, head) end)
+
+    {synced, state, :synced}
+  end
+
+  defp advance_head(state, %{status: :ready_to_merge} = head, false) do
+    {item, state} = try_merge(state, head)
+    {item, state, merge_outcome(item)}
+  end
+
+  defp advance_head(state, head, _merged?), do: {head, state, :waiting}
+
+  # A merge that did not happen and did not sync leaves the item ready.
+  defp merge_outcome(%{status: :done}), do: :merged
+  defp merge_outcome(%{status: :ready_to_merge}), do: :refused
+  defp merge_outcome(_item), do: :progressed
+
+  defp note_outcome(head, %{queue_head: %{} = watch} = advanced, outcome) do
+    synced_from =
+      if outcome == :synced, do: Map.get(head, :last_head_sha), else: watch.synced_from
+
+    %{advanced | queue_head: %{watch | synced_from: synced_from, refused?: outcome == :refused}}
+  end
+
+  defp wait_for(item, head_id), do: %{item | waiting_for_head: head_id}
 
   # Queue order: lower priority number first (P0 before P4), earliest enqueue as
   # the tiebreak. Items without an `opened_at` sort last.
@@ -877,10 +1174,6 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   defp opened_at_key(%DateTime{} = dt), do: DateTime.to_unix(dt, :microsecond)
   defp opened_at_key(_), do: 9_223_372_036_854_775_807
-
-  defp replace_item(items, %{task_id: tid} = updated) do
-    Enum.map(items, fn i -> if i.task_id == tid, do: updated, else: i end)
-  end
 
   defp poll_item(state, %{status: :failed} = item), do: {item, state}
   defp poll_item(state, %{status: :done} = item), do: {item, state}
@@ -965,15 +1258,17 @@ defmodule Arbiter.Workflows.MergeQueue do
         )
     )
 
-    {
-      %{
-        item
-        | last_error: reason,
-          last_polled_at: DateTime.utc_now(),
-          retry_not_before: retry_not_before
-      },
-      state
-    }
+    # bd-d4m8qf: a queue head whose polls keep failing (not a rate limit, which
+    # parks every item on the forge alike) is counted as making no progress.
+    item =
+      Map.merge(item, %{
+        last_error: reason,
+        last_polled_at: DateTime.utc_now(),
+        retry_not_before: retry_not_before,
+        poll_failed?: is_nil(retry_not_before)
+      })
+
+    {item, state}
   end
 
   # Only a rate-limited error with a positive retry hint changes scheduling —
@@ -990,7 +1285,14 @@ defmodule Arbiter.Workflows.MergeQueue do
   # item can climb several rungs in one cycle.
   defp advance_status(state, item, mr_state) do
     now = DateTime.utc_now()
-    item = %{item | last_polled_at: now}
+
+    item =
+      Map.merge(item, %{
+        last_polled_at: now,
+        last_block_reason: forge_block(mr_state),
+        poll_failed?: false
+      })
+
     item = track_reviewed_baseline(item, mr_state)
     item = clear_phantom_conflicts_unless_conflicting(item, mr_state)
 
@@ -1034,25 +1336,32 @@ defmodule Arbiter.Workflows.MergeQueue do
       unhandled_changes_requested?(item, mr_state) ->
         dispatch_revise(state, item, mr_state)
 
-      # Base-aware continuous auto-update (#354, Phase 3): an approved PR that
-      # has fallen :behind_base (the integration branch moved under it) is
-      # rebased forward via update-branch and parked at :updating_base. A PR
-      # that was already :ready_to_merge drops back here when the base moves, so
-      # it re-bases onto the post-merge head before its own merge. A rebase that
-      # can't apply surfaces as `conflicting: true` on a later poll → the
-      # conflict-resolver guard at the top of this cond (Phase 2).
+      # Base-aware auto-update (#354, Phase 3): an approved PR that has fallen
+      # :behind_base (the integration branch moved under it) has to be rebased
+      # forward via update-branch before it can merge. A PR that was already
+      # :ready_to_merge drops back here when the base moves, so it re-bases onto
+      # the post-merge head before its own merge. Only the queue head is synced
+      # (bd-d4m8qf): this marks the item, and pass 2 syncs it if it is the head
+      # (`advance_head/2`). A rebase that can't apply surfaces as `conflicting:
+      # true` on a later poll → the conflict-resolver guard at the top of this
+      # cond (Phase 2).
       base_update_needed?(state, item, mr_state) ->
-        update_base(state, item)
+        {%{item | status: :behind_base}, state}
 
-      # Caught up after a base update (no longer :behind_base): rejoin the normal
-      # ladder and re-evaluate against the current MR state.
-      item.status == :updating_base ->
+      # Caught up after a base update, or no longer an approved PR behind its
+      # base: rejoin the normal ladder and re-evaluate against the current MR state.
+      item.status in [:updating_base, :behind_base] ->
         resume_after_base_update(state, item, mr_state)
 
       true ->
         advance_ready_ladder(state, item, mr_state)
     end
   end
+
+  # bd-d4m8qf: the forge's block classification, as the queue head reads it. A
+  # PR closed on the forge is as blocked as one whose CI failed.
+  defp forge_block(%{status: :closed}), do: :closed
+  defp forge_block(mr_state), do: Map.get(mr_state, :block_reason)
 
   # The phantom-conflict counter measures *consecutive* ticks, so it clears
   # the moment the forge stops claiming a conflict (bd-1x4r25).
@@ -1119,7 +1428,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   # degrading to the pre-Phase-3 behaviour.
   defp base_update_needed?(state, item, mr_state) do
     base_update_supported?(state.adapter) and
-      item.status in [:awaiting_approval, :updating_base, :ci_running, :ready_to_merge] and
+      item.status in [:awaiting_approval | @train_statuses] and
       Map.get(mr_state, :approved) == true and
       Map.get(mr_state, :block_reason) == :behind_base
   end
@@ -1294,9 +1603,11 @@ defmodule Arbiter.Workflows.MergeQueue do
   # A CHANGES_REQUESTED review is actionable when it is newer than the last one
   # we dispatched a revise for. The debounce key is the review id (the merger
   # derives it from the review's id/timestamp). Only fire from a settled
-  # awaiting-review status — never mid-merge or while already revising.
+  # awaiting-review status — never mid-merge or while already revising. A
+  # follower waiting for the queue head (bd-d4m8qf) is settled too: it may wait
+  # there for several merges.
   defp unhandled_changes_requested?(item, mr_state) do
-    item.status in [:awaiting_approval, :ci_running] and
+    item.status in [:awaiting_approval, :ci_running, :behind_base] and
       Map.get(mr_state, :changes_requested, false) and
       not is_nil(Map.get(mr_state, :latest_review_id)) and
       Map.get(mr_state, :latest_review_id) != item.last_handled_review_id
@@ -2293,10 +2604,12 @@ defmodule Arbiter.Workflows.MergeQueue do
       {:error, :empty_net_diff = reason} ->
         {%{item | last_error: reason}, state}
 
-      # bd-5z9yvb: the branch was synced with the target first. Demote so the
-      # ladder waits for CI on the synced head instead of re-trying the merge.
+      # bd-5z9yvb: the branch was synced with the target first. Park it like a
+      # base update so the ladder waits for CI on the synced head instead of
+      # re-trying the merge. bd-d4m8qf: :updating_base keeps the queue head in
+      # the train even when its next poll fails, so its place is not handed on.
       {:error, {:freshness_sync, _head}} ->
-        {%{item | status: :awaiting_approval}, state}
+        {%{item | status: :updating_base}, state}
 
       # bd-651ine: the gate's record forbids the merge until a reviewer round
       # approves the head or the coordinator accepts it. Non-terminal for the
@@ -2484,6 +2797,17 @@ defmodule Arbiter.Workflows.MergeQueue do
       freshness_syncs: 0,
       freshness_waits: 0,
       freshness_parked_head: nil,
+      # bd-d4m8qf. The queue head this item waits behind (its task id), or nil
+      # when it is the head or not in the train: a follower is not synced.
+      # `queue_head` is set on the head of its target branch's train, which
+      # keeps its place until it merges, leaves or cannot progress: its own
+      # bookkeeping (`new_watch/0`, `pick_head/1`). `last_block_reason` is the
+      # forge's block classification from the latest poll (`forge_block/1`), and
+      # `poll_failed?` whether that poll failed (not on a rate limit).
+      waiting_for_head: nil,
+      queue_head: nil,
+      last_block_reason: nil,
+      poll_failed?: false,
       last_error: nil,
       resolver_spawned_at: nil,
       prior_status: nil,
@@ -2612,7 +2936,10 @@ defmodule Arbiter.Workflows.MergeQueue do
         position: position,
         base: item.base,
         merger_url: merger_url_for(item_adapter(state, item), item.mr_ref),
-        last_error: item.last_error
+        last_error: item.last_error,
+        # bd-d4m8qf: the head of its target's train, or the head it waits for.
+        queue_head: Map.get(item, :queue_head) != nil,
+        waiting_for_head: Map.get(item, :waiting_for_head)
       }
     end)
   end

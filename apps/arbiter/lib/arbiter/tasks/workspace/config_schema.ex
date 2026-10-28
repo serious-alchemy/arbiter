@@ -172,7 +172,9 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       max_freshness_syncs   positive integer — freshness syncs (update-branch) allowed per head
                             before the merge parks and pages (default: 3). The count restarts
                             when the head changes for any reason other than a pending sync, and
-                            when a synced head reaches a merge decision (CI passed).
+                            when a synced head reaches a merge decision (CI passed). The merge
+                            queue syncs only the front PR of each target branch; the PRs
+                            waiting behind it spend none until they reach the front.
       repos                 map, repo_paths key -> per-repo override of any key
                             above (strategy, config, auto_merge, …). Deep-merged
                             over the workspace-level merge block, so unset
