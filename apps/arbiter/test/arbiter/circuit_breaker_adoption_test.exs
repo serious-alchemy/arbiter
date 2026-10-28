@@ -334,6 +334,33 @@ defmodule Arbiter.CircuitBreakerAdoptionTest do
 
       assert trip_escalations(ws) == []
     end
+
+    test "a non-arbiter repo gets no boot-vs-merge text or restart instruction", %{ws: ws} do
+      CoordinatorNotifier.awaiting_verification(
+        %{task_id: "bd-pmv010", workspace_id: ws.id, repo: "govcloud-atlas"},
+        "octo/atlas#1",
+        DateTime.utc_now()
+      )
+
+      assert [page] = escalations(ws)
+      refute page.body =~ "restart it first"
+      refute page.body =~ "booted"
+      assert page.body =~ "ticket verify bd-pmv010 --observed"
+      assert page.body =~ "ticket verify bd-pmv010 --failed"
+    end
+
+    test "the installation's own repo keeps the boot-vs-merge text", %{ws: ws} do
+      own = Path.basename(Arbiter.Config.Paths.primary_checkout())
+
+      CoordinatorNotifier.awaiting_verification(
+        %{task_id: "bd-pmv011", workspace_id: ws.id, repo: own},
+        "octo/arbiter#1",
+        DateTime.add(DateTime.utc_now(), 3600)
+      )
+
+      assert [page] = escalations(ws)
+      assert page.body =~ "restart it first"
+    end
   end
 
   describe "registry coverage (acceptance 2)" do
