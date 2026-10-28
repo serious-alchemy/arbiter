@@ -93,6 +93,7 @@ defmodule Arbiter.Messages.EscalationKind do
     :loop_proposal,
     :operator_login_lapsed,
     :overage_alert,
+    :engagement_failed,
     :pr_patrol_dispatch_failed,
     :quota_grant_failing,
     :quota_poll_failing,

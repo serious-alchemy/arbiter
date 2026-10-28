@@ -203,7 +203,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Backup do
       case File.ls(dir) do
         {:ok, names} ->
           names
-          |> Enum.filter(&(String.starts_with?(&1, prefix) and String.ends_with?(&1, ".sqlite3")))
+          |> Enum.filter(&(String.starts_with?(&1, prefix) and stamp_of(&1) != nil))
           |> Enum.sort_by(&stamp_of/1)
 
         {:error, _} ->
@@ -225,7 +225,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Backup do
   defp stamp_of(name) do
     case Regex.run(~r/-(\d{8}T\d{6}Z)\.sqlite3\z/, name) do
       [_, stamp] -> stamp
-      _ -> name
+      # Not a name we wrote (operator-made): prune leaves it alone.
+      _ -> nil
     end
   end
 
