@@ -614,7 +614,8 @@ defmodule Arbiter.Nodes.Placement do
   `{:no_node_capacity, info}` shape as a full fleet, so every caller already
   holds the card and retries.
   """
-  @spec image_hold(request(), term()) :: info()
+  @spec image_hold(%{required(:task_id) => String.t(), optional(atom()) => term()}, term()) ::
+          info()
   def image_hold(request, reason) do
     %{
       task_id: request.task_id,
