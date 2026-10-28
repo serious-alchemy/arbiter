@@ -42,6 +42,7 @@ jobs:
   audit:
     name: mix audit (credo, sobelow, dialyzer)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       MIX_ENV: dev
 
@@ -180,6 +181,7 @@ jobs:
   test-shard:
     name: mix test (${{ matrix.app }} ${{ matrix.partition }}/${{ matrix.partitions }})
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     env:
       MIX_ENV: test
       # Non-secret test key for Arbiter.Vault (matches config/test.exs).
@@ -257,6 +259,7 @@ jobs:
   test:
     name: mix test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: test-shard
     if: ${{ always() }}
     steps:
