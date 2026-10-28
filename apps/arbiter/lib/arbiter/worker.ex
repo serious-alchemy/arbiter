@@ -2898,6 +2898,10 @@ defmodule Arbiter.Worker do
 
     cleanup_orphaned_prompt(adapter, spawn_args, pristine_args)
 
+    # Record the session id the argv pre-assigned BEFORE the port opens, so a
+    # run that crashes before printing anything still has a resumable id.
+    state = record_preassigned_session(state, adapter, spawn_args, adopted)
+
     {port, scope} = Arbiter.Worker.ClaudeSession.open_scoped_port(spawn_args, state.task_id)
     # A run placed on a node consumed its handle; what is stashed for re-opens
     # must place it again (a no-op for a local spawn).
@@ -2977,6 +2981,58 @@ defmodule Arbiter.Worker do
     {:reply, {:ok, port}, announce_phase(new_state)}
   rescue
     e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
+  end
+
+  # A Claude argv names its session up front (`--session-id <uuid>` on a first
+  # launch, `--resume <uuid>` after). Stash it in meta (`:session_id`, plus
+  # `:preassigned_session_id` so `sync_session_meta/2` can tell it from an id
+  # learned from output) and stamp it on the run row. Other providers and
+  # adopted runs (the row already has its session) are left alone.
+  defp record_preassigned_session(%State{} = state, adapter, spawn_args, adopted) do
+    sid =
+      with Arbiter.Agents.Claude <- adapter,
+           nil <- adopted,
+           %{argv: argv} when is_list(argv) <- spawn_args do
+        Arbiter.Agents.Claude.session_id_from_argv(argv)
+      else
+        _ -> nil
+      end
+
+    if is_binary(sid) and sid != "" do
+      if state.run_id, do: backfill_run_fields(state.run_id, %{session_id: sid}, state.task_id)
+
+      meta =
+        (state.meta || %{})
+        |> Map.put(:session_id, sid)
+        |> Map.put(:preassigned_session_id, sid)
+
+      %State{state | meta: meta}
+    else
+      state
+    end
+  end
+
+  # The id the CLI reports in its stream, reconciled with the pre-assigned one.
+  # The pre-assigned id always wins (it is what `--resume` will use); a
+  # difference is logged once per worker.
+  defp reconcile_session_id(%State{meta: meta} = state, reported) do
+    case meta && Map.get(meta, :preassigned_session_id) do
+      nil ->
+        {state, reported}
+
+      pre when reported in [nil, pre] ->
+        {state, pre}
+
+      pre ->
+        if Map.get(meta, :session_id_mismatch) != reported do
+          Logger.warning(
+            "Worker: session id mismatch task=#{state.task_id} " <>
+              "pre-assigned=#{pre} reported=#{reported} — keeping the pre-assigned id"
+          )
+        end
+
+        {%State{state | meta: Map.put(meta, :session_id_mismatch, reported)}, pre}
+    end
   end
 
   # bd-4p1vui: the adoption this session completes, if any: this Worker was started to adopt
@@ -3844,6 +3900,8 @@ defmodule Arbiter.Worker do
           end
 
         had_session_id? = not is_nil(Map.get(meta, :session_id))
+        {state, session_id} = reconcile_session_id(state, session_id)
+        meta = state.meta
 
         # bd-9rdwe4: mirror the structured terminal result (#1017 gap G5) the
         # same way model/session_id are already surfaced, so
@@ -6377,8 +6435,10 @@ defmodule Arbiter.Worker do
   end
 
   defp resume_or_fail(%State{meta: meta} = state, session, reason) do
+    # The pre-assigned id first: the stream may never have reported one.
     session_id =
-      session |> Arbiter.Worker.ClaudeSession.usage_summary() |> Map.get(:session_id)
+      (meta && Map.get(meta, :preassigned_session_id)) ||
+        session |> Arbiter.Worker.ClaudeSession.usage_summary() |> Map.get(:session_id)
 
     cap = resume_cap(meta)
     attempts = (meta && Map.get(meta, :resume_attempts)) || 0

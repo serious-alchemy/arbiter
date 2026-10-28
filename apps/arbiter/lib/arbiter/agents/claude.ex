@@ -130,9 +130,41 @@ defmodule Arbiter.Agents.Claude do
           Security.permission_argv(policy) ++
           Security.settings_argv(policy) ++
           mcp_config_flag(opts) ++
+          session_id_flag(opts) ++
           stream_flags()
 
       build_argv(claude, prompt, flags)
+    end
+  end
+
+  # Pre-assign the CLI session: `--session-id <uuid>` names the conversation up
+  # front, so a resume never depends on parsing the id back out of the stream
+  # (an early crash or truncated stream would leave it unknown). The caller may
+  # supply `opts[:session_id]`; otherwise a fresh UUID is generated.
+  defp session_id_flag(opts) do
+    id =
+      case Keyword.get(opts, :session_id) do
+        id when is_binary(id) and id != "" -> id
+        _ -> Ecto.UUID.generate()
+      end
+
+    ["--session-id", id]
+  end
+
+  @doc """
+  The session id an argv names: the value after `--resume` (a resume argv) or
+  `--session-id` (a first launch), else `nil`. A resume argv carries no
+  `--session-id` (see `splice_prompt/2`), so there is at most one.
+  """
+  @spec session_id_from_argv([String.t()]) :: String.t() | nil
+  def session_id_from_argv(argv) when is_list(argv) do
+    flag_value(argv, "--resume") || flag_value(argv, "--session-id")
+  end
+
+  defp flag_value(argv, flag) do
+    case Enum.find_index(argv, &(&1 == flag)) do
+      nil -> nil
+      i -> Enum.at(argv, i + 1) |> then(&if(is_binary(&1), do: &1, else: nil))
     end
   end
 
@@ -225,6 +257,15 @@ defmodule Arbiter.Agents.Claude do
 
       idx ->
         {head, [print | tail]} = Enum.split(argv, idx)
+        # `claude` refuses `--session-id` alongside `--resume`, and reusing a
+        # session id for a fresh run is refused as "already in use". So the
+        # first-launch flag is always dropped; a bare prompt swap (nudge) of a
+        # pre-assigned argv continues that session via `--resume`.
+        sid = flag_value(tail, "--session-id")
+        tail = drop_flag_pair(tail, "--session-id")
+
+        insert =
+          if sid && "--resume" not in insert, do: ["--resume", sid | insert], else: insert
 
         case pop_tmpfile_positional(head) do
           {true, head} ->
@@ -234,6 +275,13 @@ defmodule Arbiter.Agents.Claude do
           {false, head} ->
             {:ok, head ++ [print] ++ insert ++ drop_first(tail)}
         end
+    end
+  end
+
+  defp drop_flag_pair(list, flag) do
+    case Enum.find_index(list, &(&1 == flag)) do
+      nil -> list
+      i -> List.delete_at(List.delete_at(list, i), i)
     end
   end
 
