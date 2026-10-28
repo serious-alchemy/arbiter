@@ -50,10 +50,12 @@ defmodule Arbiter.Worker.ContainerCreateRetryTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Worker.advance(pid, :claude)
 
-    %{
-      pid: pid,
-      counter: Path.join(System.tmp_dir!(), "ccr-#{System.unique_integer([:positive])}")
-    }
+    # unique_integer repeats across VM restarts, so clear any counter left by an earlier run.
+    counter = Path.join(System.tmp_dir!(), "ccr-#{System.unique_integer([:positive])}")
+    File.rm(counter)
+    on_exit(fn -> File.rm(counter) && File.rm(counter <> ".tmp") end)
+
+    %{pid: pid, counter: counter}
   end
 
   defp restore(key, nil), do: Application.delete_env(:arbiter, key)
@@ -64,7 +66,7 @@ defmodule Arbiter.Worker.ContainerCreateRetryTest do
     script = """
     n=$(cat '#{counter}' 2>/dev/null || echo 0)
     n=$((n + 1))
-    echo $n > '#{counter}'
+    echo $n > '#{counter}.tmp' && mv '#{counter}.tmp' '#{counter}'
     if [ $n -le #{failures} ]; then echo '#{@libpod_error}'; exit 126; fi
     echo 'agent ran'
     exit #{"${AGENT_EXIT:-0}"}
@@ -80,7 +82,15 @@ defmodule Arbiter.Worker.ContainerCreateRetryTest do
     :ok
   end
 
-  defp attempts(counter), do: counter |> File.read!() |> String.trim() |> String.to_integer()
+  # An empty, partial or missing counter read means "not yet", so wait_until keeps polling.
+  defp attempts(counter) do
+    with {:ok, body} <- File.read(counter),
+         {n, ""} <- body |> String.trim() |> Integer.parse() do
+      n
+    else
+      _ -> 0
+    end
+  end
 
   defp wait_until(fun, timeout \\ 5_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
@@ -137,10 +147,20 @@ defmodule Arbiter.Worker.ContainerCreateRetryTest do
     refute snap.meta.failure_reason =~ "crashed"
   end
 
+  test "attempts/1 treats an empty or non-integer counter as not yet reached", %{counter: counter} do
+    assert attempts(counter) == 0
+    File.write!(counter, "")
+    assert attempts(counter) == 0
+    File.write!(counter, "x")
+    assert attempts(counter) == 0
+    File.write!(counter, "2\n")
+    assert attempts(counter) == 2
+  end
+
   test "an agent exit after a successful start is not retried", %{pid: pid, counter: counter} do
     # Creation succeeds first time; the agent then exits 126 after writing real output.
     script = """
-    echo 1 > '#{counter}'
+    echo 1 > '#{counter}.tmp' && mv '#{counter}.tmp' '#{counter}'
     echo 'agent did some work'
     echo '#{@libpod_error}'
     exit 126
