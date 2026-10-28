@@ -1497,7 +1497,8 @@ defmodule Arbiter.Worker.ReviewGate do
         # carry. Push it if it isn't; refuse to review if it can't be pushed.
         case push_gate(state) do
           {:error, reason} ->
-            escalate_pre_review(state, reason, :head_not_pushed)
+            {park_reason, text} = unpushed_park(reason)
+            escalate_pre_review(state, text, park_reason)
 
           {:ok, state} ->
             spawn_reviewer_after_push(state)
@@ -2851,9 +2852,55 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp reviewed_head(state), do: pushed_head(state)
 
+  # GitHub refused the push because the branch touches `.github/workflows/` and
+  # the App token holds no `workflows` permission (withheld on purpose: workflow
+  # files run with repo secrets). Nothing is wrong with the work and a retry can
+  # never succeed, so the park names what the operator must do.
+  defp operator_push_text(state, push_state, files) do
+    remote = push_state.remote
+
+    ssh =
+      PushState.ssh_remote(PushState.remote_url(state.worktree_path, remote)) || "<ssh-origin>"
+
+    shown_files =
+      case files do
+        [] -> "a file under `.github/workflows/`"
+        files -> Enum.map_join(files, ", ", &"`#{&1}`")
+      end
+
+    """
+    ReviewGate could not push `#{state.branch}`: GitHub refused the push because it
+    touches #{shown_files}, and the GitHub App credential is not permitted to create
+    or update workflow files (it holds no `workflows` permission — withheld on
+    purpose, since workflow files run with repo secrets). The work is not at fault;
+    this branch needs an operator push.
+
+    Branch: `#{state.branch}`
+    Head:   #{push_state.local_head}
+
+    From the task's worktree, with operator SSH credentials:
+
+        git push #{ssh} HEAD:refs/heads/#{state.branch}
+
+    then resume the task so the review runs on the pushed head:
+
+        arb worker resume #{state.task_id}
+    """
+    |> String.trim()
+  end
+
   # The findings text for a head that could not be put on the remote branch.
   # Returned (not sent) so the caller decides which terminal it belongs to —
   # a pre-review park on round 1, a park on the fix round's re-review.
+  defp escalate_unpushed_head(state, push_state, {:needs_operator_push, files}) do
+    Logger.warning(
+      "ReviewGate: push of `#{state.branch}` refused for the GitHub App's missing " <>
+        "`workflows` permission for task=#{state.task_id} (#{Enum.join(files, ", ")})"
+    )
+
+    {:error, {:needs_operator_push, operator_push_text(state, push_state, files)}}
+  end
+
   defp escalate_unpushed_head(state, push_state, reason) do
     Logger.warning(
       "ReviewGate: refusing to review an unpushed head for task=#{state.task_id} " <>
@@ -2892,9 +2939,16 @@ defmodule Arbiter.Worker.ReviewGate do
   # Parks (class B/C posture): nothing merges, the run is not failed, and one
   # escalation names the real push state.
   defp escalate_pre_review_park(state, reason) do
-    record_round(state, :review, :request_changes, reason, converged: false)
-    finish(state, {:parked, :head_not_pushed, reason})
+    {park_reason, text} = unpushed_park(reason)
+    record_round(state, :review, :request_changes, text, converged: false)
+    finish(state, {:parked, park_reason, text})
   end
+
+  # `push_gate/1`'s error is the escalation text, or `{:needs_operator_push,
+  # text}` for a push GitHub refused for want of the `workflows` permission:
+  # same terminal, distinct park reason.
+  defp unpushed_park({:needs_operator_push, text}), do: {:needs_operator_push, text}
+  defp unpushed_park(text), do: {:head_not_pushed, text}
 
   # The local head, used only to name a SHA in a coverage-write failure page —
   # never to write a coverage row (see `pushed_head/1`).

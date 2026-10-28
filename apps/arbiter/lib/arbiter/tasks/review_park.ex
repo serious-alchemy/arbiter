@@ -72,6 +72,7 @@ defmodule Arbiter.Tasks.ReviewPark do
           | :empty_diff
           | :empty_net_diff
           | :head_not_pushed
+          | :needs_operator_push
           | :resume_blocked
           | :review_rerun
 
@@ -102,6 +103,10 @@ defmodule Arbiter.Tasks.ReviewPark do
       "the head to be reviewed is not on the remote branch the merge request points at, " <>
         "and could not be pushed there — reviewing it would judge code the MR does not " <>
         "carry (G18)",
+    needs_operator_push:
+      "the branch touches `.github/workflows/`, which the GitHub App credential is not " <>
+        "permitted to push (it holds no `workflows` permission, by design) — an operator " <>
+        "must push the branch",
     resume_blocked:
       "the Watchdog could not restart the run after its awaiting-review timeout because " <>
         "another pass on the same task still holds the worker registry slot (W14)"
@@ -125,6 +130,7 @@ defmodule Arbiter.Tasks.ReviewPark do
     empty_diff: "the target branch already absorbed these commits",
     empty_net_diff: "the branch's commits contribute no net change against the target",
     head_not_pushed: "the branch is not pushed and could not be",
+    needs_operator_push: "the branch touches .github/workflows/ and needs an operator push",
     resume_blocked: "auto-resume is blocked by another pass on the same task"
   }
 

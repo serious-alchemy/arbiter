@@ -125,6 +125,32 @@ defmodule Arbiter.Worker.GitCredentialTest do
     end
   end
 
+  describe "kind/2" do
+    test "names the credential kind registered for the repo, nil otherwise" do
+      ws =
+        workspace(
+          %{
+            "repos" => %{
+              "app-repo" => %{
+                "kind" => "github_app",
+                "app_id" => "1",
+                "installation_id" => "2",
+                "private_key_secret" => "PK"
+              },
+              "key-repo" => %{"kind" => "deploy_key", "key_secret" => "K"}
+            }
+          },
+          %{}
+        )
+
+      assert GitCredential.kind(ws, "app-repo") == :github_app
+      assert GitCredential.kind(ws, "key-repo") == :deploy_key
+      assert GitCredential.kind(ws, "other") == nil
+      assert GitCredential.kind(ws, nil) == nil
+      assert GitCredential.kind(nil, "app-repo") == nil
+    end
+  end
+
   describe "plan/3 default" do
     setup do
       previous = Application.get_env(:arbiter, :git_credential_unenforced)

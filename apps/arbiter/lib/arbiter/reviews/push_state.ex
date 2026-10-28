@@ -345,7 +345,7 @@ defmodule Arbiter.Reviews.PushState do
     remote = state.remote
     refspec = "HEAD:refs/heads/" <> branch
 
-    case git(path, ["push"] ++ lease_args ++ [remote, refspec], opts) do
+    case git_out(path, ["push"] ++ lease_args ++ [remote, refspec], opts) do
       {:ok, _out} ->
         # A successful push updates refs/remotes/<remote>/<branch> locally, so
         # the confirmation read needs no second network round trip.
@@ -356,8 +356,66 @@ defmodule Arbiter.Reviews.PushState do
           _ -> {:error, :push_did_not_land, after_push}
         end
 
-      :error ->
-        {:error, :push_failed, state}
+      {:error, out} ->
+        {:error, classify_rejection(out), state}
+    end
+  end
+
+  @workflow_refusal ~r/without `workflows` permission/
+  @workflow_path ~r/workflow `([^`]+)`/
+
+  @doc """
+  Classify a failed push's combined output.
+
+  GitHub refuses a push made with an App token that creates or updates a file
+  under `.github/workflows/` unless the App holds the `workflows` permission
+  (`refusing to allow a GitHub App to create or update workflow `<path>` without
+  `workflows` permission`). Arbiter deliberately does not grant that permission
+  (workflow files run with repo secrets), so the push needs an operator:
+  `{:needs_operator_push, files}` names the refused workflow paths (possibly
+  none). Anything else is `:push_failed`.
+  """
+  @spec classify_rejection(String.t() | nil) ::
+          {:needs_operator_push, [String.t()]} | :push_failed
+  def classify_rejection(out) when is_binary(out) do
+    if Regex.match?(@workflow_refusal, out) do
+      files =
+        @workflow_path
+        |> Regex.scan(out, capture: :all_but_first)
+        |> List.flatten()
+        |> Enum.uniq()
+
+      {:needs_operator_push, files}
+    else
+      :push_failed
+    end
+  end
+
+  def classify_rejection(_), do: :push_failed
+
+  @doc """
+  The ssh form of an https forge remote URL (`git@github.com:o/r.git`), for the
+  operator push command. An ssh remote is returned as is; `nil` for any shape
+  that is neither.
+  """
+  @spec ssh_remote(String.t() | nil) :: String.t() | nil
+  def ssh_remote("git@" <> _ = url), do: url
+
+  def ssh_remote(url) when is_binary(url) do
+    case Regex.run(~r{^https?://(?:[^@/]+@)?([^/]+)/(.+?)(?:\.git)?/?$}, url) do
+      [_, host, path] -> "git@#{host}:#{path}.git"
+      _ -> nil
+    end
+  end
+
+  def ssh_remote(_), do: nil
+
+  @doc "The URL of `remote` in the checkout at `path`, or `nil`."
+  @spec remote_url(String.t() | nil, String.t()) :: String.t() | nil
+  def remote_url(path, remote) do
+    case git(path, ["remote", "get-url", remote]) do
+      {:ok, url} when url != "" -> url
+      _ -> nil
     end
   end
 
@@ -457,15 +515,24 @@ defmodule Arbiter.Reviews.PushState do
   # normal state here (it was cleaned up, the path came from stale meta), not
   # an exception.
   defp git(path, args, opts \\ []) do
+    case git_out(path, args, opts) do
+      {:ok, out} -> {:ok, out}
+      {:error, _out} -> :error
+    end
+  end
+
+  # As `git/3`, but a failure carries git's combined output, which is where a
+  # forge says why it refused a push.
+  defp git_out(path, args, opts) do
     cmd_opts = [stderr_to_stdout: true, env: Keyword.get(opts, :env, [])]
 
     case Arbiter.Worker.PrivateClone.cmd(path, args, cmd_opts) do
       {out, 0} -> {:ok, String.trim(out)}
-      {_out, _code} -> :error
+      {out, _code} -> {:error, out}
     end
   rescue
     e in [ErlangError, ArgumentError] ->
       Logger.debug("PushState: git #{inspect(args)} in #{path} failed: #{inspect(e)}")
-      :error
+      {:error, nil}
   end
 end
