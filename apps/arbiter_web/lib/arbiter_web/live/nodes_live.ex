@@ -254,7 +254,14 @@ defmodule ArbiterWeb.NodesLive do
       node ->
         case upgrade_node(node, socket.assigns.overview) do
           {:needs_operator, command} ->
-            {:noreply, assign(socket, :upgrade_help, %{name: node.name, command: command})}
+            helm? =
+              Enum.any?(
+                socket.assigns.overview.nodes,
+                &(&1.id == node.id and &1[:install_method] == "helm")
+              )
+
+            {:noreply,
+             assign(socket, :upgrade_help, %{name: node.name, command: command, helm?: helm?})}
 
           {:ok, %{version: v}} ->
             {:noreply,
@@ -652,7 +659,10 @@ defmodule ArbiterWeb.NodesLive do
         {@help.name} cannot upgrade itself
       </h2>
       <p class="m-0 text-[var(--text-secondary)]">
-        Nothing was queued: its Helm release owns the Deployment. Run this to upgrade it:
+        {if @help.helm?,
+          do: "Nothing was queued: its Helm release owns the Deployment. Run this to upgrade it:",
+          else:
+            "Nothing was queued: its controller cannot patch its own Deployment. Run this to upgrade it:"}
       </p>
       <div class="flex items-start gap-2">
         <code

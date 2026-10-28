@@ -153,6 +153,21 @@ defmodule Arbiter.Nodes.ClusterUpgradeTest do
 
       assert [_] = Enum.filter(Alerts.active(kind: :node_upgrade_refused), &(&1.key == node.id))
     end
+
+    test "a refused upgrade settles and its alert clears once the node reports the release" do
+      Ash.create!(Workspace, %{name: "settle-#{System.unique_integer([:positive])}"})
+      node = enroll!("auto", "cluster")
+      attach!(node, hello(%{"self_upgrade" => true}))
+      assert {:ok, _} = Nodes.upgrade(node, @operator)
+      Nodes.upgrade_refused(node.id)
+      assert Nodes.get_node(node.id).upgrade_refused_reason
+      assert [_] = Enum.filter(Alerts.active(kind: :node_upgrade_refused), &(&1.key == node.id))
+
+      :ok = Nodes.settle_pending_upgrade(node.id, @release)
+
+      assert Nodes.get_node(node.id).upgrade_refused_reason == nil
+      assert [] = Enum.filter(Alerts.active(kind: :node_upgrade_refused), &(&1.key == node.id))
+    end
   end
 
   describe "Nodes.upgrade/2" do

@@ -690,11 +690,17 @@ defmodule Arbiter.Nodes do
     end
   end
 
-  defp set_upgrade_pending(node, version),
-    do:
+  defp set_upgrade_pending(node, version) do
+    result =
       Ash.update(node, %{upgrade_pending_to: version, upgrade_refused_reason: nil},
         action: :set_upgrade_pending
       )
+
+    if node.upgrade_refused_reason,
+      do: Arbiter.Messages.CoordinatorNotifier.node_upgrade_refused_cleared(node.id)
+
+    result
+  end
 
   @needs_operator "needs operator (helm)"
 
@@ -730,14 +736,33 @@ defmodule Arbiter.Nodes do
   """
   @spec settle_pending_upgrade(String.t(), String.t() | nil) :: :ok
   def settle_pending_upgrade(node_id, agent_version) do
-    with %Node{upgrade_pending_to: pending} = node when is_binary(pending) <- get_node(node_id),
-         true <- strip_v(pending) == strip_v(agent_version) do
-      Ash.update(node, %{upgrade_pending_to: nil, upgrade_refused_reason: nil},
-        action: :set_upgrade_pending
-      )
+    case get_node(node_id) do
+      %Node{upgrade_pending_to: pending} = node when is_binary(pending) ->
+        if strip_v(pending) == strip_v(agent_version), do: settle(node)
+
+      # A refused upgrade has no pending marker: the operator's manual upgrade settles it
+      # once the node reports the release this primary serves.
+      %Node{upgrade_refused_reason: reason} = node when is_binary(reason) ->
+        tag = Agent.release_tag()
+
+        if is_binary(tag) and is_binary(agent_version) and
+             strip_v(tag) == strip_v(agent_version),
+           do: settle(node)
+
+      _ ->
+        :ok
     end
 
     :ok
+  end
+
+  defp settle(node) do
+    _ =
+      Ash.update(node, %{upgrade_pending_to: nil, upgrade_refused_reason: nil},
+        action: :set_upgrade_pending
+      )
+
+    Arbiter.Messages.CoordinatorNotifier.node_upgrade_refused_cleared(node.id)
   end
 
   defp strip_v("v" <> rest), do: rest
