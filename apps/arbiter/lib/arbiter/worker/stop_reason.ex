@@ -1466,23 +1466,13 @@ defmodule Arbiter.Worker.StopReason do
   # billing, any other 5xx is the transient upstream class.
   defp structured_failure(provider, %{} = result) when provider in [nil, "claude"] do
     raw = Map.get(result, :raw) || %{}
-    status = raw["api_error_status"]
 
     cond do
       raw["authentication_failed"] == true or raw["error"] == "authentication_failed" ->
         :auth_expired
 
-      status == 401 ->
-        :auth_expired
-
-      status == 402 ->
-        :credit_exhausted
-
-      status in [429, 529] ->
-        :rate_limited
-
-      is_integer(status) and status >= 500 and status < 600 ->
-        :gateway_error
+      status_failure = status_failure(raw["api_error_status"]) ->
+        status_failure
 
       raw["terminal_reason"] == "max_turns" or raw["subtype"] == "error_max_turns" ->
         :max_turns
@@ -1493,6 +1483,12 @@ defmodule Arbiter.Worker.StopReason do
   end
 
   defp structured_failure(_provider, _result), do: nil
+
+  defp status_failure(401), do: :auth_expired
+  defp status_failure(402), do: :credit_exhausted
+  defp status_failure(status) when status in [429, 529], do: :rate_limited
+  defp status_failure(status) when is_integer(status) and status in 500..599, do: :gateway_error
+  defp status_failure(_status), do: nil
 
   defp structured_reason(:auth_expired, exit_status, signal) do
     %__MODULE__{
