@@ -29,17 +29,27 @@ defmodule Arbiter.Worker.PromptBuilder do
   @doc false
   def prompt_for_task(%Issue{} = task, opts) do
     cond do
-      Keyword.get(opts, :review, false) == true -> review_prompt(task, opts)
+      Keyword.get(opts, :review, false) == true ->
+        orders_prefix(opts) <> review_prompt(task, opts)
+
       # bd-9s9dqz: the two no-PR types share a briefing skeleton but not a
       # deliverable — `research` owes findings, `task` an action + outcome note.
-      Issue.no_pr_type?(task.issue_type) -> directives_prefix(task) <> no_pr_prompt(task, opts)
-      true -> directives_prefix(task) <> work_prompt(task, opts)
+      Issue.no_pr_type?(task.issue_type) ->
+        directives_prefix(task) <> orders_prefix(opts) <> no_pr_prompt(task, opts)
+
+      true ->
+        directives_prefix(task) <> orders_prefix(opts) <> work_prompt(task, opts)
     end
   end
 
   # bd-kxzrk9: unread coordinator mail goes into every authoring prompt (fresh
   # dispatch and `resume/2` both land here) so a directive is never left for the
   # worker to find, and possibly fail to open, on its own.
+  # bd-dlvegd: the workspace's standing orders, labelled, in every role's prompt
+  # (`StandingOrders.section/1` is "" when there are none). Callers pass the
+  # loaded `:workspace`.
+  defp orders_prefix(opts), do: Arbiter.StandingOrders.section(Keyword.get(opts, :workspace))
+
   defp directives_prefix(%Issue{id: id}), do: Arbiter.Worker.CoordinatorDirectives.section(id)
 
   @doc """
@@ -64,42 +74,43 @@ defmodule Arbiter.Worker.PromptBuilder do
       when is_binary(branch) and is_binary(target_branch) do
     host_git? = Keyword.get(opts, :host_git, false)
 
-    """
-    You are a conflict-resolution worker for task #{task.id}.
+    orders_prefix(opts) <>
+      """
+      You are a conflict-resolution worker for task #{task.id}.
 
-    Your branch (#{branch}) is APPROVED but CONFLICTS with the current head of
-    #{target_branch}: it was mergeable in isolation, but the base has moved and
-    it no longer applies cleanly. Your ONLY job is to rebase it onto the current
-    base, resolve the conflicts, and #{if host_git?, do: "commit the result", else: "force-push"} — NOT to re-implement the change
-    or open a new PR.
-    #{conflict_host_git_section(host_git?, target_branch)}
-    ## Original intent — resolve conflicts so the result still satisfies THIS
+      Your branch (#{branch}) is APPROVED but CONFLICTS with the current head of
+      #{target_branch}: it was mergeable in isolation, but the base has moved and
+      it no longer applies cleanly. Your ONLY job is to rebase it onto the current
+      base, resolve the conflicts, and #{if host_git?, do: "commit the result", else: "force-push"} — NOT to re-implement the change
+      or open a new PR.
+      #{conflict_host_git_section(host_git?, target_branch)}
+      ## Original intent — resolve conflicts so the result still satisfies THIS
 
-    Title: #{task.title}
+      Title: #{task.title}
 
-    Description:
-    #{task.description || "(none)"}
+      Description:
+      #{task.description || "(none)"}
 
-    Acceptance:
-    #{task.acceptance || "(none)"}
+      Acceptance:
+      #{task.acceptance || "(none)"}
 
-    ## Steps
+      ## Steps
 
-    #{conflict_steps(host_git?, branch, target_branch)}
+      #{conflict_steps(host_git?, branch, target_branch)}
 
-    DO NOT:
-      * re-implement the change set or open a new PR,
-      * touch files unrelated to the conflict,
-      * abandon the rebase silently (`git rebase --abort` then exit).
+      DO NOT:
+        * re-implement the change set or open a new PR,
+        * touch files unrelated to the conflict,
+        * abandon the rebase silently (`git rebase --abort` then exit).
 
-    If a conflict is SEMANTIC — two changes both rewrote the same predicate or
-    invariant such that no mechanical merge can honor both — STOP and escalate:
+      If a conflict is SEMANTIC — two changes both rewrote the same predicate or
+      invariant such that no mechanical merge can honor both — STOP and escalate:
 
-        arb message coordinator "Conflict on #{task.id} needs human review: <one-line why>"
+          arb message coordinator "Conflict on #{task.id} needs human review: <one-line why>"
 
-    then print `arb done`. A loud escalation beats a silent miscompile in
-    #{target_branch}.
-    """
+      then print `arb done`. A loud escalation beats a silent miscompile in
+      #{target_branch}.
+      """
   end
 
   # bd-19skda: a podman conflict pass has no `git fetch`/`git push` (no forge
