@@ -257,17 +257,8 @@ defmodule Arbiter.Agents.Claude do
 
       idx ->
         {head, [print | tail]} = Enum.split(argv, idx)
-        # `claude` refuses `--session-id` alongside `--resume`, and reusing a
-        # session id for a fresh run is refused as "already in use". So the
-        # first-launch flag is always dropped; a bare prompt swap (nudge) of a
-        # pre-assigned argv continues that session via `--resume`.
         {tmpfile?, head} = pop_tmpfile_positional(head)
-
-        # Mode B has no inline prompt in `tail`; mode A has `<prompt> flags...`
-        # or, for an already nudged/resumed argv, `--resume <sid> <prompt> flags...`.
-        {prefix_sid, flags} = if tmpfile?, do: {nil, tail}, else: strip_prompt(tail)
-        sid = prefix_sid || flag_value(flags, "--session-id") || flag_value(flags, "--resume")
-        flags = flags |> drop_flag_pair("--session-id") |> drop_flag_pair("--resume")
+        {sid, flags} = split_session(tail, tmpfile?)
 
         insert =
           if sid && "--resume" not in insert, do: ["--resume", sid | insert], else: insert
@@ -275,6 +266,19 @@ defmodule Arbiter.Agents.Claude do
         head = if tmpfile?, do: List.replace_at(head, 2, @inline_prompt_script), else: head
         {:ok, head ++ [print] ++ insert ++ flags}
     end
+  end
+
+  # `claude` refuses `--session-id` alongside `--resume`, and reusing a
+  # session id for a fresh run is refused as "already in use". So the
+  # first-launch flag is always dropped; a bare prompt swap (nudge) of a
+  # pre-assigned argv continues that session via `--resume`.
+  #
+  # Mode B has no inline prompt in `tail`; mode A has `<prompt> flags...`
+  # or, for an already nudged/resumed argv, `--resume <sid> <prompt> flags...`.
+  defp split_session(tail, tmpfile?) do
+    {prefix_sid, flags} = if tmpfile?, do: {nil, tail}, else: strip_prompt(tail)
+    sid = prefix_sid || flag_value(flags, "--session-id") || flag_value(flags, "--resume")
+    {sid, flags |> drop_flag_pair("--session-id") |> drop_flag_pair("--resume")}
   end
 
   defp strip_prompt(["--resume", sid, _old_prompt | rest]), do: {sid, rest}
