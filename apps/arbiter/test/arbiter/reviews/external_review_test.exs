@@ -736,6 +736,68 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert engagement.workspace_id == ws.id
     end
 
+    test "multi-repo workspace, no default_repo: forge name != repo_paths key resolves the key" do
+      client = tmp_git_repo("git@github.com:octo/widget.git")
+      server = tmp_git_repo("git@github.com:octo/other.git")
+      ws = multi_repo_ws("er-multi", %{"client" => client, "server" => server})
+      stub_full_review(head_sha: "sha-m", author: "coworker", max_comment_id: 1)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: true,
+                 check_runner: one_finding()
+               )
+
+      assert result.engagement_created == true
+      refute Map.get(result, :engagement_error)
+      assert Ash.get!(Issue, result.engagement).repo == "client"
+    end
+
+    test "same-name repo key still resolves in a multi-repo workspace" do
+      widget = tmp_git_repo("git@github.com:octo/widget.git")
+      server = tmp_git_repo("git@github.com:octo/other.git")
+      ws = multi_repo_ws("er-multi-same", %{"widget" => widget, "server" => server})
+      stub_full_review(head_sha: "sha-m2", author: "coworker", max_comment_id: 1)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: true,
+                 check_runner: one_finding()
+               )
+
+      assert Ash.get!(Issue, result.engagement).repo == "widget"
+    end
+
+    test "an unresolvable repo surfaces engagement_error and a coordinator message" do
+      a = tmp_git_repo("git@github.com:octo/alpha.git")
+      b = tmp_git_repo("git@github.com:octo/beta.git")
+      ws = multi_repo_ws("er-multi-fail", %{"alpha" => a, "beta" => b})
+      stub_full_review(head_sha: "sha-m3", author: "coworker", max_comment_id: 1)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: true,
+                 check_runner: one_finding()
+               )
+
+      assert result.engagement == nil
+      assert result.engagement_created == false
+      assert is_binary(result.engagement_error)
+
+      msgs =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(to_ref == "coordinator" and workspace_id == ^ws.id)
+        |> Ash.read!()
+
+      assert Enum.any?(msgs, &(&1.subject =~ "engagement" and &1.body =~ "octo/widget#42"))
+    end
+
     test "with follow_up: false, the review is a pure one-shot (no engagement)" do
       ws = github_ws("er-noeng")
       stub_full_review(head_sha: "sha-x", author: "coworker", max_comment_id: 1)
@@ -2909,6 +2971,23 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     conn
     |> Plug.Conn.put_resp_header("content-type", "application/json")
     |> Plug.Conn.resp(200, Jason.encode!(body))
+  end
+
+  defp multi_repo_ws(name, repo_paths) do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: name,
+        prefix: uniq_prefix(),
+        config: %{
+          "repo_paths" => repo_paths,
+          "merge" => %{
+            "strategy" => "github",
+            "config" => %{"owner" => "octo", "credentials_ref" => "env:#{@env_var}"}
+          }
+        }
+      })
+
+    ws
   end
 
   defp tmp_git_repo(origin_url) do
