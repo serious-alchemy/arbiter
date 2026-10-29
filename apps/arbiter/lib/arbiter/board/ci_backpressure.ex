@@ -273,27 +273,24 @@ defmodule Arbiter.Board.CiBackpressure do
   """
   @spec poll(Workspace.t(), String.t()) :: {:ok, signal()} | {:error, term()}
   def poll(%Workspace{} = workspace, repo) when is_binary(repo) do
-    scoped = Mergers.scope(workspace, repo)
-    adapter = Mergers.for_workspace(scoped)
+    adapter = Mergers.for_repo(workspace, repo)
 
-    cond do
-      not Code.ensure_loaded?(adapter) or not function_exported?(adapter, :ci_queue, 0) ->
-        {:error, :ci_queue_unsupported}
-
-      true ->
-        :ok = Mergers.prepare(workspace, repo: repo)
-        prepare_slug(adapter, scoped, workspace, repo)
-        adapter.ci_queue()
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :ci_queue, 0) do
+      :ok = Mergers.prepare(workspace, repo: repo)
+      prepare_slug(adapter, workspace, repo)
+      adapter.ci_queue()
+    else
+      {:error, :ci_queue_unsupported}
     end
   end
 
   # A multi-repo GitHub workspace derives `owner/repo` from each repo's remote
   # rather than pinning it, so the adapter is told the slug (as PRPatrol does).
-  defp prepare_slug(adapter, scoped, workspace, repo) do
+  defp prepare_slug(adapter, workspace, repo) do
     slug = Enum.find_value(ForgeRepos.list(workspace), &(&1.repo_key == repo && &1.slug))
 
     if adapter == Arbiter.Mergers.Github and is_binary(slug),
-      do: adapter.prepare(scoped, repo: slug),
+      do: adapter.prepare(Mergers.scope(workspace, repo), repo: slug),
       else: :ok
   end
 end

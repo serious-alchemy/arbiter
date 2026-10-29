@@ -78,21 +78,21 @@ defmodule Arbiter.Board.CiBackpressure.Cache do
   defp previous([]), do: :unknown
 
   defp refresh(key, poll, opts, previous) do
-    if claim(key) do
-      if Keyword.get(opts, :async, true) do
-        case Task.Supervisor.start_child(Arbiter.TaskSupervisor, fn -> run(key, poll, opts) end) do
-          {:ok, _pid} ->
-            previous
+    cond do
+      not claim(key) -> previous
+      Keyword.get(opts, :async, true) -> spawn_poll(key, poll, opts, previous)
+      true -> run(key, poll, opts)
+    end
+  end
 
-          _ ->
-            release(key)
-            previous
-        end
-      else
-        run(key, poll, opts)
-      end
-    else
-      previous
+  defp spawn_poll(key, poll, opts, previous) do
+    case Task.Supervisor.start_child(Arbiter.TaskSupervisor, fn -> run(key, poll, opts) end) do
+      {:ok, _pid} ->
+        previous
+
+      _ ->
+        release(key)
+        previous
     end
   end
 
