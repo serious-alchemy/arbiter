@@ -163,9 +163,12 @@ defmodule Arbiter.Mergers.LocalCompare do
   end
 
   @doc """
-  How many commits of `origin/<base>` (fetched first) `head` lacks:
-  `git rev-list --count head..origin/<base>`. `0` means `head` contains the
-  target tip. `{:error, _}` is "could not tell" and is never `0`.
+  How many target updates of `origin/<base>` (fetched first) `head` lacks:
+  `git rev-list --count --first-parent head..origin/<base>`, i.e. commits on the
+  target's first-parent chain, so a merged branch counts once (its merge commit),
+  not once per commit it brought in. Direct commits to the target count each.
+  `0` means `head` contains the target tip. `{:error, _}` is "could not tell"
+  and is never `0`.
   """
   @spec behind_by(String.t() | nil, String.t(), String.t()) ::
           {:ok, non_neg_integer()} | {:error, term()}
@@ -175,7 +178,7 @@ defmodule Arbiter.Mergers.LocalCompare do
          :ok <- refresh(repo, nil, [head]),
          {:ok, base_rev} <- resolve_base(repo, base),
          {:ok, [head_rev]} <- resolve_commits(repo, [head]) do
-      case run(repo, ["rev-list", "--count", "#{head_rev}..#{base_rev}"]) do
+      case run(repo, ["rev-list", "--count", "--first-parent", "#{head_rev}..#{base_rev}"]) do
         {out, 0} ->
           case Integer.parse(String.trim(out)) do
             {n, ""} -> {:ok, n}

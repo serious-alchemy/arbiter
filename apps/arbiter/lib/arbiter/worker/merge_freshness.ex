@@ -12,7 +12,9 @@ defmodule Arbiter.Worker.MergeFreshness do
   only its old head.
 
   This check is forge-independent. Before merging an approved PR, if the branch
-  head lacks more than `merge.up_to_date_tolerance` commits of the target, the
+  head lacks more than `merge.up_to_date_tolerance` target updates (commits on
+  the target's first-parent chain: about one per merged PR, not one per commit
+  the PR brought in; each direct commit to the target counts), the
   caller syncs the branch once (`adapter.update_branch/1`), waits for CI on the
   synced head and only then merges.
 
@@ -22,8 +24,9 @@ defmodule Arbiter.Worker.MergeFreshness do
       itself refuses stale merges and you want to skip the extra local check.
       **GitLab `merge_method=merge` on Free needs it on.**
     * `up_to_date_tolerance` — default `0` (sync for any missing target commit;
-      correctness first). A positive N lets a branch up to N commits behind
-      merge unsynced, trading a small untested-combination window for fewer
+      correctness first). The unit is first-parent target commits (one per PR
+      merged with a merge commit). A positive N lets a branch up to N such
+      commits behind merge unsynced, trading a small untested-combination window for fewer
       sync pipelines on busy targets.
 
   When the forge already reports `:behind_base`, the existing update-branch
