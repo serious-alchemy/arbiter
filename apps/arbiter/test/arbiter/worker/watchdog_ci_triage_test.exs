@@ -54,7 +54,8 @@ defmodule Arbiter.Worker.WatchdogCiTriageTest do
       approved: true,
       block_reason: :ci_failed,
       pipeline: :failed,
-      head_sha: head
+      head_sha: head,
+      base_ref: "main"
     }
 
   defp pending(head),

@@ -122,14 +122,16 @@ defmodule Arbiter.Worker.Watchdog do
   after the re-run, the flake did not clear and a fix pass is dispatched; a
   failure in anything unregistered goes straight to a fix pass.
 
-  A `:ci_failed` block whose failing tests are all outside the PR's diff (read
-  from the failing checks' files and the PR diff, see
-  `Arbiter.Workflows.MergeQueue.FlakeSuspect`) is re-run once per head instead
-  of getting a fix pass. If the re-run fails again in a test that failed before,
-  the failure reproduces and a fix pass is dispatched, briefed not to edit those
-  tests. If only *different* untouched tests fail, the block is escalated as a
-  suspected flake (`:ci_failed_external`, with the tests in the note) and no fix
-  pass runs.
+  Every other `:ci_failed` block is triaged first (GitHub #1144,
+  `Arbiter.Workflows.MergeQueue.CiTriage`): from the failing jobs' data it is
+  `:infra` (a timeout, a runner failure, an OOM kill, a cancel), `:unrelated_tests`
+  (test failures in files the PR does not touch), `:target_red` (the existing
+  target hold) or `:needs_agent` (touches the diff, a compile error, anything
+  unreadable). Infra and unrelated-test failures re-run the failed jobs with no
+  agent, up to `merge.ci.triage_rerun_budget` per head (default 2, honouring
+  `merge.ci.no_rerun_jobs`); a head still red after that, and every `:needs_agent`
+  verdict, gets a fix pass briefed with the triage evidence. Each decision is
+  appended to the ticket's notes (`Arbiter.Worker.CiTriageLog`).
 
   ## Clearing an indefinite `:ci_failed` park (bd-5mzzww)
 
@@ -317,12 +319,13 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.CiSync
+  alias Arbiter.Worker.CiTriageLog
   alias Arbiter.Worker.MergeFreshness
   alias Arbiter.Worker.Registry, as: PRegistry
   alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.VisualBaselines
   alias Arbiter.Workflows.CodeReview.ConsumerTrace
-  alias Arbiter.Workflows.MergeQueue.FlakeSuspect
+  alias Arbiter.Workflows.MergeQueue.CiTriage
   alias Arbiter.Workflows.MergeQueue.KnownFlakes
 
   @default_interval_ms 60_000
@@ -1483,6 +1486,16 @@ defmodule Arbiter.Worker.Watchdog do
       # re-ran, the untouched tests that failed, the poll it ran on, and
       # whether the head has read pending since. One per head.
       flake_rerun: nil,
+      # The deterministic triage's re-runs on one head (#1144): `%{head, count,
+      # poll, seen_pending}`; `ci_triage_budget` caps `count` per head.
+      ci_triage_rerun: nil,
+      ci_triage_budget:
+        Keyword.get(opts, :ci_triage_budget) ||
+          CiTriageLog.budget(workspace, Keyword.get(opts, :repo)),
+      # The newest triage, `%{head, result}`, briefed to a fix pass, and the
+      # decisions already written to the ticket (`{head, kind}`, newest first).
+      last_triage: nil,
+      triage_noted: [],
       # The `:ci_cancelled` re-runs on one head (#360): `%{head, count, poll}`.
       # Kept apart from `auto_resolve_attempts`, which a running re-run resets
       # (the block reads nil while it is in flight) and which would never cap.
@@ -1490,10 +1503,8 @@ defmodule Arbiter.Worker.Watchdog do
       # Head whose cap-reached `:ci_cancelled` escalation already fired: the latch is
       # its own field because `last_block_reason` is reset by every non-blocked poll.
       ci_cancelled_escalated_head: nil,
-      # The head parked as a suspected flake, and the head
-      # `retry_auto_resolve/1` has cleared for a fix pass anyway. `:none` never
-      # equals a head, including a nil one.
-      flake_parked_head: :none,
+      # The head `retry_auto_resolve/1` has cleared for a fix pass anyway. `:none`
+      # never equals a head, including a nil one.
       flake_bypass: :none,
       # Latches the exhausted-retry escalation so it fires once per block
       # episode rather than on every subsequent poll (#354, Phase 2a). While
@@ -1707,7 +1718,7 @@ defmodule Arbiter.Worker.Watchdog do
       state
       | max_auto_resolve_attempts: state.auto_resolve_attempts + 1,
         max_fix_passes: max(state.max_fix_passes, fix_passes_so_far(state) + 1),
-        flake_bypass: state.flake_parked_head,
+        flake_bypass: triage_head(state),
         unresolved_escalated: false,
         last_escalated_poll: state.poll_count
     }
@@ -1882,6 +1893,7 @@ defmodule Arbiter.Worker.Watchdog do
         record_status(state, result)
         state = track_reviewed_baseline(state, result)
         state = note_flake_rerun_pending(state, result)
+        state = note_triage_rerun_pending(state, result)
         state = maybe_escalate_pipeline(state, result)
         state = maybe_auto_resolve_conflict(state, result)
 
@@ -3448,7 +3460,7 @@ defmodule Arbiter.Worker.Watchdog do
 
     case target_red_hold(state, base) do
       {:hold, why} ->
-        {:halt, hold_ci_remediation(state, why)}
+        {:halt, hold_ci_remediation(state, why, head)}
 
       :clear ->
         state = clear_ci_hold(state)
@@ -3463,7 +3475,9 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  defp hold_ci_remediation(state, why) do
+  defp hold_ci_remediation(state, why, head) do
+    state = if state.ci_hold != why, do: record_target_red(state, why, head), else: state
+
     if state.ci_hold != why do
       Logger.warning(
         "Worker.Watchdog: holding CI remediation for task=#{state.task_id} " <>
@@ -3476,6 +3490,15 @@ defmodule Arbiter.Worker.Watchdog do
     held = if is_integer(state.max_polls), do: state.pass_polls + 1, else: state.pass_polls
 
     reschedule(%{state | ci_hold: why, last_block_reason: :ci_failed, pass_polls: held})
+  end
+
+  # GitHub #1144: the target-red verdict is one of the triage classes; write it to
+  # the ticket the first time the hold is entered for this reason.
+  defp record_target_red(state, why, head) do
+    checks = safe_failing_checks(state)
+    triage = CiTriage.classify(checks, pr_changed_files(state), target_hold: why)
+    state = %{state | last_triage: %{head: head, result: triage}}
+    record_triage(state, {head, {:target_red, why}}, "holding CI remediation; #{why}")
   end
 
   defp clear_ci_hold(%{ci_hold: nil} = state), do: state
@@ -3590,11 +3613,13 @@ defmodule Arbiter.Worker.Watchdog do
   defp resolve_ci_failed_by_fix(state, head) do
     state = note_ruling(state, "ci_failed", head)
     checks = safe_failing_checks(state)
+    triage = CiTriage.classify(checks, pr_changed_files(state))
+    state = %{state | last_triage: %{head: head, result: triage}}
 
-    case flake_step(state, checks, head) do
+    case flake_step(state, checks, head, triage) do
       :await_rerun -> reschedule(%{state | last_block_reason: :ci_failed})
       {:rerun, files, why} -> rerun_suspected_flake(state, checks, head, files, why)
-      {:escalate, files, prev} -> park_as_suspected_flake(state, head, files, prev)
+      {:triage_rerun, spent} -> rerun_triaged(state, checks, head, triage, spent)
       {:fix, outside_diff} -> fix_or_cap(state, checks, outside_diff)
     end
   end
@@ -3659,29 +3684,23 @@ defmodule Arbiter.Worker.Watchdog do
     :exit, reason -> {:error, {:exit, reason}}
   end
 
-  # What to do about a red head whose failing tests may all be known flakes
-  # (`known_flake_step/3`, bd-4qj7io: re-run once, a second red is a fix pass),
-  # or all outside the diff (bd-2l0hzm, #2003):
+  # What to do about a red head (GitHub #1144, bd-4qj7io, bd-2l0hzm):
   #
-  #   * first red on this head, only untouched tests failing -> re-run CI;
-  #   * red again on the same head before the re-run was seen pending, within
-  #     `@flake_rerun_grace_polls` -> the forge still lists the old failed
-  #     attempt as newest; wait;
-  #   * red again after the re-run, and a test that failed before failed
-  #     again -> it reproduces, so it is most likely this diff breaking a test
-  #     it didn't edit: fix pass, briefed not to edit those tests;
-  #   * red again with only *different* untouched tests -> flaky tests, not this
-  #     PR: escalate as a suspected flake, no fix pass;
-  #   * a failing test the PR touched, or anything this can't read -> fix pass.
+  #   * the failing tests are all registered known flakes (`known_flake_step/3`)
+  #     -> re-run once; a second red is a fix pass;
+  #   * otherwise the deterministic triage decides (`triage_step/3`): infra or
+  #     failures in untouched tests re-run up to the per-head budget, anything
+  #     else, or a spent budget, is a fix pass;
+  #   * `retry_auto_resolve/1` cleared this head -> fix pass.
   #
-  # One re-run per head, so the re-run itself is bounded; heads only move when
-  # someone pushes, and fix passes are capped.
-  defp flake_step(%{flake_bypass: head}, _checks, head), do: {:fix, nil}
+  # Re-runs are bounded per head, heads only move when someone pushes, and fix
+  # passes are capped, so none of this can loop.
+  defp flake_step(%{flake_bypass: head}, _checks, head, _triage), do: {:fix, nil}
 
-  defp flake_step(state, checks, head) do
+  defp flake_step(state, checks, head, triage) do
     case KnownFlakes.confined(checks) do
       {:ok, ids} -> known_flake_step(state, head, ids)
-      :none -> outside_diff_step(state, checks, head)
+      :none -> triage_step(state, head, triage)
     end
   end
 
@@ -3703,24 +3722,41 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  defp outside_diff_step(state, checks, head) do
-    with {:ok, _tests} <- FlakeSuspect.failing_tests(checks),
-         {:outside_diff, files} <- FlakeSuspect.classify(checks, pr_changed_files(state)) do
-      case state.flake_rerun do
-        %{head: ^head, seen_pending: false, poll: poll}
-        when state.poll_count - poll < @flake_rerun_grace_polls ->
-          :await_rerun
+  defp triage_step(state, head, %{class: class} = triage)
+       when class in [:infra, :unrelated_tests] do
+    case state.ci_triage_rerun do
+      %{head: ^head, seen_pending: false, poll: poll}
+      when state.poll_count - poll < @flake_rerun_grace_polls ->
+        :await_rerun
 
-        %{head: ^head, files: prev} ->
-          if Enum.any?(files, &(&1 in prev)), do: {:fix, files}, else: {:escalate, files, prev}
+      %{head: ^head, count: spent} when spent >= state.ci_triage_budget ->
+        {:fix, untouched_tests(triage)}
 
-        _ ->
-          {:rerun, files, "only in tests this PR does not touch"}
-      end
-    else
-      _ -> {:fix, nil}
+      %{head: ^head, count: spent} ->
+        {:triage_rerun, spent}
+
+      _ when state.ci_triage_budget > 0 ->
+        {:triage_rerun, 0}
+
+      _ ->
+        {:fix, untouched_tests(triage)}
     end
   end
+
+  # `:needs_agent` (touches the diff, unclassifiable) and `:target_red` (held
+  # before this point; reaching here means the hold cleared).
+  defp triage_step(_state, _head, _triage), do: {:fix, nil}
+
+  # The failing test files the triage found outside the diff: the fix pass is
+  # briefed not to edit them when they reproduce (bd-2l0hzm).
+  defp untouched_tests(%{class: :unrelated_tests, evidence: evidence}) do
+    case evidence |> Enum.filter(&(&1.verdict == :unrelated_test)) |> Enum.flat_map(& &1.files) do
+      [] -> nil
+      files -> Enum.uniq(files)
+    end
+  end
+
+  defp untouched_tests(_triage), do: nil
 
   # Same gate as the ReviewGate's rerun (`ReviewCi.skip_rerun/4`): a red whose
   # jobs are all `merge.ci.no_rerun_jobs`, or that this head already failed with
@@ -3760,6 +3796,9 @@ defmodule Arbiter.Worker.Watchdog do
             "re-running CI as a suspected flake instead of dispatching a fix pass"
         )
 
+        state =
+          record_triage(state, {head, :known_flake_rerun}, "re-ran CI once (#{why})")
+
         reschedule(%{
           state
           | last_block_reason: :ci_failed,
@@ -3780,26 +3819,99 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  # The re-run went red in different untouched tests. Park and escalate with
-  # the evidence as the external-CI note, so the page reads "not this branch"
-  # and names the tests. `retry_auto_resolve/1` sets `flake_bypass` to this
-  # head, so a human who wants a fix pass anyway gets one.
-  defp park_as_suspected_flake(state, head, files, prev) do
-    note =
-      "suspected flake: CI on head #{head || "(unknown)"} failed only in tests this PR " <>
-        "does not touch (#{Enum.join(prev, ", ")}), and its re-run failed in different " <>
-        "untouched tests (#{Enum.join(files, ", ")}). No fix pass dispatched; " <>
-        "retry_auto_resolve dispatches one anyway."
+  # GitHub #1144: re-run the failed jobs of an infra / unrelated-tests head with
+  # no agent. `spent` re-runs have already been made on this head. Honours
+  # `merge.ci.no_rerun_jobs`; the ReviewGate's earlier re-run of the same job set
+  # counts as the first one, as it does for a known flake.
+  defp rerun_triaged(state, checks, head, triage, spent) do
+    seen = if spent == 0, do: ReviewCi.load_failed_sets(state.task_id), else: %{}
+    prefixes = ReviewCi.no_rerun_jobs(state.workspace, state.repo)
 
-    Logger.warning(
-      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} — #{note} Escalating."
-    )
+    case ReviewCi.skip_rerun(checks, prefixes, seen, head || "") do
+      {:skip, reason} ->
+        Logger.info(
+          "Worker.Watchdog: CI on task=#{state.task_id} head=#{head} triaged #{triage.class} " <>
+            "(#{reason}); not re-running, dispatching the fix pass"
+        )
 
-    park_ci_failed(
-      %{state | ci_external_note: note, flake_parked_head: head},
-      max(state.auto_resolve_attempts, state.max_auto_resolve_attempts)
-    )
+        fix_or_cap(state, checks, untouched_tests(triage))
+
+      :rerun ->
+        do_rerun_triaged(state, checks, head, triage, spent)
+    end
   end
+
+  defp do_rerun_triaged(state, checks, head, triage, spent) do
+    case safe_rerun_ci(state) do
+      {:ok, _} ->
+        ReviewCi.note_failed_set(
+          state.task_id,
+          ReviewCi.load_failed_sets(state.task_id),
+          head,
+          checks
+        )
+
+        state =
+          record_triage(
+            state,
+            {head, {:rerun, spent + 1}},
+            "re-ran CI (#{spent + 1}/#{state.ci_triage_budget}) instead of dispatching a fix pass"
+          )
+
+        reschedule(%{
+          state
+          | last_block_reason: :ci_failed,
+            ci_triage_rerun: %{
+              head: head,
+              count: spent + 1,
+              poll: state.poll_count,
+              seen_pending: false
+            }
+        })
+
+      {:error, :ci_in_progress} ->
+        # CI on this head has not finished: no verdict yet, so no fix pass.
+        reschedule(%{state | last_block_reason: :ci_failed})
+
+      other ->
+        Logger.warning(
+          "Worker.Watchdog: CI re-run for a triaged #{triage.class} failure on " <>
+            "task=#{state.task_id} mr=#{state.mr_ref} failed (#{inspect(other)}); " <>
+            "dispatching the fix pass instead"
+        )
+
+        fix_or_cap(state, checks, untouched_tests(triage))
+    end
+  end
+
+  # Write one decision to the ticket's notes, once per `key`. The triage it
+  # carries is the newest one for the head (`last_triage`).
+  defp record_triage(%{last_triage: %{head: head, result: triage}} = state, key, action) do
+    if key in state.triage_noted do
+      state
+    else
+      safe(fn -> CiTriageLog.record(state.task_id, head, action, triage) end)
+      %{state | triage_noted: Enum.take([key | state.triage_noted], 20)}
+    end
+  end
+
+  defp record_triage(state, _key, _action), do: state
+
+  defp triage_head(%{last_triage: %{head: head}}), do: head
+  defp triage_head(_state), do: :none
+
+  # What the fix pass is dispatched for, in the ticket note.
+  defp fix_pass_action(%{ci_triage_budget: budget, ci_triage_rerun: %{count: spent}}, %{
+         class: class
+       })
+       when class in [:infra, :unrelated_tests] and spent >= budget,
+       do: "re-run budget (#{budget}) spent and the head is still red; dispatching a fix pass"
+
+  defp fix_pass_action(_state, %{class: class}) when class in [:infra, :unrelated_tests],
+    do:
+      "re-run not possible (merge.ci.no_rerun_jobs, a repeat failure or a refused re-run); dispatching a fix pass"
+
+  defp fix_pass_action(_state, _triage), do: "needs an agent; dispatching a fix pass"
 
   defp fix_or_cap(state, checks, outside_diff) do
     so_far = fix_passes_so_far(state)
@@ -3861,6 +3973,7 @@ defmodule Arbiter.Worker.Watchdog do
         "#{length(checks)} failing check(s))"
     )
 
+    state = record_fix_pass_triage(state)
     dispatched = state |> dispatch_fix_pass(checks, outside_diff) |> tag_image_failure()
 
     # The fix pass AUTHORS commits after the approval; see
@@ -3916,6 +4029,11 @@ defmodule Arbiter.Worker.Watchdog do
         })
     end
   end
+
+  defp record_fix_pass_triage(%{last_triage: %{head: head, result: triage}} = state),
+    do: record_triage(state, {head, :fix_pass}, fix_pass_action(state, triage))
+
+  defp record_fix_pass_triage(state), do: state
 
   defp tag_image_failure({:error, reason} = error),
     do: if(image_error?(reason), do: {:spawn_image_unavailable, reason}, else: error)
@@ -3981,6 +4099,13 @@ defmodule Arbiter.Worker.Watchdog do
     # dispatcher briefs the pass to fix the PR's own code, not those tests.
     args = if outside_diff, do: Map.put(args, :outside_diff_files, outside_diff), else: args
 
+    # GitHub #1144: why an agent is being called, from the forge's job data.
+    args =
+      case state.last_triage do
+        %{result: triage} -> Map.put(args, :triage, CiTriage.render(triage))
+        _ -> args
+      end
+
     safe(fn -> state.fix_pass_dispatcher.dispatch(args) end)
   end
 
@@ -3997,6 +4122,19 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp note_flake_rerun_pending(state, _result), do: state
+
+  # The same for the triage's re-run (#1144).
+  defp note_triage_rerun_pending(
+         %{ci_triage_rerun: %{head: head, seen_pending: false} = rerun} = state,
+         result
+       ) do
+    if Map.get(result, :head_sha) == head and Map.get(result, :pipeline) != :failed and
+         Map.get(result, :block_reason) != :ci_failed,
+       do: %{state | ci_triage_rerun: %{rerun | seen_pending: true}},
+       else: state
+  end
+
+  defp note_triage_rerun_pending(state, _result), do: state
 
   # The PR's changed files, or `:unknown` when the adapter can't produce a diff.
   defp pr_changed_files(%{adapter: adapter, mr_ref: mr_ref}) do
