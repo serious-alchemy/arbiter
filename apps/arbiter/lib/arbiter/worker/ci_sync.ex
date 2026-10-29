@@ -127,9 +127,6 @@ defmodule Arbiter.Worker.CiSync do
 
       {:error, reason} ->
         {:error, {:sync_failed, reason}}
-
-      other ->
-        {:error, {:sync_failed, {:bad_return, other}}}
     end
   end
 end
