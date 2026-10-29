@@ -1810,6 +1810,37 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert check.url == "https://gitlab.com/grp/proj/-/jobs/55"
     end
 
+    test "carries the job's status and failure_reason for the CI triage (#1144)" do
+      stub(fn conn ->
+        case conn.request_path do
+          @pipelines_path ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => @pipeline_id, "status" => "failed"}])
+
+          @jobs_path ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{
+                "id" => @job_id,
+                "name" => "rspec",
+                "status" => "failed",
+                "failure_reason" => "runner_system_failure",
+                "web_url" => "https://gitlab.com/grp/proj/-/jobs/55"
+              }
+            ])
+
+          @trace_path ->
+            conn |> Plug.Conn.put_status(200) |> Plug.Conn.resp(200, "")
+        end
+      end)
+
+      assert {:ok, [check]} = Gitlab.failing_check_logs(@ref)
+      assert check.failure_reason == "runner_system_failure"
+      assert check.status == "failed"
+    end
+
     test "returns {:ok, []} when no pipelines exist" do
       stub(fn conn ->
         assert conn.request_path == @pipelines_path

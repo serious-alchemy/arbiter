@@ -143,6 +143,9 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                             head whose failed jobs ALL match goes straight to the CI fix
                             path. A head that already failed the same job set once is
                             never re-run either, listed or not. Per-repo via merge.repos.<repo>.ci.
+                            ci.triage_rerun_budget (non-negative integer, default 2; 0 = off) is how
+                            many times per head the Watchdog re-runs a CI failure it triages as infra
+                            or tests outside the diff before spawning a fix pass (GitHub #1144).
       require_up_to_date    bool — (bd-5z9yvb) before merging an approved PR, if its head lacks
                             the target tip, Arbiter syncs the branch once (update-branch), waits
                             for CI green on the synced head, then merges. Forge-independent: it

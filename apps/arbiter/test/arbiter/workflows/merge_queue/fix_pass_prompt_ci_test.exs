@@ -25,7 +25,28 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassPromptCiTest do
     assert text =~ "full log: /var/ci/job-9.log"
   end
 
-  test "the briefing forbids polling CI and says Arbiter re-runs and watches it" do
+  test "the briefing carries the deterministic CI triage evidence (#1144)" do
+    text =
+      FixPassDispatcher.prompt_for(%{
+        task: %Issue{id: "bd-fixture"},
+        branch: "feature/fixture",
+        target_branch: "main",
+        checks: [%{name: "mix test", summary: "x"}],
+        triage:
+          "CI triage: needs_agent - 1 of 1 failing job(s) touch the diff\n  - mix test: touches_diff"
+      })
+
+    assert text =~ "Arbiter's CI triage"
+    assert text =~ "CI triage: needs_agent"
+    assert text =~ "mix test: touches_diff"
+  end
+
+  test "no triage section when the Watchdog passed none" do
+    refute prompt([%{name: "mix test", summary: "x"}]) =~ "Arbiter's CI triage"
+  end
+
+  test "the briefing forbids polling
+ CI and says Arbiter re-runs and watches it" do
     text = prompt([%{name: "mix test", summary: "x"}])
 
     assert text =~ "Do NOT poll CI"

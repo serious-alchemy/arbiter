@@ -72,6 +72,10 @@ defmodule Arbiter.Workflows.MergeQueue.FlakeSuspect do
     not Enum.any?(test_files, fn file -> Enum.any?(changed_files, &same_path?(file, &1)) end)
   end
 
+  @doc "True when `path` looks like a test file by the usual conventions."
+  @spec test_path?(term()) :: boolean()
+  def test_path?(path), do: is_binary(path) and Regex.match?(@test_path, path)
+
   defp same_path?(a, b),
     do: a == b or String.ends_with?(a, "/" <> b) or String.ends_with?(b, "/" <> a)
 
@@ -84,7 +88,7 @@ defmodule Arbiter.Workflows.MergeQueue.FlakeSuspect do
       |> Enum.map(fn [_, path] -> path end)
 
     (from_files ++ from_summary)
-    |> Enum.filter(&(is_binary(&1) and Regex.match?(@test_path, &1)))
+    |> Enum.filter(&test_path?/1)
     |> Enum.uniq()
   end
 

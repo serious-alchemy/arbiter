@@ -877,38 +877,40 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert StubFixPassDispatcher.call_count() == 0
     end
 
-    test "the same untouched test failing again on the re-run dispatches a briefed fix pass" do
+    # GitHub #1144: the triage re-runs up to the per-head budget (default 2), then
+    # the fix pass is briefed with the evidence and not to edit the untouched tests.
+    test "an untouched test failing through the whole re-run budget dispatches a briefed fix pass" do
       StubMerger.set_failing_checks("!flk2", failing_in(@drain))
-      StubMerger.queue_get("!flk2", [red("h1"), pending("h1")])
+
+      StubMerger.queue_get("!flk2", [
+        red("h1"),
+        pending("h1"),
+        red("h1"),
+        pending("h1"),
+        red("h1")
+      ])
 
       flake_watchdog("!flk2")
-      wait_until(fn -> length(reruns("!flk2")) == 1 end)
-
-      # The re-run reproduced it: same head, same test.
-      StubMerger.queue_get("!flk2", [red("h1")])
 
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
       assert StubFixPassDispatcher.last_args().outside_diff_files == [@drain]
-      assert length(reruns("!flk2")) == 1
+      assert StubFixPassDispatcher.last_args().triage =~ "unrelated_tests"
+      assert length(reruns("!flk2")) == 2
     end
 
-    test "a different untouched test failing on the re-run escalates as a suspected flake" do
+    test "a different untouched test failing on the re-run is re-run again, within the budget" do
       StubMerger.set_failing_checks("!flk3", failing_in(@drain))
       StubMerger.queue_get("!flk3", [red("h1"), pending("h1")])
 
-      {wpid, _task_id} = flake_watchdog("!flk3")
+      flake_watchdog("!flk3")
       wait_until(fn -> length(reruns("!flk3")) == 1 end)
 
       StubMerger.set_failing_checks("!flk3", failing_in(@coverage))
-      StubMerger.queue_get("!flk3", [red("h1")])
+      StubMerger.queue_get("!flk3", [pending("h1"), red("h1"), pending("h1")])
 
-      wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_failed_external end)
-      state = :sys.get_state(wpid)
-      assert state.ci_external_note =~ "suspected flake"
-      assert state.ci_external_note =~ "coverage_test.exs"
+      wait_until(fn -> length(reruns("!flk3")) == 2 end)
       Process.sleep(100)
       assert StubFixPassDispatcher.call_count() == 0
-      assert length(reruns("!flk3")) == 1
     end
 
     # bd-4qj7io: a failure confined to tests in `KnownFlakes` is re-run once,
@@ -1021,18 +1023,19 @@ defmodule Arbiter.Worker.WatchdogTest do
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
     end
 
-    test "retry_auto_resolve/1 after a suspected-flake park dispatches the fix pass" do
+    test "retry_auto_resolve/1 after a park skips the triage re-runs and dispatches the fix pass" do
       StubMerger.set_failing_checks("!flk4", failing_in(@drain))
-      StubMerger.queue_get("!flk4", [red("h1"), pending("h1")])
-
-      {wpid, task_id} = flake_watchdog("!flk4")
-      wait_until(fn -> length(reruns("!flk4")) == 1 end)
-      StubMerger.set_failing_checks("!flk4", failing_in(@coverage))
       StubMerger.queue_get("!flk4", [red("h1")])
-      wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_failed_external end)
+
+      {wpid, task_id} =
+        flake_watchdog("!flk4", ci_triage_budget: 0, max_fix_passes: 0)
+
+      wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_failed end)
+      assert StubFixPassDispatcher.call_count() == 0
 
       assert Watchdog.retry_auto_resolve(task_id) == :ok
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert reruns("!flk4") == []
     end
 
     # Until the forge creates the re-run's check-run, the failed attempt is still

@@ -960,12 +960,12 @@ defmodule Arbiter.Reviews.GuardRegistry do
       episode: {:task, :mr_ref, :head_sha},
       terminal: :escalated_once,
       sites: [
-        {Watchdog, :flake_step, 3},
+        {Watchdog, :flake_step, 4},
         {Watchdog, :known_flake_step, 3},
-        {Watchdog, :outside_diff_step, 3},
+        {Watchdog, :triage_step, 3},
         {Watchdog, :rerun_suspected_flake, 5},
-        {Watchdog, :safe_rerun_ci, 1},
-        {Watchdog, :park_as_suspected_flake, 4}
+        {Watchdog, :rerun_triaged, 5},
+        {Watchdog, :safe_rerun_ci, 1}
       ],
       anchors: ["@flake_rerun_grace_polls", "flake_rerun"],
       summary:

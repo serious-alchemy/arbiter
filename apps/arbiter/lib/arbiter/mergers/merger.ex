@@ -185,6 +185,10 @@ defmodule Arbiter.Mergers.Merger do
     * `:files` — repo-relative source files the failure points at (GitHub:
       the run's failure annotations), when the adapter can tell. The Watchdog
       uses them to spot a failure in a file the PR never touched (bd-2l0hzm).
+    * `:status` / `:failure_reason` — GitLab's job status and `failure_reason`
+      (`runner_system_failure`, `stuck_or_timeout_failure`, ...); with GitHub's
+      `:conclusion` they let `Arbiter.Workflows.MergeQueue.CiTriage` tell a
+      runner failure from the code's (#1144).
   """
   @type failing_check :: %{
           required(:name) => String.t(),
@@ -192,7 +196,9 @@ defmodule Arbiter.Mergers.Merger do
           optional(:url) => String.t() | nil,
           optional(:conclusion) => String.t() | nil,
           optional(:log_path) => String.t() | nil,
-          optional(:files) => [String.t()]
+          optional(:files) => [String.t()],
+          optional(:status) => String.t() | nil,
+          optional(:failure_reason) => String.t() | nil
         }
 
   @typedoc """

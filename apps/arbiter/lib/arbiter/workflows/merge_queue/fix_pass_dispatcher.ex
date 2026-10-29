@@ -87,6 +87,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
           optional(:pr_ref) => term(),
           optional(:checks) => [failing_check()],
           optional(:outside_diff_files) => [String.t()],
+          # #1144: `CiTriage.render/1` of the red head, briefed to the pass.
+          optional(:triage) => String.t() | nil,
           optional(:start_claude) => boolean(),
           # bd-4l7l2n: test seam for the start-time PR/CI re-read.
           optional(:pr_status) => (-> {:ok, map()} | {:error, term()}),
@@ -402,7 +404,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
            repo_path: repo_path,
            repo: Map.get(args, :repo) || resolve_repo_name(workspace),
            checks: Map.get(args, :checks) || [],
-           outside_diff_files: Map.get(args, :outside_diff_files) || []
+           outside_diff_files: Map.get(args, :outside_diff_files) || [],
+           triage: Map.get(args, :triage)
          }}
     end
   end
@@ -767,6 +770,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
       Failing checks:
       #{render_checks(Map.get(context, :checks) || [])}
+      #{render_triage(Map.get(context, :triage))}
       #{render_outside_diff(Map.get(context, :outside_diff_files) || [])}
       DO NOT:
         * re-implement the change set,
@@ -834,13 +838,28 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   # bd-2l0hzm: the Watchdog re-ran CI because every failing test was outside
   # the diff, and a test that failed before failed again. On #2003 a pass
   # "fixed" an unrelated flaky test on a docs-only branch; this says not to.
+  # GitHub #1144: Arbiter classified this red head before spawning the pass.
+  # Only a needs_agent verdict, or a re-run budget spent on the same failure,
+  # gets here, so the evidence says why an agent was called.
+  defp render_triage(triage) when is_binary(triage) and triage != "" do
+    """
+    Arbiter's CI triage of this head, from the forge's job data (it re-runs
+    infra and untouched-test failures itself and spawns you only when the
+    failure touches the diff, could not be classified, or kept failing across
+    its re-runs):
+    #{triage}
+    """
+  end
+
+  defp render_triage(_), do: ""
+
   defp render_outside_diff([]), do: ""
 
   defp render_outside_diff(files) do
     """
     The failing test file(s) below are NOT in this PR's diff:
     #{Enum.map_join(files, "\n", &("  * " <> &1))}
-    CI was already re-run once on this head and a test failed again, so the
+    CI was already re-run on this head and a test failed again, so the
     failure reproduces. Do not edit those test files. Work out how THIS PR's
     changes break them and fix the PR's own code. If nothing in the diff can
     reach them, it is a flake or a failure repo-wide: record it with
