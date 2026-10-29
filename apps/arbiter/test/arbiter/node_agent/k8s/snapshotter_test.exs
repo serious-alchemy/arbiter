@@ -61,14 +61,17 @@ defmodule Arbiter.NodeAgent.K8s.SnapshotterTest do
     branch=#{@branch}
     known=
     untracked_cap=50000000
-    work=$(mktemp -d)
+    work='#{tmp}/work'
+    mkdir -p "$work"
     say() { :; }
     #{functions()}
     put_retry() { cp "$1" '#{out}'; }
     take_snapshot 1
     """)
 
-    {log, status} = System.cmd(H.shell(), [script], stderr_to_stdout: true)
+    {log, status} =
+      System.cmd(H.shell(), [script], stderr_to_stdout: true, env: [{"TMPDIR", tmp}])
+
     assert status == 0, log
 
     verify = Path.join(tmp, "verify")
