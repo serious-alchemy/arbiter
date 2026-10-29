@@ -149,40 +149,52 @@ defmodule Arbiter.Workflows.MergeQueue.CiTriage do
     job = to_string(field(check, :name) || "(unnamed job)")
     text = to_string(field(check, :summary) || "")
     refs = refs(check, text)
-    tests = Enum.filter(refs, &test_path?/1)
-    hits = if changed == :unknown, do: [], else: diff_hits(refs, tests, changed)
+    ctx = %{text: text, refs: refs, tests: Enum.filter(refs, &test_path?/1), changed: changed}
 
-    cond do
-      detail = hard_infra(check) ->
-        entry(job, :infra, detail, [])
+    {verdict, detail, files} =
+      case hard_infra(check) do
+        nil -> judge_log(ctx)
+        detail -> {:infra, detail, []}
+      end
 
-      Regex.match?(@compile_errors, text) ->
-        entry(job, :touches_diff, "compile error in the log: the build itself is red", tests)
-
-      changed == :unknown and (soft_infra(text) != nil or tests != []) ->
-        entry(job, :unknown, "the PR diff could not be read", tests)
-
-      hits != [] ->
-        entry(
-          job,
-          :touches_diff,
-          "touches changed file(s): #{Enum.join(hits, ", ")}",
-          hit_refs(hits, refs, tests)
-        )
-
-      detail = soft_infra(text) ->
-        entry(job, :infra, "log says: #{detail}", [])
-
-      tests == [] ->
-        entry(job, :unknown, "names no test file; cannot tell it from a failure of the diff", [])
-
-      true ->
-        entry(job, :unrelated_test, "failing test file(s) the diff does not touch", tests)
-    end
+    entry(job, verdict, detail, files)
   end
 
   defp judge(_not_a_check, _changed),
     do: entry("(unreadable check)", :unknown, "not a failing-check map", [])
+
+  # No structured infra signal: what the log and the diff say.
+  defp judge_log(%{text: text, tests: tests, changed: changed} = ctx) do
+    cond do
+      Regex.match?(@compile_errors, text) ->
+        {:touches_diff, "compile error in the log: the build itself is red", tests}
+
+      changed == :unknown ->
+        {:unknown, "the PR diff could not be read", tests}
+
+      true ->
+        judge_against_diff(ctx)
+    end
+  end
+
+  defp judge_against_diff(%{text: text, refs: refs, tests: tests, changed: changed}) do
+    hits = diff_hits(refs, tests, changed)
+
+    cond do
+      hits != [] ->
+        {:touches_diff, "touches changed file(s): #{Enum.join(hits, ", ")}",
+         hit_refs(hits, refs, tests)}
+
+      detail = soft_infra(text) ->
+        {:infra, "log says: #{detail}", []}
+
+      tests == [] ->
+        {:unknown, "names no test file; cannot tell it from a failure of the diff", []}
+
+      true ->
+        {:unrelated_test, "failing test file(s) the diff does not touch", tests}
+    end
+  end
 
   defp entry(job, verdict, detail, files),
     do: %{job: job, verdict: verdict, detail: detail, files: files}
