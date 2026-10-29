@@ -7412,10 +7412,10 @@ defmodule Arbiter.Worker do
       worktree when is_binary(worktree) ->
         paths =
           worktree
-          |> commit_gate_git_status()
+          |> commit_gate_porcelain()
           |> String.split("\n", trim: true)
           |> Enum.flat_map(fn
-            <<_indent::binary-size(2), _xy::binary-size(2), " ", path::binary>> -> [path]
+            <<_xy::binary-size(2), " ", path::binary>> -> [path]
             _ -> []
           end)
 
@@ -7457,6 +7457,17 @@ defmodule Arbiter.Worker do
   end
 
   defp commit_gate_git_status(_), do: "  (no worktree path)"
+
+  # Raw `git status --porcelain` (`XY path` lines, no indent), or "" when it
+  # cannot be read: the subject suffix parses this, not the indented summary.
+  defp commit_gate_porcelain(path) do
+    case Arbiter.Worker.PrivateClone.cmd(path, ["status", "--porcelain"], stderr_to_stdout: true) do
+      {out, 0} -> out
+      _ -> ""
+    end
+  rescue
+    _ -> ""
+  end
 
   defp indent(text) do
     text
