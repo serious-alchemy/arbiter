@@ -138,13 +138,13 @@ defmodule Arbiter.Nodes.Session do
       adopt_timeout_ms: @default_adopt_timeout_ms,
       ack_timeout_ms: @default_ack_timeout_ms,
       pending_timeout_ms: @default_pending_timeout_ms,
-      stalled_cooldown_ms: @default_stalled_cooldown_ms
+      stalled_cooldown_ms: @default_stalled_cooldown_ms,
+      # bd-bmecet: runs still waiting on the node to start them (`run => %{at, stage, stage_at,
+      # message}`, monotonic ms) and, once a placement was failed over, until when the node is
+      # ranked last for new placements.
+      placing: %{},
+      stalled_until: nil
     },
-    # bd-bmecet: runs still waiting on the node to start them (`run => %{at, stage, stage_at,
-    # message}`, monotonic ms) and, once a placement was failed over, until when the node is
-    # ranked last for new placements.
-    placing: %{},
-    stalled_until: nil,
     allow_skew?: false,
     state: :online,
     fenced?: false,
@@ -548,15 +548,11 @@ defmodule Arbiter.Nodes.Session do
         state = %{
           state
           | streams: RunStreams.open(state.streams, run, handle, owner, from, bridges),
-            checkouts: put_checkout(state.checkouts, run, Keyword.get(opts, :checkout)),
-            placing:
-              Map.put(state.placing, run, %{
-                at: now,
-                stage: :assigned,
-                stage_at: now,
-                message: nil
-              })
+            checkouts: put_checkout(state.checkouts, run, Keyword.get(opts, :checkout))
         }
+
+        state =
+          put_placing(state, run, %{at: now, stage: :assigned, stage_at: now, message: nil})
 
         notify_channel(state, {:push, "assign", %{"run" => run, "spec" => spec}})
         {:noreply, state}
@@ -1632,7 +1628,7 @@ defmodule Arbiter.Nodes.Session do
   defp track_stage(state, run, word, message) when word in ~w(pending starting) do
     stage = String.to_existing_atom(word)
 
-    case state.placing do
+    case state.info.placing do
       %{^run => %{stage: ^stage} = entry} ->
         put_placing(state, run, %{entry | message: message || entry.message})
 
@@ -1647,11 +1643,15 @@ defmodule Arbiter.Nodes.Session do
 
   defp track_stage(state, _run, _word, _message), do: state
 
-  defp put_placing(state, run, entry), do: %{state | placing: Map.put(state.placing, run, entry)}
+  defp put_placing(state, run, entry),
+    do: put_info(state, :placing, Map.put(state.info.placing, run, entry))
+
+  defp drop_placing(state, run),
+    do: put_info(state, :placing, Map.delete(state.info.placing, run))
 
   # Fail over a placement that is not getting anywhere. Cluster nodes only (a machine node's
   # per-run phases are its own). An entry whose run has started, ended or is gone is dropped.
-  defp check_placements(%{info: %{kind: "cluster"}, placing: placing} = state)
+  defp check_placements(%{info: %{kind: "cluster", placing: placing}} = state)
        when map_size(placing) > 0 do
     now = state.clock.()
 
@@ -1664,7 +1664,7 @@ defmodule Arbiter.Nodes.Session do
           end
 
         _ ->
-          %{acc | placing: Map.delete(acc.placing, run)}
+          drop_placing(acc, run)
       end
     end)
   end
@@ -1699,9 +1699,10 @@ defmodule Arbiter.Nodes.Session do
 
         record(state, :placement_stalled, %{"run" => run, "reason" => reason, "detail" => detail})
 
-        state = %{state | streams: streams, stalled_until: now + state.info.stalled_cooldown_ms}
+        state = %{state | streams: streams}
+        state = put_info(state, :stalled_until, now + state.info.stalled_cooldown_ms)
         state = state |> run_effects(effects) |> drop_run(run)
-        %{state | placing: Map.delete(state.placing, run)}
+        drop_placing(state, run)
 
       _ ->
         state
@@ -1713,7 +1714,7 @@ defmodule Arbiter.Nodes.Session do
   defp fail_unknown_placements(%{info: %{kind: "cluster"}} = state, ids) do
     now = state.clock.()
 
-    for {run, _entry} <- state.placing, run not in ids, reduce: state do
+    for {run, _entry} <- state.info.placing, run not in ids, reduce: state do
       acc ->
         detail =
           "the node's controller reconnected without the run (it restarted and lost the " <>
@@ -1725,7 +1726,7 @@ defmodule Arbiter.Nodes.Session do
 
   defp fail_unknown_placements(state, _ids), do: state
 
-  defp placement_stalled?(%{stalled_until: until} = state) when is_integer(until),
+  defp placement_stalled?(%{info: %{stalled_until: until}} = state) when is_integer(until),
     do: state.clock.() < until
 
   defp placement_stalled?(_state), do: false
