@@ -60,6 +60,9 @@ defmodule Arbiter.Worker.MergeTrain do
 
   @default_settle_ms 30_000
   @default_ttl_ms 120_000
+  # A merge slot is held for one poll; a holder that neither renews (by asking
+  # again) nor releases within this is presumed to have lost the slot.
+  @default_merge_lease_ms 300_000
 
   @type key :: {workspace_id :: String.t() | nil, repo :: String.t() | nil, target :: String.t()}
   @type role :: :head | {:wait, task_id :: String.t() | :forming | nil}
@@ -97,7 +100,11 @@ defmodule Arbiter.Worker.MergeTrain do
   def release(key, task_id, server \\ __MODULE__),
     do: GenServer.call(server, {:release, key, task_id})
 
-  @doc "Take the target's merge slot: `:ok`, or `{:busy, holder_task_id}`."
+  @doc """
+  Take the target's merge slot: `:ok`, or `{:busy, holder_task_id}`. The holder
+  renews by asking again; a slot not renewed or released within
+  `:merge_lease_ms` (default 5 minutes) is freed for the next asker.
+  """
   @spec acquire_merge(key(), String.t(), GenServer.server()) ::
           :ok | {:busy, String.t()}
   def acquire_merge(key, task_id, server \\ __MODULE__),
@@ -136,7 +143,17 @@ defmodule Arbiter.Worker.MergeTrain do
           :settled
       end
 
-    {:ok, %{settle: settle, trains: %{}}}
+    lease =
+      case Keyword.get(
+             opts,
+             :merge_lease_ms,
+             Application.get_env(:arbiter, :merge_train_merge_lease_ms, @default_merge_lease_ms)
+           ) do
+        ms when is_integer(ms) and ms >= 0 -> ms
+        _ -> @default_merge_lease_ms
+      end
+
+    {:ok, %{settle: settle, trains: %{}, merge_lease_ms: lease}}
   end
 
   @impl true
@@ -183,13 +200,24 @@ defmodule Arbiter.Worker.MergeTrain do
     case train.merge do
       nil ->
         ref = Process.monitor(pid)
-        {:reply, :ok, put_train(state, key, %{train | merge: {id, ref}})}
+        {:reply, :ok, put_train(state, key, %{train | merge: {id, ref, now()}})}
 
-      {^id, _ref} ->
-        {:reply, :ok, state}
+      {^id, ref, _at} ->
+        {:reply, :ok, put_train(state, key, %{train | merge: {id, ref, now()}})}
 
-      {holder, _ref} ->
-        {:reply, {:busy, holder}, state}
+      {holder, ref, at} ->
+        if now() - at >= state.merge_lease_ms do
+          Logger.warning(
+            "MergeTrain: merge slot for #{label(key)} held by #{holder} was not renewed " <>
+              "within #{state.merge_lease_ms}ms; freeing it for #{id}"
+          )
+
+          Process.demonitor(ref, [:flush])
+          new_ref = Process.monitor(pid)
+          {:reply, :ok, put_train(state, key, %{train | merge: {id, new_ref, now()}})}
+        else
+          {:reply, {:busy, holder}, state}
+        end
     end
   end
 
@@ -377,7 +405,7 @@ defmodule Arbiter.Worker.MergeTrain do
     end
   end
 
-  defp drop_merge(%{merge: {id, ref}} = train, id) do
+  defp drop_merge(%{merge: {id, ref, _at}} = train, id) do
     Process.demonitor(ref, [:flush])
     %{train | merge: nil}
   end
@@ -392,7 +420,7 @@ defmodule Arbiter.Worker.MergeTrain do
       end
 
     case train.merge do
-      {_id, ^ref} -> %{train | merge: nil}
+      {_id, ^ref, _at} -> %{train | merge: nil}
       _ -> train
     end
   end

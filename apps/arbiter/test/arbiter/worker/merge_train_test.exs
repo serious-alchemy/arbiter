@@ -197,6 +197,25 @@ defmodule Arbiter.Worker.MergeTrainTest do
 
       assert :ok = MergeTrain.acquire_merge(@key, "b", t)
     end
+
+    test "a slot not renewed or released within the lease is freed for the next asker" do
+      # A zero lease: any other asker finds the holder already silent past it.
+      t = start_supervised!({MergeTrain, name: nil, settle_ms: 0, merge_lease_ms: 0}, id: :leased)
+
+      assert :ok = MergeTrain.acquire_merge(@key, "a", t)
+      # The holder itself renews by asking again.
+      assert :ok = MergeTrain.acquire_merge(@key, "a", t)
+      assert :ok = MergeTrain.acquire_merge(@key, "b", t)
+
+      # "a" was evicted, so its late release must not free "b"'s slot.
+      :ok = MergeTrain.release_merge(@key, "a", t)
+      assert :ok = MergeTrain.acquire_merge(@key, "b", t)
+    end
+
+    test "within the lease a held slot stays held", %{train: t} do
+      assert :ok = MergeTrain.acquire_merge(@key, "a", t)
+      assert {:busy, "a"} = MergeTrain.acquire_merge(@key, "b", t)
+    end
   end
 
   test "view/2 names the head and the waiting MRs", %{train: t} do
