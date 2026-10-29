@@ -1709,7 +1709,15 @@ defmodule Arbiter.Mergers.Gitlab do
           ""
       end
 
-    %{name: name, summary: summary, url: url}
+    # `status` / `failure_reason` let the CI triage (#1144) tell a runner failure
+    # (`runner_system_failure`, `stuck_or_timeout_failure`, a cancel) from a script's.
+    %{
+      name: name,
+      summary: summary,
+      url: url,
+      status: Map.get(job, "status"),
+      failure_reason: Map.get(job, "failure_reason")
+    }
   end
 
   defp handle_ok(result), do: Client.expect_ok(error_spec(), result)
