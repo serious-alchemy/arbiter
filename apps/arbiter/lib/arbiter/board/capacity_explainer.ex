@@ -479,6 +479,20 @@ defmodule Arbiter.Board.CapacityExplainer do
     }
   end
 
+  # #1126: the ticket's repo has too many MR pipelines waiting for a CI runner.
+  def hold({:ci_saturated, detail}, _board, opts) do
+    %{
+      kind: :capacity,
+      badge: "CI saturated",
+      summary:
+        "This repo's CI queue is saturated (#{detail}), so no new work starts for it: more " <>
+          "branches would only wait longer for a runner. Fix rounds and merges of open MRs " <>
+          "keep going, and it starts on its own once the queue drains below " <>
+          "`worker.repos.<repo>.ci_backpressure`.",
+      details: opts[:raw] || detail
+    }
+  end
+
   def hold(:paused, _board, opts) do
     %{
       kind: :scheduler_paused,

@@ -1164,6 +1164,37 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "held — #{reason}"
     end
 
+    # #1126
+    test "names a repo whose new dispatches are held for CI saturation" do
+      ci = [
+        %{
+          "label" => "vstim",
+          "state" => "held",
+          "pending" => 6,
+          "oldest_pending_min" => 42,
+          "max_pending" => 4,
+          "max_oldest_pending_min" => nil,
+          "detail" => "6 pending, oldest 42m"
+        },
+        %{
+          "label" => "calm",
+          "state" => "clear",
+          "pending" => 1,
+          "oldest_pending_min" => 2,
+          "max_pending" => 4,
+          "max_oldest_pending_min" => nil,
+          "detail" => nil
+        }
+      ]
+
+      stub_with_scheduler({Map.put(@draining, "ci_backpressure", ci), 200})
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+
+      assert out =~ "held — vstim: CI saturated (6 pending, oldest 42m); new dispatches wait"
+      refute out =~ "calm"
+    end
+
     test "shows no hold line when nothing is held" do
       stub_with_scheduler({@draining, 200})
 

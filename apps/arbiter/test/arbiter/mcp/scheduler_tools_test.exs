@@ -247,7 +247,20 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
         ],
         machines: [%{id: "local", name: "local", cap: 6, live: 3, free: 3, state: "online"}],
         repos: [],
-        fair_share: []
+        fair_share: [],
+        ci_backpressure: [
+          %{
+            repo: "vstim",
+            label: "vstim",
+            workspace: "vstim-ws",
+            pending: 6,
+            oldest_pending_min: 42,
+            max_pending: 4,
+            max_oldest_pending_min: nil,
+            state: "held",
+            detail: "6 pending, oldest 42m"
+          }
+        ]
       }
 
       :meck.expect(Arbiter.Board.CapacityView, :status, fn -> view end)
@@ -267,11 +280,26 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
       assert data.fair_share == []
     end
 
+    test "carries a per-repo CI backpressure entry: pending count, threshold, hold state (#1126)",
+         ctx do
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert [
+               %{
+                 repo: "vstim",
+                 pending: 6,
+                 max_pending: 4,
+                 state: "held",
+                 detail: "6 pending, oldest 42m"
+               }
+             ] = data.ci_backpressure
+    end
+
     test "is byte-for-byte the body the REST endpoint renders", ctx do
       assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
       rest = Arbiter.Board.Drain.status() |> Arbiter.Board.Drain.to_json()
 
-      for key <- [:admission, :budgets, :machines, :repos, :fair_share] do
+      for key <- [:admission, :budgets, :machines, :repos, :fair_share, :ci_backpressure] do
         assert Map.fetch!(data, key) == Map.fetch!(rest, key)
       end
     end

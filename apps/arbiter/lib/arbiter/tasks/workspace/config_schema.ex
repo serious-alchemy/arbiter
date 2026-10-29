@@ -544,7 +544,8 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       repos           map, repo name -> {seed_paths, image, prepush_check,
                       prepush_check_timeout_seconds, prepush_check_on_timeout,
                       pre_push_checks, pre_push_budget_seconds,
-                      pre_push_max_attempts, visual_baselines, max_concurrent},
+                      pre_push_max_attempts, visual_baselines, max_concurrent,
+                      ci_backpressure},
                       deep-merged over the workspace-level value (per-repo wins)
                       max_concurrent (per repo only) is a positive integer, unset
                       by default: the most implementer runs (the implementer,
@@ -552,6 +553,17 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                       reviewer) in that repo at once. It holds a fresh
                       dispatch, never a follow-up, and only under
                       scheduler_admission=enforce (DC9).
+                      ci_backpressure (per repo only) is a map, unset by default:
+                        max_pending              hold at this many pending MR pipelines
+                        max_oldest_pending_min   hold once the oldest has waited longer
+                      (either alone, or both; positive integers). While the repo's
+                      forge CI queue is over a threshold the scheduler starts no NEW
+                      implement run for it (`held — CI saturated (6 pending, oldest
+                      42m)`); fix passes, review fix rounds, merges and P0 tickets are
+                      not held. It lifts when the queue drains; a failed forge poll
+                      holds nothing. GitLab pending/created/waiting_for_resource
+                      merge-request pipelines, GitHub queued pull-request runs.
+                      Shown in scheduler_status as ci_backpressure.
 
                       umbrella:    ["deps", "_build/test/lib", "_build/dev/lib", "priv/plts"]
                       single app:  ["deps", "_build/test", "_build/dev", "priv/plts"]

@@ -407,6 +407,24 @@ defmodule Arbiter.Mergers.Merger do
   @callback deploy_pipelines(mr_ref, branch :: String.t(), opts :: map()) ::
               {:ok, [deploy_pipeline()]} | {:error, term()}
 
+  @typedoc """
+  The repo's CI queue: how many merge-request pipelines are waiting for a runner
+  and when the oldest was created (`nil` when none is).
+  """
+  @type ci_queue :: %{pending: non_neg_integer(), oldest_at: DateTime.t() | nil}
+
+  @doc """
+  The configured repository's CI queue (`t:ci_queue/0`): its merge-request
+  pipelines that have not started — GitLab `pending` / `created` /
+  `waiting_for_resource` pipelines from a merge request event, GitHub workflow
+  runs `queued` for a pull request. Feeds the CI backpressure gate
+  (`Arbiter.Board.CiBackpressure`, `worker.repos.<repo>.ci_backpressure`),
+  which polls it on a slow cadence and fails open when it errors.
+
+  Optional; an adapter without it simply cannot be gated.
+  """
+  @callback ci_queue() :: {:ok, ci_queue()} | {:error, term()}
+
   @doc """
   List open merge requests / pull requests in the configured repository.
 
@@ -641,6 +659,7 @@ defmodule Arbiter.Mergers.Merger do
                       deploy_pipelines: 3,
                       ref_for_pr: 2,
                       list_open: 0,
+                      ci_queue: 0,
                       list_open_review_threads: 1,
                       reply_to_review_comment: 4,
                       resolve_review_thread: 3,

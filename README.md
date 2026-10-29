@@ -144,6 +144,7 @@ Visit the dashboard's **Workspace** page and configure:
 - Worker/agent settings — model tier map, per-thinking-level args, provider overrides, and credentials (`agent.config.*`)
 - Security policy (`agent.security.*`)
 - Rate-limit throttling (`quota.*`). Worker concurrency is bounded per machine (`arb node set`), per provider account (`max_concurrent`) and, optionally, per repo (`worker.repos.<repo>.max_concurrent`); `conductor.max_concurrent` was removed
+- Optionally **CI backpressure** per repo (`worker.repos.<repo>.ci_backpressure: {max_pending, max_oldest_pending_min}`): while the forge's queue of MR pipelines waiting for a runner is over a threshold, no new implement run starts for that repo (`held — CI saturated (6 pending, oldest 42m)`); fix passes, review rounds, merges and P0 tickets are not held. It lifts when the queue drains, a failed forge poll holds nothing, and `arb scheduler status` / `arb prime` show it
 - Optionally a **tracker** (Jira, GitHub, Linear) and merge strategy
 
 Or edit `config/dev.exs` directly and restart the server, or use `arb config set`.

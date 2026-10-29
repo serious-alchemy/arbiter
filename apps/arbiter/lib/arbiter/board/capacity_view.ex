@@ -19,7 +19,8 @@ defmodule Arbiter.Board.CapacityView do
         pools: [pool],        # one per (account, pool); Budget.to_json/1 plus the display fields
         machines: [machine],  # the primary, then every node
         repos: [repo],        # one per capped repo (DC9): label, cap, used, free, state
-        fair_share: [row]     # DC10: one per pool of an account that splits `fair`
+        fair_share: [row],    # DC10: one per pool of an account that splits `fair`
+        ci_backpressure: [row] # #1126: one per repo with a `ci_backpressure` gate
       }
 
   A `fair_share` row (DC10, design §5.3) is `%{account:, pool:, label:, budget:,
@@ -40,9 +41,14 @@ defmodule Arbiter.Board.CapacityView do
   and `state` (`free` or `full`). Only capped repos are listed. Like a pool, it
   decides a dispatch only under `enforce`.
 
+  A `ci_backpressure` row (#1126, `Arbiter.Board.CiBackpressure`) is one
+  `worker.repos.<repo>.ci_backpressure`: the repo's cached `pending` MR pipeline count
+  and `oldest_pending_min`, the thresholds, and `state` (`held`, `clear` or `unknown`).
+  Only gated repos are listed.
+
   Options (all seams): `:mode`, `:budgets`, `:holders`, `:weights`, `:accounts`, `:local`,
   `:nodes`, `:remote_available?`, `:changes`, `:agreement`, `:workspaces`,
-  `:repo_holders`.
+  `:repo_holders`, `:ci_backpressure` (that module's `status/2` options).
   """
 
   require Ash.Query
@@ -50,6 +56,7 @@ defmodule Arbiter.Board.CapacityView do
   alias Arbiter.Accounts.AdmissionMode
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Board.AdmissionShadowEvent
+  alias Arbiter.Board.CiBackpressure
   alias Arbiter.Board.FairShare
   alias Arbiter.Board.WalkInputs
   alias Arbiter.Nodes.LocalCapacity
@@ -74,7 +81,8 @@ defmodule Arbiter.Board.CapacityView do
       pools: pools(opts),
       machines: machines(opts),
       repos: repos(opts),
-      fair_share: fair_share(opts)
+      fair_share: fair_share(opts),
+      ci_backpressure: ci_backpressure(opts)
     }
   end
 
@@ -421,6 +429,13 @@ defmodule Arbiter.Board.CapacityView do
       change_command:
         "arb config set worker.repos.#{repo}.max_concurrent N --workspace #{ws.name}"
     }
+  end
+
+  # #1126: the per-repo CI backpressure gate. Reads the cached forge poll (and starts a
+  # refresh when it is stale); a failed read is an empty list, never a failed status.
+  defp ci_backpressure(opts) do
+    workspaces = Keyword.get_lazy(opts, :workspaces, &read_workspaces/0)
+    safe(fn -> CiBackpressure.status(workspaces, Keyword.get(opts, :ci_backpressure, [])) end, [])
   end
 
   defp read_workspaces, do: safe(fn -> Ash.read!(Workspace) end, [])

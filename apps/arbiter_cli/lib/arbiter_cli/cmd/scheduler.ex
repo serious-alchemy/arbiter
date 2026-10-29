@@ -213,6 +213,14 @@ defmodule ArbiterCli.Cmd.Scheduler do
     )
 
     emit_table("Repos", ~w(cap runs), body["repos"], &repo_row/1)
+
+    emit_table(
+      "CI backpressure",
+      ~w(pending oldest state),
+      body["ci_backpressure"],
+      &ci_row/1
+    )
+
     emit_table("Fair share", ~w(weight seats share), fair_rows(body["fair_share"]), &fair_row/1)
   end
 
@@ -289,6 +297,28 @@ defmodule ArbiterCli.Cmd.Scheduler do
 
   defp repo_row(r),
     do: {r["label"] || to_string(r["repo"]), [cell(r["cap"]), cell(r["used"])], nil}
+
+  # #1126: a repo's forge CI queue against its `ci_backpressure` thresholds. `-` for a
+  # queue not read yet (or one the forge would not answer for).
+  defp ci_row(r) do
+    cells = [
+      cell(r["pending"]),
+      if(is_integer(r["oldest_pending_min"]), do: "#{r["oldest_pending_min"]}m", else: "-"),
+      to_string(r["state"] || "-")
+    ]
+
+    {r["label"] || to_string(r["repo"]), cells, ci_threshold(r)}
+  end
+
+  defp ci_threshold(r) do
+    [
+      is_integer(r["max_pending"]) && "≥#{r["max_pending"]} pending",
+      is_integer(r["max_oldest_pending_min"]) && ">#{r["max_oldest_pending_min"]}m oldest"
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join(" or ")
+    |> then(&if(&1 == "", do: nil, else: "holds at " <> &1))
+  end
 
   # One row per workspace on each pool of an account that splits `fair` (DC10).
   defp fair_rows(rows) when is_list(rows) do
