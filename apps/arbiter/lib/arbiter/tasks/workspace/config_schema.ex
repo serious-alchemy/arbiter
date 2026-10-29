@@ -164,6 +164,10 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                             "timeout_minutes": 90} or {"jobs": [...]}. After a merge, follow the
                             base branch pipeline and raise a coordinator alert when the deploy
                             job(s) are not success. Unset = off. See docs/deploy-watch.md
+      target_red_ignore_jobs list of strings (per repo) — (bd-dtbsgx) failed jobs on the target
+                            branch's pipeline that do not count as "target red" (the repo's
+                            deploy_watch jobs are always ignored). target_red_stages: list of
+                            stage names ignored the same way (default ["deploy", "release"]).
       up_to_date_tolerance  non-negative integer — commits of the target a branch may lack and
                             still merge unsynced (default: 0 = sync for any). Trade-off: a higher
                             value avoids a sync pipeline per unrelated target commit, at the cost

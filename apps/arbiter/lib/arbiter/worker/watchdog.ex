@@ -3457,7 +3457,7 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp target_red_hold(state, base) do
-    case CiSync.target_hold(state.adapter, state.mr_ref, base) do
+    case CiSync.target_hold(state.adapter, state.mr_ref, base, state.workspace, state.repo) do
       nil -> :clear
       why -> {:hold, why}
     end

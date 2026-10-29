@@ -253,11 +253,33 @@ defmodule Arbiter.Mergers.Gitlab do
              id: Map.get(pipeline, "id"),
              sha: Map.get(pipeline, "sha"),
              status: Map.get(pipeline, "status"),
-             url: Map.get(pipeline, "web_url")
+             url: Map.get(pipeline, "web_url"),
+             jobs: branch_pipeline_jobs(cfg, pipeline)
            }}
       end
     end
   end
+
+  # Job-level detail only for a failed pipeline (the one the target-red hold
+  # must judge); a job-read error leaves `nil`, so the pipeline-level verdict
+  # stands. A failed job with `allow_failure` never reddened the pipeline.
+  defp branch_pipeline_jobs(cfg, %{"status" => "failed", "id" => id}) do
+    case pipeline_jobs(cfg, id) do
+      {:ok, jobs} ->
+        for job <- jobs, Map.get(job, "allow_failure") != true do
+          %{
+            name: Map.get(job, "name"),
+            stage: Map.get(job, "stage"),
+            status: Map.get(job, "status")
+          }
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp branch_pipeline_jobs(_cfg, _pipeline), do: nil
 
   defp deploy_pipeline_list({:ok, %Req.Response{status: status, body: pipelines}})
        when status in 200..299 and is_list(pipelines),

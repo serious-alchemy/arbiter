@@ -824,7 +824,7 @@ defmodule Arbiter.Mergers.Github do
              params: [branch: branch, event: "push", per_page: 30]
            )
            |> handle_json() do
-      {:ok, settled_branch_run(runs)}
+      {:ok, runs |> settled_branch_run() |> with_branch_jobs(cfg, owner, repo)}
     else
       {:ok, _} -> {:error, :unexpected_runs_response}
       {:error, _} = error -> error
@@ -851,7 +851,51 @@ defmodule Arbiter.Mergers.Github do
 
   defp branch_run(sha, group, status) do
     run = Enum.find(group, &(deploy_status(&1) == status)) || hd(group)
-    %{id: Map.get(run, "id"), sha: sha, status: status, url: Map.get(run, "html_url")}
+
+    %{
+      id: Map.get(run, "id"),
+      sha: sha,
+      status: status,
+      url: Map.get(run, "html_url"),
+      failed_runs: Enum.filter(group, &(deploy_status(&1) == "failed"))
+    }
+  end
+
+  # Job-level detail for a failed commit: every failed workflow run's jobs
+  # (`stage` is the workflow name — GitHub has no stages). Any job-read error
+  # leaves `jobs: nil`, so the pipeline-level verdict stands.
+  defp with_branch_jobs(nil, _cfg, _owner, _repo), do: nil
+
+  defp with_branch_jobs(%{failed_runs: failed_runs} = pipeline, cfg, owner, repo) do
+    jobs =
+      Enum.reduce_while(failed_runs, {:ok, []}, fn run, {:ok, acc} ->
+        path = "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/jobs"
+
+        case cfg |> request(:get, path, params: [per_page: 100]) |> handle_json() do
+          {:ok, %{"jobs" => jobs}} when is_list(jobs) ->
+            entries =
+              Enum.map(
+                jobs,
+                &%{
+                  name: Map.get(&1, "name"),
+                  stage: Map.get(run, "name"),
+                  status: deploy_status(&1)
+                }
+              )
+
+            {:cont, {:ok, acc ++ entries}}
+
+          _ ->
+            {:halt, :error}
+        end
+      end)
+
+    pipeline = Map.delete(pipeline, :failed_runs)
+
+    case jobs do
+      {:ok, entries} when failed_runs != [] -> Map.put(pipeline, :jobs, entries)
+      _ -> pipeline
+    end
   end
 
   # A workflow run / job in GitLab's status vocabulary, the one

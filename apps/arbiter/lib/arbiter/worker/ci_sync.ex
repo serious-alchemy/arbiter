@@ -16,7 +16,7 @@ defmodule Arbiter.Worker.CiSync do
       `merge.require_up_to_date` / `merge.up_to_date_tolerance` knobs as the
       merge-time check (`Arbiter.Worker.MergeFreshness`). The sync itself is the
       adapter's `update_branch` (merge or rebase per `merge.sync_strategy`).
-    * `target_hold/3` — is the *target* branch's own latest pipeline red? Then
+    * `target_hold/5` — is the *target* branch's own latest pipeline red? Then
       no MR branch can go green by being fixed or re-run, and an attempt spent
       on one is wasted: `"target branch red: <pipeline>"` names the hold.
 
@@ -36,18 +36,47 @@ defmodule Arbiter.Worker.CiSync do
   def check(workspace, repo, base, head),
     do: MergeFreshness.check(workspace, LocalCompare.repo_path(workspace, repo), base, head)
 
+  @default_ignored_stages ["deploy", "release"]
+
   @doc """
-  `"target branch red: <pipeline>"` when `base`'s newest settled pipeline failed,
-  else `nil`. Fails open: an adapter with no `branch_pipeline/3`, a read error or
-  a branch with no settled pipeline holds nothing.
+  `"target branch red: <pipeline>"` when `base`'s newest settled pipeline failed
+  on a job that tests the code, else `nil`. Fails open: an adapter with no
+  `branch_pipeline/3`, a read error or a branch with no settled pipeline holds
+  nothing.
+
+  Deploy and post-merge jobs do not say the code is broken (a timed-out
+  `deploy-worker` left vstim's main "red" while every test passed, bd-dtbsgx),
+  so a failed job is ignored when it is named in `merge.repos.<repo>.deploy_watch`
+  (`jobs`/`job`) or `target_red_ignore_jobs`, or sits in a stage listed in
+  `target_red_stages` (default `deploy`, `release`). When the adapter reports
+  no job detail the pipeline-level verdict stands. The reason names the failing
+  job(s).
   """
-  @spec target_hold(module(), String.t(), String.t() | nil) :: String.t() | nil
-  def target_hold(adapter, mr_ref, base) when is_binary(base) and base != "" do
+  @spec target_hold(module(), String.t(), String.t() | nil, map() | nil, String.t() | nil) ::
+          String.t() | nil
+  def target_hold(adapter, mr_ref, base, workspace \\ nil, repo \\ nil)
+
+  def target_hold(adapter, mr_ref, base, workspace, repo) when is_binary(base) and base != "" do
     with true <- Code.ensure_loaded?(adapter) and function_exported?(adapter, :branch_pipeline, 3),
-         {:ok, %{status: "failed"} = pipeline} <- adapter.branch_pipeline(mr_ref, base, %{}) do
-      "target branch red: " <> describe_pipeline(base, pipeline)
+         {:ok, %{status: "failed"} = pipeline} <- adapter.branch_pipeline(mr_ref, base, %{}),
+         {:red, culprits} <- judge(pipeline, workspace, repo) do
+      why = "target branch red: " <> describe_pipeline(base, pipeline)
+
+      case culprits do
+        [] -> why
+        names -> why <> "; failing job(s): " <> Enum.join(names, ", ")
+      end
     else
-      _ -> nil
+      {:ignored, names} ->
+        Logger.info(
+          "Worker.CiSync: target #{base} pipeline failed only on non-test job(s) " <>
+            "#{Enum.join(names, ", ")}; not holding CI remediation"
+        )
+
+        nil
+
+      _ ->
+        nil
     end
   rescue
     _ -> nil
@@ -55,7 +84,41 @@ defmodule Arbiter.Worker.CiSync do
     :exit, _ -> nil
   end
 
-  def target_hold(_adapter, _mr_ref, _base), do: nil
+  def target_hold(_adapter, _mr_ref, _base, _workspace, _repo), do: nil
+
+  defp judge(%{jobs: jobs}, workspace, repo) when is_list(jobs) do
+    failed = Enum.filter(jobs, &(Map.get(&1, :status) == "failed"))
+    {ignore_jobs, ignore_stages} = ignored(workspace, repo)
+
+    {skipped, culprits} =
+      Enum.split_with(failed, fn j ->
+        Map.get(j, :name) in ignore_jobs or
+          String.downcase(to_string(Map.get(j, :stage) || "")) in ignore_stages
+      end)
+
+    cond do
+      culprits != [] -> {:red, culprits |> Enum.map(& &1.name) |> Enum.uniq()}
+      skipped != [] -> {:ignored, Enum.map(skipped, & &1.name)}
+      true -> {:red, []}
+    end
+  end
+
+  defp judge(_pipeline, _workspace, _repo), do: {:red, []}
+
+  defp ignored(workspace, repo) do
+    cfg = Mergers.merge_config(workspace, repo)
+    deploy = Arbiter.Workflows.DeployWatch.config(workspace, repo)
+
+    jobs = List.wrap(cfg["target_red_ignore_jobs"]) ++ if(deploy, do: deploy.jobs, else: [])
+
+    stages =
+      case cfg["target_red_stages"] do
+        l when is_list(l) -> l
+        _ -> @default_ignored_stages
+      end
+
+    {jobs, Enum.map(stages, &String.downcase(to_string(&1)))}
+  end
 
   defp describe_pipeline(base, pipeline) do
     id = Map.get(pipeline, :id)
