@@ -120,6 +120,10 @@ defmodule Arbiter.Workflows.MergeQueue do
   front, and an item ahead of it in queue order leads. At most one head merges
   per tick.
 
+  The head election (`pick`, queue order, the hand-off bounds) lives in
+  `Arbiter.Workflows.MergeHead`, shared with `Arbiter.Worker.MergeTrain`, which
+  applies the same rule to the auto-merge lane's per-ticket Watchdogs (bd-1754qj).
+
   ### Auto-update-branch
 
   An **approved** item whose PR reports `block_reason: :behind_base` (GitHub
