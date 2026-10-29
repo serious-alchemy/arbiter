@@ -2097,9 +2097,13 @@ defmodule Arbiter.Mergers.GithubTest do
   describe "branch_pipeline/3 (bd-5owt7w)" do
     defp stub_branch_runs(runs) do
       stub(fn conn ->
-        assert conn.request_path == "/repos/octo/widget/actions/runs"
-        assert conn.query_string =~ "branch=main"
-        Req.Test.json(conn, %{"workflow_runs" => runs})
+        if String.ends_with?(conn.request_path, "/jobs") do
+          Req.Test.json(conn, %{"jobs" => []})
+        else
+          assert conn.request_path == "/repos/octo/widget/actions/runs"
+          assert conn.query_string =~ "branch=main"
+          Req.Test.json(conn, %{"workflow_runs" => runs})
+        end
       end)
     end
 
@@ -2121,6 +2125,37 @@ defmodule Arbiter.Mergers.GithubTest do
 
       assert {:ok, %{status: "failed", sha: "newest", id: 11}} =
                Github.branch_pipeline(@ref, "main", %{})
+    end
+
+    test "a failed commit carries the failed runs' job-level status" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/actions/runs" ->
+            Req.Test.json(conn, %{
+              "workflow_runs" => [
+                Map.put(run(11, "newest", "completed", "failure"), "name", "CI")
+              ]
+            })
+
+          "/repos/octo/widget/actions/runs/11/jobs" ->
+            Req.Test.json(conn, %{
+              "jobs" => [
+                %{"name" => "test", "status" => "completed", "conclusion" => "success"},
+                %{"name" => "deploy-worker", "status" => "completed", "conclusion" => "failure"}
+              ]
+            })
+        end
+      end)
+
+      assert {:ok, %{status: "failed", jobs: jobs} = pipeline} =
+               Github.branch_pipeline(@ref, "main", %{})
+
+      refute Map.has_key?(pipeline, :failed_runs)
+
+      assert jobs == [
+               %{name: "test", stage: "CI", status: "success"},
+               %{name: "deploy-worker", stage: "CI", status: "failed"}
+             ]
     end
 
     test "a commit still running has no verdict: the walk reports the newest settled one" do

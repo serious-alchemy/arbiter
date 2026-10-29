@@ -410,13 +410,17 @@ defmodule Arbiter.Mergers.Merger do
   @typedoc """
   The target branch's newest *settled* pipeline, as `branch_pipeline/3` reports
   it: `:id`, head `:sha`, `:status` (GitLab's words: `success` / `failed`) and
-  `:url`.
+  `:url`. A *failed* pipeline also carries `:jobs` — `[%{name, stage, status}]`
+  — so the target-red hold can tell a failed test from a failed deploy job
+  (bd-dtbsgx); `nil`/absent when the jobs could not be read.
   """
   @type branch_pipeline :: %{
-          id: term(),
-          sha: String.t() | nil,
-          status: String.t() | nil,
-          url: String.t() | nil
+          required(:id) => term(),
+          required(:sha) => String.t() | nil,
+          required(:status) => String.t() | nil,
+          required(:url) => String.t() | nil,
+          optional(:jobs) =>
+            [%{name: String.t(), stage: String.t() | nil, status: String.t()}] | nil
         }
 
   @doc """
