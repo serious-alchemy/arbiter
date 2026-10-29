@@ -3376,7 +3376,7 @@ defmodule Arbiter.Worker do
         updated = Arbiter.Worker.ClaudeSession.handle_exit(session, status)
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
-        record_usage_event(new_state, updated, status)
+        record_usage_event(new_state, updated, updated.exit_status)
         link_guardrail_egress(new_state, updated)
         new_state = sync_session_meta(new_state, port)
 
@@ -3723,7 +3723,9 @@ defmodule Arbiter.Worker do
   defp node_interrupted?(session),
     do:
       match?(%{remote_outcome: %{node_lost?: true}}, session) or
-        match?(%{remote_outcome: %{pod_disrupted?: true}}, session)
+        match?(%{remote_outcome: %{pod_disrupted?: true}}, session) or
+        match?(%{remote_outcome: %{preempted?: true}}, session) or
+        Map.get(session, :unknown_exit_status) == true
 
   # The run ends `:interrupted` with the typed `:node_lost` cause, exactly as a server
   # shutdown ends one, so the resume machinery treats it as a run cut off from outside.
