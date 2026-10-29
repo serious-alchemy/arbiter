@@ -34,4 +34,34 @@ defmodule Arbiter.NodeAgent.K8s.RunReportTest do
 
     assert %{"reason" => "unschedulable", "message" => "0/3 nodes"} = RunReport.inventory(entry)
   end
+
+  describe "exit/2 for an interrupted pod" do
+    @entry %{run: "run-1", pod: "arb-run-1", cancelled: nil}
+
+    test "a preemption reports reason preempted, still pod_disrupted, with the scheduler message" do
+      info = %{
+        cause: :pod_disrupted,
+        preempted?: true,
+        reason: "PreemptionByScheduler",
+        message: "preempted by pod ci/runner-abc"
+      }
+
+      assert %{
+               "reason" => "preempted",
+               "preempted" => true,
+               "pod_disrupted" => true,
+               "detail" => "preempted by pod ci/runner-abc"
+             } = RunReport.exit(@entry, {:interrupted, info})
+    end
+
+    test "an eviction stays a plain pod_disrupted with no preempted flag" do
+      report =
+        RunReport.exit(@entry, {:interrupted, %{cause: :pod_disrupted, reason: "Evicted"}})
+
+      assert %{"reason" => "pod_disrupted", "pod_disrupted" => true, "detail" => "Evicted"} =
+               report
+
+      refute Map.has_key?(report, "preempted")
+    end
+  end
 end

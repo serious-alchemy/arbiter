@@ -401,6 +401,7 @@ defmodule Arbiter.Nodes.RunStreams do
         node_lost?: false
       }
       |> put_pod_disrupted(exit)
+      |> put_preempted(exit)
       |> put_checkout_failed(exit)
 
     flushed =
@@ -428,6 +429,16 @@ defmodule Arbiter.Nodes.RunStreams do
       do: Map.put(outcome, :pod_disrupted?, true),
       else: outcome
   end
+
+  # bd-bmecet: the scheduler preempted the pod. Only set when true, with the scheduler's own
+  # words, so a plain eviction or a machine exit is unchanged.
+  defp put_preempted(outcome, %{"preempted" => true} = exit) do
+    outcome
+    |> Map.put(:preempted?, true)
+    |> Map.put(:disruption_detail, exit["detail"])
+  end
+
+  defp put_preempted(outcome, _exit), do: outcome
 
   defp ended(%{owner: owner, handle: handle}, outcome, status),
     do: [

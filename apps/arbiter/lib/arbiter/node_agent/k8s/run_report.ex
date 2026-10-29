@@ -45,14 +45,17 @@ defmodule Arbiter.NodeAgent.K8s.RunReport do
   end
 
   def exit(entry, {:interrupted, info}) do
+    preempted? = info[:preempted?] == true
+
     base(entry)
     |> Map.merge(%{
       "status" => nil,
       "oom" => false,
-      "reason" => "pod_disrupted",
+      "reason" => if(preempted?, do: "preempted", else: "pod_disrupted"),
       "pod_disrupted" => true
     })
-    |> put_present("detail", info[:reason])
+    |> put_present("preempted", if(preempted?, do: true))
+    |> put_present("detail", info[:message] || info[:reason])
   end
 
   @doc "The exit of a run we deleted ourselves, when the pod's own outcome was never seen."
