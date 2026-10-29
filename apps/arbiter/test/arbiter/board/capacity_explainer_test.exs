@@ -480,4 +480,18 @@ defmodule Arbiter.Board.CapacityExplainerTest do
       assert hold.details == phrase
     end
   end
+
+  # #1126
+  describe "hold/3 for a CI-saturated repo" do
+    test "names the counts and says what keeps going" do
+      raw = "held — CI saturated (6 pending, oldest 42m)"
+      hold = CapacityExplainer.hold({:ci_saturated, "6 pending, oldest 42m"}, %{}, raw: raw)
+
+      assert hold.kind == :capacity
+      assert hold.badge == "CI saturated"
+      assert hold.summary =~ "6 pending, oldest 42m"
+      assert hold.summary =~ "Fix rounds and merges"
+      assert hold.details == raw
+    end
+  end
 end

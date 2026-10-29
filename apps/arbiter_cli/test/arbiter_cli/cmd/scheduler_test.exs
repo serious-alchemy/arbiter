@@ -199,6 +199,45 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       assert out =~ ~r/default\/vstim\s+2\s+1/
     end
 
+    # #1126
+    test "lists each CI-gated repo with its pending count, threshold and hold state" do
+      body =
+        Map.put(capacity_body(), "ci_backpressure", [
+          %{
+            "label" => "vstim",
+            "pending" => 6,
+            "oldest_pending_min" => 42,
+            "max_pending" => 4,
+            "max_oldest_pending_min" => nil,
+            "state" => "held",
+            "detail" => "6 pending, oldest 42m"
+          },
+          %{
+            "label" => "other",
+            "pending" => nil,
+            "oldest_pending_min" => nil,
+            "max_pending" => nil,
+            "max_oldest_pending_min" => 90,
+            "state" => "unknown",
+            "detail" => nil
+          }
+        ])
+
+      stub_get("/api/scheduler/status", body)
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "CI backpressure"
+      assert out =~ ~r/vstim\s+6\s+42m\s+held\s+holds at ≥4 pending/
+      assert out =~ ~r/other\s+-\s+-\s+unknown\s+holds at >90m oldest/
+    end
+
+    test "prints no CI backpressure table when no repo is gated" do
+      stub_get("/api/scheduler/status", capacity_body())
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      refute out =~ "CI backpressure"
+    end
+
     test "lists each workspace's weight, seats and share on a fair account" do
       body =
         Map.put(capacity_body(), "fair_share", [

@@ -238,4 +238,83 @@ defmodule Arbiter.Board.CiBackpressureTest do
       assert CiBackpressure.status([workspace!(nil)], opts(forge(9))) == []
     end
   end
+
+  # The default poller: the repo's own merger, per forge.
+  describe "poll/2" do
+    @env_var "CIBP_POLL_TEST_TOKEN"
+
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+    end
+
+    defp merge_ws(merge) do
+      %Workspace{
+        id: "poll-#{System.unique_integer([:positive])}",
+        name: "poll",
+        config: %{
+          "merge" => merge,
+          "repo_paths" => %{"vstim" => "/nonexistent/vstim"},
+          "worker" => %{"repos" => %{"vstim" => %{"ci_backpressure" => %{"max_pending" => 2}}}}
+        }
+      }
+    end
+
+    test "asks GitLab for the project's pending MR pipelines" do
+      ws =
+        merge_ws(%{
+          "strategy" => "gitlab",
+          "config" => %{
+            "host" => "gitlab.com",
+            "project_id" => 777,
+            "credentials_ref" => "env:#{@env_var}"
+          }
+        })
+
+      Req.Test.stub(Arbiter.Mergers.Gitlab.HTTP, fn conn ->
+        assert conn.request_path == "/api/v4/projects/777/pipelines"
+
+        body =
+          if conn.query_string =~ "status=pending",
+            do: [%{"id" => 1, "created_at" => "2026-10-29T11:00:00Z"}],
+            else: []
+
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(body)
+      end)
+
+      assert {:ok, %{pending: 1, oldest_at: ~U[2026-10-29 11:00:00Z]}} =
+               CiBackpressure.poll(ws, "vstim")
+    end
+
+    test "asks GitHub for the repo's queued pull-request runs" do
+      ws =
+        merge_ws(%{
+          "strategy" => "github",
+          "config" => %{
+            "owner" => "octo",
+            "repo" => "widget",
+            "credentials_ref" => "env:#{@env_var}"
+          }
+        })
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        assert conn.request_path == "/repos/octo/widget/actions/runs"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "total_count" => 3,
+          "workflow_runs" => [%{"id" => 1, "created_at" => "2026-10-29T10:00:00Z"}]
+        })
+      end)
+
+      assert {:ok, %{pending: 3, oldest_at: ~U[2026-10-29 10:00:00Z]}} =
+               CiBackpressure.poll(ws, "vstim")
+    end
+
+    test "a repo that merges directly has no CI queue to read: an error, so the gate fails open" do
+      ws = merge_ws(%{"strategy" => "direct"})
+      assert {:error, :ci_queue_unsupported} = CiBackpressure.poll(ws, "vstim")
+    end
+  end
 end

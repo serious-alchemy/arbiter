@@ -59,6 +59,22 @@ defmodule ArbiterCli.SchedulerState do
     end
   end
 
+  @doc """
+  The repos whose new dispatches are held for CI saturation (#1126,
+  `worker.repos.<repo>.ci_backpressure`), one line each — empty when none is, or
+  from a server that predates the gate. A repo that is clear or unread is not
+  worth a line in a briefing; `arb scheduler status` lists them all.
+  """
+  @spec ci_held_lines(map()) :: [String.t()]
+  def ci_held_lines(%{"ci_backpressure" => rows}) when is_list(rows) do
+    for %{"state" => "held"} = row <- rows do
+      detail = row["detail"] || "#{row["pending"]} pending"
+      "held — #{row["label"] || row["repo"]}: CI saturated (#{detail}); new dispatches wait"
+    end
+  end
+
+  def ci_held_lines(_body), do: []
+
   @doc "One display line per in-flight entry, oldest first as the server sent them."
   @spec entry_lines(map(), DateTime.t()) :: [String.t()]
   def entry_lines(body, now \\ DateTime.utc_now()) do

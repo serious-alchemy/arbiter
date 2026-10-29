@@ -420,6 +420,7 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("  " <> SchedulerState.headline(body))
     Enum.each(SchedulerState.entry_lines(body), &IO.puts("    " <> &1))
     emit_quota_hold(body["quota_hold"])
+    Enum.each(SchedulerState.ci_held_lines(body), &IO.puts("  " <> &1))
     emit_paused_providers(body["paused_providers"])
     IO.puts("")
   end
