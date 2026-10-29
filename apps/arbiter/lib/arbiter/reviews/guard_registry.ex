@@ -872,6 +872,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {Watchdog, :escalate_unresolved_block, 2},
         {Watchdog, :escalate_merge_unresolved, 5},
         {Watchdog, :resolve_behind_base, 1},
+        {Watchdog, :sync_behind_base, 1},
         {Watchdog, :park_at_fix_pass_cap, 2}
       ],
       anchors: ["@default_max_auto_resolve_attempts", "@default_max_fix_passes"],

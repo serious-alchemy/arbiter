@@ -42,11 +42,11 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.Watchdog, :dispatch_ci_fix_pass, 4,
      "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
        "until the operator lifts the pause — an operator safety stop, not a guard"},
-    {Arbiter.Worker.Watchdog, :ci_sync, 4,
+    {Arbiter.Worker.Watchdog, :do_ci_sync, 4,
      "#1125: a CI-remediation sync (update-branch) the forge rejected pages the coordinator " <>
        "once per head as a :conflict and holds on that head — nothing is refused or failed; " <>
        "the sync books against @max_freshness_syncs, never an auto-resolve attempt"},
-    {Arbiter.Worker.Watchdog, :freshness_sync_now, 2,
+    {Arbiter.Worker.Watchdog, :do_freshness_sync, 2,
      "bd-5z9yvb: a merge-time freshness sync (update-branch) the forge rejected pages the " <>
        "coordinator once per head as a :conflict and stays parked on that head — nothing is " <>
        "refused or failed; the sync is capped at @max_freshness_syncs"},
