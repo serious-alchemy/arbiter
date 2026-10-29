@@ -488,7 +488,8 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {ReviewGate, :do_route_after_reject, 2},
         {ReviewGate, :terminal_reject_verdict, 1},
         {ReviewGate, :escalate_fabricated_evidence, 2},
-        {ReviewGate, :escalate_coordinator_only, 2}
+        {ReviewGate, :escalate_coordinator_only, 2},
+        {ReviewGate, :escalate_repeat_unmet, 3}
       ],
       anchors: [
         "@default_rounds",

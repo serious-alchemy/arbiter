@@ -122,6 +122,9 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
       (`Arbiter.Worker.CoordinatorOnlyFindings`, bd-6d3h8m) — e.g. a criterion
       that can only be verified post-merge or post-deploy. Another implementer
       round cannot fix what the reviewer already says it cannot fix.
+    * `:repeat_unmet_criterion` — a criterion was `[NOT MET]` on two
+      consecutive rounds (`Arbiter.Worker.RepeatUnmetCriterion`, bd-hrhkzj), so
+      another implementer round is not moving it. The coordinator judges it.
     * `{:quota_held, hold}` — not a give-up (bd-6omte4): the quota gate held
       the round. It is queued in the workspace's
       `Arbiter.Workflows.DispatchQueue` and resumes, same round number and
@@ -137,6 +140,7 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
           | {:no_target_ref, String.t()}
           | :fabricated_evidence
           | :needs_coordinator
+          | :repeat_unmet_criterion
           | {:dispatch_failed, term()}
           | {:quota_held, held_round()}
 
@@ -424,6 +428,10 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     do:
       "#{task_id}: ReviewGate findings need coordinator/operator action — no automatic fix round"
 
+  defp subject(task_id, _attempts, :repeat_unmet_criterion, _total_reviews),
+    do:
+      "#{task_id}: ReviewGate criterion unmet on two consecutive rounds — no automatic fix round"
+
   defp subject(task_id, _attempts, {:quota_held, hold}, _total_reviews) do
     "#{task_id}: ReviewGate fix round #{hold.attempt} held for quota on " <>
       "#{provider_name(hold)} (#{hold.reason}), will resume"
@@ -528,6 +536,21 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     Read the findings (`review_gate_rounds_list #{task_id}`) and either verify
     the criterion yourself (a deploy, a live check) and mark it resolved, or
     decide the acceptance criteria need revising.
+    """
+  end
+
+  defp body(task_id, attempts, :repeat_unmet_criterion, _total_reviews) do
+    """
+    Task #{task_id} was rejected by the ReviewGate with a `[NOT MET]` criterion
+    that the previous round had already flagged `[NOT MET]`. #{attempts}
+    automatic fix round(s) had run.
+
+    No fix round was dispatched: the implementer's last pass did not move the
+    criterion, so another one is unlikely to. The escalation names the
+    criterion, both reviewer reasons and the implementer's response in between.
+
+    Decide whether the evidence already satisfies the criterion (accept it as
+    is), the criterion needs amending, or the work needs a different approach.
     """
   end
 

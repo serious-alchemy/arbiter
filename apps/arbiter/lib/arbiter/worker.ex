@@ -137,6 +137,7 @@ defmodule Arbiter.Worker do
   alias Arbiter.Worker.OsProcess
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.Registry, as: PRegistry
+  alias Arbiter.Worker.RepeatUnmetCriterion
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Workflows.DispatchQueue
   alias Arbiter.Workflows.ReviewGateFixRoundDispatcher, as: FixRound
@@ -8728,8 +8729,11 @@ defmodule Arbiter.Worker do
       # fix round can't make progress on something the reviewer already said
       # it can't fix — on bd-28t80i this ran 4 implementer passes against the
       # same "needs deploy" AC3 gap before escalating anyway.
-      CoordinatorOnlyFindings.escalation?(findings) ->
-        give_up_fix_round(dispatcher, state, attempts, :needs_coordinator)
+      #
+      # bd-hrhkzj: likewise a criterion `[NOT MET]` on two consecutive rounds;
+      # the gate already parked it for the coordinator.
+      reason = coordinator_park_reason(findings) ->
+        give_up_fix_round(dispatcher, state, attempts, reason)
 
       attempts >= cap ->
         give_up_fix_round(dispatcher, state, attempts, :budget_exhausted)
@@ -8753,6 +8757,14 @@ defmodule Arbiter.Worker do
   end
 
   defp maybe_dispatch_fix_round(%State{}, _verdict, _findings), do: :ok
+
+  defp coordinator_park_reason(findings) do
+    cond do
+      CoordinatorOnlyFindings.escalation?(findings) -> :needs_coordinator
+      RepeatUnmetCriterion.escalation?(findings) -> :repeat_unmet_criterion
+      true -> nil
+    end
+  end
 
   # The dispatch itself must not run in this process: `Dispatch.resume/2` stops
   # the task's lingering `:failed` worker — us — as its first act. Hand it to the
