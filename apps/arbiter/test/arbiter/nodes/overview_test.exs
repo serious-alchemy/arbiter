@@ -121,6 +121,31 @@ defmodule Arbiter.Nodes.OverviewTest do
              } = row(Overview.build(), "kube")
     end
 
+    # bd-bmecet: a node whose placement was just failed over is ranked last for a while.
+    test "a cluster row is constrained while a failed-over placement cools down" do
+      node = enroll!("kube")
+
+      {:ok, %{pid: pid}} =
+        Registry.attach(node, self(), cluster_hello(%{}),
+          tick_ms: :infinity,
+          ack_timeout_ms: 0,
+          stalled_cooldown_ms: 60_000
+        )
+
+      refute row(Overview.build(), "kube").constrained?
+
+      owner = self()
+
+      task =
+        Task.async(fn -> Arbiter.Nodes.Session.assign(pid, "r1", %{"run" => "r1"}, owner) end)
+
+      assert_receive {:node_session, {:push, "assign", _}}
+      Arbiter.Nodes.Session.tick(pid)
+      assert {:error, {:refused, "unacknowledged", _}} = Task.await(task)
+
+      assert row(Overview.build(), "kube").constrained?
+    end
+
     test "a cluster row carries the node's readiness checks" do
       node = enroll!("kube")
 

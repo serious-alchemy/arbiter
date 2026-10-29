@@ -96,6 +96,14 @@ defmodule Arbiter.Nodes.Session do
   @default_prepare_timeout_ms 25 * 60_000
   @default_hold_ms 150_000
   @default_adopt_timeout_ms 30_000
+  # bd-bmecet: a cluster node must show a placed run (`hb.runs`) within this long, and a run
+  # it reports `pending` (unscheduled) must start within this long; past either, the
+  # placement is failed over as a hold (`Arbiter.Nodes.Refusal`). The controller's own
+  # `schedule_s` (120 s) refusal comes first when it is alive; these are the primary's
+  # backstop for a controller that lost the request (a restart, a dead channel).
+  @default_ack_timeout_ms 120_000
+  @default_pending_timeout_ms 300_000
+  @default_stalled_cooldown_ms 300_000
 
   defstruct [
     :node_id,
@@ -127,8 +135,16 @@ defmodule Arbiter.Nodes.Session do
       capacity: nil,
       prepare_timeout_ms: @default_prepare_timeout_ms,
       hold_ms: @default_hold_ms,
-      adopt_timeout_ms: @default_adopt_timeout_ms
+      adopt_timeout_ms: @default_adopt_timeout_ms,
+      ack_timeout_ms: @default_ack_timeout_ms,
+      pending_timeout_ms: @default_pending_timeout_ms,
+      stalled_cooldown_ms: @default_stalled_cooldown_ms
     },
+    # bd-bmecet: runs still waiting on the node to start them (`run => %{at, stage, stage_at,
+    # message}`, monotonic ms) and, once a placement was failed over, until when the node is
+    # ranked last for new placements.
+    placing: %{},
+    stalled_until: nil,
     allow_skew?: false,
     state: :online,
     fenced?: false,
@@ -456,6 +472,7 @@ defmodule Arbiter.Nodes.Session do
         :adopt_timeout_ms,
         Keyword.get(opts, :adopt_timeout_ms, @default_adopt_timeout_ms)
       )
+      |> put_placement_budgets(opts)
 
     {:ok, state |> schedule_tick() |> schedule_reap()}
   end
@@ -475,6 +492,7 @@ defmodule Arbiter.Nodes.Session do
     # `recover` quiesces it and takes its work, and `hold_ms` bounds the wait.
     ids = params |> hello_run_list() |> Hello.run_ids()
     state = release_gone_holds(state, ids)
+    state = fail_unknown_placements(state, ids)
     {verdicts, state} = hello_verdicts(state, ids)
 
     # Runs we hold that the agent no longer has are over; cancels it may have
@@ -525,10 +543,19 @@ defmodule Arbiter.Nodes.Session do
 
         bridges = bridge_map(spec)
 
+        now = state.clock.()
+
         state = %{
           state
           | streams: RunStreams.open(state.streams, run, handle, owner, from, bridges),
-            checkouts: put_checkout(state.checkouts, run, Keyword.get(opts, :checkout))
+            checkouts: put_checkout(state.checkouts, run, Keyword.get(opts, :checkout)),
+            placing:
+              Map.put(state.placing, run, %{
+                at: now,
+                stage: :assigned,
+                stage_at: now,
+                message: nil
+              })
         }
 
         notify_channel(state, {:push, "assign", %{"run" => run, "spec" => spec}})
@@ -1264,6 +1291,24 @@ defmodule Arbiter.Nodes.Session do
 
   defp put_info(state, key, value), do: %{state | info: Map.put(state.info, key, value)}
 
+  # `config :arbiter, :node_placement, ack_timeout_ms:, pending_timeout_ms:,
+  # stalled_cooldown_ms:`; the session's own opts win (tests).
+  defp put_placement_budgets(state, opts) do
+    env = Application.get_env(:arbiter, :node_placement, [])
+
+    Enum.reduce(
+      [
+        ack_timeout_ms: @default_ack_timeout_ms,
+        pending_timeout_ms: @default_pending_timeout_ms,
+        stalled_cooldown_ms: @default_stalled_cooldown_ms
+      ],
+      state,
+      fn {key, default}, acc ->
+        put_info(acc, key, Keyword.get(opts, key, Keyword.get(env, key, default)))
+      end
+    )
+  end
+
   defp kind("cluster"), do: "cluster"
   defp kind(_), do: "machine"
 
@@ -1545,8 +1590,9 @@ defmodule Arbiter.Nodes.Session do
       {run, %{"state" => "running"}}, acc ->
         apply_streams(acc, RunStreams.report_running(acc.streams, run))
 
-      {run, %{"state" => word}}, acc when is_binary(word) ->
-        %{acc | streams: RunStreams.report_stage(acc.streams, run, word)}
+      {run, %{"state" => word} = report}, acc when is_binary(word) ->
+        acc = %{acc | streams: RunStreams.report_stage(acc.streams, run, word)}
+        track_stage(acc, run, word, report["message"])
 
       _other, acc ->
         acc
@@ -1574,10 +1620,115 @@ defmodule Arbiter.Nodes.Session do
 
     case Liveness.classify(t, silence) do
       :lost -> {:stop, state |> fence(silence) |> lose(silence)}
-      :suspect -> {:cont, state |> suspect() |> fence(silence)}
-      :online -> {:cont, state}
+      :suspect -> {:cont, state |> suspect() |> fence(silence) |> check_placements()}
+      :online -> {:cont, check_placements(state)}
     end
   end
+
+  # ---- placement watchdogs (bd-bmecet) -------------------------------------------
+
+  # A cluster node's `hb.runs` word for a placed run: remember when the stage began (and the
+  # scheduler's words while pending), so a run that sits in one stage can be failed over.
+  defp track_stage(state, run, word, message) when word in ~w(pending starting) do
+    stage = String.to_existing_atom(word)
+
+    case state.placing do
+      %{^run => %{stage: ^stage} = entry} ->
+        put_placing(state, run, %{entry | message: message || entry.message})
+
+      %{^run => entry} ->
+        entry = %{entry | stage: stage, stage_at: state.clock.(), message: message}
+        put_placing(state, run, entry)
+
+      _ ->
+        state
+    end
+  end
+
+  defp track_stage(state, _run, _word, _message), do: state
+
+  defp put_placing(state, run, entry), do: %{state | placing: Map.put(state.placing, run, entry)}
+
+  # Fail over a placement that is not getting anywhere. Cluster nodes only (a machine node's
+  # per-run phases are its own). An entry whose run has started, ended or is gone is dropped.
+  defp check_placements(%{info: %{kind: "cluster"}, placing: placing} = state)
+       when map_size(placing) > 0 do
+    now = state.clock.()
+
+    Enum.reduce(placing, state, fn {run, entry}, acc ->
+      case RunStreams.fetch(acc.streams, run) do
+        {:ok, %{state: :assigned, waiter: waiter}} when not is_nil(waiter) ->
+          case stalled(entry, now, acc.info) do
+            nil -> acc
+            {reason, detail} -> fail_placement(acc, run, reason, detail, now)
+          end
+
+        _ ->
+          %{acc | placing: Map.delete(acc.placing, run)}
+      end
+    end)
+  end
+
+  defp check_placements(state), do: state
+
+  defp stalled(%{stage: :assigned, at: at}, now, info) when now - at >= info.ack_timeout_ms do
+    {"unacknowledged",
+     "the node's controller did not acknowledge the assignment within " <>
+       "#{div(info.ack_timeout_ms, 1000)}s (controller unreachable, or the request was lost " <>
+       "across its restart); no pod was reported"}
+  end
+
+  defp stalled(%{stage: :pending, stage_at: at, message: message}, now, info)
+       when now - at >= info.pending_timeout_ms do
+    {"unschedulable",
+     "the pod was still Pending after #{div(info.pending_timeout_ms, 1000)}s" <>
+       if(message in [nil, ""], do: "", else: ": " <> message)}
+  end
+
+  defp stalled(_entry, _now, _info), do: nil
+
+  # The placement never reached a live pod. The waiting Worker is told the node refused the
+  # run (a hold, `Arbiter.Nodes.Refusal`: the run never started, so nothing failed), the node is
+  # asked to drop whatever it may yet create for it, and the node is ranked last for new
+  # placements for a while so the retry goes to another node or local.
+  defp fail_placement(state, run, reason, detail, now) do
+    case RunStreams.fetch(state.streams, run) do
+      {:ok, %{waiter: waiter}} when not is_nil(waiter) ->
+        GenServer.reply(waiter, {:error, {:refused, reason, detail}})
+        {streams, effects} = RunStreams.cancel(state.streams, run, "placement_timeout")
+
+        record(state, :placement_stalled, %{"run" => run, "reason" => reason, "detail" => detail})
+
+        state = %{state | streams: streams, stalled_until: now + state.info.stalled_cooldown_ms}
+        state = state |> run_effects(effects) |> drop_run(run)
+        %{state | placing: Map.delete(state.placing, run)}
+
+      _ ->
+        state
+    end
+  end
+
+  # A cluster node that reconnects without a run still waiting to be started lost the request
+  # (its controller restarted): hold it now rather than wait out a watchdog.
+  defp fail_unknown_placements(%{info: %{kind: "cluster"}} = state, ids) do
+    now = state.clock.()
+
+    for {run, _entry} <- state.placing, run not in ids, reduce: state do
+      acc ->
+        detail =
+          "the node's controller reconnected without the run (it restarted and lost the " <>
+            "assignment); no pod was reported"
+
+        fail_placement(acc, run, "placement_lost", detail, now)
+    end
+  end
+
+  defp fail_unknown_placements(state, _ids), do: state
+
+  defp placement_stalled?(%{stalled_until: until} = state) when is_integer(until),
+    do: state.clock.() < until
+
+  defp placement_stalled?(_state), do: false
 
   defp suspect(%{state: :suspect} = state), do: state
 
@@ -1663,6 +1814,7 @@ defmodule Arbiter.Nodes.Session do
       free_mem: state.free_mem,
       load: state.load,
       pressure: state.info.pressure,
+      placement_stalled?: placement_stalled?(state),
       silence_ms: state.clock.() - state.last_hb
     }
   end

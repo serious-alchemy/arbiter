@@ -19,7 +19,8 @@ defmodule Arbiter.Nodes.RefusalTest do
 
   # K14: `service_not_ready` (a crash-looping test-service sidecar, K§3.3) is the cluster
   # controller's fifth refusal; the run never started, so it is a hold like the others.
-  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready)
+  # bd-bmecet adds the primary's own two: a placement the controller never acknowledged or lost.
+  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready unacknowledged placement_lost)
 
   describe "from_start_error/1" do
     test "recognises a refusal as the spawn error carries it" do
