@@ -168,8 +168,9 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                             branch's pipeline that do not count as "target red" (the repo's
                             deploy_watch jobs are always ignored). target_red_stages: list of
                             stage names ignored the same way (default ["deploy", "release"]).
-      up_to_date_tolerance  non-negative integer — commits of the target a branch may lack and
-                            still merge unsynced (default: 0 = sync for any). Trade-off: a higher
+      up_to_date_tolerance  non-negative integer — first-parent target commits (about one per
+                            merged PR, not per commit inside it) a branch may lack and still
+                            merge unsynced (default: 0 = sync for any). Trade-off: a higher
                             value avoids a sync pipeline per unrelated target commit, at the cost
                             of merging a combination CI never ran, so only raise it where main
                             runs the tests.

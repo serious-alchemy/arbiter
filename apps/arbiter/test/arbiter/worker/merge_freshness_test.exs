@@ -68,8 +68,69 @@ defmodule Arbiter.Worker.MergeFreshnessTest do
       assert {:ok, 1} = Arbiter.Mergers.LocalCompare.behind_by(clone, "main", feat)
     end
 
+    test "counts first-parent target commits: a merged 6-commit branch is one", %{clone: clone} do
+      base = rev(clone, "feat")
+      merge_feature_into_main(clone, "f1", 6)
+
+      assert {:ok, 1} = Arbiter.Mergers.LocalCompare.behind_by(clone, "main", base)
+    end
+
+    test "tolerance counts merged MRs, not their commits", %{clone: clone} do
+      base = rev(clone, "feat")
+      ws = ws(%{"merge" => %{"up_to_date_tolerance" => 1}})
+
+      merge_feature_into_main(clone, "f1", 6)
+      assert :fresh = real_check(ws, clone, base)
+
+      merge_feature_into_main(clone, "f2", 6)
+      assert {:stale, 2} = real_check(ws, clone, base)
+    end
+
+    test "tolerance 0 syncs for any missing target commit", %{clone: clone} do
+      base = rev(clone, "feat")
+      merge_feature_into_main(clone, "f1", 3)
+
+      assert {:stale, 1} = real_check(ws(%{}), clone, base)
+    end
+
+    test "direct commits on the target each count", %{clone: clone} do
+      base = rev(clone, "feat")
+      git(clone, ["checkout", "main"])
+
+      for n <- 1..3 do
+        File.write!(Path.join(clone, "d#{n}"), "1")
+        git(clone, ["add", "."])
+        git(clone, ["commit", "-m", "direct#{n}"])
+      end
+
+      git(clone, ["push", "origin", "main"])
+
+      assert {:ok, 3} = Arbiter.Mergers.LocalCompare.behind_by(clone, "main", base)
+    end
+
     test "an unusable repo is an error, never 'fresh'" do
       assert {:error, _} = Arbiter.Mergers.LocalCompare.behind_by(nil, "main", "abc1234")
+    end
+
+    # test_helper stubs the probe globally (and the env is shared across async
+    # tests), so apply `check/4`'s comparison to the real git count directly.
+    defp real_check(ws, clone, base) do
+      {:ok, n} = Arbiter.Mergers.LocalCompare.behind_by(clone, "main", base)
+      if n > MergeFreshness.tolerance(ws), do: {:stale, n}, else: :fresh
+    end
+
+    defp merge_feature_into_main(clone, name, commits) do
+      git(clone, ["checkout", "-b", name, "main"])
+
+      for n <- 1..commits do
+        File.write!(Path.join(clone, "#{name}-#{n}"), "1")
+        git(clone, ["add", "."])
+        git(clone, ["commit", "-m", "#{name} #{n}"])
+      end
+
+      git(clone, ["checkout", "main"])
+      git(clone, ["merge", "--no-ff", "-m", "merge #{name}", name])
+      git(clone, ["push", "origin", "main"])
     end
 
     defp rev(clone, ref) do
