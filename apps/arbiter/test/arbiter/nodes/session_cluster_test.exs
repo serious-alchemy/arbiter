@@ -321,6 +321,153 @@ defmodule Arbiter.Nodes.SessionClusterTest do
     end
   end
 
+  # bd-bmecet: a placement that never reaches a live pod is failed over as a hold, not left to
+  # hang "placing". The stubbed controller here is the test itself, pushing nothing (it dropped
+  # the request) or a pending report (the scheduler cannot place the pod).
+  describe "placement watchdogs (bd-bmecet)" do
+    @ack_ms 120_000
+    @pending_ms 300_000
+
+    # A session on a clock the test advances.
+    defp attach_timed(node, params) do
+      {:ok, clock} = Agent.start_link(fn -> 0 end)
+      now = fn -> Agent.get(clock, & &1) end
+      advance = fn ms -> Agent.update(clock, &(&1 + ms)) end
+
+      {:ok, %{pid: pid}} =
+        attach(node, params,
+          clock: now,
+          ack_timeout_ms: @ack_ms,
+          pending_timeout_ms: @pending_ms,
+          stalled_cooldown_ms: 60_000
+        )
+
+      {pid, advance}
+    end
+
+    test "a controller that drops the request: held as unacknowledged, and the node cancelled",
+         %{node: node} do
+      {pid, advance} = attach_timed(node, cluster_hello())
+      task = assign(pid, "r1")
+
+      # nothing from the node, but heartbeats keep it alive
+      advance.(@ack_ms - 10_000)
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 1, "runs" => %{}})
+      Session.tick(pid)
+      refute_receive {:node_session, {:push, "cancel", _}}, 20
+
+      advance.(10_000)
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 2, "runs" => %{}})
+      Session.tick(pid)
+
+      assert {:error, {:refused, "unacknowledged", detail}} = Task.await(task)
+      assert detail =~ "did not acknowledge"
+      assert detail =~ "120s"
+
+      assert_receive {:node_session,
+                      {:push, "cancel", %{"run" => "r1", "reason" => "placement_timeout"}}}
+
+      assert Session.run_stage(pid, "r1") == nil
+      assert %{placement_stalled?: true} = Session.snapshot(pid)
+    end
+
+    test "the held reason maps through Refusal to a hold naming the cause", %{node: node} do
+      {pid, advance} = attach_timed(node, cluster_hello())
+      task = assign(pid, "r1")
+      advance.(@ack_ms)
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 1, "runs" => %{}})
+      Session.tick(pid)
+
+      {:error, placement_error} = Task.await(task)
+
+      assert {:ok, %{reason: "unacknowledged", detail: detail}} =
+               Arbiter.Nodes.Refusal.from_start_error(
+                 {:claude_start_failed, {:remote_placement_failed, placement_error}}
+               )
+
+      assert detail =~ "controller"
+    end
+
+    test "a pod stuck Pending: held as unschedulable with the scheduler's message", %{node: node} do
+      {pid, advance} = attach_timed(node, cluster_hello())
+      task = assign(pid, "r1")
+
+      message = "0/3 nodes are available: 3 Insufficient cpu."
+
+      pending = %{
+        "r1" => %{"state" => "pending", "reason" => "unschedulable", "message" => message}
+      }
+
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 1, "runs" => pending})
+      assert Session.run_stage(pid, "r1") == :pending
+
+      # past the ack budget, but the node did acknowledge: not a lost request
+      advance.(@ack_ms + 1_000)
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 2, "runs" => pending})
+      Session.tick(pid)
+      assert Session.run_stage(pid, "r1") == :pending
+
+      advance.(@pending_ms)
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 3, "runs" => pending})
+      Session.tick(pid)
+
+      assert {:error, {:refused, "unschedulable", detail}} = Task.await(task)
+      assert detail =~ "Pending"
+      assert detail =~ message
+
+      assert_receive {:node_session,
+                      {:push, "cancel", %{"run" => "r1", "reason" => "placement_timeout"}}}
+    end
+
+    test "a run that starts in time is left alone", %{node: node} do
+      {pid, advance} = attach_timed(node, cluster_hello())
+      task = assign(pid, "r1")
+
+      {:ok, _} =
+        Session.heartbeat(pid, %{"seq" => 1, "runs" => %{"r1" => %{"state" => "starting"}}})
+
+      Session.node_event(pid, "run.ready", %{"run" => "r1"})
+      assert {:ok, _} = Task.await(task)
+
+      advance.(@pending_ms * 2)
+
+      {:ok, _} =
+        Session.heartbeat(pid, %{"seq" => 2, "runs" => %{"r1" => %{"state" => "running"}}})
+
+      Session.tick(pid)
+
+      refute_receive {:node_session, {:push, "cancel", _}}, 50
+      assert Session.run_live?(pid, "r1")
+      assert %{placement_stalled?: false} = Session.snapshot(pid)
+    end
+
+    test "a controller that reconnects without the run (a restart) is held at once", %{
+      node: node
+    } do
+      {pid, _advance} = attach_timed(node, cluster_hello())
+      task = assign(pid, "r1")
+
+      {:ok, %{pid: ^pid}} = Registry.attach(node, self(), cluster_hello(), tick_ms: :infinity)
+
+      assert {:error, {:refused, "placement_lost", detail}} = Task.await(task)
+      assert detail =~ "restarted"
+    end
+
+    test "a machine node is not subject to the cluster watchdogs", %{node: node} do
+      {pid, advance} = attach_timed(node, hello())
+      task = assign(pid, "r1")
+
+      advance.(@pending_ms * 2)
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 1})
+      Session.tick(pid)
+
+      refute_receive {:node_session, {:push, "cancel", _}}, 50
+      assert Session.run_stage(pid, "r1") == :assigned
+      Session.node_event(pid, "run.ready", %{"run" => "r1"})
+      assert {:ok, _} = Task.await(task)
+    end
+  end
+
   describe "machine nodes are unchanged (no regression)" do
     test "a machine hb naming a phase 'running' does not answer or re-stage a pending assign",
          %{node: node} do

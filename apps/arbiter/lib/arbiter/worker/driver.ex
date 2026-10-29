@@ -669,7 +669,7 @@ defmodule Arbiter.Worker.Driver do
     |> Ash.read!()
     |> case do
       [%{outcome: :interrupted, stop_category: category}]
-      when category in ["node_lost", "pod_disrupted"] ->
+      when category in ["node_lost", "pod_disrupted", "preempted"] ->
         true
 
       _ ->

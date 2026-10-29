@@ -165,6 +165,35 @@ defmodule Arbiter.Worker.NodeLostTest do
              |> Ash.read!()
   end
 
+  # bd-bmecet: a scheduler preemption is its own cause, not "node lost", and still costs no attempt.
+  test "a preempted exit ends the run interrupted as preempted, with no resume attempt consumed",
+       %{pid: pid, task_id: task_id, dir: dir} do
+    lose_node(pid, dir, %{
+      oom?: false,
+      exit_code: nil,
+      cancelled?: false,
+      node_lost?: false,
+      pod_disrupted?: true,
+      preempted?: true,
+      disruption_detail: "preempted by pod ci/runner-abc on node aginor"
+    })
+
+    snap = wait_finished(pid)
+    assert %{state: :finished, outcome: :interrupted} = snap
+    assert snap.meta.stop_reason.category == :preempted
+    assert snap.meta.stop_reason.summary =~ "preempted by pod ci/runner-abc on node aginor"
+    assert snap.meta.failure_reason =~ "preempted"
+    refute snap.meta.failure_reason =~ "node lost"
+    assert Map.get(snap.meta, :resume_attempts, 0) == 0
+
+    run = Ash.get!(Run, snap.run_id)
+    assert run.outcome == :interrupted
+    assert run.stop_category == "preempted"
+
+    assert_receive {:resumed, ^task_id}, 2_000
+    refute_receive {:resumed, _}, 100
+  end
+
   test "a pod_disrupted: false outcome (any machine exit) is unchanged", %{pid: pid, dir: dir} do
     lose_node(pid, dir, %{
       oom?: false,

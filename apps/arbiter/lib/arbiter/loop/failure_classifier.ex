@@ -160,6 +160,8 @@ defmodule Arbiter.Loop.FailureClassifier do
     node_lost: {:operational, :node_lost},
     # K12: a cluster took the pod away (A5), or a node refused the placement (A3).
     pod_disrupted: {:operational, :pod_disrupted},
+    # bd-bmecet: the scheduler preempted the pod: cluster contention, not the agent or a node.
+    preempted: {:operational, :preempted},
     placement_refused: {:operational, :placement_refused},
     # bd-az8ycn: the worker jail's egress proxy refused a qwen connection. The
     # allowlist is the cause, never the agent's work.

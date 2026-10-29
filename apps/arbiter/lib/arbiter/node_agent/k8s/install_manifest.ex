@@ -7,7 +7,8 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
   Two parts, applied in order (`?part=bootstrap|node`, default both):
 
     * **bootstrap** (needs cluster-admin once): the `Namespace` with Pod Security
-      `restricted`, the never-preempting `PriorityClass`, the `ResourceQuota` and
+      `restricted`, the workers' never-preempting `PriorityClass` and the controller's own
+      (above them, bd-bmecet), the `ResourceQuota` and
       `LimitRange`, the four `NetworkPolicy` objects of K§9.1 and, with
       `?admission=policy`, the `ValidatingAdmissionPolicy` and its binding
       (`Arbiter.NodeAgent.K8s.AdmissionPolicy`).
@@ -393,7 +394,9 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
 
     %{
       bootstrap:
-        [namespace(spec), priority_class(), quota(spec), limit_range(spec)] ++
+        [namespace(spec)] ++
+          priority_classes() ++
+          [quota(spec), limit_range(spec)] ++
           network_policies(spec, server) ++ admission(spec, server),
       node: [
         service_account("arbiter-controller", spec.namespace, true),
@@ -615,7 +618,25 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifest do
     }
   end
 
-  defp priority_class do
+  # The workers' class (never preempts, below everything else) and the controller's own
+  # (bd-bmecet): above batch CI and above the workers', so losing the controller, and with it
+  # every run on the node, is not what a contended cluster does first.
+  defp priority_classes, do: [worker_priority_class(), controller_priority_class()]
+
+  defp controller_priority_class do
+    %{
+      "apiVersion" => "scheduling.k8s.io/v1",
+      "kind" => "PriorityClass",
+      "metadata" => %{"name" => ControllerManifest.priority_class()},
+      "value" => 1000,
+      "preemptionPolicy" => "PreemptLowerPriority",
+      "globalDefault" => false,
+      "description" =>
+        "Arbiter node controller: losing it interrupts every run on the node, so it outranks batch work."
+    }
+  end
+
+  defp worker_priority_class do
     %{
       "apiVersion" => "scheduling.k8s.io/v1",
       "kind" => "PriorityClass",

@@ -36,6 +36,7 @@ defmodule Arbiter.Nodes.NodeEvent do
     :upgraded,
     :fenced,
     :node_lost,
+    :placement_stalled,
     :checkout_rejected,
     :retained,
     :recovered,

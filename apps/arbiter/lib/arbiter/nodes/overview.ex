@@ -264,6 +264,8 @@ defmodule Arbiter.Nodes.Overview do
 
   # A3: `hb.capacity.constrained` / `.pending` (cluster nodes only; machines never send it).
   defp constrained?(%{node_capacity: %{"constrained" => true}}), do: true
+  # bd-bmecet: a placement on this node was just failed over; rank it last for a while.
+  defp constrained?(%{placement_stalled?: true}), do: true
   defp constrained?(_snapshot), do: false
 
   defp pending(%{node_capacity: %{"pending" => n}}) when is_integer(n) and n >= 0, do: n

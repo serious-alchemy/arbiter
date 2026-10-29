@@ -169,7 +169,19 @@ anything else they keep `hostUsers: false`. For the admission policy, install wi
 
 * PriorityClass: create the one in the install manifest (`value: -100`,
   `preemptionPolicy: Never`) or set `placement.priority_class` in
-  `arbiter-controller-config` to one that exists.
+  `arbiter-controller-config` to one that exists. The controller Deployment has its own,
+  `arbiter-controller` (also in the install manifest); upgrading an older node needs that
+  class to exist first (`helm upgrade` the bootstrap release, or apply the manifest's
+  `PriorityClass` documents), or the Deployment's new pod is refused.
+* A placement that never reaches a live pod is no longer left "placing": the primary holds
+  it (the run is `interrupted`/`placement_refused`, the ticket re-queued, no resume attempt
+  used) when the controller does not acknowledge the assignment within 120 s
+  (`unacknowledged`), reconnects without it (`placement_lost`), or leaves the pod `Pending`
+  for 300 s (`unschedulable`, with the scheduler's message). `arb worker show <task>` names the
+  cause. Tune with `config :arbiter, :node_placement, ack_timeout_ms:, pending_timeout_ms:,
+  stalled_cooldown_ms:`. The failed-over node is ranked last for `stalled_cooldown_ms` (300 s).
+* A worker pod the scheduler preempts reports `preempted` (with the scheduler's message),
+  not `node lost`: cluster contention, not a node failure. No resume attempt is consumed.
 * ResourceQuota: apply the install manifest's quota (sized for `max_concurrent`).
   "no room" means pods are running or pending against it; `assign` is refused
   `no_capacity` until one finishes.
@@ -224,7 +236,13 @@ it". Each step has a pass criterion; stop at the first that fails.
    workers from starving vstim prod and CI.
 4. **Low priority.** Create the PriorityClass `arbiter-worker` with `value: -100` and
    `preemptionPolicy: Never`. **Pass:** `kubectl get priorityclass arbiter-worker`
-   shows `-100`. Workers must never preempt anything else.
+   shows `-100`. Workers must never preempt anything else. Also create the controller's
+   own class `arbiter-controller` (`value: 1000`, `preemptionPolicy: PreemptLowerPriority`),
+   which the controller Deployment references: the controller must **not** share the
+   workers' `-100`, or a busy cluster (CI pods at priority 0) preempts it first, the node
+   counts as lost and every run on it is interrupted (mesaana, 2026-10-29). `PreemptLowerPriority`
+   lets a rescheduled controller make room on a full cluster; set `Never` if it must not
+   evict anything. **Pass:** `kubectl get priorityclass arbiter-controller` shows `1000`.
 5. **NetworkPolicies.** Apply `default-deny`, `worker-to-controller`,
    `controller-ingress-from-workers` and `controller-egress` from the install manifest
    (fill the `controller-egress` addresses: the API node IP, the `kubernetes` ClusterIP).
@@ -328,7 +346,8 @@ does not roll the pod: the controller re-reads `controller.yaml` every 30 s.
 **Uninstall.** `arb node drain <name>`, `arb node revoke <name>`, then `helm uninstall
 <node> -n arbiter-workers` (and `<node>-bootstrap` if split). Helm leaves the Secrets you
 created, the namespace, and a PriorityClass another install still uses (set
-`placement.priorityClass.create=false` on every install after the first on a cluster).
+`placement.priorityClass.create=false` and `controller.priorityClass.create=false` on every
+install after the first on a cluster).
 Delete the namespace afterwards if nothing else lives in it.
 
 **Migrating from the raw manifests.** Re-install: remove the raw objects (delete the

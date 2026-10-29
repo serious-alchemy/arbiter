@@ -3743,6 +3743,16 @@ defmodule Arbiter.Worker do
           "node #{name} lost"
         )
 
+      %{remote_outcome: %{preempted?: true} = outcome} ->
+        detail = outcome[:disruption_detail]
+
+        interrupt_for_node(
+          state,
+          Arbiter.Worker.StopReason.preempted(name, detail),
+          "preempted: #{name}" <> if(detail in [nil, ""], do: "", else: " (#{detail})"),
+          "pod preempted on node #{name}"
+        )
+
       _pod_disrupted ->
         interrupt_for_node(
           state,

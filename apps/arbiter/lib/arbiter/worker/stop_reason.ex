@@ -249,6 +249,7 @@ defmodule Arbiter.Worker.StopReason do
           | :model_unavailable
           | :node_lost
           | :pod_disrupted
+          | :preempted
           | :placement_refused
           | :egress_denied
 
@@ -1261,6 +1262,33 @@ defmodule Arbiter.Worker.StopReason do
   end
 
   @doc """
+  Build a `:preempted` reason (bd-bmecet): the cluster's scheduler preempted the pod this run
+  was placed on to make room for a higher-priority pod. Cluster contention, **not a node
+  failure**: the node and its controller are fine. `detail` is the scheduler's own message
+  (naming the preempting pod) when the pod's status carried one. Same policy as `node_lost`:
+  **interrupted, not failed, no resume attempt consumed**, re-dispatched through placement.
+  """
+  @spec preempted(String.t(), String.t() | nil) :: t()
+  def preempted(node_name, detail) when is_binary(node_name) do
+    %__MODULE__{
+      category: :preempted,
+      summary:
+        "preempted: the pod this run was placed on at #{node_name} was preempted by the " <>
+          "cluster scheduler#{detail_suffix(detail)} (cluster contention, not a node failure); " <>
+          "the run was interrupted (not failed) and any work since its last checkpoint is " <>
+          "only recoverable from that checkpoint",
+      remediation:
+        "Nothing to fix in the task. The run resumes from the last checkpoint in the home " <>
+          "clone, on another node or locally, without consuming a resume attempt. If it keeps " <>
+          "happening, the cluster is busy with higher-priority pods: raise the worker " <>
+          "PriorityClass above the competing workload or give the node more capacity " <>
+          "(`arb node show #{node_name}`).",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
   Build a `:placement_refused` reason (K12, amendment A3): the node answered the assign with
   `refuse{reason}` (`no_capacity`, `unschedulable`, `image_unavailable`, `bad_spec`,
   `service_not_ready`), so the run never started. It is a **hold**, not a failure: interrupted, no resume attempt consumed.
@@ -1389,6 +1417,9 @@ defmodule Arbiter.Worker.StopReason do
 
         :pod_disrupted ->
           "pod disrupted (run interrupted)"
+
+        :preempted ->
+          "pod preempted by the cluster scheduler (run interrupted)"
 
         :placement_refused ->
           "node refused the run (held)"
