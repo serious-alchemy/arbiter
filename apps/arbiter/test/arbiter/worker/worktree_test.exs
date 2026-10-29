@@ -1979,6 +1979,33 @@ end
     end
   end
 
+  describe "create/3 with a tracked .arbiter/Containerfile (bd-g9sh0j)" do
+    setup %{repo: repo} do
+      File.mkdir_p!(Path.join(repo, ".arbiter"))
+      File.write!(Path.join(repo, ".arbiter/Containerfile"), "FROM scratch\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "-f", ".arbiter/Containerfile"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "add Containerfile"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+      :ok
+    end
+
+    for layout <- [:linked_worktree, :private_clone] do
+      test "#{layout}: the tracked file survives provisioning and an INBOX delivery", %{
+        repo: repo
+      } do
+        {:ok, wt} =
+          Worktree.create(repo, "feature/keep-cf-#{unquote(layout)}", "main",
+            layout: unquote(layout)
+          )
+
+        File.write!(Path.join(wt, ".arbiter/INBOX"), "direction\n")
+
+        assert File.read!(Path.join(wt, ".arbiter/Containerfile")) == "FROM scratch\n"
+        assert {"", 0} = System.cmd("git", ["-C", wt, "status", "--porcelain"])
+      end
+    end
+  end
+
   describe "create/3 excludes .arbiter/ (bd-bhrji9)" do
     test "adds .arbiter/ to the repo's (common-dir) info/exclude on creation", %{repo: repo} do
       {:ok, wt} = Worktree.create(repo, "feature/arbiter-excl", "main")

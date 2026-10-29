@@ -585,6 +585,26 @@ defmodule Arbiter.Nodes.CheckoutTest do
       assert result.filtered == [".arbiter/INBOX"]
     end
 
+    test "a tracked .arbiter/Containerfile the node left alone stays in the home clone (bd-g9sh0j)",
+         c do
+      git!(c.home, ["checkout", "-q", "main"])
+      File.mkdir_p!(Path.join(c.home, ".arbiter"))
+      File.write!(Path.join(c.home, ".arbiter/Containerfile"), "FROM scratch\n")
+      base = commit_all!(c.home, "tracked Containerfile")
+      git!(c.home, ["checkout", "-q", @branch])
+      git!(c.home, ["merge", "-q", "--ff-only", "main"])
+      c = %{c | base: base}
+      File.write!(Path.join(c.home, ".arbiter/INBOX"), "direction\n")
+
+      %{shadow: shadow, info: info} = seed!(c)
+      File.write!(Path.join(shadow, "lib/real.txt"), "real\n")
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.read!(Path.join(c.home, ".arbiter/Containerfile")) == "FROM scratch\n"
+      refute git!(c.home, ["status", "--porcelain"]) =~ "Containerfile"
+    end
+
     test "a path the primary's own base tracks is not stripped when unchanged", c do
       # the base branch itself tracks `.mcp.json`
       git!(c.home, ["checkout", "-q", "main"])

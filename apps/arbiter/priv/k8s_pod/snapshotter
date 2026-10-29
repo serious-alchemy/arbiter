@@ -131,12 +131,14 @@ take_snapshot() {
   snap_git read-tree "$tip" || return 1
   bytes=$(cd "$wt" && snap_git ls-files -o -z --exclude-standard |
     xargs -0 -r stat -c '%s' -- 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')
-  rm -f "$GIT_INDEX_FILE"
   if [ "$bytes" -gt "$untracked_cap" ]; then
     say "veto: $bytes bytes untracked, cap $untracked_cap"
     return 1
   fi
 
+  # Starting from the tip's index (loaded above, kept), not an empty one: `add -A` skips an
+  # ignored path that is not already tracked, so an empty index dropped a tracked file under
+  # an excluded root (`.arbiter/Containerfile`) and the primary read it as deleted (bd-g9sh0j).
   snap_git add -A || return 1
   tree=$(snap_git write-tree) || return 1
   if [ "$force" != 1 ] && [ "$tip" = "$last_tip" ] && [ "$tree" = "$last_tree" ]; then
