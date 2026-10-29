@@ -327,7 +327,7 @@ worker pods with it. Test your chart commands on both Helm 3 and 4.
 The token is single-use and expires in 15 minutes. `--set-file join.token=` is the
 automation fallback only: the token then lands in Helm's release record.
 
-**Install.** `helm install <node> oci://ghcr.io/ryanrborn/charts/arbiter-node -n
+**Install.** `helm install <node> oci://ghcr.io/serious-alchemy/charts/arbiter-node -n
 arbiter-workers -f values.yaml`, with the values the primary prints. On k3s add the API
 server's endpoint address(es) to `networkPolicy.apiServerCIDRs` (step 5). Take them from
 `kubectl get endpoints kubernetes` (`.subsets[].addresses[].ip`), not from `kubectl get
@@ -359,7 +359,7 @@ existing objects into a release is possible but optional.
 * Controller image from a private registry or mirror: create a `docker-registry` Secret in
   the namespace and set `imagePullSecrets: [<name>]`, with `image.repository` (and
   `image.digest`, which wins over the tag) pointing at the mirror. The default, public
-  GHCR (`ghcr.io/ryanrborn/arbiter-controller`), needs none.
+  GHCR (`ghcr.io/serious-alchemy/arbiter-controller`), needs none.
 * Worker image registries: one `registries[]` entry per registry, `prefix:
   registry.example.test/arbiter` and `pullSecret: <name>`. The prefix is the admission
   policy's allow-list (`admissionPolicy.enabled`, Kubernetes 1.30+, requires
