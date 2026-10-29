@@ -300,6 +300,54 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
       assert escalations(task.id) |> Enum.filter(&(&1.subject =~ "orphan")) == []
     end
 
+    # bd-5owt7w (vs-9pdgfr): auto-resolve exhausted, THEN the Watchdog is lost.
+    # The green re-run sat unnoticed for 4h until the attention sweep paged the
+    # operator. The exhausted park now leaves the durable stamp the sweeper wakes.
+    test "auto-resolve exhausted → watchdog lost → green pipeline: merges without the operator" do
+      reviewed = sha("exhausted")
+      mr_ref = "!pm-exhausted"
+      ws = workspace()
+      task = task(ws, mr_ref)
+      pid = running_worker(task)
+      cleanup_retry(task.id)
+
+      red = %{
+        status: :open,
+        approved: true,
+        head_sha: reviewed,
+        base_ref: "main",
+        block_reason: :ci_failed,
+        pipeline: :failed
+      }
+
+      StubMerger.queue_get(mr_ref, [red])
+
+      capture_log(fn ->
+        start_live_watchdog(pid, task, mr_ref, ws,
+          max_auto_resolve_attempts: 0,
+          last_reviewed_sha: reviewed
+        )
+
+        wait_until(fn -> match?(%{reason: "ci_failed"}, PendingMerge.get(reload(task))) end)
+        kill_worker(pid, task.id)
+      end)
+
+      assert StubMerger.merge_count(mr_ref) == 0
+
+      StubMerger.queue_get(mr_ref, [
+        %{status: :open, head_sha: reviewed, base_ref: "main", pipeline: :success}
+      ])
+
+      capture_log(fn ->
+        assert %{retried: [id]} = sweep()
+        assert id == task.id
+        wait_until(fn -> reload(task).state == :closed end)
+      end)
+
+      assert StubMerger.last_merge() == {mr_ref, reviewed}
+      assert PendingMerge.get(reload(task)) == nil
+    end
+
     test "CI running → green: merges once CI concludes, with no live worker" do
       reviewed = sha("ci-green")
       mr_ref = "!pm-ci"

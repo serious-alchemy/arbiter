@@ -439,6 +439,36 @@ defmodule Arbiter.Test.StubMerger do
   @impl true
   def reply_to_review_comment(_ref, _comment_id, _body, _opts), do: {:ok, %{}}
 
+  @doc """
+  Set what `branch_pipeline/3` answers (default `{:ok, nil}`: no pipeline known,
+  so nothing holds). A 0-arity function is called each time, to answer from
+  live state.
+  """
+  def set_branch_pipeline(result) do
+    ensure_started()
+    Agent.update(@name, fn s -> Map.put(s, :branch_pipeline, result) end)
+    :ok
+  end
+
+  @doc "The `{ref, branch}` pairs `branch_pipeline/3` was asked about, newest first."
+  def branch_pipeline_calls do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :branch_pipeline_calls, []) end)
+  end
+
+  @impl true
+  def branch_pipeline(ref, branch, _opts) do
+    ensure_started()
+
+    answer =
+      Agent.get_and_update(@name, fn s ->
+        s = Map.update(s, :branch_pipeline_calls, [{ref, branch}], &[{ref, branch} | &1])
+        {Map.get(s, :branch_pipeline, {:ok, nil}), s}
+      end)
+
+    if is_function(answer, 0), do: answer.(), else: answer
+  end
+
   # ---- internals ----------------------------------------------------------
 
   defp ensure_started do

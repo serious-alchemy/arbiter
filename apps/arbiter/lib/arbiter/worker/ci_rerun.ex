@@ -11,12 +11,18 @@ defmodule Arbiter.Worker.CIRerun do
   has died is still retryable (the #1447 shape), whichever surface the retry
   comes from. The result says which way it went in `:via`.
 
+  A PR whose head is behind its target is **synced instead of re-run**
+  (`Arbiter.Worker.CiSync.rerun/4`, bd-5owt7w): re-running the old head would
+  re-test code the target may already have fixed. The result then carries
+  `action: :synced` and no `run_id`; CI runs on the synced head.
+
   Pure of any caller's authority: callers authorize the task first (MCP scope /
   `ArbiterWeb.ApiPolicy`).
   """
 
   alias Arbiter.Mergers
   alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Worker.CiSync
   alias Arbiter.Worker.Watchdog
 
   @type error ::
@@ -52,7 +58,8 @@ defmodule Arbiter.Worker.CIRerun do
       if function_exported?(adapter, :rerun_ci, 2) do
         Mergers.prepare_with_repo(workspace, issue.repo)
 
-        case adapter.rerun_ci(pr_ref, opts) do
+        # bd-5owt7w: a head behind its target is synced, not re-run.
+        case CiSync.rerun(adapter, pr_ref, opts, %{workspace: workspace, repo: issue.repo}) do
           {:ok, result} -> {:ok, Map.merge(%{task_id: task_id, via: "workspace"}, result)}
           {:error, reason} -> {:error, {:failed, reason}}
         end
