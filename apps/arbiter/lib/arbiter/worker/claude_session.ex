@@ -2392,8 +2392,23 @@ defmodule Arbiter.Worker.ClaudeSession do
   end
 
   @doc false
-  @spec handle_exit(map(), integer()) :: map()
-  def handle_exit(%{} = session, status) when is_integer(status) do
+  @spec handle_exit(map(), term()) :: map()
+  def handle_exit(%{} = session, status) when not is_integer(status) do
+    # A remote run whose pod was preempted/evicted has no process status to report (the
+    # exit report carries `nil`), and a future node path may send something else. Never
+    # crash the Worker on it: log once and treat it as an interrupted run (the Worker
+    # reads `:unknown_exit_status`), recorded with the node-lost convention status 255.
+    Logger.warning(
+      "ClaudeSession: task=#{Map.get(session, :task_id)} exited with a non-integer status " <>
+        "#{inspect(status)}; treating the run as interrupted"
+    )
+
+    session
+    |> Map.put(:unknown_exit_status, true)
+    |> handle_exit(255)
+  end
+
+  def handle_exit(%{} = session, status) do
     # Flush any buffered agy `text_delta` text (bd-2fzwlc round 2): agy emits
     # its whole response with no interior newlines until the terminal event,
     # so a session killed on timeout/cancel/crash before `DONE`/`result`
