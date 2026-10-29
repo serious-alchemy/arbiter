@@ -269,6 +269,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
+  alias Arbiter.Workflows.MergeHead
 
   @default_poll_interval_ms 30_000
 
@@ -292,19 +293,6 @@ defmodule Arbiter.Workflows.MergeQueue do
   # bd-5z9yvb. Polls to wait for a synced head; the per-head sync budget is
   # `merge.max_freshness_syncs` (`MergeFreshness.max_syncs/1`).
   @freshness_wait_ticks 10
-
-  # bd-d4m8qf. Ticks a stalled queue head keeps its place before the next item
-  # takes over. A block the forge reports right after the head's own sync (no
-  # pipeline registered yet, a check about to be re-run) is not a reason to hand
-  # its place on; one that outlasts this is.
-  @head_stall_grace_ticks 3
-
-  # bd-d4m8qf. Ticks a queue head may sit in CI on one head SHA before it is
-  # taken to be waiting on a pipeline that will not finish (a required check
-  # that never starts, no runner) and the next item takes over: two hours at the
-  # default 30s poll. Generous on purpose: a long pipeline must be allowed to run
-  # its course, and handing the place on mid-run wastes it.
-  @head_ci_wait_ticks 240
 
   @typedoc "Status atom for an in-flight item."
   @type status ::
@@ -445,14 +433,14 @@ defmodule Arbiter.Workflows.MergeQueue do
   item takes over (bd-d4m8qf).
   """
   @spec head_stall_grace_ticks() :: pos_integer()
-  def head_stall_grace_ticks, do: @head_stall_grace_ticks
+  def head_stall_grace_ticks, do: MergeHead.head_stall_grace_ticks()
 
   @doc """
   How many consecutive ticks a queue head may sit in CI on one head SHA before
   the next item takes over (bd-d4m8qf).
   """
   @spec head_ci_wait_ticks() :: pos_integer()
-  def head_ci_wait_ticks, do: @head_ci_wait_ticks
+  def head_ci_wait_ticks, do: MergeHead.head_ci_wait_ticks()
 
   # ---- GenServer callbacks ------------------------------------------------
 
@@ -951,8 +939,10 @@ defmodule Arbiter.Workflows.MergeQueue do
       items
       |> Enum.filter(&in_train?/1)
       |> Enum.group_by(&queue_target(state, &1))
-      |> Enum.flat_map(fn {_target, train} -> lead(Enum.sort_by(train, &queue_order_key/1)) end)
-      |> Enum.sort_by(fn {head, _waiting, _new?} -> queue_order_key(head) end)
+      |> Enum.flat_map(fn {_target, train} ->
+        lead(Enum.sort_by(train, &MergeHead.order_key/1))
+      end)
+      |> Enum.sort_by(fn {head, _waiting, _new?} -> MergeHead.order_key(head) end)
 
     # `Map.merge/2` and `Map.get/3` on the head fields: items enqueued before
     # they existed (a running queue across a code reload) read them as unset.
@@ -988,7 +978,16 @@ defmodule Arbiter.Workflows.MergeQueue do
   # A train's head, the items waiting behind it (not those stalled on a block
   # of their own) and whether the head has just taken its place.
   defp lead(train) do
-    case pick_head(train) do
+    {head, handed_on} = MergeHead.pick(train)
+
+    with {incumbent, why} <- handed_on do
+      Logger.warning(
+        "MergeQueue: queue head #{item_branch_label(incumbent)} #{why}; handing its place " <>
+          "to the next item"
+      )
+    end
+
+    case head do
       nil ->
         []
 
@@ -996,7 +995,7 @@ defmodule Arbiter.Workflows.MergeQueue do
         incumbent? =
           Enum.any?(train, &(&1.task_id == head.task_id and Map.get(&1, :queue_head) != nil))
 
-        waiting = Enum.reject(train, &(&1.task_id == head.task_id or stalled?(&1)))
+        waiting = Enum.reject(train, &(&1.task_id == head.task_id or MergeHead.stalled?(&1)))
         [{head, waiting, not incumbent?}]
     end
   end
@@ -1045,94 +1044,6 @@ defmodule Arbiter.Workflows.MergeQueue do
     Enum.map_join(Enum.reject([repo, base], &is_nil/1), "/", &to_string/1)
   end
 
-  # The incumbent keeps its place unless it cannot claim it: refused at its
-  # merge last tick (no sync or CI under way to protect, so its queue order is
-  # all it has, as at the old admission), no progress for more than
-  # @head_stall_grace_ticks ticks in a row, or in CI on one head for more than
-  # @head_ci_wait_ticks. Then, or with no incumbent, the front item that can
-  # progress leads.
-  defp pick_head(train) do
-    case Enum.find(train, &Map.get(&1, :queue_head)) do
-      nil -> front(train)
-      %{queue_head: %{refused?: true}} -> front(train)
-      incumbent -> keep_or_hand_on(incumbent, train)
-    end
-  end
-
-  defp keep_or_hand_on(%{queue_head: watch} = incumbent, train) do
-    watch = %{
-      watch
-      | stalls: if(stuck?(incumbent, watch), do: watch.stalls + 1, else: 0),
-        ci_wait: ci_wait(incumbent, watch.ci_wait)
-    }
-
-    case hand_on_reason(incumbent, watch) do
-      nil ->
-        Map.merge(incumbent, %{queue_head: watch, waiting_for_head: nil})
-
-      why ->
-        Logger.warning(
-          "MergeQueue: queue head #{item_branch_label(incumbent)} #{why}; handing its place " <>
-            "to the next item"
-        )
-
-        front(Enum.reject(train, &(&1.task_id == incumbent.task_id)))
-    end
-  end
-
-  defp hand_on_reason(item, %{stalls: stalls}) when stalls > @head_stall_grace_ticks do
-    "made no progress for #{stalls} ticks (forge block " <>
-      "#{inspect(Map.get(item, :last_block_reason))}, last error #{inspect(item.last_error)})"
-  end
-
-  defp hand_on_reason(_item, %{ci_wait: {sha, ticks}}) when ticks > @head_ci_wait_ticks,
-    do: "has been in CI on #{inspect(sha)} for #{ticks} ticks"
-
-  defp hand_on_reason(_item, _watch), do: nil
-
-  defp front(train) do
-    case Enum.find(train, &(not stalled?(&1))) do
-      nil -> nil
-      head -> Map.merge(head, %{queue_head: new_watch(), waiting_for_head: nil})
-    end
-  end
-
-  # The queue head's own bookkeeping: ticks in a row of no progress, ticks in CI
-  # on one head SHA, the head SHA the queue last synced it from, and whether its
-  # merge was refused last tick.
-  defp new_watch, do: %{stalls: 0, ci_wait: nil, synced_from: nil, refused?: false}
-
-  # An item in CI is waiting for its pipeline. One whose forge names a block
-  # (CI failed or was cancelled, a draft, an unmet approval or branch rule, the
-  # PR closed) is waiting for something the queue cannot do for it, so it cannot
-  # lead.
-  defp stalled?(%{status: :ci_running} = item), do: not is_nil(Map.get(item, :last_block_reason))
-  defp stalled?(_item), do: false
-
-  # No progress since the last tick: stalled, its poll failed, or still behind
-  # on the very head it was last synced from (the update-branch failed, or the
-  # forge accepted it and never applied it). Judged on this tick's poll, so a
-  # head whose CI is re-run keeps its place.
-  defp stuck?(item, watch) do
-    head = Map.get(item, :last_head_sha)
-
-    stalled?(item) or Map.get(item, :poll_failed?, false) or
-      (item.status == :behind_base and is_binary(head) and head == watch.synced_from)
-  end
-
-  # Ticks in a row the head has been in CI, with no block named, on its head SHA.
-  defp ci_wait(%{status: :ci_running} = item, wait) do
-    sha = Map.get(item, :last_head_sha)
-
-    cond do
-      stalled?(item) -> nil
-      match?({^sha, _}, wait) -> {sha, elem(wait, 1) + 1}
-      true -> {sha, 1}
-    end
-  end
-
-  defp ci_wait(_item, _wait), do: nil
-
   # The head is synced when the forge calls it behind, merged when it is ready
   # (unless another head merged this tick), and otherwise left alone while its
   # sync lands or its CI runs.
@@ -1165,15 +1076,6 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   defp wait_for(item, head_id), do: %{item | waiting_for_head: head_id}
-
-  # Queue order: lower priority number first (P0 before P4), earliest enqueue as
-  # the tiebreak. Items without an `opened_at` sort last.
-  defp queue_order_key(item) do
-    {Map.get(item, :priority) || 2, opened_at_key(item.opened_at)}
-  end
-
-  defp opened_at_key(%DateTime{} = dt), do: DateTime.to_unix(dt, :microsecond)
-  defp opened_at_key(_), do: 9_223_372_036_854_775_807
 
   defp poll_item(state, %{status: :failed} = item), do: {item, state}
   defp poll_item(state, %{status: :done} = item), do: {item, state}
@@ -2801,7 +2703,7 @@ defmodule Arbiter.Workflows.MergeQueue do
       # when it is the head or not in the train: a follower is not synced.
       # `queue_head` is set on the head of its target branch's train, which
       # keeps its place until it merges, leaves or cannot progress: its own
-      # bookkeeping (`new_watch/0`, `pick_head/1`). `last_block_reason` is the
+      # bookkeeping (`MergeHead.new_watch/0`, `MergeHead.pick/1`). `last_block_reason` is the
       # forge's block classification from the latest poll (`forge_block/1`), and
       # `poll_failed?` whether that poll failed (not on a rate limit).
       waiting_for_head: nil,
@@ -2924,7 +2826,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   # ordered front-of-queue first and stamped with a 1-based position.
   defp build_queue_view(%State{items: items, workspace_id: ws_id} = state) do
     items
-    |> Enum.sort_by(&queue_order_key/1)
+    |> Enum.sort_by(&MergeHead.order_key/1)
     |> Enum.with_index(1)
     |> Enum.map(fn {item, position} ->
       %{
