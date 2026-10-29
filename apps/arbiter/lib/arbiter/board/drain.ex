@@ -351,7 +351,8 @@ defmodule Arbiter.Board.Drain do
   end
 
   # DC5 (design §9): `admission` (the mode, labelled shadow until enforce), `budgets`
-  # (one per pool), `machines`, `repos` and `fair_share`. The REST body and the
+  # (one per pool), `machines`, `repos`, `fair_share` and `ci_backpressure` (#1126, one
+  # per gated repo). The REST body and the
   # MCP `scheduler_status` share this, so they cannot drift.
   defp capacity_json(%{} = view) do
     %{
@@ -359,12 +360,20 @@ defmodule Arbiter.Board.Drain do
       budgets: view.pools,
       machines: view.machines,
       repos: view.repos,
-      fair_share: view.fair_share
+      fair_share: view.fair_share,
+      ci_backpressure: Map.get(view, :ci_backpressure, [])
     }
   end
 
   defp capacity_json(_none),
-    do: %{admission: nil, budgets: [], machines: [], repos: [], fair_share: []}
+    do: %{
+      admission: nil,
+      budgets: [],
+      machines: [],
+      repos: [],
+      fair_share: [],
+      ci_backpressure: []
+    }
 
   # bd-b2iigy: an automatic resume waiting on the primary's own worker cap
   # (`Arbiter.Nodes.LocalCapacity`). Queued work, not in flight: no agent runs.

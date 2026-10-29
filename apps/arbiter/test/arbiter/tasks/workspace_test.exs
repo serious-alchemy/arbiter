@@ -777,6 +777,47 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  # #1126
+  describe "worker.repos.<repo>.ci_backpressure validation (#1126)" do
+    defp bp_ws(block) do
+      Ash.create(Workspace, %{
+        name: "bp-#{System.unique_integer([:positive])}",
+        config: %{"worker" => %{"repos" => %{"vstim" => %{"ci_backpressure" => block}}}}
+      })
+    end
+
+    test "accepts either threshold or both" do
+      assert {:ok, _} = bp_ws(%{"max_pending" => 4})
+      assert {:ok, _} = bp_ws(%{"max_oldest_pending_min" => 90})
+      assert {:ok, ws} = bp_ws(%{"max_pending" => 4, "max_oldest_pending_min" => 90})
+
+      assert get_in(ws.config, ["worker", "repos", "vstim", "ci_backpressure", "max_pending"]) ==
+               4
+    end
+
+    test "rejects a non-positive or non-integer threshold, naming the key" do
+      for bad <- [0, -1, 1.5, "4", true] do
+        assert {:error, %Ash.Error.Invalid{} = err} = bp_ws(%{"max_pending" => bad})
+
+        assert Exception.message(err) =~
+                 "worker.repos.vstim.ci_backpressure.max_pending must be a positive integer"
+
+        assert {:error, %Ash.Error.Invalid{} = err} = bp_ws(%{"max_oldest_pending_min" => bad})
+
+        assert Exception.message(err) =~
+                 "worker.repos.vstim.ci_backpressure.max_oldest_pending_min must be a positive integer"
+      end
+    end
+
+    test "rejects an unknown key and a non-map block" do
+      assert {:error, err} = bp_ws(%{"max_pendng" => 4})
+      assert Exception.message(err) =~ "worker.repos.vstim.ci_backpressure has unknown key"
+
+      assert {:error, err} = bp_ws("on")
+      assert Exception.message(err) =~ "worker.repos.vstim.ci_backpressure must be a map"
+    end
+  end
+
   # KH11 (bd-cexq4j, docs/design/remote-workers.md §20.9)
   describe "worker.repos.<repo>.image validation (bd-cexq4j)" do
     defp image_ws(image, level \\ :repo) do

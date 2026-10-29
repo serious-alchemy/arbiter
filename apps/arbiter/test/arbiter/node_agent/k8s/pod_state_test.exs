@@ -257,6 +257,45 @@ defmodule Arbiter.NodeAgent.K8s.PodStateTest do
                PodState.observe(pod, @opts)
     end
 
+    test "a scheduler preemption is flagged preempted and keeps the scheduler's message" do
+      pod =
+        scheduled(%{
+          "phase" => "Failed",
+          "containerStatuses" => [terminated("worker", 137)],
+          "conditions" => [
+            %{
+              "type" => "DisruptionTarget",
+              "status" => "True",
+              "reason" => "PreemptionByScheduler",
+              "message" => "kube-scheduler: preempted by pod ci/runner-abc on node aginor"
+            }
+          ]
+        })
+
+      assert {:interrupted,
+              %{
+                cause: :pod_disrupted,
+                preempted?: true,
+                reason: "PreemptionByScheduler",
+                message: "kube-scheduler: preempted by pod ci/runner-abc on node aginor"
+              }} = PodState.observe(pod, @opts)
+    end
+
+    test "status.reason Preempting is preempted too; an eviction is not" do
+      assert {:interrupted, %{preempted?: true}} =
+               PodState.observe(pod(%{"phase" => "Failed", "reason" => "Preempting"}), @opts)
+
+      evicted =
+        scheduled(%{
+          "phase" => "Failed",
+          "reason" => "Evicted",
+          "containerStatuses" => [terminated("worker", 137)]
+        })
+
+      assert {:interrupted, info} = PodState.observe(evicted, @opts)
+      refute Map.get(info, :preempted?, false)
+    end
+
     test "DisruptionTarget=False is not a disruption" do
       pod =
         scheduled(%{

@@ -360,6 +360,26 @@ defmodule Arbiter.Nodes.RunStreamsTest do
       assert {:ok, %{pod_disrupted?: true, node_lost?: false}} = S.outcome(t, "r1")
     end
 
+    test "a preempted exit carries preempted? and the scheduler's detail in the outcome" do
+      {t, _} = S.ready(table(), "r1")
+
+      {t, _} =
+        S.exit(t, "r1", %{
+          "status" => nil,
+          "size" => 0,
+          "pod_disrupted" => true,
+          "preempted" => true,
+          "detail" => "preempted by pod ci/runner-abc"
+        })
+
+      assert {:ok,
+              %{
+                pod_disrupted?: true,
+                preempted?: true,
+                disruption_detail: "preempted by pod ci/runner-abc"
+              }} = S.outcome(t, "r1")
+    end
+
     test "an ordinary exit has no pod_disrupted key at all (machine outcome unchanged)" do
       {t, _} = S.ready(table(), "r1")
       {t, _} = S.exit(t, "r1", %{"status" => 1, "size" => 0})

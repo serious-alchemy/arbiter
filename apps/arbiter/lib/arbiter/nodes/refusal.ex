@@ -12,6 +12,13 @@ defmodule Arbiter.Nodes.Refusal do
   worker started (`service_not_ready`, K§3.3; K14). In every case the run never started, so
   nothing about the task or the agent failed.
 
+  Two more reasons are the primary's own (bd-bmecet, `Arbiter.Nodes.Session`'s placement
+  watchdogs), for a placement that never reached a live pod because the node could not say so:
+  `unacknowledged` (the controller never showed the run in its heartbeats within the ack
+  budget: unreachable, or the request was lost) and `placement_lost` (the controller
+  reconnected without the run, i.e. it restarted). A pod stuck Pending past the primary's
+  budget is reported as `unschedulable`, with the scheduler's message as the detail.
+
   `Arbiter.Worker.Dispatch` sends such a spawn error here. `hold/4`
 
     * ends the just-registered Worker's run `interrupted` with the typed
@@ -33,7 +40,7 @@ defmodule Arbiter.Nodes.Refusal do
   alias Arbiter.Worker
   alias Arbiter.Worker.StopReason
 
-  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready)
+  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready unacknowledged placement_lost)
 
   @type refusal :: %{reason: String.t(), detail: String.t() | nil}
 
@@ -81,6 +88,11 @@ defmodule Arbiter.Nodes.Refusal do
   defp phrase("image_unavailable"), do: "its image is not available to the node"
   defp phrase("bad_spec"), do: "the node cannot represent its spec"
   defp phrase("service_not_ready"), do: "a test service never became ready"
+
+  defp phrase("unacknowledged"),
+    do: "its controller never acknowledged the assignment, so no pod was created"
+
+  defp phrase("placement_lost"), do: "its controller restarted and lost the assignment"
 
   defp detail_suffix(%{detail: d}) when is_binary(d) and d != "", do: ": " <> d
   defp detail_suffix(_), do: ""

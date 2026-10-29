@@ -1372,6 +1372,32 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "preempted/2 (bd-bmecet)" do
+    test "is its own category, names the node and the scheduler's message, not node loss" do
+      reason = StopReason.preempted("mesaana", "preempted by pod ci/runner-abc on node aginor")
+
+      assert reason.category == :preempted
+      assert reason.summary =~ "mesaana"
+      assert reason.summary =~ "preempted by pod ci/runner-abc"
+      assert reason.summary =~ "not a node failure"
+      assert reason.remediation =~ "resum"
+      assert reason.exit_status == nil
+      assert reason.signal == nil
+      assert StopReason.label(reason) =~ "preempted"
+      refute StopReason.label(reason) =~ "node lost"
+      assert StopReason.to_map(reason).category == :preempted
+    end
+
+    test "works without a scheduler message" do
+      assert StopReason.preempted("mesaana", nil).summary =~ "mesaana"
+    end
+
+    test "is infrastructure for the loop's failure classifier" do
+      assert {:operational, :preempted} ==
+               Arbiter.Loop.FailureClassifier.conclusive_stop_categories()[:preempted]
+    end
+  end
+
   describe "placement_refused/3 (K12, A3)" do
     test "is its own category naming the node and why it refused" do
       reason = StopReason.placement_refused("kube-1", "unschedulable", "0/3 nodes available")

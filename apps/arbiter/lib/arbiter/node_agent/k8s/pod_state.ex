@@ -23,7 +23,9 @@ defmodule Arbiter.NodeAgent.K8s.PodState do
       — the pod must be deleted.
     * `{:interrupted, %{cause: :pod_disrupted, reason: text}}` — eviction,
       preemption, node shutdown or someone else's delete; same policy as
-      `node_lost`, no resume attempt consumed.
+      `node_lost`, no resume attempt consumed. A disruption condition's message rides as
+      `message`; a scheduler preemption (`PreemptionByScheduler` / `Preempting`) also
+      sets `preempted?: true` (bd-bmecet).
 
   ## Precedence
 
@@ -51,6 +53,7 @@ defmodule Arbiter.NodeAgent.K8s.PodState do
 
   @pull_failures ~w(ImagePullBackOff ErrImagePull InvalidImageName CreateContainerConfigError)
   @disrupted_reasons ~w(Evicted Preempting Shutdown Terminated NodeLost)
+  @preempted_reasons ~w(PreemptionByScheduler Preempting)
   @default_pull_timeout_s 300
   @default_ready_timeout_s 300
   @snapshotter "snapshotter"
@@ -92,8 +95,8 @@ defmodule Arbiter.NodeAgent.K8s.PodState do
       match?({:terminated, %{"exitCode" => 0}}, worker) ->
         {:exit, exit_info(status, worker, :exited)}
 
-      reason = disruption(status) ->
-        {:interrupted, %{cause: :pod_disrupted, reason: reason}}
+      disruption = disruption(status) ->
+        {:interrupted, interruption(disruption)}
 
       match?({:terminated, _}, worker) ->
         {:exit, exit_info(status, worker, nil)}
@@ -331,14 +334,24 @@ defmodule Arbiter.NodeAgent.K8s.PodState do
     end
   end
 
+  # `{reason, message}` of a disruption, or nil. The condition's message is the scheduler's own
+  # account of a preemption ("preempted by pod ... on node ...").
   defp disruption(status) do
     case condition(status, "DisruptionTarget") do
       %{"status" => "True"} = c ->
-        c["reason"] || "DisruptionTarget"
+        {c["reason"] || "DisruptionTarget", c["message"]}
 
       _ ->
-        if status["reason"] in @disrupted_reasons, do: status["reason"]
+        if status["reason"] in @disrupted_reasons, do: {status["reason"], status["message"]}
     end
+  end
+
+  # bd-bmecet: a scheduler preemption (cluster contention) is told apart from an eviction or
+  # a delete, so the coordinator can tell it from a node failure.
+  defp interruption({reason, message}) do
+    base = %{cause: :pod_disrupted, reason: reason}
+    base = if message in [nil, ""], do: base, else: Map.put(base, :message, message)
+    if reason in @preempted_reasons, do: Map.put(base, :preempted?, true), else: base
   end
 
   # --- plumbing ---------------------------------------------------------------

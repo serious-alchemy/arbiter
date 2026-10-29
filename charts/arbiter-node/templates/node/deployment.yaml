@@ -28,7 +28,9 @@ spec:
         app.kubernetes.io/component: controller
     spec:
       serviceAccountName: arbiter-controller
-      priorityClassName: {{ .Values.placement.priorityClass.name }}
+      {{- with .Values.controller.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       {{- with include "arbiter-node.pullSecrets" . }}
       imagePullSecrets:
         {{- . | nindent 8 }}

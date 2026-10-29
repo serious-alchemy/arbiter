@@ -52,6 +52,30 @@ join:
   token: ""
 
 controller:
+  # The controller's own PriorityClass (the Deployment's priorityClassName). Losing the
+  # controller interrupts EVERY run on the node, so it must not share the workers' -100
+  # class (placement.priorityClass): on a busy cluster the scheduler preempts the lowest
+  # priority pods first, and CI at priority 0 would evict the controller before it evicted
+  # a single worker. "" = no class (the cluster default, usually 0).
+  #
+  # Trade-offs. The class sits ABOVE ordinary batch work (default 1000, must exceed the
+  # workers' value; the chart refuses otherwise) and preempts lower-priority pods if the
+  # controller has to be rescheduled onto a full cluster (PreemptLowerPriority): a controller
+  # stuck Pending on a full cluster loses the whole node, which costs more than one
+  # re-queued CI pod. Set preemptionPolicy to Never to keep it from evicting anything (it
+  # then waits for room like any pod, but is still not evicted before priority-0 work).
+  # Raise `value` above competing system-adjacent workloads if you need to; keep it below
+  # system-cluster-critical (2000000000).
+  #
+  # Like placement.priorityClass the object is cluster-scoped and shared by every install on
+  # the cluster: a second install sets priorityClass.create=false. In mode=node the class
+  # must already exist (bootstrap creates it): upgrade the guardrails first, or the
+  # Deployment's pod is refused with "no PriorityClass with name ... was found".
+  priorityClassName: arbiter-controller
+  priorityClass:
+    create: true
+    value: 1000
+    preemptionPolicy: PreemptLowerPriority
   resources:
     requests: {cpu: 250m, memory: 256Mi}
     limits: {cpu: "1", memory: 512Mi}

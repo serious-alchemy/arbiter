@@ -75,6 +75,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Accounts.Concurrency
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderRouting
+  alias Arbiter.Board.CiBackpressure
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.QueueOrder
   alias Arbiter.Board.ReadySince
@@ -292,6 +293,7 @@ defmodule Arbiter.Board.Snapshot do
           Map.merge(Map.get(input, :card_constraint, %{}), Map.get(input, :dispatch_holds, %{})),
         card_guardrail: Map.get(input, :card_guardrail, %{}),
         card_local: Map.get(input, :card_local, %{}),
+        card_ci: Map.get(input, :card_ci, %{}),
         paused: paused?
       })
 
@@ -521,6 +523,7 @@ defmodule Arbiter.Board.Snapshot do
           ticket_guardrail_holds(workspace, issues, opts)
         end),
       card_local: Keyword.get_lazy(opts, :card_local, fn -> ticket_local_holds(issues) end),
+      card_ci: Keyword.get_lazy(opts, :card_ci, fn -> ticket_ci_holds(issues, opts) end),
       dispatch_holds: Keyword.get(opts, :dispatch_holds, %{}),
       resume_queued: Keyword.get(opts, :resume_queued, []),
       local_held: Keyword.get(opts, :local_held, []),
@@ -1269,6 +1272,30 @@ defmodule Arbiter.Board.Snapshot do
       |> Enum.flat_map(fn {ws_id, tickets} -> local_holds(safe_workspace(ws_id), tickets) end)
       |> Map.new()
     end
+  rescue
+    _ -> %{}
+  end
+
+  # #1126: a Ready card whose repo's forge CI queue is saturated is held by its own
+  # hold (`Arbiter.Board.CiBackpressure`). Only a repo that sets
+  # `worker.repos.<repo>.ci_backpressure` is ever asked anything, and the poll is
+  # cached and fails open, so a board read never waits on, or breaks over, a forge.
+  # `:ci_backpressure` carries that module's seams.
+  defp ticket_ci_holds(issues, opts) do
+    queued =
+      Enum.filter(issues, fn issue ->
+        Lifecycle.state_of(issue) == :queued and not epic?(issue) and
+          is_binary(Map.get(issue, :repo))
+      end)
+
+    workspaces =
+      queued
+      |> Enum.map(&Map.get(&1, :workspace_id))
+      |> Enum.uniq()
+      |> Enum.map(&safe_workspace/1)
+      |> Enum.reject(&is_nil/1)
+
+    CiBackpressure.holds(workspaces, queued, Keyword.get(opts, :ci_backpressure, []))
   rescue
     _ -> %{}
   end

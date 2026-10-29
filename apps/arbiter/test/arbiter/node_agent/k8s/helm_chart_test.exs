@@ -47,6 +47,33 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartTest do
       assert text =~ ~s("runtime_handler" (.Values.runtimeClass.handler)
     end
 
+    # bd-bmecet: the controller must not share the workers' -100 class.
+    test "the controller defaults to its own PriorityClass, above the workers'" do
+      values = YamlElixir.read_from_file!(Path.join(@chart, "values.yaml"))
+
+      assert values["controller"]["priorityClassName"] == "arbiter-controller"
+
+      assert values["controller"]["priorityClassName"] !=
+               values["placement"]["priorityClass"]["name"]
+
+      assert values["controller"]["priorityClass"]["value"] >
+               values["placement"]["priorityClass"]["value"]
+
+      assert values["controller"]["priorityClass"]["value"] > 0
+      assert values["controller"]["priorityClass"]["preemptionPolicy"] == "PreemptLowerPriority"
+
+      deployment = File.read!(Path.join(@chart, "templates/node/deployment.yaml"))
+      assert deployment =~ ".Values.controller.priorityClassName"
+      refute deployment =~ "placement.priorityClass"
+
+      schema = @chart |> Path.join("values.schema.json") |> File.read!() |> Jason.decode!()
+      controller = schema["properties"]["controller"]["properties"]
+      assert Map.has_key?(controller, "priorityClassName")
+
+      assert controller["priorityClass"]["properties"]["preemptionPolicy"]["enum"] ==
+               ["PreemptLowerPriority", "Never"]
+    end
+
     test "no template renders a Namespace or grants the patch verb" do
       for file <- Path.wildcard(Path.join(@chart, "templates/**/*.{yaml,tpl,txt}")) do
         text = File.read!(file)
@@ -92,6 +119,68 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartTest do
       assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
       assert parsed.placement["runtime_class"] == "gvisor"
       assert parsed.placement["runtime_handler"] == "runsc"
+    end
+
+    test "the controller gets its own PriorityClass by default, the Deployment uses it" do
+      docs = render!(@direct)
+      worker = find!(docs, "PriorityClass", "arbiter-worker")
+      controller = find!(docs, "PriorityClass", "arbiter-controller")
+
+      assert controller["value"] > worker["value"]
+      assert controller["value"] == 1000
+      assert controller["preemptionPolicy"] == "PreemptLowerPriority"
+      assert worker["preemptionPolicy"] == "Never"
+
+      deployment = find!(docs, "Deployment", "arbiter-controller")
+      assert deployment["spec"]["template"]["spec"]["priorityClassName"] == "arbiter-controller"
+    end
+
+    test "controller.priorityClass* values override the name, value and policy" do
+      docs =
+        render!(
+          @direct ++
+            [
+              "controller.priorityClassName=arbiter-ctl",
+              "controller.priorityClass.value=5000",
+              "controller.priorityClass.preemptionPolicy=Never"
+            ]
+        )
+
+      controller = find!(docs, "PriorityClass", "arbiter-ctl")
+      assert controller["value"] == 5000
+      assert controller["preemptionPolicy"] == "Never"
+      refute Enum.any?(docs, &(identity(&1) == {"PriorityClass", "arbiter-controller"}))
+
+      deployment = find!(docs, "Deployment", "arbiter-controller")
+      assert deployment["spec"]["template"]["spec"]["priorityClassName"] == "arbiter-ctl"
+    end
+
+    test "create=false names the class without rendering it; an empty name sets none" do
+      docs = render!(@direct ++ ["controller.priorityClass.create=false"])
+      refute Enum.any?(docs, &(identity(&1) == {"PriorityClass", "arbiter-controller"}))
+
+      deployment = find!(docs, "Deployment", "arbiter-controller")
+      assert deployment["spec"]["template"]["spec"]["priorityClassName"] == "arbiter-controller"
+
+      docs = render!(@direct ++ ["controller.priorityClassName="])
+      deployment = find!(docs, "Deployment", "arbiter-controller")
+      refute Map.has_key?(deployment["spec"]["template"]["spec"], "priorityClassName")
+      assert length(Enum.filter(docs, &(&1["kind"] == "PriorityClass"))) == 1
+    end
+
+    test "a controller class that does not outrank the workers' is refused" do
+      assert {:error, out} = helm_template(@direct ++ ["controller.priorityClass.value=-100"])
+      assert out =~ "must be greater than placement.priorityClass.value"
+    end
+
+    test "mode node renders no PriorityClass, mode bootstrap both" do
+      refute "PriorityClass" in kinds(render!(@direct ++ ["mode=node"]))
+
+      names =
+        for %{"kind" => "PriorityClass"} = doc <- render!(@direct ++ ["mode=bootstrap"]),
+            do: doc["metadata"]["name"]
+
+      assert Enum.sort(names) == ["arbiter-controller", "arbiter-worker"]
     end
 
     test "mode node holds no guardrail and mode bootstrap no controller" do

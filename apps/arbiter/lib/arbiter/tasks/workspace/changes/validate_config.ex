@@ -252,6 +252,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
         cs
         |> validate_worker_block(block, "worker.repos.#{repo}")
         |> validate_repo_cap(block, "worker.repos.#{repo}")
+        |> validate_ci_backpressure(Map.fetch(block, "ci_backpressure"), "worker.repos.#{repo}")
         |> validate_image(Map.get(block, "image"), "worker.repos.#{repo}.image", :repo)
 
       {repo, _}, cs ->
@@ -282,6 +283,52 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           message: "#{label}.max_concurrent must be a positive integer"
         )
     end
+  end
+
+  # #1126: the CI backpressure gate (`Arbiter.Board.CiBackpressure`), a per-repo key.
+  @ci_backpressure_keys ["max_pending", "max_oldest_pending_min"]
+
+  defp validate_ci_backpressure(changeset, :error, _label), do: changeset
+
+  defp validate_ci_backpressure(changeset, {:ok, %{} = block}, label) do
+    label = "#{label}.ci_backpressure"
+
+    changeset =
+      case Map.keys(block) -- @ci_backpressure_keys do
+        [] ->
+          changeset
+
+        unknown ->
+          Changeset.add_error(changeset,
+            field: :config,
+            message:
+              "#{label} has unknown key(s) #{Enum.join(unknown, ", ")} " <>
+                "(expected #{Enum.join(@ci_backpressure_keys, ", ")})"
+          )
+      end
+
+    Enum.reduce(@ci_backpressure_keys, changeset, fn key, acc ->
+      case Map.fetch(block, key) do
+        :error ->
+          acc
+
+        {:ok, n} when is_integer(n) and n > 0 ->
+          acc
+
+        {:ok, _} ->
+          Changeset.add_error(acc,
+            field: :config,
+            message: "#{label}.#{key} must be a positive integer"
+          )
+      end
+    end)
+  end
+
+  defp validate_ci_backpressure(changeset, {:ok, _}, label) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "#{label}.ci_backpressure must be a map"
+    )
   end
 
   defp validate_worker_block(changeset, block, label) do

@@ -285,9 +285,18 @@ defmodule Arbiter.Test.K8sE2E do
 
     bootstrap =
       Enum.flat_map(bootstrap, fn
-        %{"kind" => "PriorityClass"} = doc -> [put_in(doc, ["metadata", "name"], priority)]
-        %{"kind" => "NetworkPolicy"} = doc -> if(policies?, do: [doc], else: [])
-        doc -> [doc]
+        %{"kind" => "PriorityClass", "metadata" => %{"name" => "arbiter-worker"}} = doc ->
+          [put_in(doc, ["metadata", "name"], priority)]
+
+        # The stand-in controller sets no class, so the controller's own is not made.
+        %{"kind" => "PriorityClass"} ->
+          []
+
+        %{"kind" => "NetworkPolicy"} = doc ->
+          if(policies?, do: [doc], else: [])
+
+        doc ->
+          [doc]
       end)
 
     # The stand-in controller only listens; it needs no egress.
@@ -422,12 +431,14 @@ defmodule Arbiter.Test.K8sE2E do
     suffix = random()
     ns = "arb-e2e-" <> suffix
     priority = "arbiter-e2e-" <> suffix
+    controller_priority = "arbiter-e2e-ctl-" <> suffix
     release = "e2e"
 
     ExUnit.Callbacks.on_exit(fn ->
       helm(env, ["uninstall", release, "--namespace", ns, "--ignore-not-found"])
       kubectl(env, ["delete", "namespace", ns, "--wait=false", "--ignore-not-found"])
       kubectl(env, ["delete", "priorityclass", priority, "--ignore-not-found"])
+      kubectl(env, ["delete", "priorityclass", controller_priority, "--ignore-not-found"])
     end)
 
     api_ip = jsonpath(env, ["-n", "default", "get", "service", "kubernetes"], ".spec.clusterIP")
@@ -451,7 +462,9 @@ defmodule Arbiter.Test.K8sE2E do
         "--set",
         "networkPolicy.apiServerCIDRs={#{api_ip}/32}",
         "--set",
-        "placement.priorityClass.name=#{priority}"
+        "placement.priorityClass.name=#{priority}",
+        "--set",
+        "controller.priorityClassName=#{controller_priority}"
       ] ++ Keyword.get(opts, :set, [])
     )
 
