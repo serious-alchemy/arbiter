@@ -488,7 +488,8 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {ReviewGate, :do_route_after_reject, 2},
         {ReviewGate, :terminal_reject_verdict, 1},
         {ReviewGate, :escalate_fabricated_evidence, 2},
-        {ReviewGate, :escalate_coordinator_only, 2}
+        {ReviewGate, :escalate_coordinator_only, 2},
+        {ReviewGate, :escalate_repeat_unmet, 3}
       ],
       anchors: [
         "@default_rounds",
@@ -872,6 +873,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {Watchdog, :escalate_unresolved_block, 2},
         {Watchdog, :escalate_merge_unresolved, 5},
         {Watchdog, :resolve_behind_base, 1},
+        {Watchdog, :sync_behind_base, 1},
         {Watchdog, :park_at_fix_pass_cap, 2}
       ],
       anchors: ["@default_max_auto_resolve_attempts", "@default_max_fix_passes"],
