@@ -22,6 +22,13 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifestTest do
     end
   end
 
+  describe "deployment/1 priority (bd-bmecet)" do
+    test "runs under its own PriorityClass, not the workers' preemptible one" do
+      {:ok, d} = ControllerManifest.deployment(@opts)
+      assert d["spec"]["template"]["spec"]["priorityClassName"] == "arbiter-controller"
+    end
+  end
+
   describe "deployment/1 default" do
     test "has no tailscale sidecar and no proxy" do
       {:ok, d} = ControllerManifest.deployment(@opts)

@@ -196,7 +196,7 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
         InstallManifest.documents(parse!(%{"name" => "n"}), @server)
 
       assert Enum.map(bootstrap, & &1["kind"]) ==
-               ~w(Namespace PriorityClass ResourceQuota LimitRange NetworkPolicy NetworkPolicy NetworkPolicy NetworkPolicy)
+               ~w(Namespace PriorityClass PriorityClass ResourceQuota LimitRange NetworkPolicy NetworkPolicy NetworkPolicy NetworkPolicy)
 
       assert Enum.map(node, & &1["kind"]) ==
                ~w(ServiceAccount ServiceAccount Role RoleBinding Secret Secret ConfigMap ConfigMap Lease Service Deployment)
@@ -211,9 +211,25 @@ defmodule Arbiter.NodeAgent.K8s.InstallManifestTest do
       assert labels["pod-security.kubernetes.io/audit"] == "restricted"
       assert labels["pod-security.kubernetes.io/warn"] == "restricted"
 
-      pc = find(docs, "PriorityClass")
+      pc = find(docs, "PriorityClass", "arbiter-worker")
       assert pc["value"] == -100
       assert pc["preemptionPolicy"] == "Never"
+    end
+
+    # bd-bmecet: the controller shares the workers' -100 class no longer. Losing it
+    # interrupts every run on the node, so a busy cluster must not evict it first.
+    test "the controller has its own PriorityClass, above the workers' and above batch CI" do
+      docs = render!(%{"name" => "n"})
+      worker = find(docs, "PriorityClass", "arbiter-worker")
+      controller = find(docs, "PriorityClass", "arbiter-controller")
+
+      assert controller["value"] > worker["value"]
+      assert controller["value"] > 0
+      assert controller["preemptionPolicy"] == "PreemptLowerPriority"
+      assert controller["globalDefault"] == false
+
+      deployment = find(docs, "Deployment", "arbiter-controller")
+      assert deployment["spec"]["template"]["spec"]["priorityClassName"] == "arbiter-controller"
     end
 
     test "the quota is derived from max_concurrent and the per-pod figures" do

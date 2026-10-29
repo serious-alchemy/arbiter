@@ -39,7 +39,11 @@ check "reach proxy" --set primary.url=https://arbiter.example.test --set reach.m
   --set reach.proxy.url=http://proxy.example.test:3128 --set 'reach.proxy.cidrs={10.9.0.5/32}'
 check "admission policy" $direct --set admissionPolicy.enabled=true \
   --set 'registries[0].prefix=registry.example.test/arbiter' --set 'registries[0].pullSecret=arbiter-registry'
-check "runtime class, placement, join token" $direct --set runtimeClass.create=true \
+check "controller priority class override" $direct --set controller.priorityClassName=arbiter-ctl \
+  --set controller.priorityClass.value=5000 --set controller.priorityClass.preemptionPolicy=Never
+check "controller priority class not created, none named" $direct \
+  --set controller.priorityClass.create=false --set controller.priorityClassName=
+check "runtime class, placement, join token"$direct --set runtimeClass.create=true \
   --set placement.runtimeClassName=gvisor --set runtimeClass.handler=runsc \
   --set 'placement.tolerations[0].key=dedicated' --set 'placement.tolerations[0].operator=Exists' \
   --set placement.nodeSelector.pool=ci --set join.token=abc123
@@ -57,7 +61,10 @@ refuse() {
   fi
 }
 
-refuse "unknown top-level key" $direct --set concurency.max=3
+refuse "controller class not above the workers'" $direct --set controller.priorityClass.value=-100
+refuse "controller class policy outside PreemptLowerPriority|Never" $direct \
+  --set controller.priorityClass.preemptionPolicy=Sometimes
+refuse "unknown top-level key"$direct --set concurency.max=3
 refuse "unknown nested key" $direct --set workers.requests.gpu=1
 refuse "mode outside all|bootstrap|node" $direct --set mode=everything
 refuse "no primary url" --set 'networkPolicy.controllerEgress.primaryCIDRs={1.2.3.4/32}'

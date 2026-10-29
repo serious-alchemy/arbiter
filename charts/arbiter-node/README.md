@@ -39,6 +39,13 @@ helm install mesaana ./charts/arbiter-node -n arbiter-workers \
 - **Object names are fixed** (`arbiter-controller`, `arbiter-worker`, ...): the Role's `resourceNames`, the
   Service, the Lease, every worker pod's ownerReference and the NetworkPolicy selectors name them. One
   release per namespace.
+- **The controller has its own PriorityClass** (`controller.priorityClassName`, default
+  `arbiter-controller`, `value: 1000`, `PreemptLowerPriority`), above the workers' `-100`
+  (`placement.priorityClass`, `Never`). Losing the controller interrupts every run on the node, so a
+  contended cluster must not evict it first. The chart refuses a controller value that does not exceed the
+  workers'. Set `controller.priorityClassName=""` for no class, `controller.priorityClass.preemptionPolicy=Never`
+  to stop it evicting others, `controller.priorityClass.create=false` on every install after the first on a
+  cluster. In `mode=node` the class must already exist: upgrade the bootstrap release first.
 - **No `Namespace`** is templated: Helm stores its release record in the namespace, so it must exist first.
 - **Helm owns the controller image.** The Role has no write verb on the Deployment and
   `ARB_K8S_SELF_UPGRADE=false`; the Deployment carries `ARB_INSTALL_METHOD=helm`, `ARB_HELM_RELEASE` and

@@ -26,6 +26,9 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
 
   @uid 10_001
   @name "arbiter-controller"
+  # bd-bmecet: not the workers' preemptible `arbiter-worker` (-100): a busy cluster would evict
+  # the controller first and interrupt every run on the node. `InstallManifest` creates it.
+  @priority_class "arbiter-controller"
   @proxy_addr "127.0.0.1:1055"
   @tailscale_image "ghcr.io/tailscale/tailscale:v1.104.1@sha256:87c55d6be56ad85b3d8bceca5f87f73de288c609131460dd1be1874c250cc41d"
   @tailscale_secret "arbiter-tailscale"
@@ -33,6 +36,10 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
   @socket "/tmp/tailscaled.sock"
 
   @type reach :: :direct | :tailscale | :proxy
+
+  @doc "The controller Deployment's PriorityClass name."
+  @spec priority_class() :: String.t()
+  def priority_class, do: @priority_class
 
   @doc "Parse the `?reach=` query value."
   @spec parse_reach(String.t() | nil) :: {:ok, reach()} | {:error, {:bad_reach, term()}}
@@ -90,7 +97,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerManifest do
           },
           "spec" => %{
             "serviceAccountName" => @name,
-            "priorityClassName" => "arbiter-worker",
+            "priorityClassName" => @priority_class,
             "securityContext" => %{
               "runAsNonRoot" => true,
               "runAsUser" => @uid,

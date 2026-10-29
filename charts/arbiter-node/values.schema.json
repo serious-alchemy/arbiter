@@ -100,6 +100,16 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "priorityClassName": {"anyOf": [{"type": "string", "maxLength": 0}, {"$ref": "#/definitions/dnsName"}]},
+        "priorityClass": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "create": {"type": "boolean"},
+            "value": {"type": "integer", "maximum": 1000000000},
+            "preemptionPolicy": {"type": "string", "enum": ["PreemptLowerPriority", "Never"]}
+          }
+        },
         "resources": {
           "type": "object",
           "additionalProperties": false,
