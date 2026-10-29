@@ -1890,7 +1890,7 @@ defmodule Arbiter.Worker.Watchdog do
   def handle_info(:poll, %{detached: true} = state) do
     case live_merge_owner(state.task_id) do
       nil ->
-        with {:ok, state} <- retry_still_owed(state), do: detached_poll(state)
+        with {:ok, state} <- retry_still_owed(state), do: state |> detached_poll() |> end_poll()
 
       owner ->
         Logger.info(
