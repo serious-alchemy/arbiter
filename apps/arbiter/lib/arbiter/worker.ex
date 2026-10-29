@@ -7233,6 +7233,7 @@ defmodule Arbiter.Worker do
   defp park_commit_gate(%State{} = state, reason, why) do
     {failure_reason, subject} = commit_gate_failure_metadata(reason)
     summary = commit_gate_summary(state, reason, why)
+    subject = subject <> dirty_paths_suffix(state, reason)
 
     record_commit_gate_note(state, reason, why, summary)
     escalate_commit_gate(state, subject, summary)
@@ -7401,6 +7402,36 @@ defmodule Arbiter.Worker do
     end
   end
 
+  @dirty_paths_in_subject 5
+
+  # The escalation subject names the dirty paths, so a stray Arbiter-side change
+  # (a tracked file deleted under the worker) reads differently from real
+  # uncommitted work without opening the body (bd-g9sh0j).
+  defp dirty_paths_suffix(%State{meta: meta}, :uncommitted) do
+    view = prepush_view(meta || %{})
+
+    case Map.get(view, :worktree_path) do
+      worktree when is_binary(worktree) ->
+        paths =
+          worktree
+          |> commit_gate_porcelain()
+          |> String.split("\n", trim: true)
+          |> Enum.flat_map(fn
+            <<_xy::binary-size(2), " ", path::binary>> -> [path]
+            _ -> []
+          end)
+
+        {shown, rest} = Enum.split(paths, @dirty_paths_in_subject)
+        more = if rest == [], do: "", else: ", +#{length(rest)} more"
+        if shown == [], do: "", else: ": " <> Enum.join(shown, ", ") <> more
+
+      _ ->
+        ""
+    end
+  end
+
+  defp dirty_paths_suffix(_state, _reason), do: ""
+
   defp tracked_deletion_count(status) do
     status
     |> String.split("\n", trim: true)
@@ -7428,6 +7459,17 @@ defmodule Arbiter.Worker do
   end
 
   defp commit_gate_git_status(_), do: "  (no worktree path)"
+
+  # Raw `git status --porcelain` (`XY path` lines, no indent), or "" when it
+  # cannot be read: the subject suffix parses this, not the indented summary.
+  defp commit_gate_porcelain(path) do
+    case Arbiter.Worker.PrivateClone.cmd(path, ["status", "--porcelain"], stderr_to_stdout: true) do
+      {out, 0} -> out
+      _ -> ""
+    end
+  rescue
+    _ -> ""
+  end
 
   defp indent(text) do
     text

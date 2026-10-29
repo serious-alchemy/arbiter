@@ -160,7 +160,7 @@ mkdir -p "$dot_git/hooks" "$dot_git/info" "$dot_git/objects/info"
 : >"$dot_git/objects/info/alternates"
 # `.arbiter/` is the harness's; mix_home/.mix/.hex are where an agent that points MIX_HOME or
 # HEX_HOME into the checkout puts them (bd-5wm92s): never part of the work, never staged.
-printf '.arbiter/\nmix_home/\n.mix/\n.hex/\n' >"$dot_git/info/exclude"
+printf '.arbiter/*\n!.arbiter/Containerfile\nmix_home/\n.mix/\n.hex/\n' >"$dot_git/info/exclude"
 # The identity a container commits as (a pod sees no global git config).
 git_in config user.name arbiter
 git_in config user.email arbiter@localhost
