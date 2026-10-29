@@ -267,6 +267,8 @@ defmodule Arbiter.Worker.CommitGateTest do
 
       assert escalation
       assert escalation.subject =~ "uncommitted"
+      # bd-g9sh0j: the subject names the dirty path itself.
+      assert escalation.subject =~ "forgotten_work.txt"
       assert escalation.body =~ "forgotten_work.txt"
 
       # The work is still on disk — we did NOT auto-commit (per bd-ofql8k:
