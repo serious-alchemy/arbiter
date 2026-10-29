@@ -30,6 +30,24 @@ next: its CI failed or never finishes, its sync keeps failing or is never
 applied, the PR was closed, or the freshness gate parked it. One the merge
 guards refuse keeps only its place in queue order.
 
+On the **auto-merge lane** (`merge.auto_merge=true`) there is no queue process:
+each ticket's Watchdog syncs its own approved MR. The same rule is applied
+through `Arbiter.Worker.MergeTrain` (bd-1754qj), a registry the Watchdogs share
+that uses the same head election as the queue (`Arbiter.Workflows.MergeHead`).
+Per (workspace, repo, target branch) one MR at a time is in a sync or
+CI-after-sync state, the head, chosen by priority and then by when it first
+asked. Every other MR that needs a sync (the merge-time freshness sync, a
+forge-reported `:behind_base`, a CI-remediation sync) waits without syncing,
+logs `waiting for merge head <task>`, and spends no sync, no
+`max_freshness_syncs` budget and no auto-resolve attempt; a red non-head MR
+re-runs its failed jobs once per head instead of syncing. An MR within
+`up_to_date_tolerance` merges without a sync whatever its place, one merge at a
+time per target so the next freshness check sees the new target. The head hands
+its place on on the same bounds as the queue's; a Watchdog that exits releases
+it. After a server restart the train forms for `merge_train_settle_ms` (default
+30s) so every Watchdog re-registers before a head is chosen. A train that
+cannot be reached fails open: the MR syncs as it did before.
+
 ## Merge path details
 
 * The sync runs in the ticket's own worktree (attached if needed) under the

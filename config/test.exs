@@ -76,6 +76,9 @@ config :arbiter_web, :board_worker_debounce_ms, 0
 # without depending on a real environment variable. Never used outside :test.
 config :arbiter, Arbiter.Vault, key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
+# bd-1754qj: no forming period for the auto-merge lane's merge train.
+config :arbiter, :merge_train_settle_ms, 0
+
 config :arbiter, :github_http_stub, true
 # The GitHub limiter's owning-account resolution and periodic /rate_limit poll
 # both make real HTTP calls; disable that probing in the suite so the app-wide

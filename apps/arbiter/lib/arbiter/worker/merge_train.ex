@@ -1,0 +1,415 @@
+defmodule Arbiter.Worker.MergeTrain do
+  @moduledoc """
+  The coalesced merge train of the auto-merge lane (bd-1754qj, the counterpart of
+  bd-d4m8qf's queue head for `merge.auto_merge=true`).
+
+  On the auto-merge lane each ticket's `Arbiter.Worker.Watchdog` syncs its own
+  approved MR; with N of them every move of the target branch cost N sync
+  pipelines, and each sync made the others stale again at the next merge. There
+  is no queue process to choose among them, so this is the one thing they share:
+  per *target* (a workspace, a repo and a base branch), **at most one MR is in a
+  sync or CI-after-sync state at a time** — the head. An MR that needs a sync and
+  is not the head waits (`{:wait, head_task_id}`), spending no sync, no
+  `merge.max_freshness_syncs` budget and no CI-remediation attempt.
+
+  The election is `Arbiter.Workflows.MergeHead`, the rule the MergeQueue applies
+  to its own train: the head is the best by priority then merge-ready time, keeps
+  its place until it merges or leaves, and hands it on when it is parked
+  (`release/3`), closed or its process dies, red or otherwise stalled for
+  `MergeHead.head_stall_grace_ticks/0` ticks, or in CI on one head SHA past
+  `MergeHead.head_ci_wait_ticks/0` ticks.
+
+  ## Who calls what
+
+    * `claim/3` — a Watchdog about to sync (merge-time freshness, a forge-reported
+      `:behind_base`, a CI-remediation sync) asks for the place. `:head`: go ahead.
+      `{:wait, head}`: do not sync. A waiter asks again on each poll, which also
+      keeps it in the order.
+    * `tick/3` — the head's Watchdog reports once per poll while it holds the
+      place (its CI, a block, a failed poll); that is where stalls are counted
+      and where the place is handed on.
+    * `release/3` — the Watchdog is done with its place (merged, closed, parked,
+      its merge refused).
+    * `acquire_merge/3` / `release_merge/3` — one merge at a time per target, so
+      the next MR's freshness check sees the target the previous merge produced.
+      An MR within `merge.up_to_date_tolerance` merges without a sync whatever
+      its place, but not at the same instant as another.
+
+  ## Crash and restart
+
+  The state is in memory and every entry is the caller's last report. A Watchdog
+  that exits (merged, closed, crashed) is dropped by its monitor; an entry not
+  refreshed within its `ttl_ms` is dropped too. When the train process itself
+  restarts it knows nothing, so it forms for `merge_train_settle_ms` (default
+  30s, about a poll) before electing anyone: waiters answer `{:wait, :forming}`
+  while every Watchdog re-registers on its next poll, then the best-ordered one
+  leads rather than whichever polled first. Nothing syncs in the meantime;
+  nothing is lost either, since the head is a pure function of the entries. An
+  MR whose sync was in flight before the restart is, if the target has not moved
+  since, no longer stale and merges; if it has, it competes like the others.
+
+  Callers fail open (`Watchdog` treats an unreachable train as "you are the
+  head"): the train only ever saves syncs, never gates a merge.
+  """
+
+  use GenServer
+
+  alias Arbiter.Workflows.MergeHead
+
+  require Logger
+
+  @default_settle_ms 30_000
+  @default_ttl_ms 120_000
+
+  @type key :: {workspace_id :: String.t() | nil, repo :: String.t() | nil, target :: String.t()}
+  @type role :: :head | {:wait, task_id :: String.t() | :forming | nil}
+
+  # ---- API ----------------------------------------------------------------
+
+  def start_link(opts \\ []) do
+    case Keyword.get(opts, :name, __MODULE__) do
+      nil -> GenServer.start_link(__MODULE__, opts)
+      name -> GenServer.start_link(__MODULE__, opts, name: name)
+    end
+  end
+
+  @doc """
+  Ask for the place to sync. `entry` is a `MergeHead` item (`task_id`, `status`,
+  `priority`, `opened_at`, `last_block_reason`, `last_head_sha`, …) plus an
+  optional `ttl_ms`.
+  """
+  @spec claim(key(), map(), GenServer.server()) :: role()
+  def claim(key, entry, server \\ __MODULE__),
+    do: GenServer.call(server, {:claim, key, entry, self()})
+
+  @doc "The head's once-per-poll report; the place may be handed on. Else as `claim/3`."
+  @spec tick(key(), map(), GenServer.server()) :: role()
+  def tick(key, entry, server \\ __MODULE__),
+    do: GenServer.call(server, {:tick, key, entry, self()})
+
+  @doc "Record that the head was just synced from `sha` (see `MergeHead.new_watch/0`)."
+  @spec note_synced(key(), String.t(), String.t() | nil, GenServer.server()) :: :ok
+  def note_synced(key, task_id, sha, server \\ __MODULE__),
+    do: GenServer.call(server, {:note_synced, key, task_id, sha})
+
+  @doc "Leave the train: the place, if held, goes to the next."
+  @spec release(key(), String.t(), GenServer.server()) :: :ok
+  def release(key, task_id, server \\ __MODULE__),
+    do: GenServer.call(server, {:release, key, task_id})
+
+  @doc "Take the target's merge slot: `:ok`, or `{:busy, holder_task_id}`."
+  @spec acquire_merge(key(), String.t(), GenServer.server()) ::
+          :ok | {:busy, String.t()}
+  def acquire_merge(key, task_id, server \\ __MODULE__),
+    do: GenServer.call(server, {:acquire_merge, key, task_id, self()})
+
+  @spec release_merge(key(), String.t(), GenServer.server()) :: :ok
+  def release_merge(key, task_id, server \\ __MODULE__),
+    do: GenServer.call(server, {:release_merge, key, task_id})
+
+  @doc "End the forming period now (tests; operators)."
+  @spec settle_now(GenServer.server()) :: :ok
+  def settle_now(server \\ __MODULE__), do: GenServer.call(server, :settle_now)
+
+  @doc "The head and the task ids waiting behind it, in order."
+  @spec view(key(), GenServer.server()) :: %{head: String.t() | nil, waiting: [String.t()]}
+  def view(key, server \\ __MODULE__), do: GenServer.call(server, {:view, key})
+
+  # ---- GenServer ----------------------------------------------------------
+
+  @impl true
+  def init(opts) do
+    settle =
+      case Keyword.get(
+             opts,
+             :settle_ms,
+             Application.get_env(:arbiter, :merge_train_settle_ms, @default_settle_ms)
+           ) do
+        ms when is_integer(ms) and ms > 0 ->
+          Process.send_after(self(), :settled, ms)
+          :forming
+
+        :infinity ->
+          :forming
+
+        _ ->
+          :settled
+      end
+
+    {:ok, %{settle: settle, trains: %{}}}
+  end
+
+  @impl true
+  def handle_call({:claim, key, entry, pid}, _from, state) do
+    {role, state} = do_claim(state, key, entry, pid)
+    {:reply, role, state}
+  end
+
+  def handle_call({:tick, key, entry, pid}, _from, state) do
+    id = entry.task_id
+    train = Map.get(state.trains, key, new_train())
+
+    if train.head == id do
+      train = upsert(train, entry, pid)
+      {role, train} = advance_head(train, key, id)
+      {:reply, role, put_train(state, key, train)}
+    else
+      {role, state} = do_claim(state, key, entry, pid)
+      {:reply, role, state}
+    end
+  end
+
+  def handle_call({:note_synced, key, id, sha}, _from, state) do
+    state =
+      update_train(state, key, fn
+        %{head: ^id, entries: %{^id => %{item: %{queue_head: %{} = watch} = item} = e}} = train ->
+          item = %{item | queue_head: %{watch | synced_from: sha}}
+          %{train | entries: Map.put(train.entries, id, %{e | item: item})}
+
+        train ->
+          train
+      end)
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:release, key, id}, _from, state) do
+    {:reply, :ok, update_train(state, key, &drop(&1, id))}
+  end
+
+  def handle_call({:acquire_merge, key, id, pid}, _from, state) do
+    train = Map.get(state.trains, key, new_train())
+
+    case train.merge do
+      nil ->
+        ref = Process.monitor(pid)
+        {:reply, :ok, put_train(state, key, %{train | merge: {id, ref}})}
+
+      {^id, _ref} ->
+        {:reply, :ok, state}
+
+      {holder, _ref} ->
+        {:reply, {:busy, holder}, state}
+    end
+  end
+
+  def handle_call({:release_merge, key, id}, _from, state) do
+    {:reply, :ok, update_train(state, key, &drop_merge(&1, id))}
+  end
+
+  def handle_call(:settle_now, _from, state), do: {:reply, :ok, %{state | settle: :settled}}
+
+  def handle_call({:view, key}, _from, state) do
+    train = Map.get(state.trains, key, new_train())
+
+    waiting =
+      train.entries
+      |> Map.values()
+      |> Enum.map(& &1.item)
+      |> MergeHead.sort()
+      |> Enum.map(& &1.task_id)
+      |> List.delete(train.head)
+
+    {:reply, %{head: train.head, waiting: waiting}, state}
+  end
+
+  @impl true
+  def handle_info(:settled, state), do: {:noreply, %{state | settle: :settled}}
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    trains =
+      state.trains
+      |> Enum.map(fn {key, train} -> {key, drop_ref(train, ref)} end)
+      |> Enum.reject(fn {_key, train} -> empty?(train) end)
+      |> Map.new()
+
+    {:noreply, %{state | trains: trains}}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  # ---- the rule -----------------------------------------------------------
+
+  defp do_claim(state, key, entry, pid) do
+    id = entry.task_id
+    train = state.trains |> Map.get(key, new_train()) |> upsert(entry, pid) |> expire(id)
+
+    {role, train} =
+      cond do
+        train.head == id -> {:head, train}
+        train.head != nil -> {{:wait, train.head}, train}
+        state.settle == :forming -> {{:wait, :forming}, train}
+        true -> elect(train, key, id)
+      end
+
+    {role, put_train(state, key, train)}
+  end
+
+  # No head: the front of the train takes the place, which may not be the caller
+  # (a better-ordered MR registered on an earlier poll and is still asking).
+  defp elect(train, key, id) do
+    {head, _} = train |> items() |> MergeHead.pick()
+    announce(key, train, head)
+    train = set_head(train, head)
+
+    cond do
+      is_nil(head) -> {{:wait, nil}, train}
+      head.task_id == id -> {:head, train}
+      true -> {{:wait, head.task_id}, train}
+    end
+  end
+
+  defp advance_head(train, key, id) do
+    {head, handed_on} = train |> items() |> MergeHead.pick()
+
+    with {incumbent, why} <- handed_on do
+      Logger.warning(
+        "MergeTrain: merge head #{incumbent.task_id} for #{label(key)} #{why}; handing its " <>
+          "place on"
+      )
+    end
+
+    if head && head.task_id != id, do: announce(key, train, head)
+    train = set_head(train, head)
+
+    cond do
+      is_nil(head) -> {{:wait, nil}, train}
+      head.task_id == id -> {:head, train}
+      true -> {{:wait, head.task_id}, train}
+    end
+  end
+
+  defp announce(key, train, %{task_id: id}) do
+    waiting = map_size(train.entries) - 1
+
+    Logger.info(
+      "MergeTrain: #{id} is the merge head for #{label(key)} (#{waiting} waiting behind it); " <>
+        "only it is synced"
+    )
+  end
+
+  defp announce(_key, _train, nil), do: :ok
+
+  defp label({_workspace, repo, target}),
+    do: Enum.map_join(Enum.reject([repo, target], &is_nil/1), "/", &to_string/1)
+
+  # ---- bookkeeping --------------------------------------------------------
+
+  defp new_train, do: %{entries: %{}, head: nil, merge: nil}
+
+  defp empty?(train), do: train.entries == %{} and is_nil(train.merge)
+
+  defp items(train), do: train.entries |> Map.values() |> Enum.map(& &1.item) |> MergeHead.sort()
+
+  defp upsert(train, entry, pid) do
+    id = entry.task_id
+    old = Map.get(train.entries, id)
+
+    ref =
+      case old do
+        %{pid: ^pid, ref: ref} ->
+          ref
+
+        %{ref: ref} ->
+          Process.demonitor(ref, [:flush])
+          Process.monitor(pid)
+
+        nil ->
+          Process.monitor(pid)
+      end
+
+    {ttl, entry} = Map.pop(entry, :ttl_ms, @default_ttl_ms)
+
+    item =
+      if train.head == id and old,
+        do: Map.put(entry, :queue_head, old.item.queue_head),
+        else: Map.delete(entry, :queue_head)
+
+    entries =
+      Map.put(train.entries, id, %{
+        item: item,
+        pid: pid,
+        ref: ref,
+        ttl_ms: ttl,
+        seen_at: now()
+      })
+
+    %{train | entries: entries}
+  end
+
+  # Entries that stopped asking are not in the order. The caller and the head
+  # (which reports through `tick/3`) are judged on what they last said.
+  defp expire(train, keep) do
+    now = now()
+
+    {live, dead} =
+      Enum.split_with(train.entries, fn {id, e} -> id == keep or now - e.seen_at < e.ttl_ms end)
+
+    Enum.each(dead, fn {_id, e} -> Process.demonitor(e.ref, [:flush]) end)
+    train = %{train | entries: Map.new(live)}
+
+    if train.head && not Map.has_key?(train.entries, train.head),
+      do: %{train | head: nil},
+      else: train
+  end
+
+  # Only the head carries a `queue_head` watch: an item handed on has lost its.
+  defp set_head(train, head) do
+    keep = head && head.task_id
+
+    entries =
+      Map.new(train.entries, fn
+        {^keep, e} -> {keep, %{e | item: head}}
+        {id, e} -> {id, %{e | item: Map.delete(e.item, :queue_head)}}
+      end)
+
+    %{train | head: keep, entries: entries}
+  end
+
+  defp drop(train, id) do
+    case Map.pop(train.entries, id) do
+      {nil, _} ->
+        train
+
+      {e, entries} ->
+        Process.demonitor(e.ref, [:flush])
+        %{train | entries: entries, head: if(train.head == id, do: nil, else: train.head)}
+    end
+  end
+
+  defp drop_merge(%{merge: {id, ref}} = train, id) do
+    Process.demonitor(ref, [:flush])
+    %{train | merge: nil}
+  end
+
+  defp drop_merge(train, _id), do: train
+
+  defp drop_ref(train, ref) do
+    train =
+      case Enum.find(train.entries, fn {_id, e} -> e.ref == ref end) do
+        {id, _} -> drop(train, id)
+        nil -> train
+      end
+
+    case train.merge do
+      {_id, ^ref} -> %{train | merge: nil}
+      _ -> train
+    end
+  end
+
+  defp put_train(state, key, train) do
+    trains =
+      if empty?(train), do: Map.delete(state.trains, key), else: Map.put(state.trains, key, train)
+
+    %{state | trains: trains}
+  end
+
+  defp update_train(state, key, fun) do
+    case Map.fetch(state.trains, key) do
+      {:ok, train} -> put_train(state, key, fun.(train))
+      :error -> state
+    end
+  end
+
+  defp now, do: System.monotonic_time(:millisecond)
+end
