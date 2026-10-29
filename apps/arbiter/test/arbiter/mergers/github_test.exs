@@ -2094,6 +2094,57 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "branch_pipeline/3 (bd-5owt7w)" do
+    defp stub_branch_runs(runs) do
+      stub(fn conn ->
+        assert conn.request_path == "/repos/octo/widget/actions/runs"
+        assert conn.query_string =~ "branch=main"
+        Req.Test.json(conn, %{"workflow_runs" => runs})
+      end)
+    end
+
+    defp run(id, sha, status, conclusion \\ nil),
+      do: %{
+        "id" => id,
+        "head_sha" => sha,
+        "status" => status,
+        "conclusion" => conclusion,
+        "html_url" => "https://github.com/octo/widget/actions/runs/#{id}"
+      }
+
+    test "a red workflow beside a green one on the newest commit makes the target red" do
+      stub_branch_runs([
+        run(12, "newest", "completed", "success"),
+        run(11, "newest", "completed", "failure"),
+        run(5, "older", "completed", "success")
+      ])
+
+      assert {:ok, %{status: "failed", sha: "newest", id: 11}} =
+               Github.branch_pipeline(@ref, "main", %{})
+    end
+
+    test "a commit still running has no verdict: the walk reports the newest settled one" do
+      stub_branch_runs([
+        run(12, "newest", "in_progress"),
+        run(5, "older", "completed", "failure")
+      ])
+
+      assert {:ok, %{status: "failed", sha: "older"}} = Github.branch_pipeline(@ref, "main", %{})
+    end
+
+    test "an all-green newest commit is success" do
+      stub_branch_runs([run(12, "newest", "completed", "success")])
+
+      assert {:ok, %{status: "success", sha: "newest"}} =
+               Github.branch_pipeline(@ref, "main", %{})
+    end
+
+    test "no runs is no verdict" do
+      stub_branch_runs([])
+      assert {:ok, nil} = Github.branch_pipeline(@ref, "main", %{})
+    end
+  end
+
   describe "rerun_ci/2 (bd-5mzzww / #1448)" do
     # A run whose failing check sits downstream of jobs that already succeeded —
     # the incident shape: re-running only the failed job reuses the stale deploy.

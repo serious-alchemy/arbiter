@@ -3863,6 +3863,8 @@ defmodule Arbiter.MCP.Catalog do
           "would be reused, or the run is already on attempt 2+), `failed_jobs`, `all_jobs` " <>
           "(re-runs the whole run, rebuilding upstream jobs), `workflow` (a fresh " <>
           "workflow_dispatch — the only mode that can carry `inputs` such as force_deploy). " <>
+          "A head BEHIND its target branch is synced (merge.sync_strategy) instead of re-run, " <>
+          "and the result says `action: synced` (bd-5owt7w). " <>
           "A worker may re-run its own ticket's CI; a coordinator must name `task_id`.",
       input_schema: %{
         "type" => "object",

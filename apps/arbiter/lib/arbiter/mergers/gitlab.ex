@@ -235,6 +235,29 @@ defmodule Arbiter.Mergers.Gitlab do
     end
   end
 
+  @impl true
+  def branch_pipeline(_mr_ref, branch, _opts) when is_binary(branch) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, pipelines} <-
+           cfg
+           |> request(:get, "/pipelines", params: [ref: branch, per_page: 10])
+           |> deploy_pipeline_list() do
+      case Enum.find(pipelines, &(Map.get(&1, "status") in ["success", "failed"])) do
+        nil ->
+          {:ok, nil}
+
+        pipeline ->
+          {:ok,
+           %{
+             id: Map.get(pipeline, "id"),
+             sha: Map.get(pipeline, "sha"),
+             status: Map.get(pipeline, "status"),
+             url: Map.get(pipeline, "web_url")
+           }}
+      end
+    end
+  end
+
   defp deploy_pipeline_list({:ok, %Req.Response{status: status, body: pipelines}})
        when status in 200..299 and is_list(pipelines),
        do: {:ok, newest_first(pipelines)}

@@ -316,6 +316,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Tasks.PullRequest
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
+  alias Arbiter.Worker.CiSync
   alias Arbiter.Worker.MergeFreshness
   alias Arbiter.Worker.Registry, as: PRegistry
   alias Arbiter.Worker.ReviewCi
@@ -1223,6 +1224,22 @@ defmodule Arbiter.Worker.Watchdog do
     :exit, _ -> nil
   end
 
+  @doc """
+  Why the Watchdog is holding `task_id`'s CI-failure remediation, or `nil`
+  (bd-5owt7w): `"target branch red: <pipeline>"` while the MR's target branch's
+  own latest pipeline is failed. A held MR spends no auto-resolve attempt and
+  no sync; it resumes (syncing first) once the target goes green.
+  """
+  @spec ci_hold(String.t()) :: String.t() | nil
+  def ci_hold(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> nil
+      pid -> GenServer.call(pid, :ci_hold, 1_000)
+    end
+  catch
+    :exit, _ -> nil
+  end
+
   # ---- GenServer ----------------------------------------------------------
 
   @impl true
@@ -1376,6 +1393,9 @@ defmodule Arbiter.Worker.Watchdog do
       freshness_sync_head: nil,
       freshness_failed_head: nil,
       freshness_wait_polls: 0,
+      # bd-5owt7w. Why a CI-failure remediation is being held ("target branch
+      # red: <pipeline>"), or nil. Spends no attempt, no sync.
+      ci_hold: nil,
       coverage_unknown_head: nil,
       coverage_parked?: false,
       # `poll_count` as it stood when the coverage park lifted `max_polls` to
@@ -1737,7 +1757,12 @@ defmodule Arbiter.Worker.Watchdog do
   @impl true
   def handle_call({:rerun_ci, opts}, _from, state) do
     if function_exported?(state.adapter, :rerun_ci, 2) do
-      result = state.adapter.rerun_ci(state.mr_ref, opts)
+      # bd-5owt7w: a head behind its target is synced, not re-run.
+      result =
+        CiSync.rerun(state.adapter, state.mr_ref, opts, %{
+          workspace: state.workspace,
+          repo: state.repo
+        })
 
       Logger.info(
         "Worker.Watchdog: CI re-run requested for task=#{state.task_id} " <>
@@ -1803,6 +1828,9 @@ defmodule Arbiter.Worker.Watchdog do
   def handle_call(:parked_on, _from, state) do
     {:reply, parked_reason(state), state}
   end
+
+  @impl true
+  def handle_call(:ci_hold, _from, state), do: {:reply, state.ci_hold, state}
 
   @impl true
   def handle_cast(:recheck_auto_merge, state) do
@@ -3029,7 +3057,8 @@ defmodule Arbiter.Worker.Watchdog do
             auto_resolve_attempts: 0,
             max_auto_resolve_attempts: state.base_max_auto_resolve_attempts,
             unresolved_escalated: false,
-            ci_external_note: nil
+            ci_external_note: nil,
+            ci_hold: nil
         }
 
         apply_outcome(effective_outcome(state, result), result, state)
@@ -3062,7 +3091,11 @@ defmodule Arbiter.Worker.Watchdog do
         park_ci_cancelled(state)
 
       true ->
-        rerun_cancelled(state, rerun)
+        # bd-5owt7w: a stale head is synced rather than re-run.
+        case ci_freshness_gate(state, Map.get(result, :base_ref) || state.mr_base_ref, head) do
+          {:halt, reply} -> reply
+          {:go, state} -> rerun_cancelled(state, rerun)
+        end
     end
   end
 
@@ -3097,6 +3130,7 @@ defmodule Arbiter.Worker.Watchdog do
       state.auto_resolve_attempts >= state.max_auto_resolve_attempts ->
         effective = effective_park_reason(state, reason)
         state = maybe_escalate_unresolved(state, effective)
+        state = stamp_exhausted_park(state, reason)
 
         reschedule(%{
           state
@@ -3109,6 +3143,16 @@ defmodule Arbiter.Worker.Watchdog do
         auto_resolve(reason, result, state)
     end
   end
+
+  # bd-5owt7w (vs-9pdgfr). An exhausted `:ci_failed` park is "waiting for an
+  # out-of-band fix", and the only thing that notices it landing is this process.
+  # Lose the process (a crash, a server restart) and a green pipeline on the head
+  # sat unmerged for 4h until the attention sweep paged the operator. Stamping
+  # the durable pending merge hands the lane to `PendingMergeSweeper`, which
+  # restarts the Watchdog (or a worker-less retry) that merges on green. Only an
+  # exhausted CI block: other parks have their own owners (a human approver, ...).
+  defp stamp_exhausted_park(state, :ci_failed), do: note_pending_merge(state, :ci_failed, nil)
+  defp stamp_exhausted_park(state, _reason), do: state
 
   defp unanchor_cancel_rerun(%{} = rerun), do: %{rerun | poll: nil}
   defp unanchor_cancel_rerun(other), do: other
@@ -3366,10 +3410,179 @@ defmodule Arbiter.Worker.Watchdog do
     else
       head = Map.get(result, :head_sha)
 
-      case visual_step(state, result, head) do
-        {:refreshed, state} -> reschedule(%{state | last_block_reason: :ci_failed})
-        {:wait, state} -> reschedule(%{state | last_block_reason: :ci_failed})
-        {:skip, state} -> resolve_ci_failed_by_fix(state, head)
+      # bd-5owt7w: nothing below (visual refresh, flake re-run, fix pass) is
+      # worth an attempt while the target is red or the head lacks the target.
+      case ci_remediation_gate(state, result, head) do
+        {:halt, reply} ->
+          reply
+
+        {:go, state} ->
+          case visual_step(state, result, head) do
+            {:refreshed, state} -> reschedule(%{state | last_block_reason: :ci_failed})
+            {:wait, state} -> reschedule(%{state | last_block_reason: :ci_failed})
+            {:skip, state} -> resolve_ci_failed_by_fix(state, head)
+          end
+      end
+    end
+  end
+
+  # ---- CI-failure remediation gate (bd-5owt7w) ---------------------------
+  #
+  # Before a fix pass, a flake re-run or a cancelled-run re-run is spent on a red
+  # MR head, two things are checked, neither of which counts as an auto-resolve
+  # attempt:
+  #
+  #   1. Is the TARGET branch's own latest pipeline red? Then the MR cannot go
+  #      green by being fixed or re-run: hold (`ci_hold`, polled but un-counted
+  #      against the poll ceiling) until the target is green.
+  #   2. Does the head lack target commits? Then it is failing on something the
+  #      target may already have fixed: sync it (`merge.sync_strategy`), let CI
+  #      run on the synced head, and only a failure THERE earns an agent. The
+  #      sync books against the freshness budget (`merge.max_freshness_syncs`
+  #      per head), never `auto_resolve_attempts`.
+  #
+  # Both fail open: a probe or forge read that cannot answer never blocks the
+  # remediation the lane had before.
+  defp ci_remediation_gate(state, result, head) do
+    base = Map.get(result, :base_ref) || state.mr_base_ref
+
+    case target_red_hold(state, base) do
+      {:hold, why} ->
+        {:halt, hold_ci_remediation(state, why)}
+
+      :clear ->
+        state = clear_ci_hold(state)
+        ci_freshness_gate(state, base, head)
+    end
+  end
+
+  defp target_red_hold(state, base) do
+    case CiSync.target_hold(state.adapter, state.mr_ref, base) do
+      nil -> :clear
+      why -> {:hold, why}
+    end
+  end
+
+  defp hold_ci_remediation(state, why) do
+    if state.ci_hold != why do
+      Logger.warning(
+        "Worker.Watchdog: holding CI remediation for task=#{state.task_id} " <>
+          "mr=#{state.mr_ref} — #{why}; no attempt spent, no sync until the target is green"
+      )
+    end
+
+    # Held polls do not count toward the ceiling (like a queued pipeline): the
+    # lane is waiting on the target, not stalled.
+    held = if is_integer(state.max_polls), do: state.pass_polls + 1, else: state.pass_polls
+
+    reschedule(%{state | ci_hold: why, last_block_reason: :ci_failed, pass_polls: held})
+  end
+
+  defp clear_ci_hold(%{ci_hold: nil} = state), do: state
+
+  defp clear_ci_hold(state) do
+    Logger.info(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} — target branch no longer " <>
+        "red (was: #{state.ci_hold}); resuming CI remediation"
+    )
+
+    %{state | ci_hold: nil}
+  end
+
+  defp ci_freshness_gate(state, base, head) do
+    cond do
+      not (function_exported?(state.adapter, :update_branch, 1) or
+               function_exported?(state.adapter, :update_branch, 2)) ->
+        {:go, state}
+
+      not (is_binary(base) and is_binary(head)) ->
+        {:go, state}
+
+      true ->
+        state = reset_freshness_budget(%{state | last_head_sha: head})
+
+        case CiSync.check(state.workspace, state.repo, base, head) do
+          :fresh ->
+            {:go, state}
+
+          {:stale, behind} ->
+            ci_sync(state, head, base, behind)
+
+          {:unknown, reason} ->
+            Logger.warning(
+              "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not tell " <>
+                "whether #{inspect(head)} contains #{inspect(base)} (#{inspect_short(reason)}); " <>
+                "not syncing before CI remediation"
+            )
+
+            {:go, state}
+        end
+    end
+  end
+
+  # The synced head has not shown up yet: wait for it, bounded.
+  defp ci_sync(%{freshness_sync_head: head} = state, head, _base, _behind)
+       when state.freshness_wait_polls < @freshness_wait_polls do
+    {:halt,
+     reschedule(%{
+       state
+       | last_block_reason: :ci_failed,
+         freshness_wait_polls: state.freshness_wait_polls + 1
+     })}
+  end
+
+  # A sync that failed on this head is not retried; the forge's `conflicting`
+  # flag drives the conflict resolver. Held, un-paged, un-counted.
+  defp ci_sync(%{freshness_failed_head: head} = state, head, _base, _behind),
+    do: {:halt, reschedule(state)}
+
+  defp ci_sync(state, head, base, behind) do
+    if state.freshness_syncs >= MergeFreshness.max_syncs(state.workspace) do
+      # The forge never applies our syncs. Don't deadlock the lane on it: the
+      # remediation proceeds as before, and the merge-time gate still fails closed.
+      Logger.warning(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head #{head} still behind " <>
+          "#{base} after #{state.freshness_syncs} syncs; proceeding with CI remediation unsynced"
+      )
+
+      {:go, %{state | freshness_sync_head: nil, freshness_wait_polls: 0}}
+    else
+      Logger.info(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} CI is red on head #{head}, " <>
+          "#{behind} commit(s) behind #{base}; syncing before any re-run or fix pass " <>
+          "(#{state.freshness_syncs + 1}/#{MergeFreshness.max_syncs(state.workspace)}, no attempt spent)"
+      )
+
+      state = %{state | freshness_syncs: state.freshness_syncs + 1}
+
+      case safe_update_branch(state) do
+        :ok ->
+          # Not `clear_reviewed_latch/1`, as for the merge-time sync: the guard
+          # covers the synced head only if it is the reviewed content plus the target.
+          {:halt,
+           reschedule(%{
+             state
+             | last_block_reason: :ci_failed,
+               freshness_sync_head: head,
+               freshness_wait_polls: 0
+           })}
+
+        {:error, reason} ->
+          Logger.warning(
+            "Worker.Watchdog: CI-remediation sync failed for task=#{state.task_id} " <>
+              "mr=#{state.mr_ref}: #{inspect(reason)}; treating as :conflict"
+          )
+
+          safe(fn ->
+            Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+              snapshot(state),
+              state.mr_ref,
+              :conflict
+            )
+          end)
+
+          {:halt,
+           reschedule(%{state | last_block_reason: :conflict, freshness_failed_head: head})}
       end
     end
   end
@@ -3616,6 +3829,7 @@ defmodule Arbiter.Worker.Watchdog do
     state = %{state | auto_resolve_attempts: attempts}
     effective = effective_park_reason(state, :ci_failed)
     state = maybe_escalate_unresolved(state, effective)
+    state = stamp_exhausted_park(state, :ci_failed)
 
     reschedule(%{
       state

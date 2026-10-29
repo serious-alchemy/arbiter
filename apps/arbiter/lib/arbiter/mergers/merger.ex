@@ -407,6 +407,29 @@ defmodule Arbiter.Mergers.Merger do
   @callback deploy_pipelines(mr_ref, branch :: String.t(), opts :: map()) ::
               {:ok, [deploy_pipeline()]} | {:error, term()}
 
+  @typedoc """
+  The target branch's newest *settled* pipeline, as `branch_pipeline/3` reports
+  it: `:id`, head `:sha`, `:status` (GitLab's words: `success` / `failed`) and
+  `:url`.
+  """
+  @type branch_pipeline :: %{
+          id: term(),
+          sha: String.t() | nil,
+          status: String.t() | nil,
+          url: String.t() | nil
+        }
+
+  @doc """
+  The newest settled (`success` or `failed`) pipeline on `branch`, or `{:ok,
+  nil}` when it has none. One cheap read, unlike `deploy_pipelines/3`: the
+  Watchdog asks it every poll while an MR's CI is red, to hold auto-resolve
+  while the *target* is itself red (bd-5owt7w). In-flight and cancelled
+  pipelines are skipped, so a red target stays red until a newer one passes.
+  Optional; an adapter without it simply never holds.
+  """
+  @callback branch_pipeline(mr_ref, branch :: String.t(), opts :: map()) ::
+              {:ok, branch_pipeline() | nil} | {:error, term()}
+
   @doc """
   List open merge requests / pull requests in the configured repository.
 
@@ -639,6 +662,7 @@ defmodule Arbiter.Mergers.Merger do
                       ci_job_artifacts: 3,
                       last_green_job_sha: 3,
                       deploy_pipelines: 3,
+                      branch_pipeline: 3,
                       ref_for_pr: 2,
                       list_open: 0,
                       list_open_review_threads: 1,

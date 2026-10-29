@@ -809,6 +809,50 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
+  # The target branch's verdict is its newest *commit's* workflow runs together:
+  # one commit runs several workflows, and a green one beside a red one is red.
+  # A commit still running or cancelled has no verdict yet, so the walk passes
+  # over it to the newest commit that settled.
+  @impl true
+  def branch_pipeline(mr_ref, branch, _opts) when is_binary(mr_ref) and is_binary(branch) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, %{"workflow_runs" => runs}} when is_list(runs) <-
+           cfg
+           |> request(:get, "/repos/#{owner}/#{repo}/actions/runs",
+             params: [branch: branch, event: "push", per_page: 30]
+           )
+           |> handle_json() do
+      {:ok, settled_branch_run(runs)}
+    else
+      {:ok, _} -> {:error, :unexpected_runs_response}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp settled_branch_run(runs) do
+    runs
+    |> Enum.group_by(&Map.get(&1, "head_sha"))
+    |> Enum.sort_by(
+      fn {_sha, group} -> group |> Enum.map(&(Map.get(&1, "id") || 0)) |> Enum.max() end,
+      :desc
+    )
+    |> Enum.find_value(fn {sha, group} ->
+      statuses = Enum.map(group, &deploy_status/1)
+
+      cond do
+        "failed" in statuses -> branch_run(sha, group, "failed")
+        Enum.all?(statuses, &(&1 in ["success", "skipped"])) -> branch_run(sha, group, "success")
+        true -> nil
+      end
+    end)
+  end
+
+  defp branch_run(sha, group, status) do
+    run = Enum.find(group, &(deploy_status(&1) == status)) || hd(group)
+    %{id: Map.get(run, "id"), sha: sha, status: status, url: Map.get(run, "html_url")}
+  end
+
   # A workflow run / job in GitLab's status vocabulary, the one
   # `Arbiter.Workflows.DeployWatch` reads.
   defp deploy_status(%{"status" => "completed", "conclusion" => conclusion}) do
