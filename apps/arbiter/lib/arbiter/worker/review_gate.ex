@@ -255,6 +255,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.PrepushCheck.Touched
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
+  alias Arbiter.Worker.RepeatUnmetCriterion
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.ReviewFindings
@@ -3950,6 +3951,10 @@ defmodule Arbiter.Worker.ReviewGate do
         standalone_deferred: state.guard_rejected == :unmet_criteria
       ) ->
         escalate_coordinator_only(state, findings)
+
+      # bd-hrhkzj: a criterion unmet on two consecutive rounds is not moving.
+      repeats = repeated_unmet_criteria(state, findings) ->
+        escalate_repeat_unmet(state, findings, repeats)
 
       true ->
         do_route_after_reject(state, findings)
@@ -9608,5 +9613,52 @@ defmodule Arbiter.Worker.ReviewGate do
   rescue
     _ ->
       %{title: "(unknown)", description: "(none)", acceptance: "(none)", acceptance_waived: nil}
+  end
+
+  # bd-hrhkzj: the criteria shared between this round's findings and the
+  # previous REQUEST_CHANGES round's, or `nil` when none repeat. Reads the
+  # in-memory thread only, so a fresh gate (a new fix round) starts clean.
+  defp repeated_unmet_criteria(state, findings) do
+    with {_idx, %{body: prev_body}} <- previous_reject(state.thread),
+         [_ | _] = repeats <- RepeatUnmetCriterion.repeated(prev_body, findings) do
+      repeats
+    else
+      _ -> nil
+    end
+  end
+
+  defp previous_reject(thread) do
+    thread
+    |> Enum.with_index()
+    |> Enum.reverse()
+    |> Enum.find_value(fn {entry, idx} ->
+      if entry.role == :reviewer and String.contains?(entry.subject, "REQUEST_CHANGES"),
+        do: {idx, entry}
+    end)
+  end
+
+  # Reported like `escalate_coordinator_only/2`: a plain `:request_changes`
+  # led by the rule's marker, which also stops `Arbiter.Worker` dispatching
+  # its own automatic fix round.
+  defp escalate_repeat_unmet(state, findings, repeats) do
+    {idx, _} = previous_reject(state.thread)
+
+    response =
+      state.thread
+      |> Enum.drop(idx + 1)
+      |> Enum.filter(&(&1.role == :implementer))
+      |> Enum.map_join("\n\n", & &1.body)
+
+    state = record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
+
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} round #{state.round} repeated an unmet criterion " <>
+        "from the previous round; escalating instead of a revise round"
+    )
+
+    payload =
+      RepeatUnmetCriterion.escalation_findings(repeats, response, escalation_payload(state))
+
+    {:done, finish(state, {:request_changes, payload})}
   end
 end
