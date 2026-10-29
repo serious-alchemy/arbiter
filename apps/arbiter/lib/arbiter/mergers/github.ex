@@ -74,6 +74,7 @@ defmodule Arbiter.Mergers.Github do
 
   alias Arbiter.Mergers.{
     CILogExcerpt,
+    CIQueue,
     CIRerun,
     Github.BlockedState,
     Github.Config,
@@ -1377,6 +1378,34 @@ defmodule Arbiter.Mergers.Github do
       end
     end
   end
+
+  # The CI backpressure signal (#1126): the repo's workflow runs for pull requests
+  # that are `queued` (waiting for a runner). `total_count` is the whole queue; the
+  # page (newest first) only dates the oldest, so a deeper queue than a page reads
+  # the oldest of the page — a lower bound, which only under-reports the age.
+  # A PR with several workflows counts once per workflow run.
+  @impl true
+  def ci_queue do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, owner} <- require_owner_repo(cfg, :owner),
+         {:ok, repo} <- require_owner_repo(cfg, :repo),
+         {:ok, %{"workflow_runs" => runs} = body} when is_list(runs) <-
+           cfg
+           |> request(:get, "/repos/#{owner}/#{repo}/actions/runs",
+             params: [status: "queued", event: "pull_request", per_page: 100]
+           )
+           |> handle_json() do
+      {:ok, CIQueue.build(queued_total(body, runs), Enum.map(runs, &Map.get(&1, "created_at")))}
+    else
+      {:ok, _} -> {:error, :unexpected_runs_response}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp queued_total(%{"total_count" => total}, _runs) when is_integer(total) and total >= 0,
+    do: total
+
+  defp queued_total(_body, runs), do: length(runs)
 
   @impl true
   def list_open do

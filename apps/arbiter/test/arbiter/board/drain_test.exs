@@ -561,6 +561,45 @@ defmodule Arbiter.Board.DrainTest do
       assert Jason.encode!(json)
     end
 
+    # #1126: the per-repo CI backpressure entry rides `scheduler_status`.
+    test "carries the per-repo ci_backpressure entries, [] when the view has none" do
+      ap = start_autopilot!(paused: false)
+      sup = empty_supervisor!()
+
+      entry = %{
+        repo: "vstim",
+        label: "vstim",
+        pending: 6,
+        max_pending: 4,
+        oldest_pending_min: 42,
+        max_oldest_pending_min: nil,
+        state: "held",
+        detail: "6 pending, oldest 42m"
+      }
+
+      view = %{
+        admission: nil,
+        pools: [],
+        machines: [],
+        repos: [],
+        fair_share: [],
+        ci_backpressure: [entry]
+      }
+
+      json =
+        [autopilot: ap, supervisor: sup, capacity: view] |> Drain.status() |> Drain.to_json()
+
+      assert json.ci_backpressure == [entry]
+      assert Jason.encode!(json)
+
+      bare = Map.delete(view, :ci_backpressure)
+
+      json =
+        [autopilot: ap, supervisor: sup, capacity: bare] |> Drain.status() |> Drain.to_json()
+
+      assert json.ci_backpressure == []
+    end
+
     test "reads the live capacity view when not handed one" do
       ap = start_autopilot!(paused: false)
 

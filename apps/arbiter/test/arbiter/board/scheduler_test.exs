@@ -464,4 +464,28 @@ defmodule Arbiter.Board.SchedulerTest do
       assert plan(ready: [card("bd-1")]).promote == "bd-1"
     end
   end
+
+  describe "a CI backpressure hold (#1126)" do
+    test "a card of a saturated repo is held by its own hold, naming the counts, and the next card goes" do
+      plan =
+        plan(
+          ready: [card("bd-1"), card("bd-2")],
+          card_ci: %{"bd-1" => {:hold, "6 pending, oldest 42m"}}
+        )
+
+      assert %{
+               state: :blocked,
+               reason: "held — CI saturated (6 pending, oldest 42m)",
+               hold: {:ci_saturated, "6 pending, oldest 42m"}
+             } = reason(plan, "bd-1")
+
+      # A card's own block never advances the queue.
+      assert plan.promote == "bd-2"
+    end
+
+    test "no entry, or :ok, does not hold" do
+      assert plan(ready: [card("bd-1")], card_ci: %{"bd-1" => :ok}).promote == "bd-1"
+      assert plan(ready: [card("bd-1")]).promote == "bd-1"
+    end
+  end
 end

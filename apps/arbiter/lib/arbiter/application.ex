@@ -365,6 +365,8 @@ defmodule Arbiter.Application do
         Arbiter.Usage.EstimateCache,
         # Owns the ETS table memoizing `/reports` results (bd-an8t0e).
         Arbiter.Reports.Cache,
+        # The forge-poll memo behind the per-repo CI backpressure gate (#1126).
+        Arbiter.Board.CiBackpressure.Cache,
         # Memoizes the host's minted GitHub App tokens (bd-bsmkfu).
         Arbiter.Worker.HostCredential.Cache,
         # The egress proxy's grant cache, registry and per-run supervisor

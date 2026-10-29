@@ -64,6 +64,7 @@ defmodule Arbiter.Mergers.Gitlab do
   alias Arbiter.Http.Error, as: ErrorSpec
   alias Arbiter.Mergers.BranchSync
   alias Arbiter.Mergers.CILogExcerpt
+  alias Arbiter.Mergers.CIQueue
   alias Arbiter.Mergers.CIRerun
   alias Arbiter.Mergers.Gitlab.{Config, Error}
 
@@ -1045,6 +1046,37 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   defp approved_by_username?(_approvals, _username), do: false
+
+  # Pipelines that are waiting for a runner, in GitLab's status vocabulary.
+  @queued_pipeline_statuses ~w(pending waiting_for_resource created)
+
+  # The CI backpressure signal (#1126): the project's merge-request pipelines that
+  # have not started. One list per status (the API filters on a single status); a
+  # page is the cap, since a queue that deep is saturated whatever its exact count.
+  @impl true
+  def ci_queue do
+    with {:ok, cfg} <- Config.resolve() do
+      @queued_pipeline_statuses
+      |> Enum.reduce_while({:ok, %{}}, fn status, {:ok, acc} ->
+        params = [status: status, source: "merge_request_event", per_page: 100]
+
+        case cfg |> request(:get, "/pipelines", params: params) |> handle_json() do
+          {:ok, pipelines} when is_list(pipelines) ->
+            {:cont, {:ok, Enum.reduce(pipelines, acc, &Map.put(&2, &1["id"], &1["created_at"]))}}
+
+          {:ok, _other} ->
+            {:halt, {:error, :unexpected_pipelines_response}}
+
+          {:error, _} = error ->
+            {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, queued} -> {:ok, CIQueue.build(map_size(queued), Map.values(queued))}
+        error -> error
+      end
+    end
+  end
 
   @impl true
   def list_open do

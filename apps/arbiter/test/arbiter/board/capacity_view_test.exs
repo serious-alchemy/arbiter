@@ -264,6 +264,70 @@ defmodule Arbiter.Board.CapacityViewTest do
     end
   end
 
+  # #1126: the per-repo CI backpressure entry beside the repo cap.
+  describe "ci backpressure (#1126)" do
+    alias Arbiter.Tasks.Workspace
+
+    @now ~U[2026-10-29 12:00:00Z]
+
+    defp ci_ws(name, block) do
+      config = %{"worker" => %{"repos" => %{"vstim" => %{"ci_backpressure" => block}}}}
+
+      %Workspace{
+        id: "ci-#{name}-#{System.unique_integer([:positive])}",
+        name: name,
+        config: config
+      }
+    end
+
+    defp stub_forge(pending, age_min) do
+      [
+        poller: fn _ws, _repo ->
+          {:ok, %{pending: pending, oldest_at: DateTime.add(@now, -age_min * 60, :second)}}
+        end,
+        async: false,
+        now: @now
+      ]
+    end
+
+    test "is empty when no repo is gated" do
+      assert status(workspaces: [ws("w1", "vstim", [{"vstim", 2}])]).ci_backpressure == []
+    end
+
+    test "a gated repo shows its pending count, thresholds and hold state" do
+      view =
+        status(
+          workspaces: [ci_ws("vstim-ws", %{"max_pending" => 4, "max_oldest_pending_min" => 90})],
+          ci_backpressure: stub_forge(6, 42)
+        )
+
+      assert [
+               %{
+                 repo: "vstim",
+                 label: "vstim",
+                 workspace: "vstim-ws",
+                 pending: 6,
+                 oldest_pending_min: 42,
+                 max_pending: 4,
+                 max_oldest_pending_min: 90,
+                 state: "held",
+                 detail: "6 pending, oldest 42m",
+                 change_command: command
+               }
+             ] = view.ci_backpressure
+
+      assert command =~ "worker.repos.vstim.ci_backpressure"
+      assert {:ok, _} = Jason.encode(view)
+    end
+
+    test "below the threshold the repo reads clear" do
+      view =
+        status(workspaces: [ci_ws("w", %{"max_pending" => 4})], ci_backpressure: stub_forge(2, 3))
+
+      assert [%{state: "clear", pending: 2, detail: nil}] = view.ci_backpressure
+    end
+  end
+
   describe "repos and fair share" do
     alias Arbiter.Tasks.Workspace
 

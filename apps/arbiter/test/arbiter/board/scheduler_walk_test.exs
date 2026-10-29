@@ -481,6 +481,19 @@ defmodule Arbiter.Board.SchedulerWalkTest do
       assert plan.promote == "bd-2"
     end
 
+    test "a CI backpressure hold is an own hold" do
+      plan =
+        walk(
+          ready: [card("bd-1"), card("bd-2")],
+          card_ci: %{"bd-1" => {:hold, "6 pending, oldest 42m"}}
+        )
+
+      assert %{wait_cause: :own_hold, reason: "held — CI saturated (6 pending, oldest 42m)"} =
+               entry(plan, "bd-1")
+
+      assert plan.promote == "bd-2"
+    end
+
     test "paused places nothing and every free card says so" do
       plan = walk(ready: [card("bd-1"), card("bd-2", blocked_by: ["bd-9"])], paused: true)
 
