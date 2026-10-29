@@ -318,6 +318,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Worker
   alias Arbiter.Worker.CiSync
   alias Arbiter.Worker.MergeFreshness
+  alias Arbiter.Worker.MergeTrain
   alias Arbiter.Worker.Registry, as: PRegistry
   alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.VisualBaselines
@@ -1396,6 +1397,20 @@ defmodule Arbiter.Worker.Watchdog do
       # bd-5owt7w. Why a CI-failure remediation is being held ("target branch
       # red: <pipeline>"), or nil. Spends no attempt, no sync.
       ci_hold: nil,
+      # bd-1754qj. The merge train (`Arbiter.Worker.MergeTrain`): `:head` while
+      # this MR holds the target's one sync place, `{:wait, task_id}` while it waits
+      # for that head, nil when it has not asked. `train_ready_since` is when it
+      # first asked (its place in the order); `train_priority` the task's priority
+      # (loaded on first use); `merge_slot` whether it holds the target's merge
+      # slot this poll; `train_rerun_head` the head whose failed jobs were re-run
+      # instead of a sync (once per head); `train_wait_logged` the head last
+      # logged as waited for.
+      train_role: nil,
+      train_ready_since: nil,
+      train_priority: Keyword.get(opts, :train_priority),
+      merge_slot: false,
+      train_rerun_head: nil,
+      train_wait_logged: nil,
       coverage_unknown_head: nil,
       coverage_parked?: false,
       # `poll_count` as it stood when the coverage park lifted `max_polls` to
@@ -1880,6 +1895,7 @@ defmodule Arbiter.Worker.Watchdog do
     case safe_get(state) do
       {:ok, result} when is_map(result) ->
         record_status(state, result)
+        state = train_tick(state, result)
         state = track_reviewed_baseline(state, result)
         state = note_flake_rerun_pending(state, result)
         state = maybe_escalate_pipeline(state, result)
@@ -1888,13 +1904,17 @@ defmodule Arbiter.Worker.Watchdog do
         state
         |> maybe_escalate_merge_block(result)
         |> persist_lane()
+        |> end_poll()
 
       {:error, reason} ->
         Logger.debug(
           "Worker.Watchdog: get/1 error for task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}"
         )
 
-        reschedule(state)
+        state
+        |> train_tick(%{poll_failed?: true})
+        |> reschedule()
+        |> end_poll()
     end
   end
 
@@ -2563,7 +2583,7 @@ defmodule Arbiter.Worker.Watchdog do
       # The forge has not caught up with our own push yet, so it is not yet
       # possible to say anything true about the head. Keep polling.
       {:wait, state} ->
-        reschedule(note_pending_merge(state, :merge_waiting, nil))
+        reschedule(note_pending_merge(state, :merge_waiting, wait_detail(state)))
 
       {:merge, expected_sha, state} ->
         apply_guarded_merge(state, expected_sha)
@@ -2618,7 +2638,9 @@ defmodule Arbiter.Worker.Watchdog do
           "Worker.Watchdog: auto-merge failed for task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}; will retry (consecutive failure #{fail_count})"
         )
 
-        state = %{state | merge_fail_count: fail_count}
+        # bd-1754qj: a refused merge has no sync or CI under way to protect, so
+        # the place goes to the next MR rather than idling behind it.
+        state = release_sync_place(%{state | merge_fail_count: fail_count})
 
         should_notify =
           (fail_count >= state.merge_fail_notify_threshold and not state.merge_stall_notified) or
@@ -3361,6 +3383,14 @@ defmodule Arbiter.Worker.Watchdog do
   # :behind_base — run update-branch (mechanical, no agent) and re-poll. On
   # failure (update-branch would conflict) fall through to :conflict handling.
   defp resolve_behind_base(state) do
+    # bd-1754qj: only the target's merge head syncs; the rest wait, unspent.
+    case claim_sync_place(state) do
+      {:head, state} -> sync_behind_base(state)
+      {:wait, state} -> reschedule(%{wait_for_head(state) | last_block_reason: :behind_base})
+    end
+  end
+
+  defp sync_behind_base(state) do
     attempts = state.auto_resolve_attempts + 1
 
     Logger.info(
@@ -3371,7 +3401,7 @@ defmodule Arbiter.Worker.Watchdog do
     case safe_update_branch(state) do
       :ok ->
         # The rebase-forward moves the branch head; see `clear_reviewed_latch/1`.
-        state = clear_reviewed_latch(state)
+        state = state |> clear_reviewed_latch() |> note_synced()
         reschedule(%{state | last_block_reason: :behind_base, auto_resolve_attempts: attempts})
 
       {:error, reason} ->
@@ -3390,7 +3420,13 @@ defmodule Arbiter.Worker.Watchdog do
           )
         end)
 
-        reschedule(%{state | last_block_reason: :conflict, auto_resolve_attempts: attempts})
+        reschedule(
+          release_sync_place(%{
+            state
+            | last_block_reason: :conflict,
+              auto_resolve_attempts: attempts
+          })
+        )
     end
   end
 
@@ -3536,7 +3572,48 @@ defmodule Arbiter.Worker.Watchdog do
   defp ci_sync(%{freshness_failed_head: head} = state, head, _base, _behind),
     do: {:halt, reschedule(state)}
 
+  # bd-1754qj. Only the target's merge head syncs. A red MR that is not the head
+  # re-runs its failed jobs on the head it has (once per head: a failure that
+  # being behind caused will not clear, and waiting for its turn to sync costs
+  # one pipeline, not one per main move) and holds: no sync, no fix pass, no
+  # attempt spent.
   defp ci_sync(state, head, base, behind) do
+    case claim_sync_place(state) do
+      {:head, state} -> do_ci_sync(state, head, base, behind)
+      {:wait, state} -> {:halt, hold_ci_for_head(wait_for_head(state), head)}
+    end
+  end
+
+  defp hold_ci_for_head(state, head) do
+    state =
+      if state.train_rerun_head == head do
+        state
+      else
+        rerun_failed_on_existing_head(%{state | train_rerun_head: head}, head)
+      end
+
+    reschedule(%{state | last_block_reason: :ci_failed})
+  end
+
+  defp rerun_failed_on_existing_head(state, head) do
+    case safe_rerun_ci(state) do
+      {:ok, _} ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} CI is red on head #{head} " <>
+            "and it is not the merge head; re-ran its failed jobs instead of syncing"
+        )
+
+      other ->
+        Logger.debug(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} re-run on head #{head} " <>
+            "not started (#{inspect(other)}); holding for the merge head"
+        )
+    end
+
+    state
+  end
+
+  defp do_ci_sync(state, head, base, behind) do
     if state.freshness_syncs >= MergeFreshness.max_syncs(state.workspace) do
       # The forge never applies our syncs. Don't deadlock the lane on it: the
       # remediation proceeds as before, and the merge-time gate still fails closed.
@@ -3545,7 +3622,7 @@ defmodule Arbiter.Worker.Watchdog do
           "#{base} after #{state.freshness_syncs} syncs; proceeding with CI remediation unsynced"
       )
 
-      {:go, %{state | freshness_sync_head: nil, freshness_wait_polls: 0}}
+      {:go, release_sync_place(%{state | freshness_sync_head: nil, freshness_wait_polls: 0})}
     else
       Logger.info(
         "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} CI is red on head #{head}, " <>
@@ -3560,12 +3637,14 @@ defmodule Arbiter.Worker.Watchdog do
           # Not `clear_reviewed_latch/1`, as for the merge-time sync: the guard
           # covers the synced head only if it is the reviewed content plus the target.
           {:halt,
-           reschedule(%{
-             state
-             | last_block_reason: :ci_failed,
-               freshness_sync_head: head,
-               freshness_wait_polls: 0
-           })}
+           reschedule(
+             note_synced(%{
+               state
+               | last_block_reason: :ci_failed,
+                 freshness_sync_head: head,
+                 freshness_wait_polls: 0
+             })
+           )}
 
         {:error, reason} ->
           Logger.warning(
@@ -3582,7 +3661,13 @@ defmodule Arbiter.Worker.Watchdog do
           end)
 
           {:halt,
-           reschedule(%{state | last_block_reason: :conflict, freshness_failed_head: head})}
+           reschedule(
+             release_sync_place(%{
+               state
+               | last_block_reason: :conflict,
+                 freshness_failed_head: head
+             })
+           )}
       end
     end
   end
@@ -5333,35 +5418,45 @@ defmodule Arbiter.Worker.Watchdog do
         merge
 
       true ->
-        merge = {:merge, sha, reset_freshness_budget(state)}
-
-        case MergeFreshness.check(
-               state.workspace,
-               local_repo(state),
-               state.mr_base_ref,
-               state.last_head_sha
-             ) do
-          :fresh ->
-            merge
-
-          {:stale, behind} ->
-            freshness_sync(merge, behind)
-
-          {:unknown, reason} ->
-            # Correctness-critical: "could not tell" is not "fresh". Sync anyway;
-            # `update_branch/1` is harmless on a branch that already has the tip.
-            Logger.warning(
-              "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not tell " <>
-                "whether #{inspect(state.last_head_sha)} contains #{inspect(state.mr_base_ref)} " <>
-                "(#{inspect_short(reason)}); syncing rather than merging unchecked"
-            )
-
-            freshness_sync(merge, nil)
+        # bd-1754qj: one merge at a time per target, so the freshness check below
+        # sees the target the previous merge produced. Taken before the check,
+        # not after, for that reason.
+        case acquire_merge_slot(reset_freshness_budget(state)) do
+          {:busy, state} -> {:wait, state}
+          {:ok, state} -> locked_freshness_check({:merge, sha, state})
         end
     end
   end
 
   defp freshness_gate(other), do: other
+
+  defp locked_freshness_check({:merge, _sha, state} = merge) do
+    case MergeFreshness.check(
+           state.workspace,
+           local_repo(state),
+           state.mr_base_ref,
+           state.last_head_sha
+         ) do
+      :fresh ->
+        # Within tolerance (or current): merges whatever its place in the train,
+        # so it no longer waits for a sync place.
+        merge |> release_waiting_place()
+
+      {:stale, behind} ->
+        merge |> release_merge_slot() |> freshness_sync(behind)
+
+      {:unknown, reason} ->
+        # Correctness-critical: "could not tell" is not "fresh". Sync anyway;
+        # `update_branch/1` is harmless on a branch that already has the tip.
+        Logger.warning(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not tell " <>
+            "whether #{inspect(state.last_head_sha)} contains #{inspect(state.mr_base_ref)} " <>
+            "(#{inspect_short(reason)}); syncing rather than merging unchecked"
+        )
+
+        merge |> release_merge_slot() |> freshness_sync(nil)
+    end
+  end
 
   # The sync budget is per head. A head that is neither the one we last synced from
   # nor the one we parked on is new: either someone else pushed, or our sync landed
@@ -5405,7 +5500,16 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp freshness_sync({:merge, _sha, state}, behind), do: freshness_sync_now(state, behind)
 
+  # bd-1754qj. Only the target's merge head syncs; every other MR waits for it,
+  # spending no sync, no budget and no page.
   defp freshness_sync_now(state, behind) do
+    case claim_sync_place(state) do
+      {:head, state} -> do_freshness_sync(state, behind)
+      {:wait, state} -> {:wait, wait_for_head(state)}
+    end
+  end
+
+  defp do_freshness_sync(state, behind) do
     if state.freshness_syncs >= MergeFreshness.max_syncs(state.workspace) do
       # Fail closed: a branch still not (provably) current after the bounded syncs
       # is never merged untested. Park and page once; a new head re-enables it.
@@ -5425,13 +5529,13 @@ defmodule Arbiter.Worker.Watchdog do
       end)
 
       {:wait,
-       %{
+       release_sync_place(%{
          state
          | last_block_reason: :behind_base,
            freshness_failed_head: state.last_head_sha,
            freshness_sync_head: nil,
            freshness_wait_polls: 0
-       }}
+       })}
     else
       Logger.info(
         "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head " <>
@@ -5448,7 +5552,12 @@ defmodule Arbiter.Worker.Watchdog do
           # is more than the sync through. The reviewed-SHA guard stays bound and
           # covers the synced head only if it is the reviewed content plus the
           # target.
-          {:wait, %{state | freshness_sync_head: state.last_head_sha, freshness_wait_polls: 0}}
+          {:wait,
+           note_synced(%{
+             state
+             | freshness_sync_head: state.last_head_sha,
+               freshness_wait_polls: 0
+           })}
 
         {:error, reason} ->
           # Same fall-through as a failed `:behind_base` update-branch: a sync
@@ -5468,10 +5577,234 @@ defmodule Arbiter.Worker.Watchdog do
           end)
 
           {:wait,
-           %{state | last_block_reason: :conflict, freshness_failed_head: state.last_head_sha}}
+           release_sync_place(%{
+             state
+             | last_block_reason: :conflict,
+               freshness_failed_head: state.last_head_sha
+           })}
       end
     end
   end
+
+  # ---- merge train (bd-1754qj) ---------------------------------------------
+  #
+  # `Arbiter.Worker.MergeTrain` is the one thing the auto-merge lane's Watchdogs
+  # share: per (workspace, repo, target) one MR at a time syncs and waits on CI
+  # (the head); the others wait without syncing. Every call fails open: a train
+  # that cannot be reached makes this MR its own head, which is the behaviour
+  # before the train existed.
+
+  defp train_key(%{mr_base_ref: base} = state) when is_binary(base) and base != "",
+    do: {workspace_id(state), state.repo, base}
+
+  defp train_key(_state), do: nil
+
+  defp train_call(fun, default) do
+    fun.()
+  rescue
+    _ -> default
+  catch
+    :exit, _ -> default
+  end
+
+  # Ask for the target's sync place: `{:head, state}` to go ahead and sync,
+  # `{:wait, state}` to leave it to the head.
+  defp claim_sync_place(state) do
+    state = ensure_train_identity(state)
+
+    case train_key(state) do
+      nil ->
+        {:head, state}
+
+      key ->
+        entry = train_entry(state, :behind_base)
+
+        case train_call(fn -> MergeTrain.claim(key, entry) end, :head) do
+          :head -> {:head, %{state | train_role: :head}}
+          {:wait, head} -> {:wait, %{state | train_role: {:wait, head}}}
+        end
+    end
+  end
+
+  defp train_entry(state, status, extra \\ %{}) do
+    Map.merge(
+      %{
+        task_id: state.task_id,
+        status: status,
+        priority: state.train_priority || 2,
+        opened_at: state.train_ready_since,
+        last_head_sha: state.last_head_sha,
+        ttl_ms: state.interval_ms * 3 + 1_000
+      },
+      extra
+    )
+  end
+
+  # The place in the order: when this MR first asked, and the task's priority.
+  defp ensure_train_identity(%{train_ready_since: nil} = state),
+    do: ensure_train_identity(%{state | train_ready_since: DateTime.utc_now()})
+
+  defp ensure_train_identity(%{train_priority: nil} = state) do
+    priority =
+      case safe_value(fn -> Ash.get(Arbiter.Tasks.Issue, state.task_id) end) do
+        {:ok, %{priority: p}} when is_integer(p) -> p
+        _ -> 2
+      end
+
+    %{state | train_priority: priority}
+  end
+
+  defp ensure_train_identity(state), do: state
+
+  defp safe_value(fun) do
+    fun.()
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
+  end
+
+  # Said once per head waited for: the log and attention line for a follower.
+  defp wait_for_head(%{train_role: {:wait, head}} = state) do
+    if state.train_wait_logged != head do
+      Logger.info(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} waiting for merge head " <>
+          "#{inspect(head)} on #{inspect(state.mr_base_ref)}; not synced until it reaches the front"
+      )
+    end
+
+    # A wait for the head is not a stall: held polls do not count toward the
+    # ceiling (the head's CI can take hours), like a queued pipeline.
+    held = if is_integer(state.max_polls), do: state.pass_polls + 1, else: state.pass_polls
+    %{state | train_wait_logged: head, pass_polls: held}
+  end
+
+  defp wait_detail(%{train_role: {:wait, head}}), do: "waiting for merge head #{head}"
+  defp wait_detail(_state), do: nil
+
+  # The head's once-per-poll report: where it is (syncing, in CI, red, ready) so
+  # the train can hand its place on when it is stuck. A no-op for anyone else.
+  defp train_tick(%{train_role: :head} = state, result) do
+    case train_key(state) do
+      nil ->
+        state
+
+      key ->
+        {status, block} = train_status(state, result)
+
+        entry =
+          train_entry(state, status, %{
+            last_block_reason: block,
+            poll_failed?: Map.get(result, :poll_failed?, false),
+            last_head_sha: Map.get(result, :head_sha) || state.last_head_sha
+          })
+
+        case train_call(fn -> MergeTrain.tick(key, entry) end, :head) do
+          :head ->
+            state
+
+          {:wait, head} ->
+            Logger.warning(
+              "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} no longer the merge " <>
+                "head for #{inspect(state.mr_base_ref)} (handed on to #{inspect(head)})"
+            )
+
+            %{state | train_role: {:wait, head}}
+        end
+    end
+  end
+
+  defp train_tick(state, _result), do: state
+
+  defp train_status(_state, %{poll_failed?: true}), do: {:ci_running, nil}
+
+  defp train_status(state, result) do
+    block = effective_block_reason(state, result)
+    head = Map.get(result, :head_sha)
+
+    cond do
+      block == :behind_base -> {:behind_base, nil}
+      not is_nil(block) -> {:ci_running, block}
+      ci_failed?(result) -> {:ci_running, :ci_failed}
+      ci_pending?(result) -> {:ci_running, nil}
+      is_binary(head) and state.freshness_sync_head == head -> {:behind_base, nil}
+      true -> {:ready_to_merge, nil}
+    end
+  end
+
+  defp note_synced(state) do
+    with key when not is_nil(key) <- train_key(state) do
+      train_call(
+        fn -> MergeTrain.note_synced(key, state.task_id, state.last_head_sha) end,
+        :ok
+      )
+    end
+
+    %{state | train_role: :head}
+  end
+
+  # Done with the sync place (parked, refused, current): the next MR's turn.
+  defp release_sync_place(%{train_role: nil} = state), do: state
+
+  defp release_sync_place(state) do
+    with key when not is_nil(key) <- train_key(state) do
+      train_call(fn -> MergeTrain.release(key, state.task_id) end, :ok)
+    end
+
+    %{state | train_role: nil, train_wait_logged: nil}
+  end
+
+  # A head keeps its place through its merge (it is the sync under way); anyone
+  # else that no longer needs a sync stops waiting for one.
+  defp release_waiting_place({:merge, sha, %{train_role: {:wait, _}} = state}),
+    do: {:merge, sha, release_sync_place(state)}
+
+  defp release_waiting_place(merge), do: merge
+
+  # One merge at a time per target, held for the poll: `:ok`, or `{:busy, state}`
+  # with the poll held.
+  defp acquire_merge_slot(state) do
+    case train_key(state) do
+      nil ->
+        {:ok, state}
+
+      key ->
+        case train_call(fn -> MergeTrain.acquire_merge(key, state.task_id) end, :ok) do
+          :ok ->
+            {:ok, %{state | merge_slot: true}}
+
+          {:busy, holder} ->
+            Logger.info(
+              "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} waiting to merge: " <>
+                "#{inspect(holder)} is merging into #{inspect(state.mr_base_ref)}; its merge " <>
+                "must land before this MR's freshness is checked"
+            )
+
+            held =
+              if is_integer(state.max_polls), do: state.pass_polls + 1, else: state.pass_polls
+
+            {:busy, %{state | pass_polls: held}}
+        end
+    end
+  end
+
+  defp release_merge_slot({:merge, sha, state}), do: {:merge, sha, release_merge_slot(state)}
+  defp release_merge_slot(%{merge_slot: false} = state), do: state
+
+  defp release_merge_slot(state) do
+    with key when not is_nil(key) <- train_key(state) do
+      train_call(fn -> MergeTrain.release_merge(key, state.task_id) end, :ok)
+    end
+
+    %{state | merge_slot: false}
+  end
+
+  # The end of a poll: its merge attempt, if any, is over, so the target's merge
+  # slot is free for the next MR. A Watchdog that stops leaves the train for good.
+  defp end_poll({:noreply, state}), do: {:noreply, release_merge_slot(state)}
+
+  defp end_poll({:stop, reason, state}),
+    do: {:stop, reason, state |> release_merge_slot() |> release_sync_place()}
 
   defp freshness_budget_detail(state, behind) do
     "freshness syncs (merge.max_freshness_syncs) exhausted: #{state.freshness_syncs}/" <>

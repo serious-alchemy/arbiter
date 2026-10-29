@@ -154,6 +154,8 @@ defmodule Arbiter.Application do
         # Arbiter.Nodes.Placement and Arbiter.Nodes.LocalCapacity.
         {Registry, keys: :unique, name: Arbiter.Nodes.Placement.Registry},
         {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.Supervisor},
+        # bd-1754qj: the per-target merge head the auto-merge lane's Watchdogs share.
+        Arbiter.Worker.MergeTrain,
         {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.WatchdogSupervisor},
         {Registry, keys: :unique, name: Arbiter.Workflows.MachineRegistry},
         {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Workflows.MachineSupervisor},
