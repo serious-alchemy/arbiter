@@ -77,7 +77,7 @@ defmodule Arbiter.Tasks.IssueFieldsTest do
     # response shape (P-13); `assignee` is the deprecated accept-and-ignore
     # field, never an Issue attribute. `ids` and `confirm_replace_notes` are
     # the bulk-patch call options (one patch applied to several ids).
-    @options ~w(id ids confirm_replace_notes force workspace assignee summary depends_on blocks)
+    @options ~w(id ids confirm_replace_notes force workspace assignee summary depends_on blocks fixes)
 
     defp outside(tool, allowed) do
       Enum.reject(props(tool), &(&1 in @options or &1 in allowed))
