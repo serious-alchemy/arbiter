@@ -105,6 +105,174 @@ defmodule Arbiter.Worker.MergeTrainTest do
     assert {:wait, "b"} = MergeTrain.tick(@key, running, t)
   end
 
+  describe "a head that is green but not merging" do
+    test "hands its place on after N ticks of :ready_to_merge with no merge", %{train: t} do
+      assert :head = MergeTrain.claim(@key, entry("a"), t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b"), t)
+
+      ready = entry("a", status: :ready_to_merge, ready_ticks: 3)
+
+      for _ <- 1..3, do: assert(:head = MergeTrain.tick(@key, ready, t))
+
+      assert {:wait, "b"} = MergeTrain.tick(@key, ready, t)
+      assert :head = MergeTrain.claim(@key, entry("b"), t)
+    end
+
+    test "the default bound applies when the entry names none", %{train: t} do
+      assert :head = MergeTrain.claim(@key, entry("a"), t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b"), t)
+
+      ready = entry("a", status: :ready_to_merge)
+
+      for _ <- 1..MergeHead.head_ready_ticks(),
+          do: assert(:head = MergeTrain.tick(@key, ready, t))
+
+      assert {:wait, "b"} = MergeTrain.tick(@key, ready, t)
+    end
+
+    test "a tick in CI in between resets the count", %{train: t} do
+      assert :head = MergeTrain.claim(@key, entry("a"), t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b"), t)
+
+      ready = entry("a", status: :ready_to_merge, ready_ticks: 2)
+      for _ <- 1..2, do: assert(:head = MergeTrain.tick(@key, ready, t))
+      assert :head = MergeTrain.tick(@key, entry("a", status: :ci_running), t)
+      for _ <- 1..2, do: assert(:head = MergeTrain.tick(@key, ready, t))
+    end
+  end
+
+  describe "the CI-wait bound" do
+    test "is configurable per entry and hands the place on past it", %{train: t} do
+      assert :head = MergeTrain.claim(@key, entry("a"), t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b"), t)
+
+      running = entry("a", status: :ci_running, ci_phase: :running, ci_wait_ticks: 4)
+
+      for _ <- 1..4, do: assert(:head = MergeTrain.tick(@key, running, t))
+      assert {:wait, "b"} = MergeTrain.tick(@key, running, t)
+    end
+
+    test "counts only running ticks, not pending ones", %{train: t} do
+      assert :head = MergeTrain.claim(@key, entry("a"), t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b"), t)
+
+      pending = entry("a", status: :ci_running, ci_phase: :pending, ci_wait_ticks: 2)
+      running = %{pending | ci_phase: :running}
+
+      # A long queue wait neither hands the place on nor resets the running count.
+      for _ <- 1..20, do: assert(:head = MergeTrain.tick(@key, pending, t))
+      for _ <- 1..2, do: assert(:head = MergeTrain.tick(@key, running, t))
+      for _ <- 1..20, do: assert(:head = MergeTrain.tick(@key, pending, t))
+      assert {:wait, "b"} = MergeTrain.tick(@key, running, t)
+    end
+  end
+
+  describe "election order" do
+    test "a green stale MR is elected ahead of a red one at equal priority", %{train: t} do
+      assert :head = MergeTrain.claim(@key, entry("a"), t)
+
+      red = entry("red", opened_at: ~U[2026-10-29 08:00:00Z], red?: true)
+      green = entry("green", opened_at: ~U[2026-10-29 09:00:00Z])
+      assert {:wait, "a"} = MergeTrain.claim(@key, red, t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, green, t)
+
+      :ok = MergeTrain.release(@key, "a", t)
+
+      assert {:wait, "green"} = MergeTrain.claim(@key, red, t)
+      assert :head = MergeTrain.claim(@key, green, t)
+    end
+
+    test "priority still beats the red flag", %{train: t} do
+      assert :head = MergeTrain.claim(@key, entry("a"), t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("red", priority: 0, red?: true), t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("green", priority: 2), t)
+
+      :ok = MergeTrain.release(@key, "a", t)
+
+      assert :head = MergeTrain.claim(@key, entry("red", priority: 0, red?: true), t)
+    end
+  end
+
+  describe "a head whose Watchdog crashed while its synced pipeline runs" do
+    defp crash(agent) do
+      ref = Process.monitor(agent)
+      Process.exit(agent, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^agent, _}
+    end
+
+    test "keeps its place for the restarted Watchdog; nobody else becomes head", %{train: t} do
+      {:ok, agent} = Agent.start(fn -> :ok end)
+      running = entry("a", status: :ci_running, ci_phase: :running)
+
+      assert :head = Agent.get(agent, fn _ -> MergeTrain.claim(@key, entry("a"), t) end)
+      assert :head = Agent.get(agent, fn _ -> MergeTrain.tick(@key, running, t) end)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b"), t)
+
+      crash(agent)
+      _ = :sys.get_state(t)
+
+      # The pipeline is still running: b does not get to sync a second pipeline.
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b"), t)
+
+      # The restarted Watchdog takes its place back.
+      assert :head = MergeTrain.resume(@key, running, t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b"), t)
+    end
+
+    test "the place lapses once the CI-wait bound has passed", %{train: t} do
+      {:ok, agent} = Agent.start(fn -> :ok end)
+      running = entry("a", status: :ci_running, ci_phase: :running, orphan_ms: 0)
+
+      assert :head = Agent.get(agent, fn _ -> MergeTrain.claim(@key, running, t) end)
+      assert :head = Agent.get(agent, fn _ -> MergeTrain.tick(@key, running, t) end)
+
+      crash(agent)
+      _ = :sys.get_state(t)
+
+      assert :head = MergeTrain.claim(@key, entry("b"), t)
+    end
+
+    test "a deliberate stop (shutdown) still hands the place on", %{train: t} do
+      {:ok, agent} = Agent.start(fn -> :ok end)
+      running = entry("a", status: :ci_running, ci_phase: :running)
+
+      assert :head = Agent.get(agent, fn _ -> MergeTrain.claim(@key, entry("a"), t) end)
+      assert :head = Agent.get(agent, fn _ -> MergeTrain.tick(@key, running, t) end)
+
+      ref = Process.monitor(agent)
+      Process.exit(agent, :shutdown)
+      assert_receive {:DOWN, ^ref, :process, ^agent, _}
+      _ = :sys.get_state(t)
+
+      assert :head = MergeTrain.claim(@key, entry("b"), t)
+    end
+
+    test "a head that was not under way (behind, nothing synced) is not held", %{train: t} do
+      {:ok, agent} = Agent.start(fn -> :ok end)
+      assert :head = Agent.get(agent, fn _ -> MergeTrain.claim(@key, entry("a"), t) end)
+
+      crash(agent)
+      _ = :sys.get_state(t)
+
+      assert :head = MergeTrain.claim(@key, entry("b"), t)
+    end
+
+    test "a restarted train seats a resuming head even while forming" do
+      t = start_supervised!({MergeTrain, name: nil, settle_ms: :infinity}, id: :resume)
+      running = entry("a", status: :ci_running)
+
+      assert :head = MergeTrain.resume(@key, running, t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b", priority: 0), t)
+      :ok = MergeTrain.settle_now(t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b", priority: 0), t)
+    end
+
+    test "resume does not displace another head", %{train: t} do
+      assert :head = MergeTrain.claim(@key, entry("a"), t)
+      assert {:wait, "a"} = MergeTrain.resume(@key, entry("b", status: :ci_running), t)
+    end
+  end
+
   test "a head whose sync is never applied hands its place on", %{train: t} do
     assert :head = MergeTrain.claim(@key, entry("a"), t)
     assert {:wait, "a"} = MergeTrain.claim(@key, entry("b"), t)
@@ -193,6 +361,30 @@ defmodule Arbiter.Worker.MergeTrainTest do
 
       Agent.stop(agent)
       assert_receive {:DOWN, ^ref, :process, ^agent, _}
+      _ = :sys.get_state(t)
+
+      assert :ok = MergeTrain.acquire_merge(@key, "b", t)
+    end
+
+    test "the monitor follows the current holder pid", %{train: t} do
+      {:ok, old} = Agent.start(fn -> :ok end)
+      {:ok, current} = Agent.start(fn -> :ok end)
+
+      assert :ok = Agent.get(old, fn _ -> MergeTrain.acquire_merge(@key, "a", t) end)
+      # A replaced Watchdog re-enters under the same task id from a new pid.
+      assert :ok = Agent.get(current, fn _ -> MergeTrain.acquire_merge(@key, "a", t) end)
+
+      ref = Process.monitor(old)
+      Agent.stop(old)
+      assert_receive {:DOWN, ^ref, :process, ^old, _}
+      _ = :sys.get_state(t)
+
+      # The old pid dying must not free the slot the current pid holds.
+      assert {:busy, "a"} = MergeTrain.acquire_merge(@key, "b", t)
+
+      ref = Process.monitor(current)
+      Agent.stop(current)
+      assert_receive {:DOWN, ^ref, :process, ^current, _}
       _ = :sys.get_state(t)
 
       assert :ok = MergeTrain.acquire_merge(@key, "b", t)

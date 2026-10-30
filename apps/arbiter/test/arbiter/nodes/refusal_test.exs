@@ -20,7 +20,7 @@ defmodule Arbiter.Nodes.RefusalTest do
   # K14: `service_not_ready` (a crash-looping test-service sidecar, K§3.3) is the cluster
   # controller's fifth refusal; the run never started, so it is a hold like the others.
   # bd-bmecet adds the primary's own two: a placement the controller never acknowledged or lost.
-  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready unacknowledged placement_lost)
+  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready unacknowledged placement_lost placement_timeout)
 
   describe "from_start_error/1" do
     test "recognises a refusal as the spawn error carries it" do
@@ -45,6 +45,17 @@ defmodule Arbiter.Nodes.RefusalTest do
           ] do
         assert Refusal.from_start_error(error) == :error
       end
+    end
+
+    test "a placement timeout (bd-3jjt3p) is a refusal-shaped hold with the stage and budget" do
+      error =
+        {:claude_start_failed, {:remote_placement_failed, {:placement_timeout, :prepare, 1800}}}
+
+      assert {:ok, %{reason: "placement_timeout", detail: detail}} =
+               Refusal.from_start_error(error)
+
+      assert detail =~ "prepare"
+      assert detail =~ "1800"
     end
 
     test "an unknown refuse reason is not trusted as one" do

@@ -115,6 +115,42 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassRemoteTest do
     end
   end
 
+  describe "a placement timeout (bd-3jjt3p)" do
+    # Building the spawn's opts is already past a zero deadline, so the pass's own
+    # pre-ClaudeSession steps are what overrun, with no node involved.
+    setup do
+      put_app_env(:arbiter, :node_placement, placement_timeout_ms: 0)
+      :ok
+    end
+
+    defp dispatch_spawning(ctx, mode) do
+      set_placement!(ctx.ws, mode)
+
+      FixPassDispatcher.dispatch(%{
+        task_id: ctx.issue.id,
+        workspace_id: ctx.ws.id,
+        repo_path: ctx.repo,
+        repo: "test/repo",
+        checks: [],
+        start_claude: true,
+        placement_opts: [remote_available?: true, nodes: [node_row()]],
+        slot_admitted: true,
+        pr_status: fn -> {:ok, %{status: :open, pipeline: :failed}} end
+      })
+    end
+
+    test "holds a remote_only pass (no spawn_failed, ticket stays in Merging)", ctx do
+      assert {:error, {:no_node_capacity, info}} = dispatch_spawning(ctx, "remote_only")
+      assert info.refused == "placement_timeout"
+
+      pid = Worker.whereis(ctx.issue.id)
+      on_exit(fn -> stop_quietly(pid) end)
+      assert %{state: :finished, outcome: :interrupted, meta: meta} = Worker.state(pid)
+      assert meta.stop_reason.category == :placement_refused
+      assert Ash.get!(Issue, ctx.issue.id).state == :merging
+    end
+  end
+
   test "it stays on the primary when no node has room", ctx do
     %{worker_pid: pid} = pass!(ctx, nodes: [node_row(live: 2, max: 2)])
 

@@ -91,6 +91,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Placement
+  alias Arbiter.Nodes.PlacementWatch
   alias Arbiter.Nodes.Recovery
   alias Arbiter.Nodes.Refusal
   alias Arbiter.Quota.SpendCap
@@ -1202,7 +1203,12 @@ defmodule Arbiter.Worker.Dispatch do
 
     defer = Keyword.get_lazy(opts, :defer_resume, &configured_deferrer/0)
 
-    case defer.(task_id, kind, Keyword.delete(opts, :defer_resume)) do
+    defer_opts =
+      opts
+      |> Keyword.delete(:defer_resume)
+      |> put_waiting_account(info)
+
+    case defer.(task_id, kind, defer_opts) do
       :ok ->
         Logger.info(
           "Dispatch: deferred #{kind} of #{task_id} until a worker slot frees " <>
@@ -1220,6 +1226,13 @@ defmodule Arbiter.Worker.Dispatch do
         {:error, {:slot_cap_full, info}}
     end
   end
+
+  # The account whose pool the resume waits on, so the board holds Ready work
+  # for that account only (not the implementer's, which may differ).
+  defp put_waiting_account(opts, %{seat: %{account_id: id}}) when is_binary(id),
+    do: Keyword.put(opts, :waiting_account, id)
+
+  defp put_waiting_account(opts, _info), do: opts
 
   @doc """
   Operator-facing explanation for an `{:error, {:worker_active, run}}`
@@ -4440,17 +4453,15 @@ defmodule Arbiter.Worker.Dispatch do
               |> Keyword.put(:resolved_skills, resolved_skills)
               |> Keyword.put(:skills_materialized?, skills_materialized?)
 
-            with {:ok, session_opts} <-
-                   build_agent_session_opts(task, worker_pid, path, opts),
-                 {:ok, port, opts} <-
-                   start_session(task, worker_pid, path, worktree_path, session_opts, opts) do
-              # Move the run out of :starting so UI/CLI report a meaningful
-              # state while Claude works. In claude_driven mode the Driver
-              # never ticks the Machine, so without this nudge the run would
-              # remain :starting until "arb done" finished it.
-              _ = Worker.advance(worker_pid, :claude)
-              {:ok, port, opts}
-            else
+            case start_placed_session(task, worker_pid, path, worktree_path, opts) do
+              {:ok, port, opts} ->
+                # Move the run out of :starting so UI/CLI report a meaningful
+                # state while Claude works. In claude_driven mode the Driver
+                # never ticks the Machine, so without this nudge the run would
+                # remain :starting until "arb done" finished it.
+                _ = Worker.advance(worker_pid, :claude)
+                {:ok, port, opts}
+
               {:error, {:no_node_capacity, _info}} = held ->
                 Checkout.teardown(review_checkout_path(opts))
                 held
@@ -4474,17 +4485,43 @@ defmodule Arbiter.Worker.Dispatch do
   # registered, so failing the spawn would crash a run that nothing was wrong with.
   # `remote_only` never runs local, so its failure stands. The home clone was cut
   # thin for the node (no deps), so it is seeded the way a local run's is first.
-  defp start_session(task, worker_pid, path, worktree_path, session_opts, opts) do
-    case start_agent_session(opts, session_opts) do
+  #
+  # bd-3jjt3p: the placement deadline (`PlacementWatch`) starts here, where the node was
+  # chosen, so it covers building the session opts and the credential steps before
+  # `ClaudeSession` as well as its own. A step that overruns it is a placement failure like
+  # any other: the primary takes the run, or `remote_only` holds it. Any other failure to
+  # build the opts is the caller's error, as before.
+  defp start_placed_session(task, worker_pid, path, worktree_path, opts) do
+    node = if Keyword.get(opts, :adopt), do: nil, else: Keyword.get(opts, :node)
+
+    result =
+      PlacementWatch.watch(
+        node,
+        task.id,
+        fn -> build_agent_session_opts(task, worker_pid, path, opts) end,
+        &start_agent_session(opts, &1)
+      )
+
+    case result do
       {:ok, port} ->
         {:ok, port, opts}
 
-      {:error, reason} = error ->
-        if local_fallback?(task, opts) do
-          start_session_locally(task, worker_pid, path, worktree_path, opts, reason)
-        else
-          error
-        end
+      {:build_error, {:remote_placement_failed, {:placement_timeout, _, _}} = reason} ->
+        session_failed(task, worker_pid, path, worktree_path, opts, reason)
+
+      {:build_error, reason} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        session_failed(task, worker_pid, path, worktree_path, opts, reason)
+    end
+  end
+
+  defp session_failed(task, worker_pid, path, worktree_path, opts, reason) do
+    if local_fallback?(task, opts) do
+      start_session_locally(task, worker_pid, path, worktree_path, opts, reason)
+    else
+      {:error, reason}
     end
   end
 

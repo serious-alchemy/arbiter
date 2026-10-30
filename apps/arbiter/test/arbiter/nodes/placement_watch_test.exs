@@ -137,6 +137,49 @@ defmodule Arbiter.Nodes.PlacementWatchTest do
     end
   end
 
+  describe "watch/4 (bd-3jjt3p)" do
+    test "a spawn that hangs outside any step is ended by the attempt-level timer" do
+      previous = Application.get_env(:arbiter, :node_placement)
+      Application.put_env(:arbiter, :node_placement, placement_timeout_ms: 100)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:arbiter, :node_placement, previous),
+          else: Application.delete_env(:arbiter, :node_placement)
+      end)
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:remote_placement_failed, {:placement_timeout, :start, 100}}} =
+                   PlacementWatch.watch(
+                     @node,
+                     "bd-gap001",
+                     fn -> {:ok, []} end,
+                     fn opts ->
+                       assert %PlacementWatch{} = Keyword.fetch!(opts, :placement_attempt)
+                       Process.sleep(:infinity)
+                     end
+                   )
+        end)
+
+      assert log =~ "placement timed out task=bd-gap001"
+      assert [] = Enum.filter(PlacementWatch.in_flight(), &(&1.task_id == "bd-gap001"))
+    end
+
+    test "a build that overruns is a build error, a start error is the start's" do
+      attempt_opts = fn -> {:ok, [x: 1]} end
+
+      assert {:build_error, :nope} =
+               PlacementWatch.watch(@node, "bd-b1", fn -> {:error, :nope} end, & &1)
+
+      assert {:error, :refused} =
+               PlacementWatch.watch(@node, "bd-b2", attempt_opts, fn _ -> {:error, :refused} end)
+
+      assert {:ok, :port} =
+               PlacementWatch.watch(nil, "bd-b3", attempt_opts, fn _ -> {:ok, :port} end)
+    end
+  end
+
   describe "in-flight attempts (what doctor reports)" do
     test "an attempt is listed until it finishes" do
       attempt = begin()
@@ -169,6 +212,46 @@ defmodule Arbiter.Nodes.PlacementWatchTest do
       assert age >= 20
       PlacementWatch.finish(attempt, {:ok, :handle})
       assert [] = Enum.filter(PlacementWatch.stuck(), &(&1.task_id == "bd-abc123"))
+    end
+
+    test "stuck_runs/2 names a run left in placing past the timeout, whatever step it is stuck in" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3_600, :second)
+
+      snap = fn task_id, attrs ->
+        Map.merge(
+          %{
+            task_id: task_id,
+            run_id: "run-" <> task_id,
+            state: :starting,
+            started_at: long_ago,
+            meta: %{placed_node_id: "node-1"}
+          },
+          attrs
+        )
+      end
+
+      snaps = [
+        snap.("bd-placing", %{}),
+        # young: inside the budget
+        snap.("bd-young", %{started_at: DateTime.utc_now()}),
+        # the agent started on the node: no longer placing
+        snap.("bd-started", %{meta: %{placed_node_id: "node-1", node_id: "node-1"}}),
+        snap.("bd-working", %{state: :working}),
+        # a local run
+        snap.("bd-local", %{meta: %{}})
+      ]
+
+      assert [
+               %{task_id: "bd-placing", node_id: "node-1", run: "run-bd-placing", age_ms: age} =
+                 entry
+             ] =
+               PlacementWatch.stuck_runs(snaps, 60_000)
+
+      assert age >= 3_600_000
+      assert entry.stage == :placing
+      assert entry.timeout_ms == 60_000
+
+      assert [] = PlacementWatch.stuck_runs(snaps, :infinity)
     end
 
     test "an attempt whose process dies is dropped" do

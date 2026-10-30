@@ -183,6 +183,13 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                             when a synced head reaches a merge decision (CI passed). The merge
                             queue syncs only the front PR of each target branch; the PRs
                             waiting behind it spend none until they reach the front.
+      train_ci_wait_ms      positive integer, milliseconds — (bd-az0dcu) how long the auto-merge
+                            lane's merge head (the one MR per target that is synced and waited on)
+                            may run CI on one head SHA before the next MR takes over. Queued
+                            (pending) time does not count. Default 7200000 (240 polls at the 30s
+                            poll, two hours); set it to your pipeline's real run time.
+      train_ready_ticks     non-negative integer — polls the merge head may report itself ready to
+                            merge without merging before the next MR takes over (default: 10).
       repos                 map, repo_paths key -> per-repo override of any key
                             above (strategy, config, auto_merge, …). Deep-merged
                             over the workspace-level merge block, so unset
