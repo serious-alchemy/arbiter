@@ -360,6 +360,52 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
     end
   end
 
+  describe "approval_gap/3 — bd-brkdi3 (vs-aq1gka: multi-dot filename truncated, false 'no revision touched')" do
+    @long "k8s/gitlab-runner/secret.template.yaml"
+
+    setup do
+      findings = """
+      VERDICT: REQUEST_CHANGES
+      1. **High** — `.gitlab-ci.yml:40` and `#{@long}:126` leak the registration token
+      """
+
+      %{open: ReviewFindings.extract(findings, 1)}
+    end
+
+    test "a multi-dot filename is extracted whole, never cut at six extension letters", %{
+      open: [finding]
+    } do
+      assert finding.files == [".gitlab-ci.yml", @long]
+    end
+
+    test "a finding citing two files is touched when the revision modifies only the second",
+         %{open: open} do
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - F1.1 [ADDRESSED] `#{@long}:126-127`, `#{@long}:186-187` now read the token from a secret
+      VERIFICATION: FULL
+      """
+
+      touched = MapSet.new([@long])
+
+      refute ReviewFindings.gap?(ReviewFindings.approval_gap(open, approve, touched))
+    end
+
+    test "the guard's message and open-findings block show the full path", %{open: open} do
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - F1.1 [ADDRESSED] done
+      VERIFICATION: FULL
+      """
+
+      gap = ReviewFindings.approval_gap(open, approve, MapSet.new(["unrelated.ex"]))
+      assert ReviewFindings.gap?(gap)
+      assert ReviewFindings.open_findings_block(open, MapSet.new(["unrelated.ex"])) =~ @long
+    end
+  end
+
   describe "approval_gap/3 — bd-bm6bfs (emr-8fqbng round 2, false park on a dispositioned APPROVE)" do
     setup do
       # The exact round-1 findings text persisted for emr-8fqbng (MR !294),
