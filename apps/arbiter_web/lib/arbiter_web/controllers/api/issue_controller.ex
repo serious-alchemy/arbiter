@@ -291,7 +291,8 @@ defmodule ArbiterWeb.Api.IssueController do
 
     with :ok <- IssueFields.check(params, :create),
          {:ok, deps} <- fetch_id_lists(params, ["depends_on", "deps"]),
-         {:ok, blocks} <- fetch_id_lists(params, ["blocks"]) do
+         {:ok, blocks} <- fetch_id_lists(params, ["blocks"]),
+         {:ok, fixes} <- fetch_id_lists(params, ["fixes"]) do
       attrs =
         params
         |> Params.strip_attribution()
@@ -303,7 +304,8 @@ defmodule ArbiterWeb.Api.IssueController do
           "deps",
           "depends_on",
           "blocks",
-          "no_lint"
+          "no_lint",
+          "fixes"
         ])
         |> Map.put("workspace_id", ws_id)
         |> coerce_atoms(@atom_fields)
@@ -315,6 +317,7 @@ defmodule ArbiterWeb.Api.IssueController do
           force: force?,
           deps: deps,
           blocks: blocks,
+          fixes: fixes,
           created_by: Params.actor_label(conn.assigns[:mcp_scope]),
           context: permission_context(conn)
         ]

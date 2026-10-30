@@ -26,6 +26,18 @@ defmodule ArbiterWeb.Api.DependencyControllerTest do
       assert body["type"] == "blocks"
     end
 
+    test "accepts the fixes edge type", %{conn: conn, a: a, b: b} do
+      conn =
+        post(conn, ~p"/api/dependencies", %{
+          from_issue_id: a.id,
+          to_issue_id: b.id,
+          type: "fixes"
+        })
+
+      assert %{"type" => "fixes", "from_issue_id" => from} = json_response(conn, 201)
+      assert from == a.id
+    end
+
     test "returns 422 on self-reference", %{conn: conn, a: a} do
       conn =
         post(conn, ~p"/api/dependencies", %{

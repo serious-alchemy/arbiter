@@ -300,6 +300,17 @@ defmodule Arbiter.Tasks.DependenciesTest do
   # ---- for_issue/1 --------------------------------------------------------
 
   describe "for_issue/1" do
+    test "groups fixes edges as :fixes (outbound) and :fixed_by (inbound)", ctx do
+      %{a: a, b: b} = ctx
+
+      _ = edge(a, b, :fixes)
+
+      assert [%{issue_id: fixed}] = Dependencies.for_issue(a.id).fixes
+      assert fixed == b.id
+      assert [%{issue_id: fixer}] = Dependencies.for_issue(b.id).fixed_by
+      assert fixer == a.id
+    end
+
     test "groups edges by role rather than by raw direction", ctx do
       %{a: a, b: b, c: c} = ctx
 

@@ -84,6 +84,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Usage
   alias Arbiter.Usage.Budget
   alias Arbiter.Usage.Event, as: UsageEvent
+  alias Arbiter.Usage.FollowUpSpend
   alias Arbiter.Usage.LiveSpend
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
@@ -1340,7 +1341,24 @@ defmodule ArbiterWeb.TaskDetailLive do
     task
     |> Budget.assess(spend: live.total_usd || 0.0)
     |> Map.put(:live, live)
+    |> Map.put(:follow_ups, follow_up_spend(task, live))
   end
+
+  # Spend rolled up from the tickets filed against this one (`fixes` /
+  # `discovered_from`, transitively). The task's own figure is the live one
+  # already read, so only the follow-ups' ledger is read here.
+  defp follow_up_spend(%Issue{id: id}, live) do
+    rolled = FollowUpSpend.for_task(id)
+    own = live.total_usd || 0.0
+    %{rolled | own_usd: own, total_usd: Float.round(own + rolled.follow_ups_usd, 4)}
+  rescue
+    e ->
+      Logger.warning("Failed to roll up follow-up spend for #{id}: #{inspect(e)}")
+      nil
+  end
+
+  defp follow_up_items(%{follow_ups: %{follow_ups: items}}) when is_list(items), do: items
+  defp follow_up_items(_budget), do: []
 
   defp refresh_live_spend(
          %{assigns: %{task: %Issue{} = task, budget: %{live: _} = budget}} = socket
@@ -2630,6 +2648,41 @@ defmodule ArbiterWeb.TaskDetailLive do
             >
               {spend_chip_label(@budget.state)}
             </span>
+          </div>
+
+          <%!-- Spend rolled up from follow-up tickets (`fixes` /
+               `discovered_from` edges, transitively). --%>
+          <div
+            :if={@task && @budget && follow_up_items(@budget) != []}
+            id="task-spend-rollup"
+            class="mt-1.5 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+          >
+            <span
+              id="task-spend-rollup-total"
+              title="Own spend plus the spend of every ticket filed as a fix or follow-up of this one, transitively; each ticket counted once."
+              class="tabular-nums"
+            >
+              {money(@budget.follow_ups.own_usd)} own + {money(@budget.follow_ups.follow_ups_usd)} follow-ups =
+              <span class="font-medium text-[var(--text-title)]">
+                {money(@budget.follow_ups.total_usd)}
+              </span>
+            </span>
+            <ul id="task-follow-ups" class="mt-1 flex flex-col gap-0.5 list-none p-0 m-0">
+              <li
+                :for={fu <- follow_up_items(@budget)}
+                id={"task-follow-up-#{fu.id}"}
+                class="flex items-baseline gap-2 tabular-nums"
+              >
+                <.link
+                  navigate={~p"/tasks/#{fu.id}"}
+                  class="text-[var(--text-secondary)] hover:text-[var(--text-title)] transition-colors"
+                >
+                  {fu.id}
+                </.link>
+                <span class="truncate">{fu.title}</span>
+                <span class="ml-auto">{if is_number(fu.usd), do: money(fu.usd), else: "n/a"}</span>
+              </li>
+            </ul>
           </div>
 
           <%!-- bd-38of5i (design bd-2s901b §7): what this issue is part of,

@@ -45,6 +45,8 @@ defmodule Arbiter.Tasks.Create do
     * `:deps` — ticket ids that block the new ticket (`blocks` edges, dep → new).
       This is the REST `deps` / `depends_on` param.
     * `:blocks` — ticket ids the new ticket blocks (`blocks` edges, new → target).
+    * `:fixes` — ticket ids the new ticket fixes (`fixes` edges, new → target); its spend
+      rolls up into them (`Arbiter.Usage.FollowUpSpend`).
     * `:created_by` — the attribution label stamped on the edges.
     * `:context` — the Ash context for the create. REST and MCP pass
       `:guardrail_authority` / `:permission_actor` here so the ticket's declared
@@ -82,9 +84,10 @@ defmodule Arbiter.Tasks.Create do
     parent_id = blank_to_nil(fetch(attrs, :parent_id))
     deps = opts |> Keyword.get(:deps, []) |> List.wrap()
     blocks = opts |> Keyword.get(:blocks, []) |> List.wrap()
+    fixes = opts |> Keyword.get(:fixes, []) |> List.wrap()
 
     with :ok <- dedup(attrs, force?),
-         :ok <- preflight(fetch(attrs, :workspace_id), parent_id, deps ++ blocks) do
+         :ok <- preflight(fetch(attrs, :workspace_id), parent_id, deps ++ blocks ++ fixes) do
       create(attrs, parent_id, deps, blocks, opts)
     else
       {:dup, dup} -> {:duplicate, dup}
@@ -242,7 +245,11 @@ defmodule Arbiter.Tasks.Create do
       for target <- blocks,
           do: {issue.id, target, :blocks, "add dependency #{issue.id} -> #{target}"}
 
-    Enum.reduce_while(parent_edge ++ dep_edges ++ block_edges, :ok, fn edge, :ok ->
+    fix_edges =
+      for target <- Keyword.get(opts, :fixes, []) |> List.wrap(),
+          do: {issue.id, target, :fixes, "add fixes edge #{issue.id} -> #{target}"}
+
+    Enum.reduce_while(parent_edge ++ dep_edges ++ block_edges ++ fix_edges, :ok, fn edge, :ok ->
       {from, to, type, what} = edge
 
       case writer.(from, to, type, edge_opts) do
