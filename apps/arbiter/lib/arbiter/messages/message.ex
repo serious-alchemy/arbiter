@@ -179,6 +179,8 @@ defmodule Arbiter.Messages.Message do
         :escalation_kind
       ]
 
+      change {Arbiter.Changes.ScrubAttributes, fields: [:subject, :body]}
+
       # bd-58vtjk: `task_ref` is the canonical field; `directive_ref` is the
       # deprecated legacy alias (old fleet vernacular for "task"). Dual-write
       # both so a row is findable under either name during the compat window,
@@ -242,6 +244,8 @@ defmodule Arbiter.Messages.Message do
       accept [:subject, :body]
       require_atomic? false
 
+      change {Arbiter.Changes.ScrubAttributes, fields: [:subject, :body]}
+
       change after_action(fn _changeset, message, _context ->
                Arbiter.Messages.Message.broadcast_updated(message)
                {:ok, message}
@@ -279,6 +283,8 @@ defmodule Arbiter.Messages.Message do
       # so the row keeps matching whatever dedupe query found it.
       accept [:body]
       require_atomic? false
+
+      change {Arbiter.Changes.ScrubAttributes, fields: [:body]}
 
       change after_action(fn _changeset, message, _context ->
                Arbiter.Messages.Message.broadcast_updated(message)

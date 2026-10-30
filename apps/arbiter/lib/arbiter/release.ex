@@ -464,7 +464,7 @@ defmodule Arbiter.Release do
 
     * `:gemini_usage_note` → `Arbiter.Usage.GeminiUsageNote.backfill/1`
       (`:apply?`, `:since`, `:until`, `:limit`)
-    * `:utf8_text` → `Arbiter.Tasks.Utf8TextBackfill.backfill/1` (repairs invalid UTF-8 in issue text columns with U+FFFD; `bin/arbiter eval 'Arbiter.Release.backfill(:utf8_text, apply?: true)'`)
+    * `:utf8_text` → `Arbiter.Tasks.Utf8TextBackfill.backfill/1` (repairs invalid UTF-8 in issues, messages and worker_prepush_steps text columns with U+FFFD; `bin/arbiter eval 'Arbiter.Release.backfill(:utf8_text, apply?: true)'`)
     * `:issue_repos` → `Arbiter.Tasks.RepoBackfill.plan/0` + `apply!/1`
       (`:apply?`)
     * `:run_steps` → `Arbiter.Workers.StepBackfill.backfill/1`
@@ -566,11 +566,14 @@ defmodule Arbiter.Release do
 
     IO.puts(banner("utf8 text", apply?, opts[:hint]))
 
-    IO.puts("""
+    label = if(apply?, do: "repaired", else: "would repair") <> ":"
 
-    issue rows scanned:   #{result.scanned}
-    #{String.pad_trailing(if(apply?, do: "repaired", else: "would repair") <> ":", 22)}#{result.repaired + result.would_repair}
-    """)
+    for {table, c} <- Enum.sort(result.tables) do
+      IO.puts("\n    #{table} rows scanned:   #{c.scanned}")
+      IO.puts("    #{String.pad_trailing(label, 22)}#{c.repaired + c.would_repair}")
+    end
+
+    IO.puts("")
 
     result
   end

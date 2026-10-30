@@ -46,6 +46,8 @@ defmodule Arbiter.Workers.PrepushStep do
         :output,
         :occurred_at
       ]
+
+      change {Arbiter.Changes.ScrubAttributes, fields: [:name, :cmd, :output]}
     end
   end
 
