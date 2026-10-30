@@ -70,7 +70,8 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
       {"GET", ["commands"]} ->
         control(conn, opts, &commands/3)
 
-      {_, [route]} when route in ["seed.bundle", "session", "checkpoint", "transcripts", "commands"] ->
+      {_, [route]}
+      when route in ["seed.bundle", "session", "checkpoint", "transcripts", "commands"] ->
         json(conn, 405, %{error: "method_not_allowed"})
 
       _ ->

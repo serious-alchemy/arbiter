@@ -20,6 +20,7 @@ defmodule Arbiter.Nodes.Supervisor do
     Supervisor.init(
       [
         Arbiter.Nodes.Registry,
+        Arbiter.Nodes.PlacementWatch,
         {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Nodes.SessionSupervisor}
       ],
       strategy: :one_for_all

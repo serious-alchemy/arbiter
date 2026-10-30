@@ -434,6 +434,16 @@ defmodule Arbiter.Nodes.Session do
   @spec abandon_run(pid(), String.t()) :: :ok
   def abandon_run(pid, run), do: GenServer.call(pid, {:abandon_run, run})
 
+  @doc """
+  The primary gave up on placing `run` (`Arbiter.Nodes.PlacementWatch`'s deadline): drop it
+  and tell the node to drop whatever it may yet create for it. A run still waiting for its
+  node is failed over like any stalled placement (the node is ranked last for a while); one
+  the node had just started is cancelled. A run the session does not hold is left alone.
+  """
+  @spec cancel_placement(pid(), String.t(), term()) :: :ok
+  def cancel_placement(pid, run, detail \\ "the primary gave up waiting for the placement"),
+    do: GenServer.cast(pid, {:cancel_placement, run, detail})
+
   @doc "Forget an ended run."
   @spec release_run(pid(), String.t()) :: :ok
   def release_run(pid, run), do: GenServer.cast(pid, {:release_run, run})
@@ -736,6 +746,21 @@ defmodule Arbiter.Nodes.Session do
   end
 
   def handle_cast({:release_run, run}, state), do: {:noreply, drop_run(state, run)}
+
+  def handle_cast({:cancel_placement, run, detail}, state) do
+    case RunStreams.fetch(state.streams, run) do
+      {:ok, %{waiter: waiter}} when not is_nil(waiter) ->
+        {:noreply, fail_placement(state, run, "placement_timeout", detail, state.clock.())}
+
+      {:ok, _started} ->
+        {streams, effects} = RunStreams.cancel(state.streams, run, "placement_timeout")
+        state = %{state | streams: streams}
+        {:noreply, state |> run_effects(effects) |> drop_run(run)}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
 
   def handle_cast({:recover_abort, run}, state) do
     {recovery, recoveries} = Map.pop(state.recoveries, run)
