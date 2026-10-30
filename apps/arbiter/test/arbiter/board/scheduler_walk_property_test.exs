@@ -191,12 +191,11 @@ defmodule Arbiter.Board.SchedulerWalkPropertyTest do
           else: assert(entry.wait_cause != nil and entry.pair == nil)
       end
 
-      # Nothing placed in one pass conflicts with, or overlaps, another placement.
+      # Nothing placed in one pass conflicts with another placement.
       for %{id: a} <- plan.placements, %{id: b} <- plan.placements, a < b do
         card_a = Enum.find(board.ready, &(&1.id == a))
         card_b = Enum.find(board.ready, &(&1.id == b))
         refute b in card_a.conflicts_with or a in card_b.conflicts_with
-        assert MapSet.disjoint?(MapSet.new(card_a.scope), MapSet.new(card_b.scope))
       end
     end
   end

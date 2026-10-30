@@ -28,7 +28,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
     * `:conflicts_with` — the ticket's `:conflicts_with` counterparts, and
       `:claimed` — `%{id => label}` (or a list of ids) of what is in flight;
     * `:scope` — the ticket's declared file scope, and `:in_flight` —
-      `[{task_id, scope}]` for work already holding files;
+      `[{task_id, changed_files, repo}]` for work already holding files, and `:repo` — the ticket's repo (holds only apply within one repo);
     * `:paused` — the scheduler is paused;
     * `:quota` — `:ok`, or `{:hold, reason}`;
     * `:provider_constraint` — `:ok`, or `{:hold, detail}`: the ticket's own
@@ -55,7 +55,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
   | `{:blocked_by, ids}` | queued, waiting on these blockers |
   | `{:column, column}` | already past Ready (`:in_progress`, `:merging`, `:verifying`, `:closed`) |
   | `{:conflicts_with, id}` | a `:conflicts_with` counterpart is in flight |
-  | `{:file_overlap, files, id}` | these declared files are in flight on `id` |
+  | `{:file_overlap, files, id, source}` | files `id` has changed (`source` is `:diff`) in the same repo that this ticket's text declares; text mentions on the in-flight side never count |
   | `{:provider_constraint, detail}` | the ticket's provider constraint leaves no eligible account |
   | `{:guardrail, detail}` | no model its guardrails allow can take it, or a permission awaits the operator's grant |
   | `{:local_capacity, phrase}` | it can only run on the primary, whose own cap is full |
@@ -73,7 +73,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
           {:column, View.column() | nil}
           | {:blocked_by, [String.t()]}
           | {:conflicts_with, String.t()}
-          | {:file_overlap, [String.t()], String.t()}
+          | {:file_overlap, [String.t()], String.t(), :diff}
           | {:provider_constraint, String.t()}
           | {:guardrail, String.t()}
           | {:local_capacity, String.t()}
@@ -116,8 +116,8 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
   def describe_hold({:blocked_by, ids}), do: "blocked by " <> Enum.join(ids, ", ")
   def describe_hold({:conflicts_with, peer}), do: EdgeGate.describe({:conflicts_with, peer})
 
-  def describe_hold({:file_overlap, files, task_id}),
-    do: "#{name_files(files)} in flight on #{task_id}"
+  def describe_hold({:file_overlap, files, task_id, source}),
+    do: "#{name_files(files)} in flight on #{task_id} (#{source})"
 
   def describe_hold({:provider_constraint, detail}), do: "provider constraint (#{detail})"
   def describe_hold({:guardrail, detail}), do: "guardrail (#{detail})"
@@ -150,17 +150,25 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
   # attributed to the worker that has actually been holding the file.
   defp overlap_hold(ctx) do
     scope = scope_of(Map.get(ctx, :scope))
+    repo = Map.get(ctx, :repo)
 
     ctx
     |> Map.get(:in_flight)
     |> List.wrap()
-    |> Enum.find_value(:ok, fn {task_id, other} ->
-      case FileScope.overlap(scope, scope_of(other)) do
-        [] -> nil
-        files -> {:held, {:file_overlap, files, task_id}}
+    |> Enum.find_value(:ok, fn entry ->
+      {task_id, other, other_repo} = in_flight_parts(entry)
+
+      with true <- other_repo == repo,
+           [_ | _] = files <- FileScope.overlap(scope, scope_of(other)) do
+        {:held, {:file_overlap, files, task_id, :diff}}
+      else
+        _ -> nil
       end
     end)
   end
+
+  defp in_flight_parts({task_id, scope}), do: {task_id, scope, nil}
+  defp in_flight_parts({task_id, scope, repo}), do: {task_id, scope, repo}
 
   # A ticket's own block, like a mutex: it survives the board-wide holds
   # clearing, and it does not hold the queue behind it.

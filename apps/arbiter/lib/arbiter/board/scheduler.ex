@@ -335,7 +335,7 @@ defmodule Arbiter.Board.Scheduler do
       promote: nil,
       held?: false,
       ahead: 0,
-      in_flight: Enum.map(running, &{&1.task_id, scope_of(&1)}),
+      in_flight: Enum.map(running, &in_flight_entry/1),
       claimed: nil,
       mutex: conflict_claims(Map.get(input, :conflict_claims))
     }
@@ -438,6 +438,7 @@ defmodule Arbiter.Board.Scheduler do
       local_capacity: Map.get(board.card_local, card.id),
       ci_saturated: Map.get(board.card_ci, card.id),
       scope: scope_of(card),
+      repo: Map.get(card, :repo),
       in_flight: claims(acc)
     })
   end
@@ -454,7 +455,7 @@ defmodule Arbiter.Board.Scheduler do
     acc = %{
       acc
       | promote: card.id,
-        claimed: {card.id, scope_of(card)},
+        claimed: {card.id, MapSet.new(), Map.get(card, :repo)},
         mutex: Map.put(acc.mutex, card.id, @dispatching_state)
     }
 
@@ -513,6 +514,11 @@ defmodule Arbiter.Board.Scheduler do
   defp conflict_claims(claims) when is_map(claims), do: claims
   defp conflict_claims(ids) when is_list(ids), do: Map.new(ids, &{&1, @unlabelled_state})
 
+  # An in-flight entry: the files its worktree has *changed* (`scope`) and the repo
+  # they are in. A just-promoted card (no diff yet) is entered with an empty scope:
+  # paths its text mentions are never evidence (bd-9o9hci).
+  defp in_flight_entry(run), do: {run.task_id, scope_of(run), Map.get(run, :repo)}
+
   defp scope_of(%{scope: %MapSet{} = scope}), do: scope
   defp scope_of(%{scope: paths}) when is_list(paths), do: MapSet.new(paths)
   defp scope_of(_), do: MapSet.new()
@@ -529,7 +535,7 @@ defmodule Arbiter.Board.Scheduler do
       placements: [],
       used: used,
       ahead: 0,
-      in_flight: Enum.map(Map.get(input, :running) || [], &{&1.task_id, scope_of(&1)}),
+      in_flight: Enum.map(Map.get(input, :running) || [], &in_flight_entry/1),
       mutex: conflict_claims(Map.get(input, :conflict_claims)),
       # A placed card's own counterparts, so a later card it names is held even
       # when the edge reached only one side (the board folds both; a hand-built
@@ -597,6 +603,7 @@ defmodule Arbiter.Board.Scheduler do
       guardrail: Map.get(board.card_guardrail, card.id),
       ci_saturated: Map.get(board.card_ci, card.id),
       scope: scope_of(card),
+      repo: Map.get(card, :repo),
       in_flight: acc.in_flight
     }
   end
@@ -683,7 +690,7 @@ defmodule Arbiter.Board.Scheduler do
       |> take(:repos, Map.get(candidate, :repo))
       |> take_workspace(candidate.pool, card)
       |> Map.update!(:placements, &[%{id: card.id, pool: candidate.pool, node: node} | &1])
-      |> Map.update!(:in_flight, &(&1 ++ [{card.id, scope_of(card)}]))
+      |> Map.update!(:in_flight, &(&1 ++ [{card.id, MapSet.new(), Map.get(card, :repo)}]))
       |> Map.update!(:mutex, &Map.put(&1, card.id, @dispatching_state))
       |> Map.update!(:named, &name_peers(&1, card))
       |> bump()

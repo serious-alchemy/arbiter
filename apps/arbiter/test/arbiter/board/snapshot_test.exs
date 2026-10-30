@@ -146,27 +146,37 @@ defmodule Arbiter.Board.SnapshotTest do
         )
 
       assert [%{id: "bd-a", state: :blocked, reason: reason}, _] = board.ready
-      assert reason == "blocked — lib/board.ex in flight on bd-run"
+      assert reason == "blocked — lib/board.ex in flight on bd-run (diff)"
     end
 
-    test "a running worker's own issue text counts as in-flight scope" do
+    test "a path cited only in text (the same notes file in several tickets) holds nothing" do
+      cited = "Source: `notes/fix-pass-analysis.md`."
+
       board =
         derive(
           issues: [
-            issue("bd-a", %{description: "Rewrites `lib/board.ex`."}),
-            issue("bd-run", %{state: :active, description: "Touches `lib/board.ex` too."})
+            issue("bd-a", %{description: cited}),
+            issue("bd-run", %{state: :active, description: cited})
           ],
-          workers: [worker("bd-run", :working)]
+          workers: [worker("bd-run", :working)],
+          changed_files: %{"bd-run" => ["lib/other.ex"]}
         )
 
-      assert [
-               %{
-                 id: "bd-a",
-                 state: :blocked,
-                 reason: "blocked — lib/board.ex in flight on bd-run"
-               }
-             ] =
-               board.ready
+      assert [%{id: "bd-a", state: :next}] = board.ready
+    end
+
+    test "overlap holds apply only within one repo" do
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{description: "Rewrites `lib/board.ex`.", repo: "r1"}),
+            issue("bd-run", %{state: :active, repo: "r2"})
+          ],
+          workers: [worker("bd-run", :working)],
+          changed_files: %{"bd-run" => ["lib/board.ex"]}
+        )
+
+      assert [%{id: "bd-a", state: :next}] = board.ready
     end
   end
 
