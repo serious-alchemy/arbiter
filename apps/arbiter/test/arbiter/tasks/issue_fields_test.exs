@@ -25,10 +25,11 @@ defmodule Arbiter.Tasks.IssueFieldsTest do
         Enum.map(a.accept ++ Enum.map(a.arguments, & &1.name), &to_string/1)
       end
 
-      assert IssueFields.create_fields() -- governed.(:create) == []
+      assert IssueFields.create_fields() -- governed.(:create) == IssueFields.request_flags()
       # `add_permissions` / `remove_permissions` are folded into `permissions`
       # before the action runs (bd-54m4vv), so they are not action inputs.
-      assert IssueFields.update_fields() -- governed.(:update) == IssueFields.permission_edits()
+      assert Enum.sort(IssueFields.update_fields() -- governed.(:update)) ==
+               Enum.sort(IssueFields.permission_edits() ++ IssueFields.request_flags())
     end
 
     test "no internal review / breaker / audit field is allowed on either action" do

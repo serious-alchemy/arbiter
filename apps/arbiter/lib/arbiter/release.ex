@@ -464,6 +464,7 @@ defmodule Arbiter.Release do
 
     * `:gemini_usage_note` → `Arbiter.Usage.GeminiUsageNote.backfill/1`
       (`:apply?`, `:since`, `:until`, `:limit`)
+    * `:utf8_text` → `Arbiter.Tasks.Utf8TextBackfill.backfill/1` (repairs invalid UTF-8 in issue text columns with U+FFFD; `bin/arbiter eval 'Arbiter.Release.backfill(:utf8_text, apply?: true)'`)
     * `:issue_repos` → `Arbiter.Tasks.RepoBackfill.plan/0` + `apply!/1`
       (`:apply?`)
     * `:run_steps` → `Arbiter.Workers.StepBackfill.backfill/1`
@@ -552,6 +553,23 @@ defmodule Arbiter.Release do
     gemini rows scanned:  #{result.scanned}
     #{String.pad_trailing(if(apply?, do: "noted", else: "would note") <> ":", 22)}#{result.noted + result.would_note}
     write failures:        #{result.failed}
+    """)
+
+    result
+  end
+
+  def backfill(:utf8_text, opts) do
+    start_release_repo!()
+    apply? = Keyword.get(opts, :apply?, false)
+
+    result = Arbiter.Tasks.Utf8TextBackfill.backfill(opts)
+
+    IO.puts(banner("utf8 text", apply?, opts[:hint]))
+
+    IO.puts("""
+
+    issue rows scanned:   #{result.scanned}
+    #{String.pad_trailing(if(apply?, do: "repaired", else: "would repair") <> ":", 22)}#{result.repaired + result.would_repair}
     """)
 
     result

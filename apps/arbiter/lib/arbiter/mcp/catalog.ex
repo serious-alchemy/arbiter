@@ -526,6 +526,12 @@ defmodule Arbiter.MCP.Catalog do
         "type" => "object",
         "properties" => %{
           "title" => %{"type" => "string", "description" => "Ticket title (required)."},
+          "no_lint" => %{
+            "type" => "boolean",
+            "description" =>
+              "Suppress the acceptance-criteria lint warnings (lines needing post-merge or " <>
+                "external evidence)."
+          },
           "parent_id" => %{
             "type" => "string",
             "description" =>
@@ -767,6 +773,10 @@ defmodule Arbiter.MCP.Catalog do
         "properties" => %{
           "id" => %{"type" => "string", "description" => "Ticket id (this or `ids`)."},
           "ids" => @bulk_ids_schema,
+          "no_lint" => %{
+            "type" => "boolean",
+            "description" => "Suppress the acceptance-criteria lint warnings."
+          },
           "confirm_replace_notes" => %{
             "type" => "boolean",
             "description" => "Bulk only: required to send `notes` (replace) with `ids`."
