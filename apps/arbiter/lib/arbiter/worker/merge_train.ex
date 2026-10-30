@@ -231,8 +231,7 @@ defmodule Arbiter.Worker.MergeTrain do
     end
   end
 
-  def handle_call({:note_synced,
- key, id, sha}, _from, state) do
+  def handle_call({:note_synced, key, id, sha}, _from, state) do
     state =
       update_train(state, key, fn
         %{head: ^id, entries: %{^id => %{item: %{queue_head: %{} = watch} = item} = e}} = train ->
