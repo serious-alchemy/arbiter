@@ -137,6 +137,49 @@ defmodule Arbiter.Nodes.PlacementWatchTest do
     end
   end
 
+  describe "watch/4 (bd-3jjt3p)" do
+    test "a spawn that hangs outside any step is ended by the attempt-level timer" do
+      previous = Application.get_env(:arbiter, :node_placement)
+      Application.put_env(:arbiter, :node_placement, placement_timeout_ms: 100)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:arbiter, :node_placement, previous),
+          else: Application.delete_env(:arbiter, :node_placement)
+      end)
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:remote_placement_failed, {:placement_timeout, :start, 100}}} =
+                   PlacementWatch.watch(
+                     @node,
+                     "bd-gap001",
+                     fn -> {:ok, []} end,
+                     fn opts ->
+                       assert %PlacementWatch{} = Keyword.fetch!(opts, :placement_attempt)
+                       Process.sleep(:infinity)
+                     end
+                   )
+        end)
+
+      assert log =~ "placement timed out task=bd-gap001"
+      assert [] = Enum.filter(PlacementWatch.in_flight(), &(&1.task_id == "bd-gap001"))
+    end
+
+    test "a build that overruns is a build error, a start error is the start's" do
+      attempt_opts = fn -> {:ok, [x: 1]} end
+
+      assert {:build_error, :nope} =
+               PlacementWatch.watch(@node, "bd-b1", fn -> {:error, :nope} end, & &1)
+
+      assert {:error, :refused} =
+               PlacementWatch.watch(@node, "bd-b2", attempt_opts, fn _ -> {:error, :refused} end)
+
+      assert {:ok, :port} =
+               PlacementWatch.watch(nil, "bd-b3", attempt_opts, fn _ -> {:ok, :port} end)
+    end
+  end
+
   describe "in-flight attempts (what doctor reports)" do
     test "an attempt is listed until it finishes" do
       attempt = begin()

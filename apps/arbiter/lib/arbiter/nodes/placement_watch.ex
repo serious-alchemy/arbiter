@@ -45,6 +45,7 @@ defmodule Arbiter.Nodes.PlacementWatch do
   require Logger
 
   @default_timeout_ms 30 * 60_000
+  @backstop_grace_ms 2_000
 
   defstruct [:ref, :task_id, :node, :run, :started, :timeout_ms]
 
@@ -85,7 +86,12 @@ defmodule Arbiter.Nodes.PlacementWatch do
   killed). An exception in `fun` is raised in the caller, as if it had run inline.
   """
   @spec step(t(), atom(), (-> result)) :: result | {:error, term()} when result: term()
-  def step(%__MODULE__{} = attempt, stage, fun) when is_function(fun, 0) do
+  def step(%__MODULE__{} = attempt, stage, fun) when is_function(fun, 0),
+    do: step(attempt, stage, fun, 0)
+
+  # `grace` lets the attempt-level backstop (`watch/4`) outlast the steps inside it, so a
+  # step that overruns reports its own stage first.
+  defp step(%__MODULE__{} = attempt, stage, fun, grace) do
     tracked(fn -> GenServer.cast(__MODULE__, {:update, attempt.ref, %{stage: stage}}) end)
 
     case attempt.timeout_ms do
@@ -93,7 +99,7 @@ defmodule Arbiter.Nodes.PlacementWatch do
         fun.()
 
       ms ->
-        remaining = max(attempt.started + ms - now(), 0)
+        remaining = max(attempt.started + ms - now(), 0) + grace
         run_bounded(fun, remaining, stage, ms)
     end
   end
@@ -179,12 +185,39 @@ defmodule Arbiter.Nodes.PlacementWatch do
 
     case step(attempt, :session_opts, build) do
       {:ok, opts} ->
-        attempt |> finish(start.(Keyword.put(opts, :placement_attempt, attempt)))
+        opts = Keyword.put(opts, :placement_attempt, attempt)
+
+        # The whole spawn is also under one attempt-level timer: a gap between the steps
+        # (or a step nobody wrapped) can no longer hold the run in `placing` for ever.
+        result = step(attempt, :start, fn -> start.(opts) end, @backstop_grace_ms)
+
+        with {:error, {:remote_placement_failed, {:placement_timeout, :start, _}}} <- result do
+          cancel_on_node(attempt, node)
+        end
+
+        finish(attempt, result)
 
       {:error, reason} ->
         finish(attempt, {:error, reason})
         {:build_error, reason}
     end
+  end
+
+  # The backstop ended a spawn the node may already know of: tell it to drop the run.
+  defp cancel_on_node(attempt, node) do
+    run =
+      with list when is_list(list) <- tracked(fn -> GenServer.call(__MODULE__, :list) end),
+           {%__MODULE__{run: run}, _stage} <-
+             Enum.find(list, fn {a, _} -> a.ref == attempt.ref end) do
+        run
+      else
+        _ -> nil
+      end
+
+    if is_binary(run), do: Arbiter.Worker.Executor.Node.cancel_placement(node, run)
+    :ok
+  catch
+    _, _ -> :ok
   end
 
   @doc "End the attempt: unregister it and log the outcome. Returns `result` unchanged."
