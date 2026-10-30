@@ -4441,15 +4441,15 @@ defmodule Arbiter.Worker.Dispatch do
               |> Keyword.put(:resolved_skills, resolved_skills)
               |> Keyword.put(:skills_materialized?, skills_materialized?)
 
-            with {:ok, port, opts} <-
-                   start_placed_session(task, worker_pid, path, worktree_path, opts) do
-              # Move the run out of :starting so UI/CLI report a meaningful
-              # state while Claude works. In claude_driven mode the Driver
-              # never ticks the Machine, so without this nudge the run would
-              # remain :starting until "arb done" finished it.
-              _ = Worker.advance(worker_pid, :claude)
-              {:ok, port, opts}
-            else
+            case start_placed_session(task, worker_pid, path, worktree_path, opts) do
+              {:ok, port, opts} ->
+                # Move the run out of :starting so UI/CLI report a meaningful
+                # state while Claude works. In claude_driven mode the Driver
+                # never ticks the Machine, so without this nudge the run would
+                # remain :starting until "arb done" finished it.
+                _ = Worker.advance(worker_pid, :claude)
+                {:ok, port, opts}
+
               {:error, {:no_node_capacity, _info}} = held ->
                 Checkout.teardown(review_checkout_path(opts))
                 held
