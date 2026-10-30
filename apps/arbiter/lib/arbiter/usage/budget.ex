@@ -178,6 +178,20 @@ defmodule Arbiter.Usage.Budget do
     end)
   end
 
+  @doc """
+  The settled ledger rows (`task_id`, `role`, `cost_usd`, `occurred_at`) of one
+  base task, attributed by the same rule `settled_by_task/2` uses — so a
+  per-pass breakdown built from them sums to the same settled figure.
+  """
+  @spec rows_for_task(String.t()) :: [map()]
+  def rows_for_task(task_id) when is_binary(task_id) do
+    select = [:task_id, :base_task_id, :cost_usd, :role, :occurred_at]
+
+    [task_id]
+    |> read_chunk(select)
+    |> Enum.filter(&(fold_event_id(&1) == task_id))
+  end
+
   defp row_tokens(row),
     do: (row.tokens_in || 0) + (row.tokens_out || 0) + (row.thinking_tokens || 0)
 

@@ -129,6 +129,39 @@ defmodule ArbiterCli.OutputTest do
       assert out =~ "n=10"
     end
 
+    test "prints the Spend block with a per-pass line each" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "spend" => %{
+          "total_usd" => 6.5,
+          "run_count" => 4,
+          "unpriced_runs" => 1,
+          "passes" => [
+            %{"kind" => "implement", "count" => 1, "usd" => 4.0, "unpriced_runs" => 0},
+            %{"kind" => "fix_pass", "count" => 2, "usd" => 2.5, "unpriced_runs" => 0},
+            %{"kind" => "review", "count" => 1, "usd" => 0.0, "unpriced_runs" => 1}
+          ]
+        }
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Spend:        $6.50 (1 unpriced run, not counted in $)"
+      assert out =~ "implement: 1 run, $4.00"
+      assert out =~ "fix_pass: 2 runs, $2.50"
+      assert out =~ "reviews: 1 run, $0.00 + 1 unpriced"
+    end
+
+    test "prints 'Spend: none recorded' when there is no usage" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "spend" => %{"total_usd" => 0.0, "run_count" => 0, "unpriced_runs" => 0, "passes" => []}
+      }
+
+      assert Output.format_issue_detail(issue) =~ "Spend:        none recorded"
+    end
+
     test "omits the estimate line when there is no estimate" do
       issue = %{"id" => "x", "title" => "T", "estimate" => nil}
       refute Output.format_issue_detail(issue) =~ "Estimate:"

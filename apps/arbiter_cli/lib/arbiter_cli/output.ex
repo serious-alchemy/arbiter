@@ -223,6 +223,7 @@ defmodule ArbiterCli.Output do
         {"Providers", provider_constraint_label(issue["provider_constraint"])},
         {"Permissions", permissions_label(issue)},
         {"Estimate", estimate_label(issue["estimate"])},
+        {"Spend", spend_label(issue["spend"])},
         {"Type", issue["issue_type"]},
         {"Backlog", backlog_label(issue)},
         {"Progress", child_progress_label(issue)},
@@ -342,6 +343,49 @@ defmodule ArbiterCli.Output do
   end
 
   defp epic_rollup_label(_), do: nil
+
+  # The ticket's actual spend: the total, then one line per pass kind. No
+  # `spend` key (an older server) prints nothing; an empty one says so.
+  @spend_labels %{
+    "implement" => "implement",
+    "review_round" => "review rounds",
+    "fix_pass" => "fix_pass",
+    "conflict" => "conflict",
+    "resume" => "resumes",
+    "review" => "reviews"
+  }
+
+  defp spend_label(%{"run_count" => 0, "total_usd" => t}) when t in [nil, 0, 0.0],
+    do: "none recorded"
+
+  defp spend_label(%{"passes" => passes} = spend) when is_list(passes) do
+    total =
+      case spend["total_usd"] do
+        n when is_number(n) -> money(n)
+        _ -> "unpriced"
+      end
+
+    note =
+      case spend["unpriced_runs"] do
+        n when is_integer(n) and n > 0 -> " (#{n} unpriced run#{plural(n)}, not counted in $)"
+        _ -> ""
+      end
+
+    lines =
+      Enum.map(passes, fn p ->
+        label = Map.get(@spend_labels, p["kind"], p["kind"])
+        un = if p["unpriced_runs"] > 0, do: " + #{p["unpriced_runs"]} unpriced", else: ""
+
+        "\n#{String.duplicate(" ", 14)}#{label}: #{p["count"]} run#{plural(p["count"])}, #{money(p["usd"])}#{un}"
+      end)
+
+    total <> note <> Enum.join(lines)
+  end
+
+  defp spend_label(_), do: nil
+
+  defp plural(1), do: ""
+  defp plural(_), do: "s"
 
   defp money(n) when is_number(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
   defp money(_), do: "?"
