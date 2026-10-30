@@ -239,6 +239,15 @@ defmodule Arbiter.Workflows.MergeQueue.CiTriage do
         {:unknown,
          "no ExUnit failure block in the log; cannot tell it from a failure of the diff", []}
 
+      true ->
+        judge_test_scope(blocks, changed, tests)
+    end
+  end
+
+  # Failing tests the diff does not touch: still not "unrelated" when the failure
+  # is in the harness, or the diff changes something every test depends on.
+  defp judge_test_scope(blocks, changed, tests) do
+    cond do
       tests == [] ->
         {:unknown, "names no failing test file; cannot tell it from a failure of the diff", []}
 

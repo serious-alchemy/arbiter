@@ -17,7 +17,7 @@ defmodule Arbiter.Worker.WatchdogFlakeRerunDedupeTest do
   alias Arbiter.Worker.Watchdog
 
   @docs_diff "diff --git a/docs/guide.md b/docs/guide.md\n--- a/docs/guide.md\n+++ b/docs/guide.md\n@@ -1 +1 @@\n-a\n+b\n"
-  @drain "apps/arbiter/test/arbiter/board/drain_test.exs"
+  @drain "test/arbiter/board/drain_test.exs"
 
   setup do
     StubMerger.reset()
@@ -38,7 +38,13 @@ defmodule Arbiter.Worker.WatchdogFlakeRerunDedupeTest do
   defp task(ws),
     do: Ash.create!(Issue, %{title: "flake", description: "body", workspace_id: ws.id})
 
-  defp failing(job), do: [%{name: job, summary: "", files: [@drain]}]
+  # A realistic ExUnit report: the triage needs a numbered failure block.
+  defp failing(job) do
+    summary =
+      "  1) test drains (DrainTest)\n     #{@drain}:11\n     boom\n\n9 tests, 1 failure\n"
+
+    [%{name: job, summary: summary}]
+  end
 
   defp red(head),
     do: %{
@@ -98,7 +104,7 @@ defmodule Arbiter.Worker.WatchdogFlakeRerunDedupeTest do
 
     wait_until(fn -> length(reruns("!nr2")) == 1 end)
     assert StubFixPassDispatcher.call_count() == 0
-    assert ReviewCi.load_failed_sets(t.id) == %{"h1" => ["mix test"]}
+    wait_until(fn -> ReviewCi.load_failed_sets(t.id) == %{"h1" => ["mix test"]} end)
   end
 
   test "a head the ReviewGate already re-ran with the same job set is not re-run again" do

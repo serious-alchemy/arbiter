@@ -3831,6 +3831,10 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
+  # `:needs_agent` (touches the diff, unclassifiable) and `:target_red` (held
+  # before this point; reaching here means the hold cleared).
+  defp triage_step(_state, _head, _triage), do: {:fix, nil}
+
   # bd-3ij7dw: the same untouched failing test set on consecutive attempts of one
   # head reproduced; a second re-run would only re-roll the dice until a lucky
   # pass merges. Only a DIFFERENT set (a genuine flake moving around) may use
@@ -3870,10 +3874,6 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp hydrate_triage_rerun(state, _head), do: state
-
-  # `:needs_agent` (touches the diff, unclassifiable) and `:target_red` (held
-  # before this point; reaching here means the hold cleared).
-  defp triage_step(_state, _head, _triage), do: {:fix, nil}
 
   # The failing test files the triage found outside the diff: the fix pass is
   # briefed not to edit them when they reproduce (bd-2l0hzm).
@@ -4311,8 +4311,7 @@ defmodule Arbiter.Worker.Watchdog do
   @full_log_limit 2_000_000
   @full_log_max_bytes 64 * 1024 * 1024
 
-  defp with_full_logs(checks) when is_list(checks), do: Enum.map(checks, &with_full_log/1)
-  defp with_full_logs(checks), do: checks
+  defp with_full_logs(checks), do: Enum.map(checks, &with_full_log/1)
 
   defp with_full_log(%{truncated: true, log_path: path} = check)
        when is_binary(path) and path != "" do
