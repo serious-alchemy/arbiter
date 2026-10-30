@@ -223,6 +223,61 @@ defmodule Arbiter.Worker.WatchdogCiSyncTest do
     end
   end
 
+  describe "a :no_pipeline block on a branch the target has outrun" do
+    defp no_pipeline(head),
+      do: %{
+        status: :open,
+        approved: true,
+        block_reason: :no_pipeline,
+        pipeline: nil,
+        head_sha: head,
+        base_ref: "main"
+      }
+
+    test "syncs once, polls the new head, and merges when the synced head has a pipeline" do
+      task_id = new_task_id()
+      probe(%{"old" => 4, "synced" => 0})
+
+      StubMerger.queue_get("!np1", [
+        no_pipeline("old"),
+        # the forge has not shown the sync commit yet: must not sync again
+        no_pipeline("old"),
+        running("synced"),
+        green("synced")
+      ])
+
+      reviewed_then_synced("!np1")
+      start_watchdog(task_id, "!np1", last_reviewed_sha: "old")
+
+      assert_receive {:watchdog, ^task_id, {:merged, _}}, 3_000
+      assert StubMerger.update_branch_count("!np1") == 1
+    end
+
+    test "a synced head that still has no pipeline escalates and parks, no sync loop" do
+      task_id = new_task_id()
+      probe(%{"old" => 4, "synced" => 0})
+      StubMerger.queue_get("!np2", [no_pipeline("old"), no_pipeline("synced")])
+
+      wpid = start_watchdog(task_id, "!np2")
+
+      wait_until(fn -> :sys.get_state(wpid).park_reason == :no_pipeline end)
+      wait_until(fn -> StubMerger.get_count("!np2") >= 6 end)
+      assert StubMerger.update_branch_count("!np2") == 1
+      assert StubMerger.merge_count("!np2") == 0
+    end
+
+    test "a head already current with the target escalates without syncing" do
+      task_id = new_task_id()
+      probe(%{"cur" => 0})
+      StubMerger.queue_get("!np3", [no_pipeline("cur")])
+
+      wpid = start_watchdog(task_id, "!np3")
+
+      wait_until(fn -> :sys.get_state(wpid).park_reason == :no_pipeline end)
+      assert StubMerger.update_branch_count("!np3") == 0
+    end
+  end
+
   describe "ci_rerun on a stale branch" do
     test "syncs instead of re-running the old head" do
       task_id = new_task_id()

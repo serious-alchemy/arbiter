@@ -230,6 +230,8 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Placement
+  alias Arbiter.Nodes.Refusal
+  alias Arbiter.Nodes.Refusal
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Reviews.Checkout
   alias Arbiter.Reviews.ConflictResolution
@@ -1291,6 +1293,11 @@ defmodule Arbiter.Worker.ReviewGate do
       # fix round (`place_fix_round/1`): nil on the primary, else the node row it was
       # placed on.
       fix_node: nil,
+      # bd-dylogx: retries of this round's implementer start after a node refused it with a hold
+      # reason (`Refusal`), and the bound on them.
+      session_start: Keyword.get(opts, :session_start, &ClaudeSession.start/1),
+      fix_refusal_retries: 0,
+      fix_refusal_max_retries: Keyword.get(opts, :fix_refusal_max_retries, 2),
       placement_opts: Keyword.get(opts, :placement_opts, []),
       # Where the wait resumes when CI clears: `:first` (the gate's opening
       # review) or `{:next, review_id}` (a later round). Set on every gate pass.
@@ -4122,7 +4129,7 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp launch_implementer_now(state, findings, prompt_prefix) do
-    impl_id = implementer_task_id(state.review_id, state.round)
+    impl_id = refusal_retry_id(implementer_task_id(state.review_id, state.round), state)
 
     with {:ok, placed} <- place_fix_round(%{state | phase: :revising}),
          {:ok, state} <-
@@ -4140,7 +4147,7 @@ defmodule Arbiter.Worker.ReviewGate do
       # The round is genuinely under way now, so the guard provenance has done
       # its job: only the terminal arms read it, and from here the next
       # terminal belongs to the round that follows, not to this reject.
-      {:revise, %{state | guard_rejected: nil}}
+      {:revise, %{state | guard_rejected: nil, fix_refusal_retries: 0}}
     else
       # bd-bg87oz: a `remote_only` workspace with no node free holds the fix round
       # the way a cap of 0 does: nothing is spawned and no round is consumed. The
@@ -4151,20 +4158,61 @@ defmodule Arbiter.Worker.ReviewGate do
         {:revise, %{held | phase: :revising, current_id: nil, attempt: state.attempt + 1}}
 
       {:error, reason} ->
-        state =
-          record_thread(
-            state,
-            :system,
-            "Round #{state.round} revise could not start",
-            "The implementer worker could not be spawned: #{inspect(reason)}"
-          )
-
-        # bd-9zuvbh: an implementer that could not be spawned is a liveness
-        # failure, and when the reject it was standing in for came from a
-        # verdict guard the PR still has a reviewer's APPROVE on it. Same split
-        # as the round cap: park that, fail a genuine REQUEST_CHANGES.
-        {:done, finish(state, terminal_reject_verdict(state))}
+        retry_refused_implementer(state, reason, findings, prompt_prefix)
     end
+  end
+
+  # bd-dylogx: a node's refusal of the implementer's start (`startup_failed`,
+  # `placement_timeout`, `no_capacity`, `unschedulable`, `placement_lost`, ...) is a hold, not
+  # a failure: the run never started. Ask again (placed afresh) up to a bound, under a fresh
+  # worker id so the refused run's row is not reused; past the bound, or on any other error, park.
+  defp retry_refused_implementer(state, reason, findings, prompt_prefix) do
+    case refusal_of(reason) do
+      {:ok, refusal} when state.fix_refusal_retries < state.fix_refusal_max_retries ->
+        retries = state.fix_refusal_retries + 1
+        detail = if refusal.detail, do: ": " <> refusal.detail, else: ""
+
+        Logger.warning(
+          "ReviewGate: task=#{state.task_id} round #{state.round} implementer start refused " <>
+            "(#{refusal.reason}#{detail}); retrying #{retries}/#{state.fix_refusal_max_retries}"
+        )
+
+        stale = refusal_retry_id(implementer_task_id(state.review_id, state.round), state)
+        safe(fn -> stale |> Worker.whereis() |> stop_if_pid() end)
+        launch_implementer_now(%{state | fix_refusal_retries: retries}, findings, prompt_prefix)
+
+      _ ->
+        park_unstartable_implementer(state, reason)
+    end
+  end
+
+  defp stop_if_pid(pid) when is_pid(pid), do: Worker.stop(pid, :normal)
+  defp stop_if_pid(_), do: :ok
+
+  defp refusal_of({:worker_session_failed, inner}), do: refusal_of(inner)
+
+  defp refusal_of({:no_node_capacity, %{refused: r} = info}),
+    do: {:ok, %{reason: r, detail: info[:detail]}}
+
+  defp refusal_of(reason), do: Refusal.from_start_error(reason)
+
+  defp refusal_retry_id(id, %{fix_refusal_retries: 0}), do: id
+  defp refusal_retry_id(id, %{fix_refusal_retries: n}), do: "#{id}#r#{n}"
+
+  defp park_unstartable_implementer(state, reason) do
+    state =
+      record_thread(
+        state,
+        :system,
+        "Round #{state.round} revise could not start",
+        "The implementer worker could not be spawned: #{inspect(reason)}"
+      )
+
+    # bd-9zuvbh: an implementer that could not be spawned is a liveness
+    # failure, and when the reject it was standing in for came from a
+    # verdict guard the PR still has a reviewer's APPROVE on it. Same split
+    # as the round cap: park that, fail a genuine REQUEST_CHANGES.
+    {:done, finish(state, terminal_reject_verdict(state))}
   end
 
   # ---- the remote must not move under a fix round (bd-bq8c8a) --------------
@@ -4721,9 +4769,36 @@ defmodule Arbiter.Worker.ReviewGate do
         {:done, escalate_pre_review_park(next, reason)}
 
       {:ok, next} ->
-        next |> ci_gate({:next, review_id}) |> ci_next_reply(review_id)
+        # bd-4ynfr7: round 1 checks the head against the target in
+        # `prepare_branch_for_review/1`; this door must too, or the reviewer
+        # finds the conflict a fix round (or a target that moved) produced.
+        case target_conflict(next) do
+          {:conflict, files} ->
+            text = conflict_escalation(next, %{files: files})
+            record_round(next, :review, :request_changes, text, converged: false)
+            {:done, finish(next, {:request_changes, text})}
+
+          :none ->
+            next |> ci_gate({:next, review_id}) |> ci_next_reply(review_id)
+        end
     end
   end
+
+  # Check-only (`git merge-tree`; nothing is merged, committed or pushed): does the
+  # head under review conflict with the freshly fetched target? Anything git cannot
+  # answer fails open, as `prepare_branch_for_review/1` does.
+  defp target_conflict(%{worktree_path: wt, branch: branch, target_branch: target})
+       when is_binary(wt) and is_binary(target) do
+    with {:ok, ^branch} <- Worktree.current_branch(wt),
+         :ok <- Worktree.fetch_origin(wt, target),
+         {:conflict, files} <- Worktree.merge_conflict(wt, "origin/" <> target, "HEAD") do
+      {:conflict, files}
+    else
+      _ -> :none
+    end
+  end
+
+  defp target_conflict(_state), do: :none
 
   defp launch_next_reviewer(next, review_id) do
     case provision_review_checkout(next) do
@@ -7726,7 +7801,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp start_worker_session(state, pid, role, prompt, command, revision) do
     case build_session_opts(state, pid, role, prompt, command, revision) do
       {:ok, session_opts} ->
-        case ClaudeSession.start(session_opts ++ arb_token_opts(state, role)) do
+        case state.session_start.(session_opts ++ arb_token_opts(state, role)) do
           {:ok, _port} -> :ok
           {:error, reason} -> {:error, {:worker_session_failed, reason}}
         end

@@ -68,12 +68,28 @@ defmodule Arbiter.Tasks.LifecycleDispatchableTest do
     test "a file overlap with in-flight work" do
       ctx = %{
         scope: MapSet.new(["lib/a.ex"]),
-        in_flight: [{"bd-7", MapSet.new(["lib/a.ex", "lib/b.ex"])}],
+        repo: "r",
+        in_flight: [{"bd-7", MapSet.new(["lib/a.ex", "lib/b.ex"]), "r"}],
         paused: true
       }
 
       assert Lifecycle.dispatchable(ticket(:queued), ctx) ==
-               {:held, {:file_overlap, ["lib/a.ex"], "bd-7"}}
+               {:held, {:file_overlap, ["lib/a.ex"], "bd-7", :diff}}
+    end
+
+    test "the same file in flight in another repo does not hold" do
+      ctx = %{
+        scope: MapSet.new(["notes/x.md"]),
+        repo: "r1",
+        in_flight: [{"bd-7", MapSet.new(["notes/x.md"]), "r2"}]
+      }
+
+      assert Lifecycle.dispatchable(ticket(:queued), ctx) == :ok
+    end
+
+    test "the hold names its evidence source" do
+      assert Lifecycle.describe_hold({:file_overlap, ["lib/a.ex"], "bd-7", :diff}) ==
+               "lib/a.ex in flight on bd-7 (diff)"
     end
 
     test "paused, then a quota hold, then no free slot" do
