@@ -449,8 +449,11 @@ defmodule Arbiter.Worker.MergeTrain do
   defp drop_ref(train, ref, reason) do
     train =
       case Enum.find(train.entries, fn {_id, e} -> e.ref == ref end) do
-        {id, e} -> if orphan?(train, id, e, reason), do: orphan(train, id, e), else: drop(train, id)
-        nil -> train
+        {id, e} ->
+          if orphan?(train, id, e, reason), do: orphan(train, id, e), else: drop(train, id)
+
+        nil ->
+          train
       end
 
     case train.merge do
@@ -466,11 +469,15 @@ defmodule Arbiter.Worker.MergeTrain do
   # the restarted Watchdog can `resume/3`; a head nobody resumes then expires like
   # any entry that stopped asking.
   defp orphan?(train, id, e, reason) do
-    reason != :normal and train.head == id and
+    crashed?(reason) and train.head == id and
       (e.item.status in [:ci_running, :updating_base] or
          (e.item.status == :behind_base and synced?(e.item))) and
       is_nil(Map.get(e.item, :last_block_reason))
   end
+
+  # A deliberate stop (a merge, a close, an operator's pull) is not a crash.
+  defp crashed?(reason),
+    do: reason not in [:normal, :shutdown] and not match?({:shutdown, _}, reason)
 
   defp synced?(item), do: match?(%{synced_from: sha} when is_binary(sha), item[:queue_head])
 

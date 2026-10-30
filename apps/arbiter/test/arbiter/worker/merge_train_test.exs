@@ -124,7 +124,8 @@ defmodule Arbiter.Worker.MergeTrainTest do
 
       ready = entry("a", status: :ready_to_merge)
 
-      for _ <- 1..MergeHead.head_ready_ticks(), do: assert(:head = MergeTrain.tick(@key, ready, t))
+      for _ <- 1..MergeHead.head_ready_ticks(),
+          do: assert(:head = MergeTrain.tick(@key, ready, t))
 
       assert {:wait, "b"} = MergeTrain.tick(@key, ready, t)
     end
