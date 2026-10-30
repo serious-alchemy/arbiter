@@ -355,7 +355,8 @@ defmodule ArbiterCli.Output do
     "review" => "reviews"
   }
 
-  defp spend_label(%{"run_count" => 0, "total_usd" => t}) when t in [nil, 0, 0.0], do: "none recorded"
+  defp spend_label(%{"run_count" => 0, "total_usd" => t}) when t in [nil, 0, 0.0],
+    do: "none recorded"
 
   defp spend_label(%{"passes" => passes} = spend) when is_list(passes) do
     total =
@@ -374,7 +375,8 @@ defmodule ArbiterCli.Output do
       Enum.map(passes, fn p ->
         label = Map.get(@spend_labels, p["kind"], p["kind"])
         un = if p["unpriced_runs"] > 0, do: " + #{p["unpriced_runs"]} unpriced", else: ""
-        "\n#{String.duplicate(" ", 16)}#{label}: #{p["count"]} run#{plural(p["count"])}, #{money(p["usd"])}#{un}"
+
+        "\n#{String.duplicate(" ", 14)}#{label}: #{p["count"]} run#{plural(p["count"])}, #{money(p["usd"])}#{un}"
       end)
 
     total <> note <> Enum.join(lines)

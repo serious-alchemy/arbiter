@@ -146,7 +146,7 @@ defmodule ArbiterCli.OutputTest do
       }
 
       out = Output.format_issue_detail(issue)
-      assert out =~ "Spend:       $6.50 (1 unpriced run, not counted in $)"
+      assert out =~ "Spend:        $6.50 (1 unpriced run, not counted in $)"
       assert out =~ "implement: 1 run, $4.00"
       assert out =~ "fix_pass: 2 runs, $2.50"
       assert out =~ "reviews: 1 run, $0.00 + 1 unpriced"
@@ -159,7 +159,7 @@ defmodule ArbiterCli.OutputTest do
         "spend" => %{"total_usd" => 0.0, "run_count" => 0, "unpriced_runs" => 0, "passes" => []}
       }
 
-      assert Output.format_issue_detail(issue) =~ "Spend:       none recorded"
+      assert Output.format_issue_detail(issue) =~ "Spend:        none recorded"
     end
 
     test "omits the estimate line when there is no estimate" do
