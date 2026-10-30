@@ -430,7 +430,7 @@ defmodule Arbiter.Reviews.ConflictResolution do
     packet = Enum.map_join(files, "\n", &render_file/1)
 
     if byte_size(packet) > limit do
-      binary_part(packet, 0, limit) <>
+      Arbiter.Text.head_bytes(packet, limit) <>
         "\n(… truncated at #{limit} bytes — #{length(files)} conflicted file(s) in all: " <>
         "#{Enum.map_join(files, ", ", & &1.path)})\n"
     else
