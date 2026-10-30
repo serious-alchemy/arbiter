@@ -1673,6 +1673,7 @@ defmodule Arbiter.Board.Snapshot do
       |> queue_card(order_ctx)
       |> Map.merge(%{
         scope: FileScope.declared_paths(issue),
+        repo: Map.get(issue, :repo),
         blocked_by: [],
         conflicts_with: EdgeGate.conflicts(conflicts, issue.id),
         state: Lifecycle.state_of(issue)
@@ -2250,19 +2251,19 @@ defmodule Arbiter.Board.Snapshot do
         @orphan_grace_seconds
   end
 
+  defp repo_of(nil), do: nil
+  defp repo_of(issue), do: Map.get(issue, :repo)
+
   defp in_flight(workers, issues_by_id, changed) do
     workers
     |> Enum.filter(&(Map.get(&1, :state) in @in_flight_run_states))
     |> Enum.map(fn w ->
-      declared =
-        case Map.get(issues_by_id, w.task_id) do
-          nil -> MapSet.new()
-          issue -> FileScope.declared_paths(issue)
-        end
-
+      # bd-9o9hci: only what the worktree has actually changed. Paths the ticket's
+      # text cites (a source note, a doc) are not files in flight.
       %{
         task_id: w.task_id,
-        scope: MapSet.union(declared, MapSet.new(Map.get(changed, w.task_id, [])))
+        repo: issues_by_id |> Map.get(w.task_id) |> repo_of(),
+        scope: MapSet.new(Map.get(changed, w.task_id, []))
       }
     end)
   end
