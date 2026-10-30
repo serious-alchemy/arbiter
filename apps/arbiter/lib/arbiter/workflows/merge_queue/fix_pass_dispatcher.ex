@@ -52,6 +52,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   alias Arbiter.Mergers.Merger
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.Placement
+  alias Arbiter.Nodes.PlacementWatch
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
@@ -581,61 +582,70 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
         {:ok, nil}
 
       true ->
-        # bd-7e8ezw: mint this pass its OWN worker token and write a fresh
-        # `.mcp.json`. `Worktree.attach/2` may hand back the original run's
-        # checkout, whose `.mcp.json` carries a token whose worker lease has
-        # long expired, or a re-created one with no config at all. Either way
-        # the pass reported the `arbiter` server "not connected" and could not
-        # call `ci_mark_external` / `ci_rerun`, which its prompt tells it to use.
-        # bd-ld8qde (G14): the same dispatch-time withholding as the first-round
-        # worker. A guarded install seals a spawn that carries no projection, so
-        # a pass without one would run with no `secrets:` env and no
-        # `tracker_write` claim. The pass names no model (the adapter picks its
-        # default), so a rule keyed on model family sees `nil`.
-        projection = spawn_projection(context, provider)
+        # bd-3jjt3p: everything up to the spawn runs under the placement deadline of a
+        # run on a node (`PlacementWatch.watch/4`), which starts where the node was chosen.
+        build = fn ->
+          # bd-7e8ezw: mint this pass its OWN worker token and write a fresh
+          # `.mcp.json`. `Worktree.attach/2` may hand back the original run's
+          # checkout, whose `.mcp.json` carries a token whose worker lease has
+          # long expired, or a re-created one with no config at all. Either way
+          # the pass reported the `arbiter` server "not connected" and could not
+          # call `ci_mark_external` / `ci_rerun`, which its prompt tells it to use.
+          # bd-ld8qde (G14): the same dispatch-time withholding as the first-round
+          # worker. A guarded install seals a spawn that carries no projection, so
+          # a pass without one would run with no `secrets:` env and no
+          # `tracker_write` claim. The pass names no model (the adapter picks its
+          # default), so a rule keyed on model family sees `nil`.
+          projection = spawn_projection(context, provider)
 
-        mcp_opts =
-          Dispatch.inject_mcp_config(context.task, worktree_path,
-            repo: context.repo,
-            agent_type: provider,
-            permissions: projection.claims
-          )
+          mcp_opts =
+            Dispatch.inject_mcp_config(context.task, worktree_path,
+              repo: context.repo,
+              agent_type: provider,
+              permissions: projection.claims
+            )
 
-        # bd-asawcq: the worker token doubles as the agent's ARB_TOKEN.
-        #
-        # bd-7ays3v: under podman, a Claude pass runs in the container, in the
-        # private clone `create_worktree/1` gave it, under the policy the task
-        # worker resolves; any other pass is spawned exactly as before.
-        #
-        # bd-9cygoo (G16): the pass pushes, so it needs a repo-scoped git
-        # credential (or an explicit legacy opt-in) like any other implementer.
-        case GitCredential.plan(context.workspace, context.repo,
-               role: :implementer,
-               guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?,
-               host_pushes?: container_pass?(context, provider)
-             ) do
-          {:ok, git_credential} ->
-            session_opts =
-              ([
-                 owner: worker_pid,
-                 worktree_path: worktree_path,
-                 projection: projection,
-                 git_credential: git_credential
-               ] ++
-                 Keyword.take(mcp_opts, [:arb_token]) ++
-                 container_opts(context, provider) ++ node_opts(node, context))
-              |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
+          # bd-asawcq: the worker token doubles as the agent's ARB_TOKEN.
+          #
+          # bd-7ays3v: under podman, a Claude pass runs in the container, in the
+          # private clone `create_worktree/1` gave it, under the policy the task
+          # worker resolves; any other pass is spawned exactly as before.
+          #
+          # bd-9cygoo (G16): the pass pushes, so it needs a repo-scoped git
+          # credential (or an explicit legacy opt-in) like any other implementer.
+          case GitCredential.plan(context.workspace, context.repo,
+                 role: :implementer,
+                 guarded?: Arbiter.Guardrails.guarded?() or projection.guarded?,
+                 host_pushes?: container_pass?(context, provider)
+               ) do
+            {:ok, git_credential} ->
+              session_opts =
+                ([
+                   owner: worker_pid,
+                   worktree_path: worktree_path,
+                   projection: projection,
+                   git_credential: git_credential
+                 ] ++
+                   Keyword.take(mcp_opts, [:arb_token]) ++
+                   container_opts(context, provider) ++ node_opts(node, context))
+                |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
 
-            case ClaudeSession.start(session_opts) do
-              {:ok, port} ->
-                _ = Worker.advance(worker_pid, :fix_ci)
-                {:ok, port}
+              {:ok, session_opts}
 
-              {:error, reason} ->
-                {:error, {:claude_start_failed, reason}}
-            end
+            {:error, _reason} = error ->
+              error
+          end
+        end
+
+        case PlacementWatch.watch(node, context.task.id, build, &ClaudeSession.start/1) do
+          {:ok, port} ->
+            _ = Worker.advance(worker_pid, :fix_ci)
+            {:ok, port}
 
           {:error, reason} ->
+            {:error, {:claude_start_failed, reason}}
+
+          {:build_error, reason} ->
             {:error, {:claude_start_failed, reason}}
         end
     end

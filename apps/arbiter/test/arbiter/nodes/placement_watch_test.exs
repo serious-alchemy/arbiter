@@ -171,6 +171,46 @@ defmodule Arbiter.Nodes.PlacementWatchTest do
       assert [] = Enum.filter(PlacementWatch.stuck(), &(&1.task_id == "bd-abc123"))
     end
 
+    test "stuck_runs/2 names a run left in placing past the timeout, whatever step it is stuck in" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3_600, :second)
+
+      snap = fn task_id, attrs ->
+        Map.merge(
+          %{
+            task_id: task_id,
+            run_id: "run-" <> task_id,
+            state: :starting,
+            started_at: long_ago,
+            meta: %{placed_node_id: "node-1"}
+          },
+          attrs
+        )
+      end
+
+      snaps = [
+        snap.("bd-placing", %{}),
+        # young: inside the budget
+        snap.("bd-young", %{started_at: DateTime.utc_now()}),
+        # the agent started on the node: no longer placing
+        snap.("bd-started", %{meta: %{placed_node_id: "node-1", node_id: "node-1"}}),
+        snap.("bd-working", %{state: :working}),
+        # a local run
+        snap.("bd-local", %{meta: %{}})
+      ]
+
+      assert [
+               %{task_id: "bd-placing", node_id: "node-1", run: "run-bd-placing", age_ms: age} =
+                 entry
+             ] =
+               PlacementWatch.stuck_runs(snaps, 60_000)
+
+      assert age >= 3_600_000
+      assert entry.stage == :placing
+      assert entry.timeout_ms == 60_000
+
+      assert [] = PlacementWatch.stuck_runs(snaps, :infinity)
+    end
+
     test "an attempt whose process dies is dropped" do
       test = self()
 

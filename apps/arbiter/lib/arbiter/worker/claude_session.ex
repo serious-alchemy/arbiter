@@ -237,6 +237,24 @@ defmodule Arbiter.Worker.ClaudeSession do
   """
   @spec start(opts()) :: {:ok, port()} | {:error, term()}
   def start(opts) when is_list(opts) do
+    node = Keyword.get(opts, :node)
+
+    # bd-3jjt3p: a placed run's deadline starts where its node was chosen. A caller that
+    # began the attempt there passes it in `:placement_attempt`; any other placed start is
+    # watched from here, so the steps before `prepare_remote_container/5` are covered too.
+    if node && !Keyword.has_key?(opts, :placement_attempt) && !Keyword.get(opts, :adopt) do
+      task_id = with owner when is_pid(owner) <- opts[:owner], do: task_id_for(owner)
+
+      case PlacementWatch.watch(node, task_id, fn -> {:ok, opts} end, &start_session/1) do
+        {:build_error, reason} -> {:error, reason}
+        result -> result
+      end
+    else
+      start_session(opts)
+    end
+  end
+
+  defp start_session(opts) do
     with {:ok, owner} <- fetch_owner(opts),
          {:ok, worktree_path} <- fetch_worktree(opts),
          # bd-ld8qde (G14): never run a `prod_ssh` spawn without its agent.
@@ -250,7 +268,10 @@ defmodule Arbiter.Worker.ClaudeSession do
          task_id = task_id_for(owner),
          # bd-9cygoo (G16): the repo-scoped git credential, or a refusal. Never the
          # operator's agent: the spawn env has no SSH_AUTH_SOCK (`SpawnEnv`).
-         {:ok, git} <- prepare_git_credential(opts, owner, worktree_path, task_id),
+         {:ok, git} <-
+           placement_step(opts, :git_credential, fn ->
+             prepare_git_credential(opts, owner, worktree_path, task_id)
+           end),
          # One workspace load serves both halves (bd-62d3jh): the pairs go into the
          # child's env, the secret values into the session's redaction list.
          {worker_env, redact_values} =
@@ -381,6 +402,15 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
+  # A step of the placement attempt the caller began (`:placement_attempt`), under its
+  # deadline; any other start has no attempt and runs the step inline.
+  defp placement_step(opts, stage, fun) do
+    case Keyword.get(opts, :placement_attempt) do
+      %PlacementWatch{} = attempt -> PlacementWatch.step(attempt, stage, fun)
+      _ -> fun.()
+    end
+  end
+
   defp container_spawn?(%Arbiter.Agents.SecurityPolicy{} = policy),
     do: ContainerSpawn.podman?(policy)
 
@@ -480,10 +510,17 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp prepare_remote_container(opts, policy, port_args, ctx, node) do
     # bd-cch1jh: one attempt, one deadline, one logged outcome for everything the primary
     # does to place this run (its own half and the node's answer).
-    attempt = PlacementWatch.begin(task_id: Keyword.get(ctx, :task_id), node: node)
+    case Keyword.get(opts, :placement_attempt) do
+      # the caller began it where the node was chosen and finishes it (`PlacementWatch.watch/4`)
+      %PlacementWatch{} = attempt ->
+        prepare_remote_container(opts, policy, port_args, ctx, node, attempt)
 
-    result = prepare_remote_container(opts, policy, port_args, ctx, node, attempt)
-    PlacementWatch.finish(attempt, result)
+      _ ->
+        attempt = PlacementWatch.begin(task_id: Keyword.get(ctx, :task_id), node: node)
+
+        result = prepare_remote_container(opts, policy, port_args, ctx, node, attempt)
+        PlacementWatch.finish(attempt, result)
+    end
   end
 
   defp prepare_remote_container(opts, policy, port_args, ctx, node, attempt) do
