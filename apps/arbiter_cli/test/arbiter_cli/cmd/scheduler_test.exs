@@ -377,6 +377,25 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       assert out =~ "bd-b"
     end
 
+    # bd-7twuru: deferred resumes and how long each has waited.
+    test "lists deferred resumes with their age" do
+      stub_get(
+        "/api/scheduler/status",
+        Map.merge(body("running"), %{
+          "deferred_resumes" => [
+            %{"task_id" => "bd-x", "wait" => "slot", "age_ms" => 125_000, "parked?" => true}
+          ]
+        })
+      )
+
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Deferred resumes: 1"
+      assert out =~ "bd-x"
+      assert out =~ "2m"
+      assert out =~ "parked"
+    end
+
     test "prints no held line when nothing waits on local capacity" do
       stub_get(
         "/api/scheduler/status",
