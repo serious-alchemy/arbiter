@@ -578,6 +578,12 @@ defmodule Arbiter.Tasks.Dependencies do
   defp classify_group(%Dependency{type: :discovered_from, to_issue_id: id}, id),
     do: {:discovered, :inbound}
 
+  defp classify_group(%Dependency{type: :fixes, from_issue_id: id}, id),
+    do: {:fixes, :outbound}
+
+  defp classify_group(%Dependency{type: :fixes, to_issue_id: id}, id),
+    do: {:fixed_by, :inbound}
+
   defp classify_group(%Dependency{type: type, from_issue_id: id}, id)
        when type in [:relates_to, :conflicts_with],
        do: {type, :outbound}

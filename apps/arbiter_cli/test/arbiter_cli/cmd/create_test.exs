@@ -103,6 +103,25 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert_received {:posted, %{"deps" => ["bd-1", "bd-2"]}}
   end
 
+  test "--fixes ids ride along as a list in the create body" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "bd-007", "title" => "X"})
+       end}
+    ])
+
+    {_out, _err, 0} = capture(fn -> Create.run(["X", "--fixes", "bd-1,bd-2"]) end)
+
+    assert_received {:posted, %{"fixes" => ["bd-1", "bd-2"]}}
+  end
+
   # #1973: the server needs the parent at create time to default a child of a
   # tracker-linked parent to context-only rather than minting its own ticket.
   test "--parent is sent with the create so the server can default the tracker from it" do
