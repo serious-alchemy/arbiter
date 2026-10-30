@@ -37,21 +37,12 @@ defmodule Arbiter.Worker.ReviewGatePatrolCollisionTest do
   @handshake Path.expand("../../fixtures/review_handshake.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
   @stub_name Arbiter.Mergers.Github.HTTP
-  @git_cred_http Arbiter.Worker.GitCredential.HTTP
 
   setup do
-    # The gate's pre-review push mints the host's App token over HTTP; stub it
-    # (shared, so the gate's spawned processes find it) instead of logging a
-    # "cannot find mock/stub" error.
+    # The gate's pre-review PR open runs in a spawned process; share the
+    # Req.Test stubs so it finds @stub_name instead of logging a "cannot find
+    # mock/stub" error.
     Req.Test.set_req_test_to_shared(%{async: false})
-    put_app_env(:arbiter, :git_credential_req_options, plug: {Req.Test, @git_cred_http})
-    Arbiter.Worker.HostCredential.Cache.clear()
-
-    Req.Test.stub(@git_cred_http, fn conn ->
-      conn
-      |> Plug.Conn.put_status(201)
-      |> Req.Test.json(%{"token" => "ghs_host", "expires_at" => "2099-01-01T00:00:00Z"})
-    end)
 
     CircuitBreaker.reset_all()
     on_exit(&CircuitBreaker.reset_all/0)
