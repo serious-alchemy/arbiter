@@ -992,7 +992,8 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
 
       assert passes(rig) == 2
-      assert StubMerger.get_count(@pr) == 0
+      # #1146: only the reviewer brief reads the forge (one read per reviewer prompt), no CI wait.
+      assert StubMerger.get_count(@pr) == 2
     end
   end
 
@@ -1207,7 +1208,8 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
 
       assert passes(rig) == 1
-      assert StubMerger.get_count(@pr) == 0
+      # #1146: the one read is the reviewer brief, not a CI wait.
+      assert StubMerger.get_count(@pr) == 1
     end
 
     # bd-48kmfe: a pipeline queued in the forge (pending, not started) is not a stuck

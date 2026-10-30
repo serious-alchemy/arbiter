@@ -258,6 +258,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.RepeatUnmetCriterion
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ReviewCi
+  alias Arbiter.Worker.ReviewMrBrief
   alias Arbiter.Worker.ReviewFindings
   alias Arbiter.Worker.ReviewPass
   alias Arbiter.Worker.ReviewSync
@@ -2318,6 +2319,26 @@ defmodule Arbiter.Worker.ReviewGate do
 
       true ->
         ""
+    end
+  end
+
+  # #1146: the standing evidence instruction, plus the MR/PR description and head
+  # pipeline data when the gate is reviewing a PR.
+  defp mr_brief_block(state) do
+    brief = mr_brief(state, Map.get(state, :pr_ref))
+
+    ReviewMrBrief.instruction() <> if(brief == "", do: "\n", else: "\n" <> brief <> "\n")
+  end
+
+  defp mr_brief(_state, ref) when ref in [nil, ""], do: ""
+
+  defp mr_brief(state, ref) do
+    workspace = load_workspace(Map.get(state, :workspace_id))
+    repo = Map.get(state, :repo)
+
+    case ReviewCi.adapter(workspace, repo, Map.get(state, :ci_adapter)) do
+      {:ok, adapter} -> ReviewMrBrief.fetch(workspace, repo, adapter, ref)
+      _ -> ""
     end
   end
 
@@ -8494,7 +8515,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
       #{async_tool_block(state)}
 
-      #{ci_prompt_block(state)}NOTE: If you run tests or any build command, wrap it with a hard timeout so
+      #{ci_prompt_block(state)}#{mr_brief_block(state)}NOTE: If you run tests or any build command, wrap it with a hard timeout so
       a cold compilation pass cannot exhaust the reviewer session — e.g.
       `timeout 120 mix test`. If the command times out or fails to compile, issue
       your VERDICT based on the diff alone and note that live test verification

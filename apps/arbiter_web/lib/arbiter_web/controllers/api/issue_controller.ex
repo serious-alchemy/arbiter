@@ -286,7 +286,16 @@ defmodule ArbiterWeb.Api.IssueController do
       attrs =
         params
         |> Params.strip_attribution()
-        |> Map.drop(["id", "force", "assignee", "workspace", "deps", "depends_on", "blocks", "no_lint"])
+        |> Map.drop([
+          "id",
+          "force",
+          "assignee",
+          "workspace",
+          "deps",
+          "depends_on",
+          "blocks",
+          "no_lint"
+        ])
         |> Map.put("workspace_id", ws_id)
         |> coerce_atoms(@atom_fields)
 
@@ -452,7 +461,10 @@ defmodule ArbiterWeb.Api.IssueController do
     assignee_warnings = AssigneeCompat.warnings(params)
 
     with {:ok, updated} <- apply_update(conn, id, params) do
-      render(conn, :show, issue: updated, warnings: assignee_warnings ++ update_lint(updated, params))
+      render(conn, :show,
+        issue: updated,
+        warnings: assignee_warnings ++ update_lint(updated, params)
+      )
     end
   end
 
