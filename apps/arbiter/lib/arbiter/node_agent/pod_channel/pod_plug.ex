@@ -8,6 +8,7 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
   | `POST /boot` | server-authenticated only; the nonce is the body | redeem the single-use boot nonce: the run's certificates, secrets and seed files as a tar (`Arbiter.NodeAgent.PodChannel.BootBundle`) |
   | `GET /seed.bundle[?have=]` | `control` client certificate | stream the primary's seed bundle for the certificate's run |
   | `PUT /checkpoint` | `control` client certificate | forward a checkpoint bundle to `PUT /nodes/runs/:run/checkout` |
+  | `GET /session` | `control` client certificate | stream the session transcript a resumed run continues from `GET /nodes/runs/:run/session` |
   | `PUT /transcripts` | `control` client certificate | forward the transcripts tar to `PUT /nodes/runs/:run/transcripts` |
   | `GET /commands[?wait=s]` | `control` client certificate | long-poll the run's command mailbox |
 
@@ -54,8 +55,8 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
       {_, ["boot"]} ->
         json(conn, 405, %{error: "method_not_allowed"})
 
-      {"GET", ["seed.bundle"]} ->
-        control(conn, opts, &seed/3)
+      {"GET", [route]} when route in ["seed.bundle", "session"] ->
+        control(conn, opts, &download(&1, &2, &3, route))
 
       {"PUT", ["checkpoint"]} ->
         control(conn, opts, &upload(&1, &2, &3, :checkpoint))
@@ -66,7 +67,8 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
       {"GET", ["commands"]} ->
         control(conn, opts, &commands/3)
 
-      {_, [route]} when route in ["seed.bundle", "checkpoint", "transcripts", "commands"] ->
+      {_, [route]}
+      when route in ["seed.bundle", "session", "checkpoint", "transcripts", "commands"] ->
         json(conn, 405, %{error: "method_not_allowed"})
 
       _ ->
@@ -128,11 +130,18 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
     end
   end
 
+  defp download(conn, opts, run, "seed.bundle"), do: seed(conn, opts, run)
+  defp download(conn, opts, run, "session"), do: session(conn, opts, run)
+
   defp seed(conn, opts, run) do
     conn = fetch_query_params(conn)
     have = conn.query_params["have"] || ""
     Upstream.stream_seed(Keyword.fetch!(opts, :config), run, String.slice(have, 0, 4_096), conn)
   end
+
+  # The transcript a resumed run continues (bd-4ic681): moved, not parsed, like the seed.
+  defp session(conn, opts, run),
+    do: Upstream.stream_session(Keyword.fetch!(opts, :config), run, conn)
 
   defp upload(conn, opts, run, kind) do
     max = Keyword.get(opts, :max_upload_bytes, @default_max_upload)

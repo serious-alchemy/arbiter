@@ -93,7 +93,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   @mount_fields %{
     "worktree" => [:kind, :path, :files],
     "home" => [:kind, :path],
-    "config_dir" => [:kind, :path, :files],
+    "config_dir" => [:kind, :path, :files, :session],
     "tmp" => [:kind, :path],
     "cli" => [:kind, :path, :name, :sha256],
     "prompt" => [:kind, :path, :content]

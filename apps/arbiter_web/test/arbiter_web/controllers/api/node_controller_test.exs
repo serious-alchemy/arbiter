@@ -131,6 +131,27 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
       assert hd(body["nodes"])["credential_prefix"]
     end
 
+    test "GET /api/nodes reports the remote placements in flight and those past the timeout" do
+      body = json_response(get(operator_conn(), "/api/nodes"), 200)
+      assert %{"timeout_ms" => ms, "in_flight" => [], "stuck" => []} = body["placements"]
+      assert is_integer(ms)
+
+      attempt =
+        Arbiter.Nodes.PlacementWatch.begin(
+          task_id: "bd-stuck1",
+          node: %{id: "n1", name: "mesaana"},
+          run: "run-1",
+          timeout_ms: 0
+        )
+
+      body = json_response(get(operator_conn(), "/api/nodes"), 200)
+      Arbiter.Nodes.PlacementWatch.finish(attempt, {:ok, :handle})
+
+      assert %{"stuck" => [stuck], "in_flight" => [_]} = body["placements"]
+      assert %{"task_id" => "bd-stuck1", "node_name" => "mesaana", "stage" => "started"} = stuck
+      assert stuck["timeout_ms"] == 0
+    end
+
     test "GET /api/nodes/:ref finds by name or id; 404 otherwise" do
       node = enroll!("alpha")
 

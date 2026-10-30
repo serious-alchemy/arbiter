@@ -187,6 +187,19 @@ defmodule Arbiter.Worker.Executor.Node do
   end
 
   @doc """
+  Give up on placing `run` on `node` (the placement deadline passed): the session drops
+  it and has the node drop whatever it may yet create. `:ok` when the session is gone.
+  """
+  @spec cancel_placement(map() | String.t(), String.t()) :: :ok
+  def cancel_placement(node, run) when is_binary(run) do
+    with {:ok, node_id} <- node_id(node), {:ok, pid} <- session(node_id) do
+      Session.cancel_placement(pid, run)
+    else
+      _ -> :ok
+    end
+  end
+
+  @doc """
   Leave a live run to the node as its owner goes away (the primary is stopping): the
   session stops treating the owner's death as a cancel. `:ok` when the session is gone.
   """

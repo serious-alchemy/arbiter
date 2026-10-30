@@ -25,12 +25,23 @@ defmodule Arbiter.NodeAgent.PodChannel.Upstream do
   sent, so the pod sees a connection error, not a short bundle that looks whole.
   """
   @spec stream_seed(Config.t(), String.t(), String.t(), Plug.Conn.t()) :: Plug.Conn.t()
-  def stream_seed(%Config{} = config, run, have, conn) do
+  def stream_seed(%Config{} = config, run, have, conn),
+    do: stream_download(config, run, "seed.bundle", [have: have], conn)
+
+  @doc """
+  Stream the session transcript a resumed `run` continues (`GET /nodes/runs/:run/session`,
+  bd-4ic681) into `conn`, the way `stream_seed/4` streams the bundle.
+  """
+  @spec stream_session(Config.t(), String.t(), Plug.Conn.t()) :: Plug.Conn.t()
+  def stream_session(%Config{} = config, run, conn),
+    do: stream_download(config, run, "session", [], conn)
+
+  defp stream_download(%Config{} = config, run, route, params, conn) do
     request =
       Req.new(
         [
-          url: Config.http_url(config, "/nodes/runs/#{run}/seed.bundle"),
-          params: [have: have],
+          url: Config.http_url(config, "/nodes/runs/#{run}/#{route}"),
+          params: params,
           headers: [{"authorization", "Bearer " <> config.credential}],
           decode_body: false,
           into: seed_sink(conn),

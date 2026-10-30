@@ -192,6 +192,7 @@ defmodule ArbiterWeb.Api.NodeController do
       public_url: url,
       exposure: Overview.exposure(url),
       registry: Publisher.status(),
+      placements: NodeJSON.placements(),
       allow_public_endpoint: Settings.nodes_allow_public_endpoint?()
     })
   end

@@ -4,7 +4,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
   Whitelists fields: a credential or token hash is never rendered.
   """
 
-  alias Arbiter.Nodes.{Credentials, JoinToken, Node, NodeEvent, PairingRequest}
+  alias Arbiter.Nodes.{Credentials, JoinToken, Node, NodeEvent, PairingRequest, PlacementWatch}
 
   def node(%Node{} = node) do
     %{
@@ -35,6 +35,32 @@ defmodule ArbiterWeb.Api.NodeJSON do
   """
   def node(%Node{} = node, %{} = row) do
     Map.merge(__MODULE__.node(node), overview(row))
+  end
+
+  @doc """
+  The remote placements the primary has in flight (bd-cch1jh): the budget, each attempt
+  (`task_id`, `node_name`, `stage`, `age_ms`) and the ones past it, which the placement
+  deadline should have ended (`arb doctor` warns on those).
+  """
+  def placements do
+    timeout = PlacementWatch.timeout_ms()
+    in_flight = PlacementWatch.in_flight()
+
+    %{
+      timeout_ms: if(is_integer(timeout), do: timeout),
+      in_flight: Enum.map(in_flight, &placement/1),
+      stuck: in_flight |> Enum.filter(&stuck?/1) |> Enum.map(&placement/1)
+    }
+  end
+
+  defp stuck?(%{age_ms: age, timeout_ms: ms}), do: is_integer(ms) and age >= ms
+
+  defp placement(entry) do
+    %{
+      entry
+      | stage: to_string(entry.stage),
+        timeout_ms: if(is_integer(entry.timeout_ms), do: entry.timeout_ms)
+    }
   end
 
   @doc "The `local` (primary) row, in the same shape as a node."

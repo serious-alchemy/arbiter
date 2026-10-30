@@ -15,7 +15,7 @@ defmodule Arbiter.NodeAgent.PodChannel.BootBundle do
   | `worktree/<path>` | the spec's worktree seed files (`.mcp.json` with the worker-tier bearer, `.claude/skills/…`) |
   | `config_dir/<name>` | the spec's config-dir files (`settings.json`, `CLAUDE.md`) |
   | `prompt/<n>` | the spec's prompt mounts, in order |
-  | `manifest.json` | the run id, checkout settings, bridge names and where each prompt goes. **No secret.** |
+  | `manifest.json` | the run id, checkout settings, bridge names, the session transcript to fetch (a resume) and where each prompt goes. **No secret.** |
   """
 
   alias Arbiter.NodeAgent.PodChannel.BootBundle.Tar
@@ -39,11 +39,24 @@ defmodule Arbiter.NodeAgent.PodChannel.BootBundle do
       "run" => spec.run,
       "checkout" => checkout(spec.checkout),
       "bridges" => Enum.map(spec.bridges, & &1.name),
+      "session" => session(spec.mounts),
       "prompts" =>
         prompts
         |> Enum.with_index()
         |> Enum.map(fn {m, i} -> %{"file" => "prompt/#{i}", "path" => m.path} end)
     }
+  end
+
+  # The transcript a `--resume` continues (bd-4ic681): the seed container fetches it
+  # through the controller (`GET /session`) and checks it against `bytes` and `sha256`.
+  defp session(mounts) do
+    case Enum.find(mounts, &(&1.kind == "config_dir")) do
+      %{session: %{path: path, bytes: bytes, sha256: sha}} ->
+        %{"path" => path, "bytes" => bytes, "sha256" => sha}
+
+      _ ->
+        nil
+    end
   end
 
   defp checkout(nil), do: nil

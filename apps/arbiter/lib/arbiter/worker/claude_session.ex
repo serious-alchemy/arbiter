@@ -97,6 +97,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   alias Arbiter.Agents.Qwen.RetryHold
   alias Arbiter.Guardrails.Events, as: GuardrailEvents
   alias Arbiter.Guardrails.Scan
+  alias Arbiter.Nodes.PlacementWatch
   alias Arbiter.Worker
   alias Arbiter.Worker.CliSet
   alias Arbiter.Worker.ContainerSpawn
@@ -477,38 +478,49 @@ defmodule Arbiter.Worker.ClaudeSession do
   # handle rides in `port_args.remote.prepared` for the first open; the request
   # stays so a later open (a nudge, an auto-resume) places the run again.
   defp prepare_remote_container(opts, policy, port_args, ctx, node) do
+    # bd-cch1jh: one attempt, one deadline, one logged outcome for everything the primary
+    # does to place this run (its own half and the node's answer).
+    attempt = PlacementWatch.begin(task_id: Keyword.get(ctx, :task_id), node: node)
+
+    result = prepare_remote_container(opts, policy, port_args, ctx, node, attempt)
+    PlacementWatch.finish(attempt, result)
+  end
+
+  defp prepare_remote_container(opts, policy, port_args, ctx, node, attempt) do
     provider = Keyword.get(opts, :provider) || "claude"
 
     with :ok <- remote_git_credential(Keyword.get(opts, :git_material)),
          :ok <- no_remote_research(Keyword.get(opts, :research_transcripts)),
          {:ok, _sandbox} <- Arbiter.Worker.Sandbox.module(policy, provider),
          {:ok, request} <-
-           ContainerSpawn.prepare_remote(
-             Keyword.take(
-               opts,
-               [
-                 :arb_token,
-                 :workspace,
-                 :repo,
-                 :base_branch,
-                 :image,
-                 :podman,
-                 :egress,
-                 :services,
-                 :git_material
-               ] ++ @cli_set_opts
-             ) ++
-               [
-                 provider: provider,
-                 policy: policy,
-                 node: node,
-                 worktree_path: port_args.cd,
-                 argv: port_args.argv,
-                 owner: Keyword.fetch!(ctx, :owner),
-                 task_id: Keyword.fetch!(ctx, :task_id),
-                 tmp_dir: Keyword.fetch!(ctx, :tmp_dir)
-               ]
-           ) do
+           PlacementWatch.step(attempt, :prepare, fn ->
+             ContainerSpawn.prepare_remote(
+               Keyword.take(
+                 opts,
+                 [
+                   :arb_token,
+                   :workspace,
+                   :repo,
+                   :base_branch,
+                   :image,
+                   :podman,
+                   :egress,
+                   :services,
+                   :git_material
+                 ] ++ @cli_set_opts
+               ) ++
+                 [
+                   provider: provider,
+                   policy: policy,
+                   node: node,
+                   worktree_path: port_args.cd,
+                   argv: port_args.argv,
+                   owner: Keyword.fetch!(ctx, :owner),
+                   task_id: Keyword.fetch!(ctx, :task_id),
+                   tmp_dir: Keyword.fetch!(ctx, :tmp_dir)
+                 ]
+             )
+           end) do
       adopt = Keyword.get(opts, :adopt)
 
       run_id =
@@ -518,11 +530,12 @@ defmodule Arbiter.Worker.ClaudeSession do
       port_args = Map.update!(port_args, :env, &ContainerSpawn.apply_env(&1, request))
       remote = %{node: node, request: request, run_id: run_id, prepared: nil}
       owner = Keyword.fetch!(ctx, :owner)
+      attempt = PlacementWatch.put_run(attempt, run_id)
 
       case adopt do
         nil ->
           with {:ok, spawn_args} <- first_open_args(owner, port_args),
-               {:ok, handle} <- place_remote(remote, spawn_args, owner) do
+               {:ok, handle} <- place_remote(remote, spawn_args, owner, attempt) do
             {:ok, Map.put(port_args, :remote, %{remote | prepared: handle})}
           end
 
@@ -597,18 +610,40 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   defp owner_run_id(_owner), do: nil
 
-  defp place_remote(remote, port_args, owner) do
-    with {:ok, spec} <- ContainerSpawn.remote_spec(remote.request, port_args, remote.run_id),
-         {:ok, prepared} <-
-           Arbiter.Worker.Executor.Node.prepare(remote.node, spec,
-             owner: owner,
-             checkout: ContainerSpawn.checkout_context(remote.request, spec)
-           ),
-         {:ok, handle} <- Arbiter.Worker.Executor.Node.open(prepared) do
-      {:ok, handle}
-    else
-      {:error, reason} -> {:error, {:remote_placement_failed, reason}}
+  # `attempt` is the start's (`prepare_remote_container/6` finishes it); a re-open has none,
+  # so it is its own attempt, logged and bounded the same way. A placement the primary gives
+  # up on is cancelled on the node, so what the node may yet create for it is dropped too.
+  defp place_remote(remote, port_args, owner, attempt \\ nil) do
+    own? = is_nil(attempt)
+
+    attempt =
+      attempt ||
+        PlacementWatch.begin(
+          task_id: remote.request.task_id,
+          node: remote.node,
+          run: remote.run_id
+        )
+
+    result =
+      PlacementWatch.step(attempt, :assign, fn ->
+        with {:ok, spec} <- ContainerSpawn.remote_spec(remote.request, port_args, remote.run_id),
+             {:ok, prepared} <-
+               Arbiter.Worker.Executor.Node.prepare(remote.node, spec,
+                 owner: owner,
+                 checkout: ContainerSpawn.checkout_context(remote.request, spec)
+               ),
+             {:ok, handle} <- Arbiter.Worker.Executor.Node.open(prepared) do
+          {:ok, handle}
+        else
+          {:error, reason} -> {:error, {:remote_placement_failed, reason}}
+        end
+      end)
+
+    with {:error, {:remote_placement_failed, {:placement_timeout, _stage, _ms}}} <- result do
+      Arbiter.Worker.Executor.Node.cancel_placement(remote.node, remote.run_id)
     end
+
+    if own?, do: PlacementWatch.finish(attempt, result), else: result
   end
 
   # The handle of a spawn that was placed (or adopted) for its first open is consumed by

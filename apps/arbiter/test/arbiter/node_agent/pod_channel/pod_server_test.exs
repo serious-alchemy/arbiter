@@ -61,6 +61,11 @@ defmodule Arbiter.NodeAgent.PodChannel.PodServerTest do
       conn
     end
 
+    defp route(%{method: "GET", path_info: ["nodes", "runs", run, "session"]} = conn, test) do
+      send(test, {:primary, :session, run})
+      send_resp(conn, 200, "transcript-of:" <> run)
+    end
+
     defp route(%{method: "PUT", path_info: ["nodes", "runs", "gone-run", _]} = conn, _test) do
       {:ok, _body, conn} = read_all(conn, "")
       send_resp(conn, 404, ~s({"error":"not_found"}))
@@ -276,6 +281,26 @@ defmodule Arbiter.NodeAgent.PodChannel.PodServerTest do
       assert request(ctx, :get, "/seed.bundle?run=run-2", files, "control").status == 200
       assert_receive {:primary, :seed, "run-1", _}
       refute_received {:primary, :seed, "run-2", _}
+    end
+  end
+
+  describe "GET /session" do
+    test "streams the transcript a resumed run continues, for the certificate's run", ctx do
+      %{files: files} = boot(ctx)
+
+      resp = request(ctx, :get, "/session", files, "control")
+
+      assert resp.status == 200
+      assert resp.body == "transcript-of:run-1"
+      assert_receive {:primary, :session, "run-1"}
+    end
+
+    test "needs the control leaf", ctx do
+      %{files: files} = boot(ctx)
+
+      assert request(ctx, :get, "/session", nil, nil).status == 401
+      assert request(ctx, :get, "/session", files, "proxy").status == 403
+      refute_received {:primary, :session, _}
     end
   end
 

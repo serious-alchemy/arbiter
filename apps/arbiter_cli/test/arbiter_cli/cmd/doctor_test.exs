@@ -3194,6 +3194,44 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert hint =~ "arb node set local"
     end
 
+    test "a placement still in flight past the placement timeout is a warn naming the run" do
+      stub_nodes(
+        nodes_resp(%{
+          "placements" => %{
+            "timeout_ms" => 1_800_000,
+            "in_flight" => [],
+            "stuck" => [
+              %{
+                "task_id" => "bd-7jluyk",
+                "node_name" => "mesaana",
+                "stage" => "assign",
+                "age_ms" => 7_200_000,
+                "timeout_ms" => 1_800_000
+              }
+            ]
+          }
+        })
+      )
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(nodes_results(), "placement stuck: bd-7jluyk")
+
+      assert detail =~ "placing on mesaana for 2h0m"
+      assert detail =~ "stage assign"
+      assert detail =~ "timeout 30m"
+      assert hint =~ "arb worker stop bd-7jluyk"
+    end
+
+    test "placements within their budget add no line" do
+      stub_nodes(
+        nodes_resp(%{
+          "placements" => %{"timeout_ms" => 1_800_000, "in_flight" => [%{}], "stuck" => []}
+        })
+      )
+
+      refute Enum.any?(nodes_results(), &String.starts_with?(&1.name, "placement stuck"))
+    end
+
     test "no advisory, no line" do
       stub_nodes(nodes_resp(%{"local_cap_advisory" => nil}))
       assert named(nodes_results(), "conductor_system_max_concurrent removed") == nil

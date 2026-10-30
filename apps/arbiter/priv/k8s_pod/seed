@@ -125,6 +125,26 @@ if [ -n "$base" ]; then
   git check-ref-format --branch "$base" >/dev/null || die "bad checkout base"
 fi
 
+# The transcript a `--resume` continues (bd-4ic681), when the run is a resume.
+session=$(sed -n 's/.*"session":{\([^}]*\)}.*/\1/p' "$manifest" | head -n 1)
+session_field() { printf '%s' "$session" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | head -n 1; }
+session_path=
+session_sha=
+if [ -n "$session" ]; then
+  session_path=$(session_field path)
+  session_sha=$(session_field sha256)
+  case $session_path in
+    projects/*/*.jsonl) ;;
+    *) die "the manifest names a bad session path" ;;
+  esac
+  case $session_path in
+    *..*|*[!A-Za-z0-9_./-]*) die "the manifest names a bad session path" ;;
+  esac
+  case $session_sha in
+    *[!0-9a-f]*|"") die "the manifest names a bad session digest" ;;
+  esac
+fi
+
 # Everything above is a secret and stays 0600/0700. The tree is not: files are
 # created as git would on a host (0644/0755), as PrivateClone's are.
 umask 022
@@ -247,6 +267,30 @@ if [ -d "$stage/worktree" ]; then
 fi
 if [ -d "$stage/config_dir" ]; then
   cp -R "$stage/config_dir/." "$root/claude-config/"
+fi
+
+# -- 7. the session transcript -------------------------------------------------
+# Streamed through the controller from the primary, checked against the digest the
+# spec named, and written only under the config dir the pod owns.
+if [ -n "$session_path" ]; then
+  dest=$root/claude-config/$session_path
+  mkdir -p "$(dirname "$dest")"
+  if [ ! -e "$dest" ]; then
+    code=$(curl -sS --cacert "$ca_file" \
+      --cert "$run_dir/tls/control.crt" --key "$run_dir/tls/control.key" \
+      --max-time "${ARB_SEED_TIMEOUT_S:-1200}" -o "$dest" -w '%{http_code}' \
+      "$channel/session") || code=000
+    if [ "$code" != 200 ]; then
+      detail=$(head -c 300 "$dest" 2>/dev/null || true)
+      rm -f "$dest"
+      die "the session transcript was not served (status $code) $detail" 75
+    fi
+    got=$(sha256sum "$dest" | cut -d' ' -f1)
+    if [ "$got" != "$session_sha" ]; then
+      rm -f "$dest"
+      die "the session transcript does not match its digest"
+    fi
+  fi
 fi
 rm -rf "$stage"
 
