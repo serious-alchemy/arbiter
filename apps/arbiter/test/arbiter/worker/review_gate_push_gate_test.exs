@@ -44,6 +44,7 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
   @push_check Path.expand("../../fixtures/review_push_check.sh", __DIR__)
   @commit_then_approve Path.expand("../../fixtures/review_commit_then_approve.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
+  @revise_conflict Path.expand("../../fixtures/revise_commit_then_target_conflict.sh", __DIR__)
   @revise_rewrite Path.expand("../../fixtures/revise_rewrite.sh", __DIR__)
 
   setup do
@@ -467,6 +468,61 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
 
       assert sha(repo, "origin/" <> branch) == fix_head,
              "round 2 approved a head the remote does not carry"
+    end
+  end
+
+  # bd-4ynfr7: a head that conflicts with the target is never sent to a reviewer
+  # to discover; a clean, pushed head proceeds with no extra commit.
+  describe "the fix round's re-review vs the target (bd-4ynfr7)" do
+    test "a head that now conflicts with the target escalates for a conflict pass, not a review",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-conflict"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [@revise_conflict, "main"],
+        rounds: 2
+      )
+
+      wait_until(
+        fn ->
+          Arbiter.ReviewGate.Round
+          |> Ash.Query.filter(task_id == ^task.id)
+          |> Ash.read!()
+          |> Enum.any?(&Arbiter.Worker.ConflictAbortFindings.escalation?(&1.findings))
+        end,
+        60_000
+      )
+
+      # Round 2 never reached a reviewer: no approve, so no reviewed-SHA stamp.
+      assert Ash.get!(Issue, task.id).last_reviewed_sha == nil
+    end
+
+    test "a clean, pushed head goes to round 2 with no extra commit",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-clean"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [@revise_commit],
+        rounds: 2
+      )
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha != nil end, 60_000)
+      {log, 0} = git(["log", "--format=%s", "main..HEAD"], wt)
+      refute log =~ "Merge"
     end
   end
 

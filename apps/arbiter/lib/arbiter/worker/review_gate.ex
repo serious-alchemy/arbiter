@@ -4700,9 +4700,36 @@ defmodule Arbiter.Worker.ReviewGate do
         {:done, escalate_pre_review_park(next, reason)}
 
       {:ok, next} ->
-        next |> ci_gate({:next, review_id}) |> ci_next_reply(review_id)
+        # bd-4ynfr7: round 1 checks the head against the target in
+        # `prepare_branch_for_review/1`; this door must too, or the reviewer
+        # finds the conflict a fix round (or a target that moved) produced.
+        case target_conflict(next) do
+          {:conflict, files} ->
+            text = conflict_escalation(next, %{files: files})
+            record_round(next, :review, :request_changes, text, converged: false)
+            {:done, finish(next, {:request_changes, text})}
+
+          :none ->
+            next |> ci_gate({:next, review_id}) |> ci_next_reply(review_id)
+        end
     end
   end
+
+  # Check-only (`git merge-tree`; nothing is merged, committed or pushed): does the
+  # head under review conflict with the freshly fetched target? Anything git cannot
+  # answer fails open, as `prepare_branch_for_review/1` does.
+  defp target_conflict(%{worktree_path: wt, branch: branch, target_branch: target})
+       when is_binary(wt) and is_binary(target) do
+    with {:ok, ^branch} <- Worktree.current_branch(wt),
+         :ok <- Worktree.fetch_origin(wt, target),
+         {:conflict, files} <- Worktree.merge_conflict(wt, "origin/" <> target, "HEAD") do
+      {:conflict, files}
+    else
+      _ -> :none
+    end
+  end
+
+  defp target_conflict(_state), do: :none
 
   defp launch_next_reviewer(next, review_id) do
     case provision_review_checkout(next) do
