@@ -39,6 +39,11 @@ defmodule Arbiter.Worker.ReviewGatePatrolCollisionTest do
   @stub_name Arbiter.Mergers.Github.HTTP
 
   setup do
+    # The gate's pre-review PR open runs in a spawned process; share the
+    # Req.Test stubs so it finds @stub_name instead of logging a "cannot find
+    # mock/stub" error.
+    Req.Test.set_req_test_to_shared(%{async: false})
+
     CircuitBreaker.reset_all()
     on_exit(&CircuitBreaker.reset_all/0)
 
