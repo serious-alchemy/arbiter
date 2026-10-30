@@ -325,7 +325,8 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       _b = watch("b", ws)
 
       wait_until(fn -> syncs("b") == 1 end)
-      after_polls(a, 3)
+      # a was the head (it synced); its parked sync released the place for b.
+      wait_until(fn -> role(a) == nil end)
       assert syncs("a") == 1
     end
 
@@ -561,8 +562,8 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       b = watch("b", ws)
 
       # Queued far longer than the bound: the head keeps its place.
+      wait_until(fn -> role(b) == {:wait, "a"} end)
       after_polls(a, 25)
-      after_polls(b, 3)
       assert role(a) == :head
       assert role(b) == {:wait, "a"}
       assert syncs("b") == 0
@@ -682,8 +683,13 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       :sys.replace_state(MergeTrain, fn state -> %{state | settle: :forming, trains: %{}} end)
     end
 
+    # Suspend first: `:sys.suspend/1` returns only between messages, so the
+    # brutal kill never lands while the Watchdog holds the shared sandbox
+    # connection mid-query (that drops the connection and fails the next
+    # checkout of whichever test is running).
     defp kill(pid) do
       ref = Process.monitor(pid)
+      :ok = :sys.suspend(pid)
       Process.exit(pid, :kill)
       assert_receive {:DOWN, ^ref, :process, ^pid, _}
     end
@@ -817,7 +823,7 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       forget_train()
 
       a2 = restart(a, ws)
-      after_polls(a2, 3)
+      wait_until(fn -> :sys.get_state(a2).poll_count >= 2 end)
       refute role(a2) == :head
 
       b2 = restart(b, ws)
