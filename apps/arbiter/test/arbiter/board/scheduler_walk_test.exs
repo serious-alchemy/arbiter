@@ -19,7 +19,8 @@ defmodule Arbiter.Board.SchedulerWalkTest do
       id: id,
       scope: MapSet.new(Keyword.get(opts, :files, [])),
       blocked_by: Keyword.get(opts, :blocked_by, []),
-      conflicts_with: Keyword.get(opts, :conflicts_with, [])
+      conflicts_with: Keyword.get(opts, :conflicts_with, []),
+      repo: Keyword.get(opts, :repo)
     }
   end
 
@@ -441,20 +442,31 @@ defmodule Arbiter.Board.SchedulerWalkTest do
       assert Enum.map(plan.placements, & &1.id) == ["bd-1", "bd-3"]
     end
 
-    test "a card overlapping the files of a card placed this pass is held" do
+    test "a card whose text names the same file as a card placed this pass is not held" do
+      plan = walk(ready: [card("bd-1", files: ["lib/a.ex"]), card("bd-2", files: ["lib/a.ex"])])
+
+      assert Enum.map(plan.placements, & &1.id) == ["bd-1", "bd-2"]
+    end
+
+    test "a card is held by a running worker's changed file in the same repo, naming the diff" do
       plan =
         walk(
-          ready: [
-            card("bd-1", files: ["lib/a.ex"]),
-            card("bd-2", files: ["lib/a.ex"]),
-            card("bd-3", files: ["lib/b.ex"])
-          ]
+          running: [%{task_id: "bd-9", scope: MapSet.new(["lib/a.ex"]), repo: "r"}],
+          ready: [card("bd-2", files: ["lib/a.ex"], repo: "r")]
         )
 
-      assert %{wait_cause: :own_hold, hold: {:file_overlap, ["lib/a.ex"], "bd-1"}} =
+      assert %{wait_cause: :own_hold, hold: {:file_overlap, ["lib/a.ex"], "bd-9", :diff}} =
                entry(plan, "bd-2")
+    end
 
-      assert Enum.map(plan.placements, & &1.id) == ["bd-1", "bd-3"]
+    test "a running worker in another repo does not hold the card" do
+      plan =
+        walk(
+          running: [%{task_id: "bd-9", scope: MapSet.new(["lib/a.ex"]), repo: "other"}],
+          ready: [card("bd-2", files: ["lib/a.ex"], repo: "r")]
+        )
+
+      assert Enum.map(plan.placements, & &1.id) == ["bd-2"]
     end
 
     test "the 15 s retry window is an own hold" do
