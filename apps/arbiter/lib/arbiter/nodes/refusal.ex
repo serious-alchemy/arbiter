@@ -40,7 +40,7 @@ defmodule Arbiter.Nodes.Refusal do
   alias Arbiter.Worker
   alias Arbiter.Worker.StopReason
 
-  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready unacknowledged placement_lost)
+  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready unacknowledged placement_lost placement_timeout)
 
   @type refusal :: %{reason: String.t(), detail: String.t() | nil}
 
@@ -57,6 +57,13 @@ defmodule Arbiter.Nodes.Refusal do
   def from_start_error({:claude_start_failed, {:remote_placement_failed, {:refused, r, d}}})
       when r in @reasons,
       do: {:ok, %{reason: r, detail: detail(d)}}
+
+  # bd-3jjt3p: the primary's own placement deadline (`Arbiter.Nodes.PlacementWatch`) is a
+  # refusal-shaped hold too, so a pass or a `remote_only` run is held rather than failed.
+  def from_start_error(
+        {:claude_start_failed, {:remote_placement_failed, {:placement_timeout, stage, ms}}}
+      ),
+      do: {:ok, %{reason: "placement_timeout", detail: "#{stage} step exceeded #{ms}ms"}}
 
   def from_start_error(_), do: :error
 
@@ -93,6 +100,9 @@ defmodule Arbiter.Nodes.Refusal do
     do: "its controller never acknowledged the assignment, so no pod was created"
 
   defp phrase("placement_lost"), do: "its controller restarted and lost the assignment"
+
+  defp phrase("placement_timeout"),
+    do: "the primary's placement deadline passed before the run was placed"
 
   defp detail_suffix(%{detail: d}) when is_binary(d) and d != "", do: ": " <> d
   defp detail_suffix(_), do: ""

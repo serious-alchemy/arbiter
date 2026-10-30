@@ -117,7 +117,13 @@ defmodule Arbiter.Worker.ReviewFindings do
   # a whole family of committed files, not a single path — `touched?/2` below
   # expands the `*` into a glob match instead of requiring a literal file that
   # can never exist).
-  @path ~r/((?:[\w.\-]+\/)*(?<![\w.])\.?[\w\-*]+\.[a-zA-Z]{1,6})(?::\d+(?:-\d+)?)?/
+  #
+  # bd-brkdi3: the filename may carry several dots (`secret.template.yaml`) and
+  # the extension must END at a non-word character. Without the `(?!\w)` the
+  # 1..6 letter extension matched a prefix of a longer one, so
+  # `secret.template.yaml` was captured as `secret.templat` — a path no `git
+  # diff --name-only` entry equals — and the guard refused a true ADDRESSED.
+  @path ~r/((?:[\w.\-]+\/)*(?<![\w.])\.?[\w\-*]+(?:\.[\w\-*]+)*\.[a-zA-Z]{1,6}(?![\w]))(?::\d+(?:-\d+)?)?/
   @path_stoplist ~w(e.g i.e etc vs no.of)
 
   # A finding id as it appears in a DISPOSITIONS line.

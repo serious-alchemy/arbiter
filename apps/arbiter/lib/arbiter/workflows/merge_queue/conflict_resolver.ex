@@ -61,6 +61,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Messages.Message
   alias Arbiter.Nodes.Placement
+  alias Arbiter.Nodes.PlacementWatch
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
@@ -701,55 +702,64 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
         {:ok, nil}
 
       true ->
-        # bd-7e8ezw: same gap FixPassDispatcher had — this spawn never wrote
-        # its own `.mcp.json`, so the resolver ran with no Arbiter MCP config
-        # or the original run's expired one.
-        mcp_opts =
-          Dispatch.inject_mcp_config(context.task, worktree_path,
-            repo: context.repo,
-            agent_type: provider
-          )
+        # bd-3jjt3p: everything up to the spawn runs under the placement deadline of a
+        # run on a node (`PlacementWatch.watch/4`), which starts where the node was chosen.
+        build = fn ->
+          # bd-7e8ezw: same gap FixPassDispatcher had — this spawn never wrote
+          # its own `.mcp.json`, so the resolver ran with no Arbiter MCP config
+          # or the original run's expired one.
+          mcp_opts =
+            Dispatch.inject_mcp_config(context.task, worktree_path,
+              repo: context.repo,
+              agent_type: provider
+            )
 
-        # bd-asawcq: the worker token doubles as the agent's ARB_TOKEN.
-        #
-        # bd-7ays3v: under podman, a Claude pass runs in the container, in the
-        # private clone `create_worktree/1` gave it, under the policy the task
-        # worker resolves; any other pass is spawned exactly as before.
-        #
-        # bd-9cygoo (G16): a pass that force-pushes itself needs a repo-scoped git
-        # credential; a containerized pass is pushed for by the host (bd-19skda).
-        case GitCredential.plan(context.workspace, context.repo,
-               role: :implementer,
-               guarded?: Arbiter.Guardrails.guarded?(),
-               host_pushes?: host_git?(context, provider)
-             ) do
-          {:ok, git_credential} ->
-            session_opts =
-              ([
-                 owner: worker_pid,
-                 worktree_path: worktree_path,
-                 git_credential: git_credential
-               ] ++
-                 Keyword.take(mcp_opts, [:arb_token]) ++
-                 container_opts(context, provider) ++ node_opts(node, context))
-              |> add_command_or_prompt(
-                Map.put(context, :host_git, host_git?(context, provider)),
-                args,
-                worktree_path,
-                provider,
-                mcp_opts
-              )
+          # bd-asawcq: the worker token doubles as the agent's ARB_TOKEN.
+          #
+          # bd-7ays3v: under podman, a Claude pass runs in the container, in the
+          # private clone `create_worktree/1` gave it, under the policy the task
+          # worker resolves; any other pass is spawned exactly as before.
+          #
+          # bd-9cygoo (G16): a pass that force-pushes itself needs a repo-scoped git
+          # credential; a containerized pass is pushed for by the host (bd-19skda).
+          case GitCredential.plan(context.workspace, context.repo,
+                 role: :implementer,
+                 guarded?: Arbiter.Guardrails.guarded?(),
+                 host_pushes?: host_git?(context, provider)
+               ) do
+            {:ok, git_credential} ->
+              session_opts =
+                ([
+                   owner: worker_pid,
+                   worktree_path: worktree_path,
+                   git_credential: git_credential
+                 ] ++
+                   Keyword.take(mcp_opts, [:arb_token]) ++
+                   container_opts(context, provider) ++ node_opts(node, context))
+                |> add_command_or_prompt(
+                  Map.put(context, :host_git, host_git?(context, provider)),
+                  args,
+                  worktree_path,
+                  provider,
+                  mcp_opts
+                )
 
-            case ClaudeSession.start(session_opts) do
-              {:ok, port} ->
-                _ = Worker.advance(worker_pid, :resolve_conflict)
-                {:ok, port}
+              {:ok, session_opts}
 
-              {:error, reason} ->
-                {:error, {:claude_start_failed, reason}}
-            end
+            {:error, _reason} = error ->
+              error
+          end
+        end
+
+        case PlacementWatch.watch(node, context.task.id, build, &ClaudeSession.start/1) do
+          {:ok, port} ->
+            _ = Worker.advance(worker_pid, :resolve_conflict)
+            {:ok, port}
 
           {:error, reason} ->
+            {:error, {:claude_start_failed, reason}}
+
+          {:build_error, reason} ->
             {:error, {:claude_start_failed, reason}}
         end
     end

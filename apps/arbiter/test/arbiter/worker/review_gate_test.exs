@@ -5407,6 +5407,40 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert %MapSet{} = state.revise_touched_files
       assert MapSet.member?(state.revise_touched_files, "guard.txt")
     end
+
+    test "the range is the commits since the round's reviewed head, not earlier ones (bd-brkdi3)",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws, %{description: "the directive"})
+      branch = "feature/touch-range"
+      {_, 0} = git(["checkout", "-q", "-b", branch], repo)
+
+      File.mkdir_p!(Path.join(repo, "k8s/gitlab-runner"))
+      File.write!(Path.join(repo, "before.txt"), "pre-review work\n")
+      {_, 0} = git(["add", "before.txt"], repo)
+      {_, 0} = git(["commit", "-q", "-m", "pre-review"], repo)
+      reviewed = String.trim(elem(git(["rev-parse", "HEAD"], repo), 0))
+
+      long = "k8s/gitlab-runner/secret.template.yaml"
+      File.write!(Path.join(repo, long), "token: x\n")
+      {_, 0} = git(["add", long], repo)
+      {_, 0} = git(["commit", "-q", "-m", "revision"], repo)
+      new_sha = String.trim(elem(git(["rev-parse", "--short", "HEAD"], repo), 0))
+
+      state = %{
+        task_id: task.id,
+        branch: branch,
+        target_branch: "main",
+        worktree_path: repo,
+        round: 1,
+        head_sha: reviewed,
+        thread: [],
+        revise_touched_files: nil
+      }
+
+      {state, ^new_sha} = ReviewGate.note_head_change(state)
+
+      assert MapSet.equal?(state.revise_touched_files, MapSet.new([long]))
+    end
   end
 
   # ---- Pre-spawn commit gate and HEAD-SHA anchoring (bd-1mksks) ------------

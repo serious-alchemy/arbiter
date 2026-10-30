@@ -327,4 +327,83 @@ defmodule Arbiter.Board.AutopilotEnforceTest do
       assert {:resumed, "bd-parked"} = Autopilot.tick(pid)
     end
   end
+
+  describe "a deferred resume its pool cannot admit (bd-7twuru)" do
+    @blocked_pool {"acct-codex", "codex"}
+
+    defp placement(id, pool), do: %{id: id, pool: pool, node: "local"}
+
+    test "does not hold Ready cards of other pools" do
+      placements = [placement("bd-ready", @pool)]
+
+      pid =
+        start(:enforce, fn -> board(nil, [entry("bd-ready", :next)], placements) end,
+          slot_room: fn _task_id, _kind -> false end,
+          resume_account: fn "bd-parked" -> "acct-codex" end
+        )
+
+      :ok = Autopilot.defer_resume(pid, "bd-parked", :resume, [])
+      assert {:ok, "bd-ready"} = Autopilot.tick(pid)
+      assert_received {:dispatched, "bd-ready", _}
+      refute_received {:resumed, _, _, _}
+      assert Autopilot.status(pid).deferred_resumes == ["bd-parked"]
+    end
+
+    test "still goes before Ready cards of its own pool" do
+      placements = [placement("bd-same", @blocked_pool)]
+
+      pid =
+        start(:enforce, fn -> board(nil, [entry("bd-same", :next)], placements) end,
+          slot_room: fn _task_id, _kind -> false end,
+          resume_account: fn "bd-parked" -> "acct-codex" end
+        )
+
+      :ok = Autopilot.defer_resume(pid, "bd-parked", :resume, [])
+      assert :idle = Autopilot.tick(pid)
+      refute_received {:dispatched, _, _}
+    end
+
+    test "is parked with an attention item after N stalled ticks, once" do
+      test = self()
+
+      pid =
+        start(:enforce, fn -> board(nil, [], []) end,
+          slot_room: fn _task_id, _kind -> false end,
+          resume_account: fn _ -> "acct-codex" end,
+          park_after: 3,
+          escalate: fn id, reason, prio ->
+            send(test, {:escalated, id, reason, prio})
+            :ok
+          end
+        )
+
+      :ok = Autopilot.defer_resume(pid, "bd-parked", :resume, [])
+      for _ <- 1..5, do: Autopilot.tick(pid)
+
+      assert_received {:escalated, "bd-parked", {:deferred_resume_parked, "acct-codex", 3}, _}
+      refute_received {:escalated, _, _, _}
+    end
+
+    test "status lists deferred resumes with their age, and a hold is logged" do
+      import ExUnit.CaptureLog
+      placements = [placement("bd-same", @blocked_pool)]
+
+      pid =
+        start(:enforce, fn -> board(nil, [entry("bd-same", :next)], placements) end,
+          slot_room: fn _task_id, _kind -> false end,
+          resume_account: fn _ -> "acct-codex" end
+        )
+
+      :ok = Autopilot.defer_resume(pid, "bd-parked", :resume, [])
+
+      log = capture_log(fn -> Autopilot.tick(pid) end)
+      assert log =~ "holding Ready behind deferred resume bd-parked"
+      assert log =~ "acct-codex"
+
+      assert [%{task_id: "bd-parked", age_ms: age, wait: :slot}] =
+               Autopilot.status(pid).deferred_resume_details
+
+      assert is_integer(age) and age >= 0
+    end
+  end
 end
