@@ -242,6 +242,7 @@ defmodule ArbiterCli.Cmd.Create do
   }
 
   @switches [
+    lint: :boolean,
     description: :string,
     notes: :string,
     qa_notes: :string,
@@ -467,6 +468,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put("notes", opts[:notes])
       |> maybe_put("qa_notes", opts[:qa_notes])
       |> maybe_put("deployment_notes", opts[:deployment_notes])
+      |> maybe_put_flag("no_lint", opts[:lint] == false)
       |> maybe_put("priority", opts[:priority])
       |> maybe_put("difficulty", opts[:difficulty])
       |> maybe_put("issue_type", opts[:type])

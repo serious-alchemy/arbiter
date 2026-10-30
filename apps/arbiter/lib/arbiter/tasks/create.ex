@@ -57,6 +57,7 @@ defmodule Arbiter.Tasks.Create do
   """
 
   alias Arbiter.Repo
+  alias Arbiter.Tasks.AcceptanceLint
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
@@ -105,7 +106,11 @@ defmodule Arbiter.Tasks.Create do
 
   @doc "The non-blocking filing warnings for a created ticket (missing acceptance)."
   @spec warnings(Issue.t()) :: [String.t()]
-  def warnings(%Issue{} = issue), do: ac_warnings(issue)
+  def warnings(%Issue{} = issue, opts \\ []),
+    do: ac_warnings(issue) ++ lint_warnings(issue, Keyword.get(opts, :lint, true) != false)
+
+  defp lint_warnings(_issue, false), do: []
+  defp lint_warnings(%Issue{acceptance: acceptance}, true), do: AcceptanceLint.lint(acceptance)
 
   @doc "One operator-facing line for a `{:partial, _, failures}` result."
   @spec failure_message([failure()]) :: String.t()
@@ -174,6 +179,7 @@ defmodule Arbiter.Tasks.Create do
 
   defp create(attrs, parent_id, deps, blocks, opts) do
     skip_upstream? = truthy?(fetch(attrs, :skip_upstream_create))
+    lint? = Keyword.get(opts, :lint, true) != false
 
     create_attrs =
       attrs
@@ -192,19 +198,19 @@ defmodule Arbiter.Tasks.Create do
       end)
 
     case tx do
-      {:ok, %Issue{} = issue} -> finish(issue, skip_upstream?)
+      {:ok, %Issue{} = issue} -> finish(issue, skip_upstream?, lint?)
       {:error, reason} -> {:error, normalize_error(reason)}
     end
   end
 
-  defp finish(issue, skip_upstream?) do
+  defp finish(issue, skip_upstream?, lint?) do
     {issue, upstream} = if skip_upstream?, do: {issue, nil}, else: CreateUpstream.mirror(issue)
 
     # The `:created` broadcast fired inside the transaction, before the commit.
     Issue.broadcast_lifecycle(:updated, issue)
 
     case upstream_failures(upstream) do
-      [] -> {:ok, issue, ac_warnings(issue)}
+      [] -> {:ok, issue, ac_warnings(issue) ++ lint_warnings(issue, lint?)}
       failures -> {:partial, issue, failures}
     end
   end
