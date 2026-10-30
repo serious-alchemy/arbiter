@@ -682,8 +682,13 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       :sys.replace_state(MergeTrain, fn state -> %{state | settle: :forming, trains: %{}} end)
     end
 
+    # Suspend first: `:sys.suspend/1` returns only between messages, so the
+    # brutal kill never lands while the Watchdog holds the shared sandbox
+    # connection mid-query (that drops the connection and fails the next
+    # checkout of whichever test is running).
     defp kill(pid) do
       ref = Process.monitor(pid)
+      :ok = :sys.suspend(pid)
       Process.exit(pid, :kill)
       assert_receive {:DOWN, ^ref, :process, ^pid, _}
     end
