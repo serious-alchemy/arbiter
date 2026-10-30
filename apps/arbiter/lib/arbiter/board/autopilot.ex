@@ -668,6 +668,11 @@ defmodule Arbiter.Board.Autopilot do
       # DC8: under `enforce`, whether a resume deferred for a slot has a seat on
       # its own pool now: `(task_id, kind) -> boolean`.
       slot_room: Keyword.get(opts, :slot_room, &default_slot_room?/2),
+      # bd-7twuru: the account a deferred resume's pool belongs to, and how many
+      # unadmitted ticks park it with an attention item.
+      resume_account: Keyword.get(opts, :resume_account, &default_resume_account/1),
+      park_after: Keyword.get(opts, :park_after, 12),
+      resume_hold_log: nil,
       priority: Keyword.get(opts, :priority, &default_priority/1),
       escalate: Keyword.get(opts, :escalate, &default_escalate/3),
       now: Keyword.get(opts, :now, &DateTime.utc_now/0),
@@ -744,6 +749,7 @@ defmodule Arbiter.Board.Autopilot do
        dispatching: dispatching_id(state),
        holds: state.holds,
        deferred_resumes: Enum.map(state.deferred_resumes, & &1.task_id),
+       deferred_resume_details: Enum.map(state.deferred_resumes, &resume_detail(state, &1)),
        held_local_capacity: local_held_ids(state),
        deferred_fix_passes: for(%{kind: :fix_pass, task_id: id} <- state.deferred_resumes, do: id)
      }, state}
@@ -752,7 +758,7 @@ defmodule Arbiter.Board.Autopilot do
   def handle_call({:defer_resume, task_id, kind, opts}, _from, state) do
     {held_for, opts} = Keyword.pop(opts, :held_for)
     wait = if held_for == :local_capacity, do: :local_capacity, else: :slot
-    entry = %{task_id: task_id, kind: kind, opts: opts, wait: wait}
+    entry = %{task_id: task_id, kind: kind, opts: opts, wait: wait, since: state.now.()}
 
     deferred =
       if Enum.any?(state.deferred_resumes, &(&1.task_id == task_id)),
@@ -928,6 +934,19 @@ defmodule Arbiter.Board.Autopilot do
   # runs on the next real trigger or the fallback tick anyway. Busy: don't
   # start a timer, just make sure the in-flight dispatch's completion runs
   # one more pass once it reports back.
+  defp resume_detail(state, entry) do
+    since = Map.get(entry, :since)
+
+    %{
+      task_id: entry.task_id,
+      kind: entry.kind,
+      wait: entry.wait,
+      age_ms: if(since, do: max(DateTime.diff(state.now.(), since, :millisecond), 0), else: 0),
+      stalled_ticks: Map.get(entry, :stalled, 0),
+      parked?: Map.get(entry, :parked?, false)
+    }
+  end
+
   defp request_plan(%{paused?: true, deferred_resumes: []} = state), do: state
 
   defp request_plan(%{dispatching: dispatching} = state) when not is_nil(dispatching),
@@ -1044,7 +1063,10 @@ defmodule Arbiter.Board.Autopilot do
 
     cond do
       state.deferred_resumes != [] ->
-        resume_or_wait(state, read_status, snapshot, mode)
+        case resume_or_wait(state, read_status, snapshot, mode) do
+          {:idle, state} when read_status == :ok -> past_stalled_resumes(state, snapshot, mode)
+          other -> other
+        end
 
       state.paused? ->
         {:paused, state}
@@ -1054,6 +1076,129 @@ defmodule Arbiter.Board.Autopilot do
           {id, extra} -> promote_or_hold(%{state | holds: []}, id, extra)
           nil -> {:idle, note_holds(state, snapshot, read_status, mode)}
         end
+    end
+  end
+
+  # bd-7twuru: no deferred resume could start this pass. A resume parked on a
+  # pool with no seat (an exhausted provider) must not hold Ready cards that
+  # place on OTHER accounts, so under `enforce` the walk's first placement off
+  # every waiting resume's account goes. "Resumes first" still holds within an
+  # account: its cards wait. A local-capacity waiter, an unknown account, or a
+  # walk that does not decide keeps the old hold-everything behaviour.
+  defp past_stalled_resumes(state, snapshot, mode) do
+    slot_waiters = Enum.filter(state.deferred_resumes, &(&1.wait == :slot))
+    state = track_stalls(state, slot_waiters)
+
+    blocked =
+      slot_waiters |> Enum.map(&resume_account(state, &1.task_id)) |> Enum.uniq()
+
+    passable? =
+      not state.paused? and length(slot_waiters) == length(state.deferred_resumes) and
+        nil not in blocked and walk_decides?(state, snapshot, mode)
+
+    placements = if passable?, do: snapshot.walk.placements, else: []
+    {held, open} = Enum.split_with(placements, &(pool_account(&1.pool) in blocked))
+
+    state =
+      if not passable? or held != [], do: note_resume_hold(state, snapshot), else: state
+
+    pick =
+      if open == [],
+        do: nil,
+        else: pass_pick(state, put_in(snapshot.walk.placements, open), mode)
+
+    case pick do
+      {id, extra} -> promote_or_hold(%{state | holds: []}, id, extra)
+      nil -> waiting(state)
+    end
+  end
+
+  defp pool_account({account_id, _pool}), do: account_id
+  defp pool_account(_), do: nil
+
+  defp resume_account(%{resume_account: fun}, task_id) do
+    fun.(task_id)
+  rescue
+    _ -> nil
+  end
+
+  defp default_resume_account(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{implementer_account_id: id}} when is_binary(id) ->
+        id
+
+      {:ok, %Issue{} = task} ->
+        provider =
+          Arbiter.Workers.Run.latest_authoring_provider(task.id) ||
+            Arbiter.Quota.default_provider(task.workspace_id)
+
+        case Arbiter.Accounts.Resolver.account(task.workspace_id, provider) do
+          %{id: id} -> id
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # Count the ticks each slot waiter went unadmitted; at `park_after` escalate
+  # once, naming the pool's account, so an exhausted provider is seen.
+  defp track_stalls(state, slot_waiters) do
+    ids = Enum.map(slot_waiters, & &1.task_id)
+
+    queue =
+      Enum.map(state.deferred_resumes, fn entry ->
+        if entry.task_id in ids, do: stall(state, entry), else: entry
+      end)
+
+    %{state | deferred_resumes: queue}
+  end
+
+  defp stall(state, entry) do
+    stalled = Map.get(entry, :stalled, 0) + 1
+    entry = Map.put(entry, :stalled, stalled)
+
+    if stalled >= state.park_after and not Map.get(entry, :parked?, false) do
+      account = resume_account(state, entry.task_id)
+
+      Logger.warning(
+        "board autopilot: deferred resume of #{entry.task_id} parked after #{stalled} ticks — " <>
+          "pool #{inspect(account)} has no seat"
+      )
+
+      state.escalate.(entry.task_id, {:deferred_resume_parked, account, stalled}, 1)
+      Map.put(entry, :parked?, true)
+    else
+      entry
+    end
+  end
+
+  @resume_hold_log_ms 60_000
+
+  # Rate-limited: one line per change of the waiting set, else once a minute.
+  defp note_resume_hold(state, snapshot) do
+    waiters = for %{wait: :slot} = e <- state.deferred_resumes, do: e
+    sig = Enum.map(waiters, & &1.task_id)
+    now = System.monotonic_time(:millisecond)
+
+    case state.resume_hold_log do
+      {^sig, at} when now - at < @resume_hold_log_ms ->
+        state
+
+      _ ->
+        if Map.get(snapshot, :ready, []) != [] do
+          for e <- waiters do
+            Logger.warning(
+              "board autopilot: holding Ready behind deferred resume #{e.task_id} " <>
+                "(pool #{inspect(resume_account(state, e.task_id))}: no seat)"
+            )
+          end
+        end
+
+        %{state | resume_hold_log: {sig, now}}
     end
   end
 

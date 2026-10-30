@@ -237,6 +237,17 @@ defmodule Arbiter.Board.DrainTest do
 
   # bd-b2iigy: a resume waiting on the primary's own cap is visible, not silent.
   describe "resumes held for local capacity" do
+    test "status carries each deferred resume with its age (bd-7twuru)" do
+      ap = start_autopilot!(paused: true)
+      :ok = Autopilot.defer_resume(ap, "bd-slot-1", :resume, [])
+
+      status = Drain.status(autopilot: ap, supervisor: empty_supervisor!())
+
+      assert [%{task_id: "bd-slot-1", wait: :slot, age_ms: age}] = status.deferred_resumes
+      assert is_integer(age)
+      assert [%{task_id: "bd-slot-1"}] = Drain.to_json(status).deferred_resumes
+    end
+
     test "are listed, in the order they will resume, and do not make the scheduler busy" do
       ap = start_autopilot!(paused: true)
 

@@ -136,6 +136,7 @@ defmodule Arbiter.Board.Drain do
           slot_holders: [String.t()],
           quota_hold: String.t() | nil,
           held_local_capacity: [String.t()],
+          deferred_resumes: [map()],
           capacity: map() | nil,
           checked_at: DateTime.t()
         }
@@ -276,6 +277,7 @@ defmodule Arbiter.Board.Drain do
       slot_holders: slot_holders,
       quota_hold: Keyword.get_lazy(opts, :quota_hold, &quota_hold/0),
       held_local_capacity: held_local_capacity(autopilot, tickets),
+      deferred_resumes: Map.get(autopilot, :deferred_resume_details, []),
       capacity: capacity(Keyword.get(opts, :capacity)),
       checked_at: DateTime.utc_now()
     }
@@ -344,6 +346,7 @@ defmodule Arbiter.Board.Drain do
       quota_hold: Map.get(status, :quota_hold),
       held_local_capacity:
         for(id <- Map.get(status, :held_local_capacity, []), do: held_json(id)),
+      deferred_resumes: Map.get(status, :deferred_resumes, []),
       checked_at: status.checked_at,
       paused_providers: Arbiter.Providers.Pause.to_json()
     }
