@@ -2143,7 +2143,9 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
     registry = registry_results(resp["registry"])
 
-    if nodes == [] and is_nil(url) and registry == [] and
+    placements = placements_results(resp["placements"])
+
+    if nodes == [] and is_nil(url) and registry == [] and placements == [] and
          "local_cap_zero" not in (resp["warnings"] || []) and is_nil(resp["local_cap_advisory"]) do
       [nodes_result("nodes", :na, "no remote nodes enrolled")]
     else
@@ -2154,6 +2156,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       ] ++
         Enum.flat_map(nodes, &node_results/1) ++
         registry ++
+        placements ++
         [local_cap_result(resp)] ++
         advisory_result(resp["local_cap_advisory"]) ++
         capacity_result(resp, nodes)
@@ -2577,6 +2580,27 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   defp local_cap_result(_), do: nodes_result("local worker cap", :ok, "not reported")
 
+  # bd-cch1jh: a remote placement is bounded by the primary's placement timeout, so one
+  # still in flight past it is a deadline that did not end it (the run shows `placing`).
+  defp placements_results(%{"stuck" => [_ | _] = stuck} = placements) do
+    for entry <- stuck do
+      nodes_result(
+        "placement stuck: #{entry["task_id"] || "?"}",
+        :warn,
+        "placing on #{entry["node_name"] || entry["node_id"] || "?"} for " <>
+          "#{duration_text(div(entry["age_ms"] || 0, 1000))} (stage #{entry["stage"] || "?"}, " <>
+          "timeout #{timeout_text(placements["timeout_ms"])})",
+        "Stop the run (`arb worker stop #{entry["task_id"]}`) and resume it; the cause is in the " <>
+          "server log (`placement started ... task=#{entry["task_id"]}` with no outcome line)."
+      )
+    end
+  end
+
+  defp placements_results(_none), do: []
+
+  defp timeout_text(ms) when is_integer(ms), do: duration_text(div(ms, 1000))
+  defp timeout_text(_ms), do: "none"
+
   defp capacity_result(_resp, []), do: []
 
   defp capacity_result(%{"total" => _} = resp, _nodes),
@@ -2607,6 +2631,10 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       _ -> "at an unknown time"
     end
   end
+
+  defp duration_text(s) when s < 60, do: "#{s}s"
+  defp duration_text(s) when s < 3600, do: "#{div(s, 60)}m"
+  defp duration_text(s), do: "#{div(s, 3600)}h#{div(rem(s, 3600), 60)}m"
 
   defp age_text(s) when s < 60, do: "#{s}s ago"
   defp age_text(s) when s < 3600, do: "#{div(s, 60)}m ago"

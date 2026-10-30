@@ -203,6 +203,47 @@ defmodule Arbiter.Worker.DispatchRemoteFallbackTest do
     assert output =~ "falling back to the primary"
   end
 
+  # bd-cch1jh: a step of the primary's own half that never returns used to leave the run
+  # `placing` for ever. The placement deadline ends it, and the run goes the way every
+  # other placement failure does.
+  test "a placement that hangs past the placement timeout runs on the primary",
+       %{ws: ws, opts: opts, log: log} do
+    previous = Application.fetch_env(:arbiter, :node_placement)
+    Application.put_env(:arbiter, :node_placement, placement_timeout_ms: 300)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, v} -> Application.put_env(:arbiter, :node_placement, v)
+        :error -> Application.delete_env(:arbiter, :node_placement)
+      end
+    end)
+
+    inner = Keyword.fetch!(opts, :egress)
+    calls = :counters.new(1, [])
+
+    egress = fn egress_opts ->
+      :counters.add(calls, 1, 1)
+      if :counters.get(calls, 1) == 1, do: Process.sleep(:infinity), else: inner.(egress_opts)
+    end
+
+    task = ticket!(ws, "placement hangs")
+
+    output =
+      capture_log(fn ->
+        assert {:ok, %{claude_port: port}} =
+                 Dispatch.dispatch(task.id, Keyword.put(opts, :egress, egress))
+
+        await_agent_exit(port)
+        assert run_calls(log) > 0
+        assert Ash.get!(Issue, task.id).state == :active
+        stop_worker(task.id)
+      end)
+
+    assert output =~ "placement timed out task=#{task.id} node=ghost-node"
+    assert output =~ "stage=prepare"
+    assert output =~ "falling back to the primary"
+  end
+
   test "a node refusal with no room on the primary holds the ticket instead of crashing it",
        %{ws: ws, opts: opts, log: log} do
     {:ok, 0} = Nodes.set_local_max_workers(0, @operator)
