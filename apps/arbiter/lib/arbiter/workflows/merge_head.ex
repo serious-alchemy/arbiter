@@ -50,6 +50,13 @@ defmodule Arbiter.Workflows.MergeHead do
   # its course, and handing the place on mid-run wastes it.
   @head_ci_wait_ticks 240
 
+  # bd-az0dcu. Ticks a head may report `:ready_to_merge` with no merge landing
+  # before it hands its place on. A green head merges in the poll that reports
+  # it; one that sits there is parked by something Arbiter-internal (coverage
+  # undecided, a review round owed, a merge slot it never gets) and would hold
+  # the target for as long as it kept polling.
+  @head_ready_ticks 10
+
   @type item :: map()
 
   @doc """
@@ -62,13 +69,17 @@ defmodule Arbiter.Workflows.MergeHead do
   @spec head_ci_wait_ticks() :: pos_integer()
   def head_ci_wait_ticks, do: @head_ci_wait_ticks
 
+  @doc "Ticks a head may report `:ready_to_merge` with no merge before the next takes over."
+  @spec head_ready_ticks() :: pos_integer()
+  def head_ready_ticks, do: @head_ready_ticks
+
   @doc """
-  The head's own bookkeeping: ticks in a row of no progress, ticks in CI on one
-  head SHA, the head SHA it was last synced from, and whether its merge was
-  refused last tick.
+  The head's own bookkeeping: ticks in a row of no progress, ticks running CI on
+  one head SHA, ticks in a row reported `:ready_to_merge`, the head SHA it was
+  last synced from, and whether its merge was refused last tick.
   """
   @spec new_watch() :: map()
-  def new_watch, do: %{stalls: 0, ci_wait: nil, synced_from: nil, refused?: false}
+  def new_watch, do: %{stalls: 0, ci_wait: nil, ready: 0, synced_from: nil, refused?: false}
 
   @doc """
   The train's head, given its items in queue order (`sort/1`), and the incumbent
@@ -88,12 +99,16 @@ defmodule Arbiter.Workflows.MergeHead do
   end
 
   @doc """
-  Queue order: lower priority number first (P0 before P4), earliest `opened_at`
-  as the tiebreak. Items without an `opened_at` sort last.
+  Queue order: lower priority number first (P0 before P4); at equal priority an
+  item that is not `red?` (in CI remediation, so a sync would be spent on a
+  branch about to change) ahead of one that is; earliest `opened_at` as the
+  tiebreak. Items without an `opened_at` sort last.
   """
-  @spec order_key(item()) :: {integer(), integer()}
-  def order_key(item),
-    do: {Map.get(item, :priority) || 2, opened_at_key(Map.get(item, :opened_at))}
+  @spec order_key(item()) :: {integer(), 0 | 1, integer()}
+  def order_key(item) do
+    {Map.get(item, :priority) || 2, if(Map.get(item, :red?, false), do: 1, else: 0),
+     opened_at_key(Map.get(item, :opened_at))}
+  end
 
   @doc "Items in queue order."
   @spec sort([item()]) :: [item()]
@@ -109,11 +124,12 @@ defmodule Arbiter.Workflows.MergeHead do
   def stalled?(_item), do: false
 
   defp keep_or_hand_on(%{queue_head: watch} = incumbent, train) do
-    watch = %{
-      watch
-      | stalls: if(stuck?(incumbent, watch), do: watch.stalls + 1, else: 0),
-        ci_wait: ci_wait(incumbent, watch.ci_wait)
-    }
+    watch =
+      Map.merge(watch, %{
+        stalls: if(stuck?(incumbent, watch), do: watch.stalls + 1, else: 0),
+        ci_wait: ci_wait(incumbent, watch.ci_wait),
+        ready: ready(incumbent, Map.get(watch, :ready, 0))
+      })
 
     case hand_on_reason(incumbent, watch) do
       nil ->
@@ -129,10 +145,28 @@ defmodule Arbiter.Workflows.MergeHead do
       "#{inspect(Map.get(item, :last_block_reason))}, last error #{inspect(Map.get(item, :last_error))})"
   end
 
-  defp hand_on_reason(_item, %{ci_wait: {sha, ticks}}) when ticks > @head_ci_wait_ticks,
-    do: "has been in CI on #{inspect(sha)} for #{ticks} ticks"
+  defp hand_on_reason(item, %{ci_wait: ci_wait, ready: ready}) do
+    case {ci_wait, ready} do
+      {{sha, ticks}, _} when ticks > 0 ->
+        if ticks > limit(item, :ci_wait_ticks, @head_ci_wait_ticks),
+          do: "has been running CI on #{inspect(sha)} for #{ticks} ticks"
 
-  defp hand_on_reason(_item, _watch), do: nil
+      {_, ready} when ready > 0 ->
+        if ready > limit(item, :ready_ticks, @head_ready_ticks),
+          do: "has been ready to merge for #{ready} ticks without merging"
+
+      _ ->
+        nil
+    end
+  end
+
+  # A per-item bound (a workspace's `merge.train_*` setting), else the default.
+  defp limit(item, key, default) do
+    case Map.get(item, key) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> default
+    end
+  end
 
   defp front(train) do
     case Enum.find(train, &(not stalled?(&1))) do
@@ -152,18 +186,27 @@ defmodule Arbiter.Workflows.MergeHead do
       (item.status == :behind_base and is_binary(head) and head == watch.synced_from)
   end
 
-  # Ticks in a row the head has been in CI, with no block named, on its head SHA.
+  # Ticks the head has been *running* CI, with no block named, on its head SHA.
+  # A pipeline queued behind others (`ci_phase: :pending`) is not running: its
+  # ticks neither count toward the bound nor reset it.
   defp ci_wait(%{status: :ci_running} = item, wait) do
     sha = Map.get(item, :last_head_sha)
+    pending? = Map.get(item, :ci_phase) == :pending
 
     cond do
       stalled?(item) -> nil
+      match?({^sha, _}, wait) and pending? -> wait
       match?({^sha, _}, wait) -> {sha, elem(wait, 1) + 1}
+      pending? -> {sha, 0}
       true -> {sha, 1}
     end
   end
 
   defp ci_wait(_item, _wait), do: nil
+
+  # Ticks in a row the head has reported itself ready to merge.
+  defp ready(%{status: :ready_to_merge}, ready), do: ready + 1
+  defp ready(_item, _ready), do: 0
 
   defp opened_at_key(%DateTime{} = dt), do: DateTime.to_unix(dt, :microsecond)
   defp opened_at_key(_), do: 9_223_372_036_854_775_807
