@@ -2153,14 +2153,14 @@ defmodule Arbiter.Mergers.Github do
     output = Map.get(run, "output") || %{}
     annotations = failure_annotations(run, output, annotations_fun)
 
-    head =
+    head_text =
       ([Map.get(output, "title"), Map.get(output, "summary"), Map.get(output, "text")] ++
          Enum.map(annotations, &render_annotation/1))
       |> Enum.reject(&(&1 in [nil, ""]))
       |> Enum.join("\n")
-      |> truncate(@log_tail_limit)
 
-    {log_excerpt, log_path} = job_log(run, log_fun)
+    head = truncate(head_text, @log_tail_limit)
+    {log_excerpt, log_path, log_truncated?} = job_log(run, log_fun)
 
     # The log excerpt is bounded on its own so a long output summary cannot crowd it out.
     summary =
@@ -2173,6 +2173,10 @@ defmodule Arbiter.Mergers.Github do
       summary: summary,
       conclusion: Map.get(run, "conclusion"),
       log_path: log_path,
+      # The summary left failure text out (a long output summary or a log excerpt
+      # that dropped blocks): the CI triage re-reads `log_path` or gives up
+      # (bd-3ij7dw).
+      truncated: log_truncated? or head != head_text,
       url: Map.get(run, "details_url") || Map.get(run, "html_url"),
       # The source files the run's failure annotations point at. GitHub Actions
       # leaves `output` empty on a failed job, so these are often the only
@@ -2227,7 +2231,7 @@ defmodule Arbiter.Mergers.Github do
   defp job_log(run, log_fun) do
     case Map.get(run, "id") do
       id when is_integer(id) -> log_fun.(id)
-      _ -> {nil, nil}
+      _ -> {nil, nil, false}
     end
   end
 
@@ -2237,16 +2241,19 @@ defmodule Arbiter.Mergers.Github do
     case request(cfg, :get, "/repos/#{owner}/#{repo}/actions/jobs/#{job_id}/logs", []) do
       {:ok, %Req.Response{status: status, body: body}}
       when status in 200..299 and is_binary(body) ->
+        {excerpt, truncated?} = CILogExcerpt.extract_with_status(body, @log_tail_limit)
+
         excerpt =
-          case CILogExcerpt.extract(body, @log_tail_limit) do
+          case excerpt do
             "" -> nil
             excerpt -> "--- job log (filtered) ---\n" <> excerpt
           end
 
-        {excerpt, save_full_log(owner, repo, job_id, body)}
+        {excerpt, save_full_log(owner, repo, job_id, body), truncated?}
 
+      # No log at all (a non-Actions check run, a 404): nothing to classify from.
       _ ->
-        {nil, nil}
+        {nil, nil, true}
     end
   end
 

@@ -2555,6 +2555,51 @@ defmodule Arbiter.Mergers.GithubTest do
       File.rm(check.log_path)
     end
 
+    test "flags an excerpt that dropped failure blocks as truncated (bd-3ij7dw)" do
+      block = fn n ->
+        ["  #{n}) test t#{n} (Widget.BigTest)", "     test/big_#{n}_test.exs:#{n}", "     boom"] ++
+          for(i <- 1..25, do: "     detail #{i} of #{n}") ++ [""]
+      end
+
+      big =
+        Enum.map_join(Enum.flat_map(1..40, block), "\n", &("2026-10-09T12:00:01.0000000Z " <> &1))
+
+      small =
+        "2026-10-09T12:00:01.0000000Z   1) test boom (Widget.FooTest)\n" <>
+          "2026-10-09T12:00:01.0000000Z      test/foo_test.exs:12\n"
+
+      for {log, expected} <- [{big, true}, {small, false}] do
+        stub(fn conn ->
+          case conn.request_path do
+            "/repos/octo/widget/pulls/42" ->
+              conn
+              |> Plug.Conn.put_status(200)
+              |> Req.Test.json(%{"state" => "open", "head" => %{"sha" => "sha9"}})
+
+            "/repos/octo/widget/commits/sha9/check-runs" ->
+              conn
+              |> Plug.Conn.put_status(200)
+              |> Req.Test.json(%{
+                "check_runs" => [%{"id" => 77, "name" => "test", "conclusion" => "failure"}]
+              })
+
+            "/repos/octo/widget/check-runs/77/annotations" ->
+              conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+            "/repos/octo/widget/actions/jobs/77/logs" ->
+              conn
+              |> Plug.Conn.put_resp_content_type("text/plain")
+              |> Plug.Conn.send_resp(200, log)
+          end
+        end)
+
+        assert {:ok, [check]} = Github.failing_check_logs(@ref)
+        assert check.truncated == expected
+        assert is_binary(check.log_path)
+        File.rm(check.log_path)
+      end
+    end
+
     test "returns an empty list when there is no head sha" do
       stub(fn conn ->
         case conn.request_path do

@@ -388,7 +388,7 @@ defmodule Arbiter.Mergers.Gitlab do
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, [latest | _]} <- mr_pipelines(cfg, iid) |> no_pipeline(),
          {:ok, jobs} <- pipeline_jobs(cfg, Map.get(latest, "id")) do
-      failed = Enum.filter(jobs, &(failing_job?(&1) and Map.get(&1, "allow_failure") != true))
+      failed = Enum.filter(jobs, &failing_job?/1)
 
       with %{"id" => job_id} <- Enum.find(failed, &(Map.get(&1, "name") == job_name)),
            {:ok, archive} <- job_artifacts(cfg, job_id) do
@@ -889,7 +889,16 @@ defmodule Arbiter.Mergers.Gitlab do
             {"/merge_requests/#{iid}/changes", []}
         end
 
+      # `/changes` sets `overflow: true` when it cut the diff short. A caller
+      # that reasons about the WHOLE diff (the CI triage) passes `complete: true`
+      # and gets an error rather than a part it would mistake for all.
+      complete? = is_map(opts) and Map.get(opts, :complete) == true
+
       case request(cfg, :get, path, req_opts) do
+        {:ok, %Req.Response{status: status, body: %{"overflow" => true}}}
+        when status in 200..299 and complete? ->
+          {:error, :diff_overflow}
+
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
           {:ok, changes_to_diff(body)}
 
@@ -1667,9 +1676,19 @@ defmodule Arbiter.Mergers.Gitlab do
     end
   end
 
-  defp find_latest_failed_pipeline(pipelines) when is_list(pipelines) do
+  # The newest failed pipeline OF THE MR'S CURRENT HEAD. The list is newest
+  # first, so its first entry names the head; a failed pipeline on an older head
+  # (the head moved, and the new one is running or green) is history, not the
+  # red the caller is asking about (bd-3ij7dw). Pipelines carrying no `sha` match
+  # any head, as before.
+  defp find_latest_failed_pipeline([%{} = latest | _] = pipelines) do
+    head = Map.get(latest, "sha")
+
     pipelines
-    |> Enum.find(fn p -> Map.get(p, "status") in ["failed", "canceled"] end)
+    |> Enum.find(fn p ->
+      Map.get(p, "status") in ["failed", "canceled"] and
+        (not is_binary(head) or Map.get(p, "sha") in [nil, head])
+    end)
     |> case do
       %{"id" => id} -> id
       _ -> nil
@@ -1693,20 +1712,24 @@ defmodule Arbiter.Mergers.Gitlab do
     end
   end
 
-  defp failing_job?(job), do: Map.get(job, "status") in @failing_job_statuses
+  # A job allowed to fail never blocks the pipeline, so it is not a failing check.
+  defp failing_job?(job),
+    do: Map.get(job, "status") in @failing_job_statuses and Map.get(job, "allow_failure") != true
 
   defp fetch_job_log(cfg, job) do
     job_id = Map.get(job, "id")
     name = Map.get(job, "name") || "job"
     url = get_in(job, ["web_url"])
 
-    summary =
+    # `truncated`: the excerpt left failure text out, so the CI triage must not
+    # classify from it (bd-3ij7dw). No trace at all is as unreadable as a cut one.
+    {summary, truncated} =
       case request(cfg, :get, "/jobs/#{job_id}/trace", []) do
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-          body |> to_string() |> CILogExcerpt.extract(@log_tail_limit)
+          body |> to_string() |> CILogExcerpt.extract_with_status(@log_tail_limit)
 
         _ ->
-          ""
+          {"", true}
       end
 
     # `status` / `failure_reason` let the CI triage (#1144) tell a runner failure
@@ -1714,6 +1737,7 @@ defmodule Arbiter.Mergers.Gitlab do
     %{
       name: name,
       summary: summary,
+      truncated: truncated,
       url: url,
       status: Map.get(job, "status"),
       failure_reason: Map.get(job, "failure_reason")

@@ -12,6 +12,7 @@ defmodule Arbiter.Worker.CiTriageLog do
 
   alias Arbiter.Mergers
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.PullRequest
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Workflows.MergeQueue.CiTriage
 
@@ -35,6 +36,47 @@ defmodule Arbiter.Worker.CiTriageLog do
   end
 
   def budget(_workspace, _repo), do: @default_budget
+
+  @doc """
+  Persist the re-run count (and the failing test set that earned it) for `head`
+  on the ticket, so a restarted Watchdog does not hand a head a fresh budget.
+  Only the newest head is kept: heads only move forward. Best-effort.
+  """
+  @spec save_rerun(String.t(), String.t() | nil, pos_integer(), [String.t()] | nil) :: :ok
+  def save_rerun(_task_id, head, _count, _set) when head in [nil, ""], do: :ok
+
+  def save_rerun(task_id, head, count, set) do
+    case PullRequest.record_review_gate(task_id, %{
+           ci_triage_rerun: %{head: head, count: count, set: set}
+         }) do
+      :ok -> :ok
+      {:error, why} -> Logger.debug("CiTriageLog: rerun count write failed: #{inspect(why)}")
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  @doc """
+  The persisted `%{count, set}` for `head`, or `nil` when the ticket has none for
+  that head (or the read fails).
+  """
+  @spec load_rerun(String.t(), String.t()) ::
+          %{count: pos_integer(), set: [String.t()] | nil} | nil
+  def load_rerun(task_id, head) do
+    case Ash.get(Issue, task_id) do
+      {:ok,
+       %{review_gate_state: %{"ci_triage_rerun" => %{"head" => ^head, "count" => count} = r}}}
+      when is_integer(count) and count > 0 ->
+        %{count: count, set: if(is_list(r["set"]), do: Enum.map(r["set"], &to_string/1))}
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
 
   @doc """
   Append the decision to the ticket's notes (atomically, so a worker's own

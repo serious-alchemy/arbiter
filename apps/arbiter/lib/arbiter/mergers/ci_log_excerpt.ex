@@ -46,7 +46,22 @@ defmodule Arbiter.Mergers.CILogExcerpt do
   `log`. Returns `""` for an empty or non-binary log.
   """
   @spec extract(term(), pos_integer()) :: String.t()
-  def extract(log, limit) when is_binary(log) and is_integer(limit) and limit > 0 do
+  def extract(log, limit) do
+    {excerpt, _truncated?} = extract_with_status(log, limit)
+    excerpt
+  end
+
+  @doc """
+  Like `extract/2`, but also says whether the excerpt left failure-relevant
+  text out: a failure block or marker line dropped for want of budget, the
+  `limit` bound cutting the middle out, or the tail fallback cutting the log's
+  head. A caller that classifies the failure (rather than just showing it) must
+  not trust a truncated excerpt: the part that was dropped may be the part that
+  says the failure is the diff's own (bd-3ij7dw).
+  """
+  @spec extract_with_status(term(), pos_integer()) :: {String.t(), boolean()}
+  def extract_with_status(log, limit)
+      when is_binary(log) and is_integer(limit) and limit > 0 do
     lines = clean_lines(log)
     total = length(lines)
     indexed = Enum.with_index(lines)
@@ -67,7 +82,7 @@ defmodule Arbiter.Mergers.CILogExcerpt do
     end
   end
 
-  def extract(_log, _limit), do: ""
+  def extract_with_status(_log, _limit), do: {"", false}
 
   defp clean_lines(log) do
     log
@@ -88,17 +103,21 @@ defmodule Arbiter.Mergers.CILogExcerpt do
     primary = merge(Enum.sort(kept_blocks ++ summaries))
     left = limit - rendered_size(primary, lines)
 
-    kept_markers =
+    candidate_markers =
       markers
       |> Enum.sort()
       |> merge()
       |> Enum.reject(&overlaps_any?(&1, blocks ++ summaries))
-      |> take_within(lines, left, 0, [])
 
-    (primary ++ kept_markers)
-    |> Enum.sort()
-    |> render(lines)
-    |> bound(limit)
+    kept_markers = take_within(candidate_markers, lines, left, 0, [])
+
+    text = (primary ++ kept_markers) |> Enum.sort() |> render(lines)
+
+    truncated? =
+      length(kept_blocks) < length(blocks) or length(kept_markers) < length(candidate_markers) or
+        String.length(text) > limit
+
+    {bound(text, limit), truncated?}
   end
 
   # Greedy, in log order; the first range is always kept so a single oversized
@@ -174,6 +193,9 @@ defmodule Arbiter.Mergers.CILogExcerpt do
 
   defp tail(text, limit) do
     len = String.length(text)
-    if len > limit, do: "…" <> String.slice(text, len - limit, limit), else: text
+
+    if len > limit,
+      do: {"…" <> String.slice(text, len - limit, limit), true},
+      else: {text, false}
   end
 end
