@@ -44,7 +44,7 @@
     "tracker_context_ref" => :same,
     "target_branch" => :same,
     "repo" => :same,
-    "no_lint" => %{mcp: :same, cli: "no_lint", rest: :same},
+    "no_lint" => %{mcp: :same, cli: "lint", rest: :same},
     "provider_constraint" => %{mcp: :same, cli: "require_provider", rest: :same},
     "permissions" => %{mcp: :same, cli: "permission", rest: :same},
     "workspace_id" => %{
@@ -100,7 +100,7 @@
     "tracker_context_ref" => :same,
     "target_branch" => :same,
     "repo" => :same,
-    "no_lint" => %{mcp: :same, cli: "no_lint", rest: :same},
+    "no_lint" => %{mcp: :same, cli: "lint", rest: :same},
     "pr_ref" => :same,
     "pr_body" => %{
       mcp:
