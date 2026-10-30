@@ -571,13 +571,14 @@ defmodule Arbiter.Worker.ClaudeSession do
 
       case adopt do
         nil ->
-          with {:ok, spawn_args} <- first_open_args(owner, port_args),
+          with {:ok, spawn_args} <- first_open_args(owner, port_args, attempt),
                {:ok, handle} <- place_remote(remote, spawn_args, owner, attempt) do
             {:ok, Map.put(port_args, :remote, %{remote | prepared: handle})}
           end
 
         %{} ->
-          with {:ok, handle, stdout_start} <- adopt_remote(remote, port_args, owner, adopt) do
+          with {:ok, handle, stdout_start} <-
+                 adopt_remote(remote, port_args, owner, adopt, attempt) do
             remote = Map.put(%{remote | prepared: handle}, :stdout_start, stdout_start)
             {:ok, Map.put(port_args, :remote, remote)}
           end
@@ -593,13 +594,20 @@ defmodule Arbiter.Worker.ClaudeSession do
   # was to be continued. An owner that is this process has nothing to splice. An
   # adoption opens nothing on the node (its container is already running), so it
   # never asks.
-  defp first_open_args(owner, port_args) when is_pid(owner) and owner != self() do
-    {:ok, Arbiter.Worker.first_spawn_args(owner, port_args)}
-  catch
-    :exit, reason -> {:error, {:remote_placement_failed, {:owner_unreachable, reason}}}
+  #
+  # The ask is a step of the attempt (`:first_open`), so an owner that stalls instead of
+  # answering is ended by the placement deadline, not left to hold the run in `placing`.
+  defp first_open_args(owner, port_args, attempt) when is_pid(owner) and owner != self() do
+    PlacementWatch.step(attempt, :first_open, fn ->
+      try do
+        {:ok, Arbiter.Worker.first_spawn_args(owner, port_args)}
+      catch
+        :exit, reason -> {:error, {:remote_placement_failed, {:owner_unreachable, reason}}}
+      end
+    end)
   end
 
-  defp first_open_args(_owner, port_args), do: {:ok, port_args}
+  defp first_open_args(_owner, port_args, _attempt), do: {:ok, port_args}
 
   # bd-4p1vui (docs/design/remote-workers.md §10.4.3): `opts[:adopt]` (from
   # `Arbiter.Worker.Dispatch.adopt/2`) names a run the node kept across a primary restart.
@@ -610,20 +618,24 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp adopted_run_id(%{run_id: run_id}) when is_binary(run_id), do: run_id
   defp adopted_run_id(_adopt), do: nil
 
-  defp adopt_remote(remote, port_args, owner, adopt) do
-    with {:ok, spec} <- ContainerSpawn.remote_spec(remote.request, port_args, remote.run_id),
-         {:ok, prepared} <-
-           Arbiter.Worker.Executor.Node.adopt(remote.node, spec,
-             owner: owner,
-             checkout: adopted_checkout(remote.request.checkout, adopt),
-             stdout_offset: Map.get(adopt, :stdout_offset),
-             adopt_timeout_ms: Map.get(adopt, :timeout_ms)
-           ),
-         {:ok, handle} <- Arbiter.Worker.Executor.Node.open(prepared) do
-      {:ok, handle, prepared.stdout_start}
-    else
-      {:error, reason} -> {:error, {:remote_adoption_failed, reason}}
-    end
+  # A step of the attempt (`:adopt`), so a node that never answers the adoption is ended by
+  # the placement deadline too.
+  defp adopt_remote(remote, port_args, owner, adopt, attempt) do
+    PlacementWatch.step(attempt, :adopt, fn ->
+      with {:ok, spec} <- ContainerSpawn.remote_spec(remote.request, port_args, remote.run_id),
+           {:ok, prepared} <-
+             Arbiter.Worker.Executor.Node.adopt(remote.node, spec,
+               owner: owner,
+               checkout: adopted_checkout(remote.request.checkout, adopt),
+               stdout_offset: Map.get(adopt, :stdout_offset),
+               adopt_timeout_ms: Map.get(adopt, :timeout_ms)
+             ),
+           {:ok, handle} <- Arbiter.Worker.Executor.Node.open(prepared) do
+        {:ok, handle, prepared.stdout_start}
+      else
+        {:error, reason} -> {:error, {:remote_adoption_failed, reason}}
+      end
+    end)
   end
 
   # The run's transcripts keep landing where they did before the restart: the row's
