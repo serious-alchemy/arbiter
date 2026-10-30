@@ -258,8 +258,8 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.RepeatUnmetCriterion
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ReviewCi
-  alias Arbiter.Worker.ReviewMrBrief
   alias Arbiter.Worker.ReviewFindings
+  alias Arbiter.Worker.ReviewMrBrief
   alias Arbiter.Worker.ReviewPass
   alias Arbiter.Worker.ReviewSync
   alias Arbiter.Worker.ReviewVerification

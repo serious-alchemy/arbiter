@@ -134,6 +134,10 @@ defmodule ArbiterCli.Cmd.Create do
       issue (skip outbound create). The ref is passed through to the create
       action as `tracker_ref`; the server's after-transaction hook sees the
       ref is already set and skips the API call.
+    * `--lint` / `--no-lint` — acceptance-criteria lint is on by default: lines needing
+      post-merge or external evidence (deploy, prod, CI results, N runs) are warned
+      about with a suggestion to move them to deployment_notes. `--no-lint` suppresses
+      the warnings. Warn only; the ticket is always filed.
     * `--no-tracker` / `--local-only` — create a purely local task even on a
       tracker-configured workspace. Forwards `skip_upstream_create=true` as
       the action argument.
