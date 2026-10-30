@@ -137,5 +137,5 @@ defmodule Arbiter.NodeAgent.Exec do
   defp tail(output) when byte_size(output) <= @max_output_bytes, do: output
 
   defp tail(output),
-    do: binary_part(output, byte_size(output) - @max_output_bytes, @max_output_bytes)
+    do: Arbiter.Text.tail_bytes(output, @max_output_bytes)
 end

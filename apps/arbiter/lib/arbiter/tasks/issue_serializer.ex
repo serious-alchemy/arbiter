@@ -23,12 +23,12 @@ defmodule Arbiter.Tasks.IssueSerializer do
   def data(%Issue{} = issue) do
     %{
       id: issue.id,
-      title: issue.title,
-      description: issue.description,
-      acceptance: issue.acceptance,
-      notes: issue.notes,
-      qa_notes: issue.qa_notes,
-      deployment_notes: issue.deployment_notes,
+      title: Arbiter.Text.scrub(issue.title),
+      description: Arbiter.Text.scrub(issue.description),
+      acceptance: Arbiter.Text.scrub(issue.acceptance),
+      notes: Arbiter.Text.scrub(issue.notes),
+      qa_notes: Arbiter.Text.scrub(issue.qa_notes),
+      deployment_notes: Arbiter.Text.scrub(issue.deployment_notes),
       # bd-842qio: the stored lifecycle state — the ticket's one lifecycle
       # field. `close_reason` is null unless the ticket is closed; `rank`
       # orders a priority band.
