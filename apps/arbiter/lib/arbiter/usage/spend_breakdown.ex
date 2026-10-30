@@ -12,8 +12,8 @@ defmodule Arbiter.Usage.SpendBreakdown do
   never priced as `$0`.
   """
 
-  alias Arbiter.Usage.Budget
   alias Arbiter.Usage.BaseTaskBackfill
+  alias Arbiter.Usage.Budget
   alias Arbiter.Usage.LiveSpend
 
   @kinds ~w(implement review_round fix_pass conflict resume review)
