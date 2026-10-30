@@ -33,6 +33,8 @@ defmodule ArbiterCli.Cmd.Dep do
                        progress; does not gate.
       relates_to       informational cross-reference; does not gate.
       discovered_from  <from> was found while working <to>; does not gate.
+      fixes            <from> is a follow-up that fixes <to>; does not gate. Its
+                       spend (and its own follow-ups') rolls up into <to>.
 
   A `depends_on` / `blocks` edge that would close a cycle is refused, with the
   cycle named.

@@ -31,6 +31,12 @@ defmodule ArbiterCli.Cmd.DepTest do
     refute out =~ "Conductor"
   end
 
+  test "dep --help documents the fixes edge and its spend rollup" do
+    {out, _err, 0} = capture(fn -> Dep.run(["--help"]) end)
+    assert out =~ "fixes"
+    assert out =~ "rolls up"
+  end
+
   test "dep rm hits DELETE and prints how many edges went" do
     stub_routes([
       {{"delete", "/api/dependencies/a/b"},

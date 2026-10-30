@@ -306,6 +306,7 @@ defmodule Arbiter.MCP.Tools.Task do
         force: force?,
         deps: edges.depends_on,
         blocks: edges.blocks,
+        fixes: edges.fixes,
         created_by: Arbiter.PaperTrail.actor_label(scope),
         context: permission_context(scope)
       ]
@@ -407,12 +408,14 @@ defmodule Arbiter.MCP.Tools.Task do
            Tools.collect_attrs(args, [
              {"depends_on", :string_list},
              {"deps", :string_list},
-             {"blocks", :string_list}
+             {"blocks", :string_list},
+             {"fixes", :string_list}
            ]) do
       {:ok,
        %{
          depends_on: Enum.uniq(Map.get(lists, "depends_on", []) ++ Map.get(lists, "deps", [])),
-         blocks: Enum.uniq(Map.get(lists, "blocks", []))
+         blocks: Enum.uniq(Map.get(lists, "blocks", [])),
+         fixes: Enum.uniq(Map.get(lists, "fixes", []))
        }}
     end
   end

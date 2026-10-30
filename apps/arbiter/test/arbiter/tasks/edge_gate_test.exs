@@ -14,7 +14,7 @@ defmodule Arbiter.Tasks.EdgeGateTest do
 
     test "parent_of, relates_to and discovered_from are non-gating" do
       assert Enum.sort(EdgeGate.non_gating_types()) ==
-               [:discovered_from, :parent_of, :relates_to]
+               [:discovered_from, :fixes, :parent_of, :relates_to]
     end
 
     test "every Dependency type is classified exactly once" do
@@ -134,7 +134,7 @@ defmodule Arbiter.Tasks.EdgeGateTest do
 
     test "non-gating edge types never block" do
       deps =
-        for type <- [:relates_to, :discovered_from, :parent_of, :conflicts_with],
+        for type <- [:relates_to, :discovered_from, :fixes, :parent_of, :conflicts_with],
             do: dep(type, "bd-1", "bd-2")
 
       issues = [issue("bd-1", :queued), issue("bd-2", :queued)]

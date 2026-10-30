@@ -355,14 +355,27 @@ defmodule ArbiterCli.Output do
     "review" => "reviews"
   }
 
-  defp spend_label(%{"run_count" => 0, "total_usd" => t}) when t in [nil, 0, 0.0],
-    do: "none recorded"
+  defp spend_label(%{"run_count" => 0, "total_usd" => t} = spend) when t in [nil, 0, 0.0] do
+    if follow_up_items(spend) == [], do: "none recorded", else: spend_block(spend)
+  end
 
-  defp spend_label(%{"passes" => passes} = spend) when is_list(passes) do
+  defp spend_label(%{"passes" => passes} = spend) when is_list(passes), do: spend_block(spend)
+  defp spend_label(_), do: nil
+
+  defp follow_up_items(%{"follow_ups" => %{"items" => items}}) when is_list(items), do: items
+  defp follow_up_items(_), do: []
+
+  defp spend_block(%{"passes" => passes} = spend) do
     total =
-      case spend["total_usd"] do
-        n when is_number(n) -> money(n)
-        _ -> "unpriced"
+      case {spend["follow_ups"], spend["total_usd"]} do
+        {%{"items" => [_ | _], "own_usd" => o, "follow_ups_usd" => f, "total_usd" => t}, _} ->
+          "#{money(o)} own + #{money(f)} follow-ups = #{money(t)}"
+
+        {_, n} when is_number(n) ->
+          money(n)
+
+        _ ->
+          "unpriced"
       end
 
     note =
@@ -379,10 +392,13 @@ defmodule ArbiterCli.Output do
         "\n#{String.duplicate(" ", 14)}#{label}: #{p["count"]} run#{plural(p["count"])}, #{money(p["usd"])}#{un}"
       end)
 
-    total <> note <> Enum.join(lines)
-  end
+    follow_lines =
+      Enum.map(follow_up_items(spend), fn i ->
+        "\n#{String.duplicate(" ", 14)}follow-up #{i["id"]}: #{money(i["usd"])} — #{i["title"]}"
+      end)
 
-  defp spend_label(_), do: nil
+    total <> note <> Enum.join(lines) <> Enum.join(follow_lines)
+  end
 
   defp plural(1), do: ""
   defp plural(_), do: "s"

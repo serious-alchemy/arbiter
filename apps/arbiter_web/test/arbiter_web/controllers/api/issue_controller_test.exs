@@ -992,6 +992,24 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert from == dep.id
     end
 
+    test "fixes attach fixes edges from the new ticket", %{conn: conn, ws: ws} do
+      {:ok, orig} = Ash.create(Issue, %{title: "orig", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/issues", %{
+          "title" => "follow-up",
+          "workspace_id" => ws.id,
+          "fixes" => [orig.id]
+        })
+
+      assert %{"id" => child_id} = json_response(conn, 201)
+
+      assert {:ok, [%{edge: %{type: :fixes, from_issue_id: ^child_id, to_issue_id: to}}]} =
+               Arbiter.Tasks.Dependencies.list(issue_id: child_id)
+
+      assert to == orig.id
+    end
+
     test "an unknown parent refuses the whole create (nothing is filed)", %{conn: conn, ws: ws} do
       conn =
         post(conn, ~p"/api/issues", %{

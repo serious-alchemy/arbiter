@@ -1154,6 +1154,24 @@ defmodule Arbiter.MCP.ToolsTest do
       end
     end
 
+    test "dep_add and ticket_create accept the fixes edge for a coordinator", ctx do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ctx.ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ctx.ws.id})
+
+      assert {:ok, _} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => b.id,
+                 "to_issue_id" => a.id,
+                 "type" => "fixes"
+               })
+
+      assert {:ok, %{id: new_id}} =
+               Tools.task_create(ctx.coordinator, %{"title" => "fixer", "fixes" => [a.id]})
+
+      assert {:ok, edges} = Arbiter.Tasks.Dependencies.list(issue_id: new_id)
+      assert Enum.any?(edges, &(&1.edge.type == :fixes and &1.edge.to_issue_id == a.id))
+    end
+
     test "dep_add: refuses a ticket that already has a parent, and caller-set created_by/notes",
          ctx do
       {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ctx.ws.id})

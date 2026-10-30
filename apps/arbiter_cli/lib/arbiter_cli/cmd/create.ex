@@ -3,7 +3,7 @@ defmodule ArbiterCli.Cmd.Create do
   `arb create <title> [--description ...] [--acceptance ... | --acceptance-file PATH]
                        [--notes ...] [--qa-notes ...] [--deployment-notes ...]
                        [--priority N] [--difficulty N] [--type T]
-                       [--deps|--depends-on id1,id2] [--blocks id1,id2] [--labels a,b]
+                       [--deps|--depends-on id1,id2] [--blocks id1,id2] [--fixes id1,id2] [--labels a,b]
                        [--tracker-ref REF] [--tracker-type T]
                        [--tracker-context-type T] [--tracker-context-ref REF]
                        [--no-tracker] [--target-branch NAME] [--repo owner/name]
@@ -160,6 +160,10 @@ defmodule ArbiterCli.Cmd.Create do
   written in the same transaction as the ticket: a cycle or an unknown/cross-
   workspace id refuses the create and files nothing.
 
+  `--fixes id1,id2` marks the new ticket as a follow-up that fixes each listed
+  ticket (`<new_id> fixes <id>`, same transaction). Its spend then rolls up into
+  the fixed ticket's `Spend:` line in `arb ticket show`.
+
   ## Batch create (`--from-file` / `--stdin`)
 
   `--from-file PATH` (`-` or `--stdin` for standard input) reads a JSON or YAML
@@ -257,6 +261,7 @@ defmodule ArbiterCli.Cmd.Create do
     deps: :string,
     depends_on: :string,
     blocks: :string,
+    fixes: :string,
     from_file: :string,
     stdin: :boolean,
     promote: :boolean,
@@ -417,6 +422,7 @@ defmodule ArbiterCli.Cmd.Create do
         {"--deps", opts[:deps]},
         {"--depends-on", opts[:depends_on]},
         {"--blocks", opts[:blocks]},
+        {"--fixes", opts[:fixes]},
         {"--parent", opts[:parent]},
         {"--tracker-ref", opts[:tracker_ref]},
         {"--tracker-type", opts[:tracker_type]},
@@ -489,6 +495,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put_ids("deps", opts[:deps])
       |> maybe_put_ids("depends_on", opts[:depends_on])
       |> maybe_put_ids("blocks", opts[:blocks])
+      |> maybe_put_ids("fixes", opts[:fixes])
       |> maybe_put_flag("auto_close", opts[:auto_close] == true)
       |> maybe_put_flag("verify_after_deploy", opts[:verify_after_deploy] == true)
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)

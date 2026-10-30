@@ -81,6 +81,8 @@ defmodule Arbiter.Tasks.Dependencies do
     relates_to: [],
     discovered_from: [],
     discovered: [],
+    fixes: [],
+    fixed_by: [],
     conflicts_with: []
   }
 
@@ -179,6 +181,8 @@ defmodule Arbiter.Tasks.Dependencies do
     * `:relates_to` / `:conflicts_with` — symmetric, both directions
     * `:discovered_from` — the sources this issue came from
     * `:discovered` — the issues discovered while working this one
+    * `:fixes` — the tickets this issue fixes (it is their follow-up)
+    * `:fixed_by` — the follow-up tickets that fix this one
 
   Each entry is `%{edge: %Dependency{}, issue_id: id, issue: %Issue{} | nil,
   direction: :outbound | :inbound}`. `:issue` is `nil` only if the other

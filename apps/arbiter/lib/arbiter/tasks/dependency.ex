@@ -72,7 +72,7 @@ defmodule Arbiter.Tasks.Dependency do
     data_layer: AshSqlite.DataLayer,
     extensions: [AshPaperTrail.Resource]
 
-  @types ~w(blocks depends_on relates_to discovered_from parent_of conflicts_with)a
+  @types ~w(blocks depends_on relates_to discovered_from fixes parent_of conflicts_with)a
 
   sqlite do
     table "dependencies"

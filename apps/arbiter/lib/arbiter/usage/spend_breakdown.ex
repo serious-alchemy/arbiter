@@ -13,6 +13,7 @@ defmodule Arbiter.Usage.SpendBreakdown do
   """
 
   alias Arbiter.Usage.BaseTaskBackfill
+  alias Arbiter.Usage.FollowUpSpend
   alias Arbiter.Usage.Budget
   alias Arbiter.Usage.LiveSpend
 
@@ -39,7 +40,20 @@ defmodule Arbiter.Usage.SpendBreakdown do
       run_count: length(rows),
       unpriced_runs: Enum.count(rows, &(not is_number(&1.cost_usd))),
       live: live.live?,
-      passes: passes
+      passes: passes,
+      follow_ups: follow_ups(task_id)
+    }
+  end
+
+  # Spend rolled up from tickets filed against this one (`fixes` / `discovered_from`).
+  defp follow_ups(task_id) do
+    r = FollowUpSpend.for_task(task_id)
+
+    %{
+      own_usd: r.own_usd,
+      follow_ups_usd: r.follow_ups_usd,
+      total_usd: r.total_usd,
+      items: r.follow_ups
     }
   end
 
