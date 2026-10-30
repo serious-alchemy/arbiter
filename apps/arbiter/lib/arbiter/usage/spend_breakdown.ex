@@ -13,8 +13,8 @@ defmodule Arbiter.Usage.SpendBreakdown do
   """
 
   alias Arbiter.Usage.BaseTaskBackfill
-  alias Arbiter.Usage.FollowUpSpend
   alias Arbiter.Usage.Budget
+  alias Arbiter.Usage.FollowUpSpend
   alias Arbiter.Usage.LiveSpend
 
   @kinds ~w(implement review_round fix_pass conflict resume review)
