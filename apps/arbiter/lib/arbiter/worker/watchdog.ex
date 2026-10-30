@@ -5825,12 +5825,19 @@ defmodule Arbiter.Worker.Watchdog do
   defp train_setting(%{workspace: %{config: %{} = config}}, key) do
     case get_in(config, ["merge", key]) do
       n when is_integer(n) -> n
-      s when is_binary(s) -> with {n, ""} <- Integer.parse(s), do: n, else: (_ -> nil)
+      s when is_binary(s) -> parse_int(s)
       _ -> nil
     end
   end
 
   defp train_setting(_state, _key), do: nil
+
+  defp parse_int(s) do
+    case Integer.parse(s) do
+      {n, ""} -> n
+      _ -> nil
+    end
+  end
 
   defp parse_train_time(%DateTime{} = dt), do: dt
 
@@ -5931,17 +5938,19 @@ defmodule Arbiter.Worker.Watchdog do
          result
        )
        when is_binary(sha) do
-    with key when not is_nil(key) <- train_key(state) do
-      state = %{state | train_resumed?: true}
-      {status, _block} = train_status(state, result)
-      entry = train_entry(state, status, %{synced_from: sha})
+    case train_key(state) do
+      nil ->
+        state
 
-      case train_call(fn -> MergeTrain.resume(key, entry) end, :head) do
-        :head -> train_tick(%{state | train_role: :head}, result)
-        {:wait, head} -> %{state | train_role: {:wait, head}}
-      end
-    else
-      _ -> state
+      key ->
+        state = %{state | train_resumed?: true}
+        {status, _block} = train_status(state, result)
+        entry = train_entry(state, status, %{synced_from: sha})
+
+        case train_call(fn -> MergeTrain.resume(key, entry) end, :head) do
+          :head -> train_tick(%{state | train_role: :head}, result)
+          {:wait, head} -> %{state | train_role: {:wait, head}}
+        end
     end
   end
 
