@@ -304,7 +304,15 @@ defmodule Arbiter.NodeAgent.K8s.PodState do
       oom?: t["reason"] == "OOMKilled",
       snapshot: snapshot(status)
     }
+    |> put_message(t["message"])
   end
+
+  # What the seed said as it died (the kubelet's termination message, the tail of its log:
+  # `terminationMessagePolicy: FallbackToLogsOnError`), so the primary can name why.
+  defp put_message(info, message) when is_binary(message) and message != "",
+    do: Map.put(info, :message, String.trim(message))
+
+  defp put_message(info, _message), do: info
 
   # Only `seed` is a run-once init container; the rest are native sidecars
   # (`restartPolicy: Always`), whose non-zero exits are restarts, not failures.

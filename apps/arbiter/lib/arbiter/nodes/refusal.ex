@@ -40,7 +40,7 @@ defmodule Arbiter.Nodes.Refusal do
   alias Arbiter.Worker
   alias Arbiter.Worker.StopReason
 
-  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready unacknowledged placement_lost placement_timeout)
+  @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready unacknowledged placement_lost placement_timeout startup_failed)
 
   @type refusal :: %{reason: String.t(), detail: String.t() | nil}
 
@@ -103,6 +103,9 @@ defmodule Arbiter.Nodes.Refusal do
 
   defp phrase("placement_timeout"),
     do: "the primary's placement deadline passed before the run was placed"
+
+  defp phrase("startup_failed"),
+    do: "its pod ended while seeding, before the worker started"
 
   defp detail_suffix(%{detail: d}) when is_binary(d) and d != "", do: ": " <> d
   defp detail_suffix(_), do: ""

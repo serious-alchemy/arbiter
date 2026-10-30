@@ -18,6 +18,25 @@ defmodule Arbiter.NodeAgent.PodRuntimeHarness do
 
   def run_id, do: @run
 
+  @doc """
+  The spec overrides of a resumed run: the `config_dir` mount `ContainerSpawn.remote_spec/3`
+  builds, naming the session transcript at `path` (relative to the config dir) by size and
+  digest, for the seed to fetch through the controller.
+  """
+  def session_spec(path, bytes, sha256) do
+    %{
+      "mounts" => [
+        %{"kind" => "worktree", "path" => "/work/tree"},
+        %{
+          "kind" => "config_dir",
+          "path" => "/cfg",
+          "files" => %{"settings.json" => Base.encode64("{}")},
+          "session" => %{"path" => path, "bytes" => bytes, "sha256" => sha256}
+        }
+      ]
+    }
+  end
+
   defmodule Primary do
     @moduledoc false
     @behaviour Plug
@@ -28,6 +47,15 @@ defmodule Arbiter.NodeAgent.PodRuntimeHarness do
     def call(%{method: "GET", path_info: ["nodes", "runs", run, "seed.bundle"]} = conn, opts) do
       send(Keyword.fetch!(opts, :test), {:primary, :seed, run})
       conn |> send_file(200, Keyword.fetch!(opts, :bundle))
+    end
+
+    def call(%{method: "GET", path_info: ["nodes", "runs", run, "session"]} = conn, opts) do
+      send(Keyword.fetch!(opts, :test), {:primary, :session, run})
+
+      case Keyword.get(opts, :session) do
+        nil -> send_resp(conn, 404, ~s({"error":"This run resumes no session"}))
+        path -> conn |> put_resp_content_type("application/x-ndjson") |> send_file(200, path)
+      end
     end
 
     def call(%{method: "PUT", path_info: ["nodes", "runs", run, kind]} = conn, opts) do
@@ -102,7 +130,8 @@ defmodule Arbiter.NodeAgent.PodRuntimeHarness do
     primary =
       start_supervised!(
         {Bandit,
-         plug: {Primary, test: self(), bundle: fixture.bundle},
+         plug:
+           {Primary, test: self(), bundle: fixture.bundle, session: Map.get(fixture, :session)},
          scheme: :http,
          ip: @loopback,
          port: 0},
