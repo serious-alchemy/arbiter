@@ -105,7 +105,7 @@ defmodule Arbiter.Tasks.Create do
   end
 
   @doc "The non-blocking filing warnings for a created ticket (missing acceptance)."
-  @spec warnings(Issue.t()) :: [String.t()]
+  @spec warnings(Issue.t(), keyword()) :: [String.t()]
   def warnings(%Issue{} = issue, opts \\ []),
     do: ac_warnings(issue) ++ lint_warnings(issue, Keyword.get(opts, :lint, true) != false)
 

@@ -34,6 +34,28 @@ defmodule ArbiterCli.Cmd.CreateTest do
     refute out =~ "arb workspace config set"
   end
 
+  test "--no-lint sends no_lint: true; without it the key is absent" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "bd-007", "title" => "X"})
+       end}
+    ])
+
+    {_out, _err, 0} = capture(fn -> Create.run(["X", "--no-lint"]) end)
+    assert_received {:posted, %{"no_lint" => true}}
+
+    {_out, _err, 0} = capture(fn -> Create.run(["Y"]) end)
+    assert_received {:posted, body}
+    refute Map.has_key?(body, "no_lint")
+  end
+
   test "--parent is sent with the create; the CLI posts no edge itself (P-14)" do
     parent = self()
 
