@@ -167,6 +167,30 @@ defmodule Arbiter.Worker.MergeTrainTest do
     end
   end
 
+  describe "a head in pending" do
+    test "hands its place on past the pending cap, even with no pipeline", %{train: t} do
+      assert :head = MergeTrain.claim(@key, entry("a"), t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b"), t)
+
+      pending = entry("a", status: :ci_running, ci_phase: :pending, ci_pending_ticks: 5)
+
+      for _ <- 1..5, do: assert(:head = MergeTrain.tick(@key, pending, t))
+      assert {:wait, "b"} = MergeTrain.tick(@key, pending, t)
+    end
+
+    test "a new head SHA restarts the pending count", %{train: t} do
+      assert :head = MergeTrain.claim(@key, entry("a"), t)
+      assert {:wait, "a"} = MergeTrain.claim(@key, entry("b"), t)
+
+      p1 = entry("a", status: :ci_running, ci_phase: :pending, ci_pending_ticks: 3)
+      p2 = %{p1 | last_head_sha: "sha-2"}
+
+      for _ <- 1..3, do: assert(:head = MergeTrain.tick(@key, p1, t))
+      for _ <- 1..3, do: assert(:head = MergeTrain.tick(@key, p2, t))
+      assert {:wait, "b"} = MergeTrain.tick(@key, p2, t)
+    end
+  end
+
   describe "election order" do
     test "a green stale MR is elected ahead of a red one at equal priority", %{train: t} do
       assert :head = MergeTrain.claim(@key, entry("a"), t)
@@ -259,12 +283,30 @@ defmodule Arbiter.Worker.MergeTrainTest do
 
     test "a restarted train seats a resuming head even while forming" do
       t = start_supervised!({MergeTrain, name: nil, settle_ms: :infinity}, id: :resume)
-      running = entry("a", status: :ci_running)
+      running = entry("a", status: :ci_running, ci_phase: :running, synced_from: "a0")
 
       assert :head = MergeTrain.resume(@key, running, t)
       assert {:wait, "a"} = MergeTrain.claim(@key, entry("b", priority: 0), t)
       :ok = MergeTrain.settle_now(t)
       assert {:wait, "a"} = MergeTrain.claim(@key, entry("b", priority: 0), t)
+    end
+
+    test "a restarted train does not seat a resuming MR whose sync is not live" do
+      t = start_supervised!({MergeTrain, name: nil, settle_ms: :infinity}, id: :resume_guard)
+
+      # B synced and its pipeline runs; A (handed off earlier) polls first, with a
+      # marker whose sync the forge never applied (head still the one it started from).
+      stale = entry("a", status: :ci_running, ci_phase: :running, synced_from: "sha-a")
+      assert {:wait, :forming} = MergeTrain.resume(@key, stale, t)
+
+      # Applied (head moved on) but no pipeline running: same.
+      pending = entry("a", status: :ci_running, ci_phase: :pending, synced_from: "a0")
+      assert {:wait, :forming} = MergeTrain.resume(@key, pending, t)
+
+      # B, live, is seated and A then waits for it.
+      live = entry("b", status: :ci_running, ci_phase: :running, synced_from: "b0")
+      assert :head = MergeTrain.resume(@key, live, t)
+      assert {:wait, "b"} = MergeTrain.resume(@key, stale, t)
     end
 
     test "resume does not displace another head", %{train: t} do
