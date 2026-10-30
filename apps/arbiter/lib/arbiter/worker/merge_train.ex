@@ -16,8 +16,13 @@ defmodule Arbiter.Worker.MergeTrain do
   to its own train: the head is the best by priority then merge-ready time, keeps
   its place until it merges or leaves, and hands it on when it is parked
   (`release/3`), closed or its process dies, red or otherwise stalled for
-  `MergeHead.head_stall_grace_ticks/0` ticks, or in CI on one head SHA past
-  `MergeHead.head_ci_wait_ticks/0` ticks.
+  `MergeHead.head_stall_grace_ticks/0` ticks, reporting itself ready to merge for
+  `MergeHead.head_ready_ticks/0` ticks without merging (parked on something
+  Arbiter-internal), or *running* CI on one head SHA past
+  `MergeHead.head_ci_wait_ticks/0` ticks (a pipeline still queued does not
+  count). The last two bounds are per workspace: `merge.train_ci_wait_ms` and
+  `merge.train_ready_ticks`. At equal priority a green stale MR is elected ahead
+  of one in CI remediation (`red?`).
 
   ## Who calls what
 
@@ -38,15 +43,24 @@ defmodule Arbiter.Worker.MergeTrain do
   ## Crash and restart
 
   The state is in memory and every entry is the caller's last report. A Watchdog
-  that exits (merged, closed, crashed) is dropped by its monitor; an entry not
-  refreshed within its `ttl_ms` is dropped too. When the train process itself
+  that exits (merged, closed, stopped) is dropped by its monitor; an entry not
+  refreshed within its `ttl_ms` is dropped too. A *crashed* head whose sync or
+  pipeline is still going is the exception (bd-az0dcu): dropping it would elect
+  the next MR, whose sync starts a second pipeline beside the first. It stays the
+  head, without a pid, for `orphan_ms` (the CI-wait bound), and the restarted
+  Watchdog takes the place back with `resume/3`. A Watchdog records on its
+  ticket's lane when it first asked (`train_ready_since`, so a restart keeps the
+  order) and the head a sync started from (`train_synced_from`, so a restarted
+  Watchdog knows to `resume/3`). When the train process itself
   restarts it knows nothing, so it forms for `merge_train_settle_ms` (default
   30s, about a poll) before electing anyone: waiters answer `{:wait, :forming}`
   while every Watchdog re-registers on its next poll, then the best-ordered one
   leads rather than whichever polled first. Nothing syncs in the meantime;
   nothing is lost either, since the head is a pure function of the entries. An
-  MR whose sync was in flight before the restart is, if the target has not moved
-  since, no longer stale and merges; if it has, it competes like the others.
+  MR whose sync was in flight before the restart resumes its place the moment
+  its Watchdog restarts (even while the train is forming), so nothing else syncs
+  beside its pipeline; one without a recorded sync competes like the others, in
+  merge-ready order.
 
   Callers fail open (`Watchdog` treats an unreachable train as "you are the
   head"): the train only ever saves syncs, never gates a merge.

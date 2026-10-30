@@ -232,6 +232,21 @@ defmodule Arbiter.Worker.MergeTrainTest do
       assert :head = MergeTrain.claim(@key, entry("b"), t)
     end
 
+    test "a deliberate stop (shutdown) still hands the place on", %{train: t} do
+      {:ok, agent} = Agent.start(fn -> :ok end)
+      running = entry("a", status: :ci_running, ci_phase: :running)
+
+      assert :head = Agent.get(agent, fn _ -> MergeTrain.claim(@key, entry("a"), t) end)
+      assert :head = Agent.get(agent, fn _ -> MergeTrain.tick(@key, running, t) end)
+
+      ref = Process.monitor(agent)
+      Process.exit(agent, :shutdown)
+      assert_receive {:DOWN, ^ref, :process, ^agent, _}
+      _ = :sys.get_state(t)
+
+      assert :head = MergeTrain.claim(@key, entry("b"), t)
+    end
+
     test "a head that was not under way (behind, nothing synced) is not held", %{train: t} do
       {:ok, agent} = Agent.start(fn -> :ok end)
       assert :head = Agent.get(agent, fn _ -> MergeTrain.claim(@key, entry("a"), t) end)
