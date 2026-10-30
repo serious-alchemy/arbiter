@@ -811,10 +811,19 @@ defmodule Arbiter.Worker.WatchdogTest do
     # tests it never touched, and a fix pass edited one of them. A failure only
     # in test files outside the diff is re-run first.
     @docs_diff "diff --git a/docs/guide.md b/docs/guide.md\n--- a/docs/guide.md\n+++ b/docs/guide.md\n@@ -1 +1 @@\n-a\n+b\n"
-    @drain "apps/arbiter/test/arbiter/board/drain_test.exs"
-    @coverage "apps/arbiter/test/arbiter/reviews/coverage_test.exs"
+    # ExUnit prints app-relative paths, and the triage needs its failure block.
+    @drain "test/arbiter/board/drain_test.exs"
+    @coverage "test/arbiter/reviews/coverage_test.exs"
 
-    defp failing_in(file), do: [%{name: "mix test", summary: "", files: [file]}]
+    defp failing_in(file) do
+      [
+        %{
+          name: "mix test",
+          summary:
+            "  1) test it works (SomeTest)\n     #{file}:11\n     boom\n\n9 tests, 1 failure\n"
+        }
+      ]
+    end
 
     defp red(head),
       do: %{
@@ -877,14 +886,13 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert StubFixPassDispatcher.call_count() == 0
     end
 
-    # GitHub #1144: the triage re-runs up to the per-head budget (default 2), then
-    # the fix pass is briefed with the evidence and not to edit the untouched tests.
-    test "an untouched test failing through the whole re-run budget dispatches a briefed fix pass" do
+    # GitHub #1144 / bd-3ij7dw: an untouched test that fails the SAME way on the
+    # re-run reproduced; one re-run is all it gets, then the fix pass is briefed
+    # with the evidence and not to edit the untouched tests.
+    test "an untouched test failing again after ONE re-run dispatches a briefed fix pass" do
       StubMerger.set_failing_checks("!flk2", failing_in(@drain))
 
       StubMerger.queue_get("!flk2", [
-        red("h1"),
-        pending("h1"),
         red("h1"),
         pending("h1"),
         red("h1")
@@ -895,7 +903,7 @@ defmodule Arbiter.Worker.WatchdogTest do
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
       assert StubFixPassDispatcher.last_args().outside_diff_files == [@drain]
       assert StubFixPassDispatcher.last_args().triage =~ "unrelated_tests"
-      assert length(reruns("!flk2")) == 2
+      assert length(reruns("!flk2")) == 1
     end
 
     test "a different untouched test failing on the re-run is re-run again, within the budget" do

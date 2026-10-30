@@ -103,6 +103,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
           emit_capacity(body)
           emit_slots(body)
           emit_held(body)
+          emit_deferred(body)
           emit_entries(body)
         end
 
@@ -388,6 +389,23 @@ defmodule ArbiterCli.Cmd.Scheduler do
   end
 
   defp emit_held(_body), do: :ok
+
+  # bd-7twuru: every deferred resume and how long it has waited, so a resume
+  # stuck on a pool with no seat is visible rather than silent.
+  defp emit_deferred(%{"deferred_resumes" => [_ | _] = resumes}) do
+    IO.puts("Deferred resumes: #{length(resumes)}")
+
+    Enum.each(resumes, fn r ->
+      age = div(r["age_ms"] || 0, 1_000)
+      parked = if r["parked?"], do: "  parked (attention raised)", else: ""
+
+      IO.puts(
+        "  #{r["task_id"] || "?"}  waiting #{div(age, 60)}m#{rem(age, 60)}s  (#{r["wait"]})#{parked}"
+      )
+    end)
+  end
+
+  defp emit_deferred(_body), do: :ok
 
   defp emit_entries(body) do
     Enum.each(SchedulerState.entry_lines(body), &IO.puts("  " <> &1))
