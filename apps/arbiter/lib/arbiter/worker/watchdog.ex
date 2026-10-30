@@ -327,6 +327,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.VisualBaselines
   alias Arbiter.Workflows.CodeReview.ConsumerTrace
+  alias Arbiter.Workflows.MergeHead
   alias Arbiter.Workflows.MergeQueue.CiTriage
   alias Arbiter.Workflows.MergeQueue.KnownFlakes
 
@@ -1410,7 +1411,15 @@ defmodule Arbiter.Worker.Watchdog do
       # instead of a sync (once per head); `train_wait_logged` the head last
       # logged as waited for.
       train_role: nil,
-      train_ready_since: nil,
+      train_ready_since: parse_train_time(Keyword.get(opts, :train_ready_since)),
+      # bd-az0dcu. Both survive on the ticket's lane (`PullRequest.record_train_*`):
+      # `train_ready_since` so a restart keeps the MR's place in the order,
+      # `train_synced_from` (the head the last sync started from, nil once the
+      # place is released) so a restarted Watchdog asks for its place back
+      # (`MergeTrain.resume/3`) instead of letting the next MR sync beside the
+      # pipeline that sync started. `train_resumed?` is that ask, made once.
+      train_synced_from: normalize_sha(Keyword.get(opts, :train_synced_from)),
+      train_resumed?: false,
       train_priority: Keyword.get(opts, :train_priority),
       merge_slot: false,
       train_rerun_head: nil,
@@ -2591,6 +2600,9 @@ defmodule Arbiter.Worker.Watchdog do
       # to a review round or pages; either way it owns what happens next.
       {:stale, reviewed, head, state} ->
         PendingMerge.clear(state.task_id)
+        # bd-az0dcu: routed to a review round (or a page): no merge is coming
+        # from this MR, so it must not hold the target's sync place meanwhile.
+        state = release_sync_place(state)
         resolve_stale_reviewed_head(%{state | pending_merge_stamp: nil}, reviewed, head)
 
       # The forge has not caught up with our own push yet, so it is not yet
@@ -2636,7 +2648,11 @@ defmodule Arbiter.Worker.Watchdog do
       # entering the merge-fail page loop below.
       {:error, {:review_not_approved, _detail} = refusal} ->
         PendingMerge.clear(state.task_id)
-        route_unapproved_head_to_review(%{state | pending_merge_stamp: nil}, refusal)
+
+        route_unapproved_head_to_review(
+          release_sync_place(%{state | pending_merge_stamp: nil}),
+          refusal
+        )
 
       {:error, reason} ->
         # Merge failed (race, branch conflict, transient). Stay parked and let
@@ -3602,7 +3618,9 @@ defmodule Arbiter.Worker.Watchdog do
   # one pipeline, not one per main move) and holds: no sync, no fix pass, no
   # attempt spent.
   defp ci_sync(state, head, base, behind) do
-    case claim_sync_place(state) do
+    # `red?`: a branch in CI remediation is red, and the train elects a green
+    # stale MR ahead of it at equal priority.
+    case claim_sync_place(state, %{red?: true}) do
       {:head, state} -> do_ci_sync(state, head, base, behind)
       {:wait, state} -> {:halt, hold_ci_for_head(wait_for_head(state), head)}
     end
@@ -5593,8 +5611,9 @@ defmodule Arbiter.Worker.Watchdog do
       # Terminal for this head (AC4): the coverage answer was waited out and
       # the coordinator has been paged. Keep watching — a new head, or an
       # operator's coverage row, re-enters the decision below — but issue no
-      # merge and spend no forge call on it.
-      {:wait, state}
+      # merge and spend no forge call on it. bd-az0dcu: and no hold on the
+      # target's sync place either, which would idle every MR behind this one.
+      {:wait, release_sync_place(state)}
     else
       do_guarded_merge_decision(state)
     end
@@ -5832,7 +5851,7 @@ defmodule Arbiter.Worker.Watchdog do
 
   # Ask for the target's sync place: `{:head, state}` to go ahead and sync,
   # `{:wait, state}` to leave it to the head.
-  defp claim_sync_place(state) do
+  defp claim_sync_place(state, extra \\ %{}) do
     state = ensure_train_identity(state)
 
     case train_key(state) do
@@ -5840,7 +5859,7 @@ defmodule Arbiter.Worker.Watchdog do
         {:head, state}
 
       key ->
-        entry = train_entry(state, :behind_base)
+        entry = train_entry(state, :behind_base, extra)
 
         case train_call(fn -> MergeTrain.claim(key, entry) end, :head) do
           :head -> {:head, %{state | train_role: :head}}
@@ -5849,7 +5868,7 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  defp train_entry(state, status, extra \\ %{}) do
+  defp train_entry(state, status, extra) do
     Map.merge(
       %{
         task_id: state.task_id,
@@ -5857,15 +5876,73 @@ defmodule Arbiter.Worker.Watchdog do
         priority: state.train_priority || 2,
         opened_at: state.train_ready_since,
         last_head_sha: state.last_head_sha,
-        ttl_ms: state.interval_ms * 3 + 1_000
+        ttl_ms: state.interval_ms * 3 + 1_000,
+        ci_wait_ticks: train_ci_wait_ticks(state),
+        ready_ticks: train_ready_ticks(state),
+        orphan_ms: train_ci_wait_ticks(state) * state.interval_ms
       },
       extra
     )
   end
 
-  # The place in the order: when this MR first asked, and the task's priority.
-  defp ensure_train_identity(%{train_ready_since: nil} = state),
-    do: ensure_train_identity(%{state | train_ready_since: DateTime.utc_now()})
+  # bd-az0dcu. The hand-off bounds, per workspace: `merge.train_ci_wait_ms` (how
+  # long the head may run CI on one head SHA, queued time excluded, before the
+  # next MR takes over; default 240 polls, two hours at the 30s poll, vstim's CI
+  # queue) and `merge.train_ready_ticks` (polls a head may report itself ready
+  # to merge without merging).
+  defp train_ci_wait_ticks(state) do
+    case train_setting(state, "train_ci_wait_ms") do
+      ms when is_integer(ms) and ms > 0 ->
+        max(1, div(ms + state.interval_ms - 1, state.interval_ms))
+
+      _ ->
+        MergeHead.head_ci_wait_ticks()
+    end
+  end
+
+  defp train_ready_ticks(state) do
+    case train_setting(state, "train_ready_ticks") do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> MergeHead.head_ready_ticks()
+    end
+  end
+
+  defp train_setting(%{workspace: %{config: %{} = config}}, key) do
+    case get_in(config, ["merge", key]) do
+      n when is_integer(n) -> n
+      s when is_binary(s) -> parse_int(s)
+      _ -> nil
+    end
+  end
+
+  defp train_setting(_state, _key), do: nil
+
+  defp parse_int(s) do
+    case Integer.parse(s) do
+      {n, ""} -> n
+      _ -> nil
+    end
+  end
+
+  defp parse_train_time(%DateTime{} = dt), do: dt
+
+  defp parse_train_time(iso) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, dt, _offset} -> dt
+      _ -> nil
+    end
+  end
+
+  defp parse_train_time(_), do: nil
+
+  # The place in the order: when this MR first asked (recorded on the ticket, so
+  # a restart keeps it), and the task's priority.
+  defp ensure_train_identity(%{train_ready_since: nil} = state) do
+    since = DateTime.utc_now()
+
+    safe(fn -> PullRequest.record_train_ready_since(state.task_id, since) end)
+    ensure_train_identity(%{state | train_ready_since: since})
+  end
 
   defp ensure_train_identity(%{train_priority: nil} = state) do
     priority =
@@ -5919,7 +5996,8 @@ defmodule Arbiter.Worker.Watchdog do
           train_entry(state, status, %{
             last_block_reason: block,
             poll_failed?: Map.get(result, :poll_failed?, false),
-            last_head_sha: Map.get(result, :head_sha) || state.last_head_sha
+            last_head_sha: Map.get(result, :head_sha) || state.last_head_sha,
+            ci_phase: if(Map.get(result, :pipeline) == :pending, do: :pending, else: :running)
           })
 
         case train_call(fn -> MergeTrain.tick(key, entry) end, :head) do
@@ -5933,6 +6011,30 @@ defmodule Arbiter.Worker.Watchdog do
             )
 
             %{state | train_role: {:wait, head}}
+        end
+    end
+  end
+
+  # A Watchdog started with a sync of its own under way (`train_synced_from`
+  # on the ticket's lane): its first poll asks for the place back, so the next MR
+  # does not sync a second pipeline beside the one already running.
+  defp train_tick(
+         %{train_role: nil, train_resumed?: false, train_synced_from: sha} = state,
+         result
+       )
+       when is_binary(sha) do
+    case train_key(state) do
+      nil ->
+        state
+
+      key ->
+        state = %{state | train_resumed?: true}
+        {status, _block} = train_status(state, result)
+        entry = train_entry(state, status, %{synced_from: sha})
+
+        case train_call(fn -> MergeTrain.resume(key, entry) end, :head) do
+          :head -> train_tick(%{state | train_role: :head}, result)
+          {:wait, head} -> %{state | train_role: {:wait, head}}
         end
     end
   end
@@ -5963,7 +6065,17 @@ defmodule Arbiter.Worker.Watchdog do
       )
     end
 
-    %{state | train_role: :head}
+    persist_train_synced_from(%{state | train_role: :head}, state.last_head_sha)
+  end
+
+  # The sync under way, on the ticket's lane, for a restarted Watchdog.
+  defp persist_train_synced_from(%{train_synced_from: sha} = state, sha), do: state
+
+  defp persist_train_synced_from(state, sha) do
+    case safe(fn -> PullRequest.record_train_synced_from(state.task_id, sha) end) do
+      :ok -> %{state | train_synced_from: sha}
+      _ -> state
+    end
   end
 
   # Done with the sync place (parked, refused, current): the next MR's turn.
@@ -5974,7 +6086,7 @@ defmodule Arbiter.Worker.Watchdog do
       train_call(fn -> MergeTrain.release(key, state.task_id) end, :ok)
     end
 
-    %{state | train_role: nil, train_wait_logged: nil}
+    persist_train_synced_from(%{state | train_role: nil, train_wait_logged: nil}, nil)
   end
 
   # A head keeps its place through its merge (it is the sync under way); anyone
@@ -6216,7 +6328,10 @@ defmodule Arbiter.Worker.Watchdog do
         # coverage park (the park is only ever reached from the approved path),
         # so naming this park there would revoke its own lift on the next tick.
         {:wait,
-         lift_poll_ceiling(%{state | coverage_unknown_polls: polls, coverage_parked?: true})}
+         state
+         |> release_sync_place()
+         |> Map.merge(%{coverage_unknown_polls: polls, coverage_parked?: true})
+         |> lift_poll_ceiling()}
     end
   end
 

@@ -48,6 +48,17 @@ it. After a server restart the train forms for `merge_train_settle_ms` (default
 30s) so every Watchdog re-registers before a head is chosen. A train that
 cannot be reached fails open: the MR syncs as it did before.
 
+Hardening (bd-az0dcu): a head that reports itself ready to merge for
+`merge.train_ready_ticks` polls (default 10) without merging, or that parks on
+an undecidable coverage or a review round, hands its place on. The CI-wait
+bound is `merge.train_ci_wait_ms` (default 2h) and counts only *running* CI, not
+time queued. The time an MR first asked and the head its sync started from are
+recorded on the ticket's lane, so a restarted Watchdog keeps its order and a
+head whose Watchdog crashed (or whose server restarted) keeps its place while
+its synced pipeline runs: no second MR syncs beside it until it settles or the
+CI-wait bound passes. At equal priority a green stale MR is elected ahead of
+one in CI remediation.
+
 ## Merge path details
 
 * The sync runs in the ticket's own worktree (attached if needed) under the
