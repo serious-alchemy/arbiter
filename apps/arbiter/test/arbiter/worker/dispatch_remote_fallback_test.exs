@@ -209,7 +209,7 @@ defmodule Arbiter.Worker.DispatchRemoteFallbackTest do
   test "a placement that hangs past the placement timeout runs on the primary",
        %{ws: ws, opts: opts, log: log} do
     previous = Application.fetch_env(:arbiter, :node_placement)
-    Application.put_env(:arbiter, :node_placement, placement_timeout_ms: 300)
+    Application.put_env(:arbiter, :node_placement, placement_timeout_ms: 3_000)
 
     on_exit(fn ->
       case previous do
@@ -220,10 +220,21 @@ defmodule Arbiter.Worker.DispatchRemoteFallbackTest do
 
     inner = Keyword.fetch!(opts, :egress)
     calls = :counters.new(1, [])
+    test_pid = self()
 
+    # The budget runs from `PlacementWatch.begin`, so it also pays for the real
+    # `:session_opts` build before `:prepare`. It must outlast that on a loaded box
+    # (a 300ms budget sometimes expired there and logged `stage=session_opts`); the
+    # signal below proves the run reached `:prepare` before the hang is judged.
     egress = fn egress_opts ->
       :counters.add(calls, 1, 1)
-      if :counters.get(calls, 1) == 1, do: Process.sleep(:infinity), else: inner.(egress_opts)
+
+      if :counters.get(calls, 1) == 1 do
+        send(test_pid, :egress_hung)
+        Process.sleep(:infinity)
+      else
+        inner.(egress_opts)
+      end
     end
 
     task = ticket!(ws, "placement hangs")
@@ -233,6 +244,7 @@ defmodule Arbiter.Worker.DispatchRemoteFallbackTest do
         assert {:ok, %{claude_port: port}} =
                  Dispatch.dispatch(task.id, Keyword.put(opts, :egress, egress))
 
+        assert_received :egress_hung
         await_agent_exit(port)
         assert run_calls(log) > 0
         assert Ash.get!(Issue, task.id).state == :active
