@@ -24,8 +24,15 @@ defmodule Arbiter.Nodes.PlacementWatch do
       `placement refused` (the node's reason and detail), `placement timed out` or
       `placement failed`.
 
-  `in_flight/0` and `stuck/0` are what `GET /api/nodes` and `arb doctor` read: an attempt
-  still registered past its timeout is a placement the deadline did not end.
+  The attempt begins where the node is chosen (`watch/4`: `Worker.Dispatch`, the conflict
+  and fix passes; `ClaudeSession.start/1` for any other caller), so the deadline covers
+  building the session opts and the git credential, not only the prepare and assign steps.
+  `Arbiter.Nodes.Refusal` turns the timeout into a `placement_timeout` hold for the callers
+  that cannot fall back to the primary.
+
+  `in_flight/0`, `stuck/0` and `stuck_runs/2` are what `GET /api/nodes` and `arb doctor`
+  read: an attempt still registered past its timeout is a placement the deadline did not
+  end, and a run still `placing` past it is one whatever step it hung in.
 
   The table lives in this process (a `GenServer` under `Arbiter.Nodes.Supervisor`); it
   monitors the attempting process and drops an entry whose process died, and every
@@ -38,6 +45,7 @@ defmodule Arbiter.Nodes.PlacementWatch do
   require Logger
 
   @default_timeout_ms 30 * 60_000
+  @backstop_grace_ms 2_000
 
   defstruct [:ref, :task_id, :node, :run, :started, :timeout_ms]
 
@@ -78,7 +86,12 @@ defmodule Arbiter.Nodes.PlacementWatch do
   killed). An exception in `fun` is raised in the caller, as if it had run inline.
   """
   @spec step(t(), atom(), (-> result)) :: result | {:error, term()} when result: term()
-  def step(%__MODULE__{} = attempt, stage, fun) when is_function(fun, 0) do
+  def step(%__MODULE__{} = attempt, stage, fun) when is_function(fun, 0),
+    do: step(attempt, stage, fun, 0)
+
+  # `grace` lets the attempt-level backstop (`watch/4`) outlast the steps inside it, so a
+  # step that overruns reports its own stage first.
+  defp step(%__MODULE__{} = attempt, stage, fun, grace) do
     tracked(fn -> GenServer.cast(__MODULE__, {:update, attempt.ref, %{stage: stage}}) end)
 
     case attempt.timeout_ms do
@@ -86,7 +99,7 @@ defmodule Arbiter.Nodes.PlacementWatch do
         fun.()
 
       ms ->
-        remaining = max(attempt.started + ms - now(), 0)
+        remaining = max(attempt.started + ms - now(), 0) + grace
         run_bounded(fun, remaining, stage, ms)
     end
   end
@@ -137,6 +150,74 @@ defmodule Arbiter.Nodes.PlacementWatch do
 
         {:error, {:remote_placement_failed, {:placement_timeout, stage, ms}}}
     end
+  end
+
+  @doc """
+  Watch a whole spawn from the moment its node was chosen (bd-3jjt3p). `build` makes the
+  spawn's session opts (`{:ok, opts} | {:error, _}`) and runs as the attempt's
+  `:session_opts` step; `start` then spawns with those opts plus `placement_attempt:`
+  (so `Arbiter.Worker.ClaudeSession` adds its own steps to *this* deadline rather than
+  beginning a later one). The attempt is finished once, with the start's outcome.
+
+  A `nil` node is not a placement: `build` and `start` run unwatched. Returns the start's
+  result, or `{:build_error, reason}` when `build` failed (including its timeout,
+  `{:remote_placement_failed, {:placement_timeout, :session_opts, ms}}`), so a caller can
+  tell a step that never reached the node from a start the node refused.
+  """
+  @spec watch(
+          map() | nil,
+          String.t() | nil,
+          (-> {:ok, keyword()} | {:error, term()}),
+          (keyword() ->
+             result)
+        ) ::
+          result | {:build_error, term()}
+        when result: term()
+  def watch(nil, _task_id, build, start) do
+    case build.() do
+      {:ok, opts} -> start.(opts)
+      {:error, reason} -> {:build_error, reason}
+    end
+  end
+
+  def watch(node, task_id, build, start) do
+    attempt = begin(task_id: task_id, node: node)
+
+    case step(attempt, :session_opts, build) do
+      {:ok, opts} ->
+        opts = Keyword.put(opts, :placement_attempt, attempt)
+
+        # The whole spawn is also under one attempt-level timer: a gap between the steps
+        # (or a step nobody wrapped) can no longer hold the run in `placing` for ever.
+        result = step(attempt, :start, fn -> start.(opts) end, @backstop_grace_ms)
+
+        with {:error, {:remote_placement_failed, {:placement_timeout, :start, _}}} <- result do
+          cancel_on_node(attempt, node)
+        end
+
+        finish(attempt, result)
+
+      {:error, reason} ->
+        finish(attempt, {:error, reason})
+        {:build_error, reason}
+    end
+  end
+
+  # The backstop ended a spawn the node may already know of: tell it to drop the run.
+  defp cancel_on_node(attempt, node) do
+    run =
+      with list when is_list(list) <- tracked(fn -> GenServer.call(__MODULE__, :list) end),
+           {%__MODULE__{run: run}, _stage} <-
+             Enum.find(list, fn {a, _} -> a.ref == attempt.ref end) do
+        run
+      else
+        _ -> nil
+      end
+
+    if is_binary(run), do: Arbiter.Worker.Executor.Node.cancel_placement(node, run)
+    :ok
+  catch
+    _, _ -> :ok
   end
 
   @doc "End the attempt: unregister it and log the outcome. Returns `result` unchanged."
@@ -222,6 +303,40 @@ defmodule Arbiter.Nodes.PlacementWatch do
   @spec stuck() :: [map()]
   def stuck do
     Enum.filter(in_flight(), fn %{age_ms: age, timeout_ms: ms} -> is_integer(ms) and age >= ms end)
+  end
+
+  @doc """
+  The runs left in `placing` (bd-3jjt3p): a worker snapshot (`Arbiter.Worker.list_children/0`)
+  that is still `:starting`, was placed on a node (`meta.placed_node_id`) and has no
+  `node_id` yet, for longer than `timeout` (default `timeout_ms/0`). Read from the
+  workers, not from the attempts: a step that hung before `begin/1` (or an attempt the
+  table lost) leaves no entry in `in_flight/0` but the run still shows `placing`.
+  Entries have `in_flight/0`'s shape, with `stage: :placing`.
+  """
+  @spec stuck_runs([map()], pos_integer() | :infinity) :: [map()]
+  def stuck_runs(snapshots, timeout \\ timeout_ms())
+
+  def stuck_runs(_snapshots, :infinity), do: []
+
+  def stuck_runs(snapshots, timeout) when is_list(snapshots) do
+    now = DateTime.utc_now()
+
+    for %{state: :starting, meta: %{placed_node_id: node_id} = meta, started_at: %DateTime{} = at} =
+          snap <- snapshots,
+        is_binary(node_id),
+        not is_binary(Map.get(meta, :node_id)),
+        age = DateTime.diff(now, at, :millisecond),
+        age >= timeout do
+      %{
+        task_id: Map.get(snap, :task_id),
+        node_id: node_id,
+        node_name: nil,
+        run: Map.get(snap, :run_id),
+        stage: :placing,
+        age_ms: age,
+        timeout_ms: timeout
+      }
+    end
   end
 
   defp view({%__MODULE__{} = attempt, stage}) do

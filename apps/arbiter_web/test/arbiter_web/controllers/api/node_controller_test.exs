@@ -152,6 +152,36 @@ defmodule ArbiterWeb.Api.NodeControllerTest do
       assert stuck["timeout_ms"] == 0
     end
 
+    test "GET /api/nodes lists a run stuck in placing past the timeout even with no placement attempt" do
+      previous = Application.get_env(:arbiter, :node_placement)
+      Application.put_env(:arbiter, :node_placement, placement_timeout_ms: 0)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:arbiter, :node_placement, previous),
+          else: Application.delete_env(:arbiter, :node_placement)
+      end)
+
+      {:ok, pid} =
+        Arbiter.Worker.start(
+          task_id: "bd-placing1",
+          repo: "r",
+          meta: %{placed_node_id: "node-gone"}
+        )
+
+      on_exit(fn -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, pid) end)
+
+      body = json_response(get(operator_conn(), "/api/nodes"), 200)
+
+      assert %{"stuck" => stuck} = body["placements"]
+
+      assert %{"stage" => "placing", "node_id" => "node-gone"} =
+               entry =
+               Enum.find(stuck, &(&1["task_id"] == "bd-placing1"))
+
+      assert entry["age_ms"] >= 0
+    end
+
     test "GET /api/nodes/:ref finds by name or id; 404 otherwise" do
       node = enroll!("alpha")
 

@@ -194,6 +194,25 @@ defmodule Arbiter.Tasks.PullRequest do
     update_lane(task_id, %{"auto_resumes" => count})
   end
 
+  @doc """
+  Record when the ticket's MR first asked the merge train for a sync place
+  (bd-az0dcu), so a restarted Watchdog keeps its place in the election order.
+  """
+  @spec record_train_ready_since(String.t(), DateTime.t()) :: :ok | {:error, term()}
+  def record_train_ready_since(task_id, %DateTime{} = since) when is_binary(task_id) do
+    update_lane(task_id, %{"train_ready_since" => DateTime.to_iso8601(since)})
+  end
+
+  @doc """
+  Record the head the ticket's MR was last synced from (`nil` once it has left
+  the train's sync place), so a restarted Watchdog asks for its place back
+  while that sync's pipeline runs (bd-az0dcu).
+  """
+  @spec record_train_synced_from(String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def record_train_synced_from(task_id, sha) when is_binary(task_id) do
+    update_lane(task_id, %{"train_synced_from" => sha})
+  end
+
   defp update_lane(task_id, changes) do
     with {:ok, issue} <- Ash.get(Issue, task_id),
          lane = Map.merge(issue.merge_watch || %{}, changes),
@@ -330,7 +349,9 @@ defmodule Arbiter.Tasks.PullRequest do
       via_review_gate: via_review_gate,
       local_head_sha: Map.get(lane, "local_head_sha"),
       reviewed_sha: Map.get(lane, "reviewed_sha"),
-      auto_resumes: Map.get(lane, "auto_resumes")
+      auto_resumes: Map.get(lane, "auto_resumes"),
+      train_ready_since: Map.get(lane, "train_ready_since"),
+      train_synced_from: Map.get(lane, "train_synced_from")
     ]
     |> put_opt(:interval_ms, integer(lane, "interval_ms"))
     |> put_opt(:initial_delay_ms, integer(lane, "initial_delay_ms"))
