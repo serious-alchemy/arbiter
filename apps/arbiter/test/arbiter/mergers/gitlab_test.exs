@@ -1290,6 +1290,36 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert diff =~ "+b"
     end
 
+    test "an overflowed /changes is an error when the caller asks for a complete diff" do
+      body = %{
+        "overflow" => true,
+        "changes" => [
+          %{"old_path" => "a.ex", "new_path" => "a.ex", "diff" => "@@ -1 +1 @@\n-a\n+b\n"}
+        ]
+      }
+
+      stub(fn conn -> conn |> Plug.Conn.put_status(200) |> Req.Test.json(body) end)
+
+      assert {:error, :diff_overflow} = Gitlab.get_diff(@ref, %{complete: true})
+      # Every other caller keeps the partial diff it always got.
+      assert {:ok, diff} = Gitlab.get_diff(@ref, %{})
+      assert diff =~ "+b"
+    end
+
+    test "a non-overflowed /changes is returned whole for a complete-diff caller" do
+      body = %{
+        "overflow" => false,
+        "changes" => [
+          %{"old_path" => "a.ex", "new_path" => "a.ex", "diff" => "@@ -1 +1 @@\n-a\n+b\n"}
+        ]
+      }
+
+      stub(fn conn -> conn |> Plug.Conn.put_status(200) |> Req.Test.json(body) end)
+
+      assert {:ok, diff} = Gitlab.get_diff(@ref, %{complete: true})
+      assert diff =~ "+b"
+    end
+
     test "with a {base, head} range, compares the two refs instead" do
       stub(fn conn ->
         assert conn.method == "GET"
@@ -1839,6 +1869,73 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:ok, [check]} = Gitlab.failing_check_logs(@ref)
       assert check.failure_reason == "runner_system_failure"
       assert check.status == "failed"
+    end
+
+    defp trace_stub(pipelines, jobs, trace) do
+      stub(fn conn ->
+        case conn.request_path do
+          @pipelines_path ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pipelines)
+
+          "/api/v4/projects/12345/pipelines/" <> _ ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(jobs)
+
+          @trace_path ->
+            conn |> Plug.Conn.put_status(200) |> Plug.Conn.resp(200, trace)
+        end
+      end)
+    end
+
+    test "flags an excerpt that dropped failure blocks as truncated (bd-3ij7dw)" do
+      block = fn n ->
+        ["  #{n}) test t#{n} (BigTest)", "     test/big_#{n}_test.exs:#{n}", "     boom"] ++
+          for(i <- 1..25, do: "     detail #{i} of #{n}") ++ [""]
+      end
+
+      big = Enum.join(Enum.flat_map(1..40, block), "\n")
+      jobs = [%{"id" => @job_id, "name" => "rspec", "status" => "failed"}]
+      pipelines = [%{"id" => @pipeline_id, "status" => "failed", "sha" => "h1"}]
+
+      trace_stub(pipelines, jobs, big)
+      assert {:ok, [%{truncated: true}]} = Gitlab.failing_check_logs(@ref)
+
+      trace_stub(pipelines, jobs, "  1) test a (ATest)\n     test/a_test.exs:3\n     boom\n")
+      assert {:ok, [%{truncated: false}]} = Gitlab.failing_check_logs(@ref)
+    end
+
+    test "only the pipeline on the MR's head sha is read; an older head's red is not (bd-3ij7dw)" do
+      jobs = [%{"id" => @job_id, "name" => "rspec", "status" => "failed"}]
+
+      # Newest pipeline (current head h2) is running; the failed one is for the old head h1.
+      pipelines = [
+        %{"id" => 100, "status" => "running", "sha" => "h2"},
+        %{"id" => @pipeline_id, "status" => "failed", "sha" => "h1"}
+      ]
+
+      trace_stub(pipelines, jobs, "boom")
+      assert {:ok, []} = Gitlab.failing_check_logs(@ref)
+    end
+
+    test "a failed pipeline on the head is found past newer pipelines of the same head" do
+      jobs = [%{"id" => @job_id, "name" => "rspec", "status" => "failed"}]
+
+      pipelines = [
+        %{"id" => 101, "status" => "success", "sha" => "h2"},
+        %{"id" => @pipeline_id, "status" => "failed", "sha" => "h2"}
+      ]
+
+      trace_stub(pipelines, jobs, "boom")
+      assert {:ok, [%{name: "rspec"}]} = Gitlab.failing_check_logs(@ref)
+    end
+
+    test "jobs allowed to fail are not failing checks (bd-3ij7dw)" do
+      jobs = [
+        %{"id" => @job_id, "name" => "rspec", "status" => "failed", "allow_failure" => false},
+        %{"id" => 56, "name" => "lint-soft", "status" => "failed", "allow_failure" => true}
+      ]
+
+      trace_stub([%{"id" => @pipeline_id, "status" => "failed", "sha" => "h1"}], jobs, "boom")
+      assert {:ok, [%{name: "rspec"}]} = Gitlab.failing_check_logs(@ref)
     end
 
     test "returns {:ok, []} when no pipelines exist" do
