@@ -181,6 +181,7 @@ spec:
         privileged: false
         procMount: Default
         readOnlyRootFilesystem: true
+      terminationMessagePolicy: FallbackToLogsOnError
       volumeMounts:
         - mountPath: /arb/work
           name: work

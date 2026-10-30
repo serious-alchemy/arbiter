@@ -17,7 +17,7 @@ defmodule Arbiter.Nodes.Refusal do
   `unacknowledged` (the controller never showed the run in its heartbeats within the ack
   budget: unreachable, or the request was lost) and `placement_lost` (the controller
   reconnected without the run, i.e. it restarted). A pod stuck Pending past the primary's
-  budget is reported as `unschedulable`, with the scheduler's message as the detail.
+  budget is reported as `unschedulable`, with the scheduler's message as the detail. A pod that ends before its worker ever ran (the seed failed, bd-5xl6gk) is `startup_failed`, with the seed's last words as the detail.
 
   `Arbiter.Worker.Dispatch` sends such a spawn error here. `hold/4`
 
