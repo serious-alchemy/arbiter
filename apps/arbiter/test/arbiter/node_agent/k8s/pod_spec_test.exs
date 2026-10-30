@@ -767,6 +767,10 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       assert String.contains?(script, "step 0")
     end
 
+    test "seed reports its last log lines as the termination message when it fails" do
+      assert container(build!(), "seed")["terminationMessagePolicy"] == "FallbackToLogsOnError"
+    end
+
     test "the boot nonce is only on seed" do
       pod = build!()
       refute inspect(worker(pod)) =~ config().boot_nonce

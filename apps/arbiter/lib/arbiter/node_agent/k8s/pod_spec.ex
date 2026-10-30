@@ -707,6 +707,8 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
       "image" => run.image,
       "imagePullPolicy" => "IfNotPresent",
       "command" => ["sh", "-c", PodScripts.seed()] |> escape(),
+      # A failed seed says why in its exit (`PodState`), not only in a pod log nobody reads.
+      "terminationMessagePolicy" => "FallbackToLogsOnError",
       "env" =>
         env_list(
           %{

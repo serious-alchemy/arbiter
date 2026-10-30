@@ -453,6 +453,26 @@ defmodule Arbiter.Nodes.SessionClusterTest do
       assert detail =~ "restarted"
     end
 
+    test "a pod that dies while seeding refuses the placement at once, not after the prepare budget",
+         %{node: node} do
+      {pid, _advance} = attach_timed(node, cluster_hello())
+      task = assign(pid, "r1")
+
+      Session.node_event(pid, "exit", %{
+        "run" => "r1",
+        "reason" => "init_failed",
+        "status" => 75,
+        "detail" => "arbiter seed: the session transcript was not served (status 404)",
+        "size" => 0
+      })
+
+      assert {:error, {:refused, "startup_failed", detail}} = Task.await(task, 1_000)
+      assert detail =~ "init_failed"
+      assert detail =~ "session transcript was not served"
+      assert_receive {:node_session, {:push, "exit_ack", %{"run" => "r1"}}}
+      refute Session.run_live?(pid, "r1")
+    end
+
     test "a machine node is not subject to the cluster watchdogs", %{node: node} do
       {pid, advance} = attach_timed(node, hello())
       task = assign(pid, "r1")
