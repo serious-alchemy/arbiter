@@ -325,7 +325,8 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       _b = watch("b", ws)
 
       wait_until(fn -> syncs("b") == 1 end)
-      wait_until(fn -> role(a) == {:wait, "b"} end)
+      # a was the head (it synced); its parked sync released the place for b.
+      wait_until(fn -> role(a) == nil end)
       assert syncs("a") == 1
     end
 
@@ -822,7 +823,7 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       forget_train()
 
       a2 = restart(a, ws)
-      wait_until(fn -> role(a2) != nil end)
+      wait_until(fn -> :sys.get_state(a2).poll_count >= 2 end)
       refute role(a2) == :head
 
       b2 = restart(b, ws)
