@@ -19,6 +19,9 @@ defmodule Arbiter.Tasks.Utf8TextBackfill do
 
   @doc "Options: `:apply?` (default `false`, dry-run)."
   @spec backfill(keyword()) :: report()
+  # Interpolated names come only from the compile-time `@columns` literal,
+  # never user input.
+  # sobelow_skip ["SQL.Query"]
   def backfill(opts \\ []) do
     apply? = Keyword.get(opts, :apply?, false)
 
