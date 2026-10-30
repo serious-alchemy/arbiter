@@ -30,6 +30,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
     issue
     |> data()
     |> Map.put(:estimate, estimate)
+    |> Map.put(:spend, Map.get(assigns, :spend))
     |> Map.put(:epic_rollup, epic_rollup)
     |> Map.put(:dependencies, rendered_deps)
     |> put_lifecycle(Map.get(assigns, :lifecycle))
