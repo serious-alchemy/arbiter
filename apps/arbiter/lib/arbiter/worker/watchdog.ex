@@ -307,6 +307,7 @@ defmodule Arbiter.Worker.Watchdog do
   require Logger
 
   alias Arbiter.Mergers
+  alias Arbiter.Mergers.CILogExcerpt
   alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Mergers.PendingMerge
   alias Arbiter.ReviewGate.BaselineCarry
@@ -3698,8 +3699,8 @@ defmodule Arbiter.Worker.Watchdog do
   defp resolve_ci_failed_by_fix(state, head) do
     state = note_ruling(state, "ci_failed", head)
     checks = safe_failing_checks(state)
-    triage = CiTriage.classify(checks, pr_changed_files(state))
-    state = %{state | last_triage: %{head: head, result: triage}}
+    triage = CiTriage.classify(with_full_logs(checks), pr_changed_files(state))
+    state = hydrate_triage_rerun(%{state | last_triage: %{head: head, result: triage}}, head)
 
     case flake_step(state, checks, head, triage) do
       :await_rerun -> reschedule(%{state | last_block_reason: :ci_failed})
@@ -3817,8 +3818,10 @@ defmodule Arbiter.Worker.Watchdog do
       %{head: ^head, count: spent} when spent >= state.ci_triage_budget ->
         {:fix, untouched_tests(triage)}
 
-      %{head: ^head, count: spent} ->
-        {:triage_rerun, spent}
+      %{head: ^head} = rerun ->
+        if repeat_failure?(rerun, triage),
+          do: {:fix, untouched_tests(triage)},
+          else: {:triage_rerun, rerun.count}
 
       _ when state.ci_triage_budget > 0 ->
         {:triage_rerun, 0}
@@ -3827,6 +3830,46 @@ defmodule Arbiter.Worker.Watchdog do
         {:fix, untouched_tests(triage)}
     end
   end
+
+  # bd-3ij7dw: the same untouched failing test set on consecutive attempts of one
+  # head reproduced; a second re-run would only re-roll the dice until a lucky
+  # pass merges. Only a DIFFERENT set (a genuine flake moving around) may use
+  # the rest of the budget. Infra has no test set and keeps the whole budget.
+  defp repeat_failure?(%{set: set}, %{class: :unrelated_tests} = triage) when is_list(set),
+    do: triage_signature(triage) == set
+
+  defp repeat_failure?(_rerun, _triage), do: false
+
+  # The failing test files of an `:unrelated_tests` triage, sorted: the "failing
+  # set" two attempts are compared by. `nil` for any other class.
+  defp triage_signature(%{class: :unrelated_tests, evidence: evidence}),
+    do:
+      evidence
+      |> Enum.filter(&(&1.verdict == :unrelated_test))
+      |> Enum.flat_map(& &1.files)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+  defp triage_signature(_triage), do: nil
+
+  # A restarted Watchdog starts with no memory of the re-runs a head has had;
+  # without this a restart would refresh the budget (for a different job set
+  # too). The persisted record is for the newest head that was re-run; the
+  # re-run it counts was made long enough ago to have been seen (or lost).
+  defp hydrate_triage_rerun(%{ci_triage_rerun: %{head: head}} = state, head), do: state
+
+  defp hydrate_triage_rerun(state, head) when is_binary(head) do
+    case CiTriageLog.load_rerun(state.task_id, head) do
+      %{count: count, set: set} ->
+        rerun = %{head: head, count: count, set: set, poll: state.poll_count, seen_pending: true}
+        %{state | ci_triage_rerun: rerun}
+
+      nil ->
+        state
+    end
+  end
+
+  defp hydrate_triage_rerun(state, _head), do: state
 
   # `:needs_agent` (touches the diff, unclassifiable) and `:target_red` (held
   # before this point; reaching here means the hold cleared).
@@ -3936,6 +3979,9 @@ defmodule Arbiter.Worker.Watchdog do
           checks
         )
 
+        set = triage_signature(triage)
+        safe(fn -> CiTriageLog.save_rerun(state.task_id, head, spent + 1, set) end)
+
         state =
           record_triage(
             state,
@@ -3949,6 +3995,7 @@ defmodule Arbiter.Worker.Watchdog do
             ci_triage_rerun: %{
               head: head,
               count: spent + 1,
+              set: set,
               poll: state.poll_count,
               seen_pending: false
             }
@@ -3991,6 +4038,17 @@ defmodule Arbiter.Worker.Watchdog do
        })
        when class in [:infra, :unrelated_tests] and spent >= budget,
        do: "re-run budget (#{budget}) spent and the head is still red; dispatching a fix pass"
+
+  defp fix_pass_action(
+         %{ci_triage_rerun: %{count: spent} = rerun},
+         %{class: :unrelated_tests} = triage
+       )
+       when spent > 0 do
+    if repeat_failure?(rerun, triage),
+      do: "the same failing tests reproduced after a re-run; dispatching a fix pass",
+      else:
+        "re-run not possible (merge.ci.no_rerun_jobs, a repeat failure or a refused re-run); dispatching a fix pass"
+  end
 
   defp fix_pass_action(_state, %{class: class}) when class in [:infra, :unrelated_tests],
     do:
@@ -4221,12 +4279,18 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp note_triage_rerun_pending(state, _result), do: state
 
-  # The PR's changed files, or `:unknown` when the adapter can't produce a diff.
+  # The PR's changed files, or `:unknown` when the adapter can't produce a
+  # complete diff: an error, an empty body or file list (a PR always changes
+  # something), or a forge that truncated it (`complete: true` asks the adapter
+  # to error on an overflowed diff instead of returning the part it has).
   defp pr_changed_files(%{adapter: adapter, mr_ref: mr_ref}) do
     if function_exported?(adapter, :get_diff, 2) do
-      case adapter.get_diff(mr_ref, %{}) do
+      case adapter.get_diff(mr_ref, %{complete: true}) do
         {:ok, diff} when is_binary(diff) ->
-          diff |> ConsumerTrace.changed_files() |> MapSet.to_list()
+          case diff |> ConsumerTrace.changed_files() |> MapSet.to_list() do
+            [] -> :unknown
+            files -> files
+          end
 
         _ ->
           :unknown
@@ -4239,6 +4303,28 @@ defmodule Arbiter.Worker.Watchdog do
   catch
     :exit, _ -> :unknown
   end
+
+  # A check whose excerpt was cut short (`truncated: true`) is re-read from the
+  # full log the adapter saved (`log_path`), so the triage never classifies from
+  # a partial view. Without a readable log it stays truncated, which the triage
+  # treats as unknown.
+  @full_log_limit 2_000_000
+  @full_log_max_bytes 64 * 1024 * 1024
+
+  defp with_full_logs(checks) when is_list(checks), do: Enum.map(checks, &with_full_log/1)
+  defp with_full_logs(checks), do: checks
+
+  defp with_full_log(%{truncated: true, log_path: path} = check)
+       when is_binary(path) and path != "" do
+    with {:ok, %File.Stat{size: size}} when size <= @full_log_max_bytes <- File.stat(path),
+         {:ok, log} <- File.read(path) do
+      Map.merge(check, %{summary: CILogExcerpt.extract(log, @full_log_limit), truncated: false})
+    else
+      _ -> check
+    end
+  end
+
+  defp with_full_log(check), do: check
 
   defp safe_rerun_ci(%{adapter: adapter, mr_ref: mr_ref}) do
     if function_exported?(adapter, :rerun_ci, 2),

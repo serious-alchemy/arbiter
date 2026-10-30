@@ -19,7 +19,9 @@ defmodule Arbiter.Worker.WatchdogCiTriageTest do
 
   @docs_diff "diff --git a/docs/guide.md b/docs/guide.md\n--- a/docs/guide.md\n+++ b/docs/guide.md\n@@ -1 +1 @@\n-a\n+b\n"
   @lib_diff "diff --git a/apps/arbiter/lib/arbiter/board/drain.ex b/apps/arbiter/lib/arbiter/board/drain.ex\n--- a/apps/arbiter/lib/arbiter/board/drain.ex\n+++ b/apps/arbiter/lib/arbiter/board/drain.ex\n@@ -1 +1 @@\n-a\n+b\n"
-  @drain "apps/arbiter/test/arbiter/board/drain_test.exs"
+  # ExUnit prints app-relative paths.
+  @drain "test/arbiter/board/drain_test.exs"
+  @coverage "test/arbiter/reviews/coverage_test.exs"
 
   setup do
     StubMerger.reset()
@@ -45,8 +47,13 @@ defmodule Arbiter.Worker.WatchdogCiTriageTest do
   defp runner_failure(name \\ "rspec"),
     do: [%{name: name, summary: "", failure_reason: "runner_system_failure", url: nil}]
 
-  defp untouched_test(name \\ "mix test"),
-    do: [%{name: name, summary: "", conclusion: "failure", files: [@drain]}]
+  defp exunit(file),
+    do:
+      "  1) test it works (SomeTest)\n     #{file}:11\n     Assertion with == failed\n\n" <>
+        "Finished in 1.2 seconds\n9 tests, 1 failure\n"
+
+  defp untouched_test(name \\ "mix test", file \\ @drain),
+    do: [%{name: name, summary: exunit(file), conclusion: "failure"}]
 
   defp red(head),
     do: %{
@@ -155,14 +162,12 @@ defmodule Arbiter.Worker.WatchdogCiTriageTest do
   end
 
   describe "unrelated tests" do
-    test "re-runs up to the budget, then dispatches a fix pass" do
+    test "the same failing set on consecutive attempts goes to a fix pass after ONE re-run" do
       ws = workspace()
       t = task(ws)
       StubMerger.set_failing_checks("!tu1", untouched_test())
 
       StubMerger.queue_get("!tu1", [
-        red("h1"),
-        pending("h1"),
         red("h1"),
         pending("h1"),
         red("h1")
@@ -171,11 +176,32 @@ defmodule Arbiter.Worker.WatchdogCiTriageTest do
       start(t, ws, "!tu1")
 
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
-      assert length(reruns("!tu1")) == 2
+      assert length(reruns("!tu1")) == 1
       assert StubFixPassDispatcher.last_args().triage =~ "unrelated_tests"
       assert StubFixPassDispatcher.last_args().outside_diff_files == [@drain]
       assert notes(t) =~ "unrelated_tests"
       assert notes(t) =~ "drain_test.exs"
+    end
+
+    test "a different failing set may use the second re-run, then the budget is spent" do
+      ws = workspace()
+      t = task(ws)
+      StubMerger.set_failing_checks("!tu4", untouched_test())
+      StubMerger.queue_get("!tu4", [red("h1"), pending("h1")])
+
+      start(t, ws, "!tu4")
+      wait_until(fn -> length(reruns("!tu4")) == 1 end)
+
+      StubMerger.set_failing_checks("!tu4", untouched_test("mix test", @coverage))
+      StubMerger.queue_get("!tu4", [pending("h1"), red("h1"), pending("h1")])
+      wait_until(fn -> length(reruns("!tu4")) == 2 end)
+      assert StubFixPassDispatcher.call_count() == 0
+
+      # The 2nd re-run ends red on yet another set: the budget (2) is spent.
+      StubMerger.set_failing_checks("!tu4", untouched_test("mix test", "test/arbiter/x_test.exs"))
+      StubMerger.queue_get("!tu4", [pending("h1"), red("h1")])
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert length(reruns("!tu4")) == 2
     end
 
     test "a new head gets a fresh budget" do
@@ -183,16 +209,21 @@ defmodule Arbiter.Worker.WatchdogCiTriageTest do
       t = task(ws)
       StubMerger.set_failing_checks("!tu2", untouched_test())
 
+      StubMerger.queue_get("!tu2", [red("h1"), pending("h1")])
+
+      start(t, ws, "!tu2")
+      wait_until(fn -> length(reruns("!tu2")) == 1 end)
+
+      # h1 spends its second re-run on a different failing set; h2 starts over.
+      StubMerger.set_failing_checks("!tu2", untouched_test("mix test", @coverage))
+
       StubMerger.queue_get("!tu2", [
-        red("h1"),
         pending("h1"),
         red("h1"),
         pending("h1"),
         red("h2"),
         pending("h2")
       ])
-
-      start(t, ws, "!tu2")
 
       wait_until(fn -> length(reruns("!tu2")) == 3 end)
       assert StubFixPassDispatcher.call_count() == 0
@@ -286,6 +317,127 @@ defmodule Arbiter.Worker.WatchdogCiTriageTest do
 
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
       assert reruns("!tn5") == []
+    end
+  end
+
+  describe "fail-safe inputs (bd-3ij7dw)" do
+    test "an empty diff is unreadable: untouched-looking tests are not waved through" do
+      ws = workspace()
+      t = task(ws)
+      StubMerger.set_failing_checks("!fs1", untouched_test())
+      StubMerger.queue_get("!fs1", [red("h1")])
+
+      start(t, ws, "!fs1", diff: "")
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert reruns("!fs1") == []
+    end
+
+    test "a diff body with no changed file is unreadable too" do
+      ws = workspace()
+      t = task(ws)
+      StubMerger.set_failing_checks("!fs2", untouched_test())
+      StubMerger.queue_get("!fs2", [red("h1")])
+
+      start(t, ws, "!fs2", diff: "\n")
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert reruns("!fs2") == []
+    end
+
+    test "a diff touching mix.lock makes an untouched test failure a fix pass, not a re-run" do
+      ws = workspace()
+      t = task(ws)
+      StubMerger.set_failing_checks("!fs3", untouched_test())
+      StubMerger.queue_get("!fs3", [red("h1")])
+
+      lock =
+        "diff --git a/mix.lock b/mix.lock\n--- a/mix.lock\n+++ b/mix.lock\n@@ -1 +1 @@\n-a\n+b\n"
+
+      start(t, ws, "!fs3", diff: lock)
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert reruns("!fs3") == []
+    end
+
+    test "a truncated excerpt with no saved log is unknown: a fix pass, not a re-run" do
+      ws = workspace()
+      t = task(ws)
+
+      StubMerger.set_failing_checks("!fs4", [
+        %{name: "mix test", summary: exunit(@drain), truncated: true}
+      ])
+
+      StubMerger.queue_get("!fs4", [red("h1")])
+
+      start(t, ws, "!fs4")
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert reruns("!fs4") == []
+    end
+
+    test "a truncated excerpt is classified from the full saved log" do
+      ws = workspace()
+      t = task(ws)
+      log = Path.join(System.tmp_dir!(), "ci-full-#{System.unique_integer([:positive])}.log")
+      File.write!(log, "2026-01-01T00:00:00.000Z " <> exunit(@drain))
+      on_exit(fn -> File.rm(log) end)
+
+      StubMerger.set_failing_checks("!fs5", [
+        %{name: "mix test", summary: "…", truncated: true, log_path: log}
+      ])
+
+      StubMerger.queue_get("!fs5", [red("h1"), pending("h1")])
+
+      start(t, ws, "!fs5")
+
+      wait_until(fn -> length(reruns("!fs5")) == 1 end)
+      assert StubFixPassDispatcher.call_count() == 0
+    end
+
+    test "the full saved log can show the failure touches the diff" do
+      ws = workspace()
+      t = task(ws)
+      log = Path.join(System.tmp_dir!(), "ci-full-#{System.unique_integer([:positive])}.log")
+      File.write!(log, exunit(@drain))
+      on_exit(fn -> File.rm(log) end)
+
+      StubMerger.set_failing_checks("!fs6", [
+        %{name: "mix test", summary: "…", truncated: true, log_path: log}
+      ])
+
+      StubMerger.queue_get("!fs6", [red("h1")])
+
+      start(t, ws, "!fs6", diff: @lib_diff)
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert reruns("!fs6") == []
+    end
+  end
+
+  describe "the per-head re-run count survives a restart (bd-3ij7dw)" do
+    test "a new Watchdog for the same task and head does not get a fresh budget" do
+      ws = workspace()
+      t = task(ws)
+      StubMerger.set_failing_checks("!pr1", untouched_test("mix test", @drain))
+      StubMerger.queue_get("!pr1", [red("h1"), pending("h1")])
+
+      pid = start(t, ws, "!pr1")
+      wait_until(fn -> length(reruns("!pr1")) == 1 end)
+      wait_until(fn -> StubMerger.get_count("!pr1") >= 2 end)
+      GenServer.stop(pid, :normal)
+
+      # Restarted: the head is red again on a different set. One re-run was
+      # spent, so exactly one is left; a third would be a refreshed budget.
+      StubMerger.set_failing_checks("!pr1", untouched_test("mix test", @coverage))
+      StubMerger.queue_get("!pr1", [red("h1"), pending("h1")])
+      start(t, ws, "!pr1")
+      wait_until(fn -> length(reruns("!pr1")) == 2 end)
+
+      StubMerger.set_failing_checks("!pr1", untouched_test("mix test", "test/arbiter/z_test.exs"))
+      StubMerger.queue_get("!pr1", [pending("h1"), red("h1")])
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert length(reruns("!pr1")) == 2
     end
   end
 
