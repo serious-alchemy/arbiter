@@ -125,13 +125,13 @@ defmodule Arbiter.Workers.PrepushSteps do
   def to_map(%PrepushStep{} = s) do
     %{
       attempt: s.attempt,
-      name: s.name,
-      cmd: s.cmd,
+      name: Arbiter.Text.scrub(s.name),
+      cmd: Arbiter.Text.scrub(s.cmd),
       scope: s.scope,
       status: to_string(s.status),
       exit_status: s.exit_status,
       duration_ms: s.duration_ms,
-      output: s.output,
+      output: Arbiter.Text.scrub(s.output),
       log_path: existing_log_path(s)
     }
   end

@@ -84,11 +84,13 @@ defmodule Arbiter.Worker.ReviewMrBrief do
   defp blank_to(v, _d) when is_binary(v), do: v
   defp blank_to(_v, d), do: d
 
-  defp head(s, max) when byte_size(s) > max, do: binary_part(s, 0, max) <> "\n[...truncated]"
+  defp head(s, max) when byte_size(s) > max,
+    do: Arbiter.Text.head_bytes(s, max) <> "\n[...truncated]"
+
   defp head(s, _max), do: s
 
   defp tail(s, max) when byte_size(s) > max,
-    do: "[...truncated]\n" <> binary_part(s, byte_size(s) - max, max)
+    do: "[...truncated]\n" <> Arbiter.Text.tail_bytes(s, max)
 
   defp tail(s, _max), do: s
 
