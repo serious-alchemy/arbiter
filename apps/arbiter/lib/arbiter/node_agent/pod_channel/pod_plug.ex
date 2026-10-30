@@ -55,11 +55,8 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
       {_, ["boot"]} ->
         json(conn, 405, %{error: "method_not_allowed"})
 
-      {"GET", ["seed.bundle"]} ->
-        control(conn, opts, &seed/3)
-
-      {"GET", ["session"]} ->
-        control(conn, opts, &session/3)
+      {"GET", [route]} when route in ["seed.bundle", "session"] ->
+        control(conn, opts, &download(&1, &2, &3, route))
 
       {"PUT", ["checkpoint"]} ->
         control(conn, opts, &upload(&1, &2, &3, :checkpoint))
@@ -132,6 +129,9 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
         end
     end
   end
+
+  defp download(conn, opts, run, "seed.bundle"), do: seed(conn, opts, run)
+  defp download(conn, opts, run, "session"), do: session(conn, opts, run)
 
   defp seed(conn, opts, run) do
     conn = fetch_query_params(conn)

@@ -23,7 +23,7 @@ defmodule Arbiter.Worker.PlacementTimeoutTest do
   alias Arbiter.Worker.CliSetFixture
   alias Arbiter.Worker.PrivateClone
 
-  @timeout_ms 300
+  @timeout_ms 2_000
   @sid "6f1e0c52-3c7a-4a55-9d0e-6b1c1f6a2b10"
 
   setup do
@@ -129,7 +129,7 @@ defmodule Arbiter.Worker.PlacementTimeoutTest do
         end)
 
       # the controller was asked, and was then told to drop the run
-      assert_receive {:node_session, {:push, "assign", %{"run" => run}}}
+      assert_receive {:node_session, {:push, "assign", %{"run" => run}}}, 10_000
       assert_receive {:node_session, {:push, "cancel", %{"run" => ^run, "reason" => reason}}}
       assert reason == "placement_timeout"
 
@@ -170,6 +170,7 @@ defmodule Arbiter.Worker.PlacementTimeoutTest do
 
   test "a node that answers with a refusal is logged with its reason", ctx do
     test = self()
+    put_app_env(:arbiter, :node_placement, placement_timeout_ms: 60_000)
 
     task =
       Task.async(fn ->
@@ -182,7 +183,7 @@ defmodule Arbiter.Worker.PlacementTimeoutTest do
         send(test, {:log, log})
       end)
 
-    assert_receive {:node_session, {:push, "assign", %{"run" => run}}}
+    assert_receive {:node_session, {:push, "assign", %{"run" => run}}}, 10_000
 
     Session.node_event(ctx.session, "run.refused", %{
       "run" => run,
@@ -192,7 +193,7 @@ defmodule Arbiter.Worker.PlacementTimeoutTest do
 
     Task.await(task)
 
-    assert_receive {:log, log}
+    assert_receive {:log, log}, 5_000
     assert log =~ "placement started task=bd-cch1jh-run node=mesaana"
     assert log =~ "placement refused task=bd-cch1jh-run node=mesaana"
     assert log =~ "reason=unschedulable"

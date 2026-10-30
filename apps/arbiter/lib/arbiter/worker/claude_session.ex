@@ -97,11 +97,11 @@ defmodule Arbiter.Worker.ClaudeSession do
   alias Arbiter.Agents.Qwen.RetryHold
   alias Arbiter.Guardrails.Events, as: GuardrailEvents
   alias Arbiter.Guardrails.Scan
+  alias Arbiter.Nodes.PlacementWatch
   alias Arbiter.Worker
   alias Arbiter.Worker.CliSet
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.GitCredential
-  alias Arbiter.Nodes.PlacementWatch
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.RunTmp
   alias Arbiter.Worker.StepSummary
