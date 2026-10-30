@@ -148,6 +148,17 @@ defmodule Arbiter.Worker.MergeTrain do
   @spec view(key(), GenServer.server()) :: %{head: String.t() | nil, waiting: [String.t()]}
   def view(key, server \\ __MODULE__), do: GenServer.call(server, {:view, key})
 
+  # A resuming Watchdog is seated only on a live sync: it started one (`synced_from`
+  # is the head that sync started from), the forge applied it (the MR's head has
+  # moved on) and the pipeline that follows is running. A sync that never applied,
+  # or started no pipeline (pending), takes the normal election instead.
+  defp live_sync?(synced_from, entry) do
+    head = Map.get(entry, :last_head_sha)
+
+    is_binary(synced_from) and is_binary(head) and head != synced_from and
+      Map.get(entry, :status) == :ci_running and Map.get(entry, :ci_phase) == :running
+  end
+
   # ---- GenServer ----------------------------------------------------------
 
   @impl true
@@ -206,8 +217,9 @@ defmodule Arbiter.Worker.MergeTrain do
     id = entry.task_id
     train = Map.get(state.trains, key, new_train())
 
-    if train.head in [nil, id] do
-      {synced_from, entry} = Map.pop(entry, :synced_from)
+    {synced_from, entry} = Map.pop(entry, :synced_from)
+
+    if train.head == id or (is_nil(train.head) and live_sync?(synced_from, entry)) do
       train = upsert(train, entry, pid)
       watch = Map.put(old_watch(train, id), :synced_from, synced_from)
       item = train.entries |> Map.fetch!(id) |> Map.fetch!(:item) |> Map.put(:queue_head, watch)
@@ -219,7 +231,8 @@ defmodule Arbiter.Worker.MergeTrain do
     end
   end
 
-  def handle_call({:note_synced, key, id, sha}, _from, state) do
+  def handle_call({:note_synced,
+ key, id, sha}, _from, state) do
     state =
       update_train(state, key, fn
         %{head: ^id, entries: %{^id => %{item: %{queue_head: %{} = watch} = item} = e}} = train ->
