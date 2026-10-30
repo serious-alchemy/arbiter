@@ -23,7 +23,7 @@ defmodule Arbiter.Tasks.EdgeGate do
       a task carrying one is still *ready*; it simply may not be dispatched
       while its counterpart is in flight. Stored in one direction and honoured
       in both.
-    * `:parent_of`, `:relates_to`, `:discovered_from` — **non-gating**. They
+    * `:parent_of`, `:relates_to`, `:discovered_from`, `:fixes` — **non-gating**. They
       carry meaning for humans and rollups (`Arbiter.Tasks.ParentRefs`,
       `Arbiter.Tasks.EpicRollup`) and never hold a dispatch back.
 
@@ -72,7 +72,7 @@ defmodule Arbiter.Tasks.EdgeGate do
   alias Arbiter.Tasks.Lifecycle
 
   @mutex_types [:conflicts_with]
-  @non_gating_types [:relates_to, :discovered_from, :parent_of]
+  @non_gating_types [:relates_to, :discovered_from, :fixes, :parent_of]
 
   @typedoc "A `Dependency` row, or anything with the same three fields."
   @type dep :: %{

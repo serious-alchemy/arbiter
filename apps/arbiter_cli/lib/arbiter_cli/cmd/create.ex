@@ -3,7 +3,7 @@ defmodule ArbiterCli.Cmd.Create do
   `arb create <title> [--description ...] [--acceptance ... | --acceptance-file PATH]
                        [--notes ...] [--qa-notes ...] [--deployment-notes ...]
                        [--priority N] [--difficulty N] [--type T]
-                       [--deps|--depends-on id1,id2] [--blocks id1,id2] [--labels a,b]
+                       [--deps|--depends-on id1,id2] [--blocks id1,id2] [--fixes id1,id2] [--labels a,b]
                        [--tracker-ref REF] [--tracker-type T]
                        [--tracker-context-type T] [--tracker-context-ref REF]
                        [--no-tracker] [--target-branch NAME] [--repo owner/name]
@@ -134,6 +134,10 @@ defmodule ArbiterCli.Cmd.Create do
       issue (skip outbound create). The ref is passed through to the create
       action as `tracker_ref`; the server's after-transaction hook sees the
       ref is already set and skips the API call.
+    * `--lint` / `--no-lint` — acceptance-criteria lint is on by default: lines needing
+      post-merge or external evidence (deploy, prod, CI results, N runs) are warned
+      about with a suggestion to move them to deployment_notes. `--no-lint` suppresses
+      the warnings. Warn only; the ticket is always filed.
     * `--no-tracker` / `--local-only` — create a purely local task even on a
       tracker-configured workspace. Forwards `skip_upstream_create=true` as
       the action argument.
@@ -155,6 +159,10 @@ defmodule ArbiterCli.Cmd.Create do
   way: the new ticket blocks each listed issue (`<new_id> blocks <id>`). Both are
   written in the same transaction as the ticket: a cycle or an unknown/cross-
   workspace id refuses the create and files nothing.
+
+  `--fixes id1,id2` marks the new ticket as a follow-up that fixes each listed
+  ticket (`<new_id> fixes <id>`, same transaction). Its spend then rolls up into
+  the fixed ticket's `Spend:` line in `arb ticket show`.
 
   ## Batch create (`--from-file` / `--stdin`)
 
@@ -242,6 +250,7 @@ defmodule ArbiterCli.Cmd.Create do
   }
 
   @switches [
+    lint: :boolean,
     description: :string,
     notes: :string,
     qa_notes: :string,
@@ -252,6 +261,7 @@ defmodule ArbiterCli.Cmd.Create do
     deps: :string,
     depends_on: :string,
     blocks: :string,
+    fixes: :string,
     from_file: :string,
     stdin: :boolean,
     promote: :boolean,
@@ -412,6 +422,7 @@ defmodule ArbiterCli.Cmd.Create do
         {"--deps", opts[:deps]},
         {"--depends-on", opts[:depends_on]},
         {"--blocks", opts[:blocks]},
+        {"--fixes", opts[:fixes]},
         {"--parent", opts[:parent]},
         {"--tracker-ref", opts[:tracker_ref]},
         {"--tracker-type", opts[:tracker_type]},
@@ -467,6 +478,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put("notes", opts[:notes])
       |> maybe_put("qa_notes", opts[:qa_notes])
       |> maybe_put("deployment_notes", opts[:deployment_notes])
+      |> maybe_put_flag("no_lint", opts[:lint] == false)
       |> maybe_put("priority", opts[:priority])
       |> maybe_put("difficulty", opts[:difficulty])
       |> maybe_put("issue_type", opts[:type])
@@ -483,6 +495,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put_ids("deps", opts[:deps])
       |> maybe_put_ids("depends_on", opts[:depends_on])
       |> maybe_put_ids("blocks", opts[:blocks])
+      |> maybe_put_ids("fixes", opts[:fixes])
       |> maybe_put_flag("auto_close", opts[:auto_close] == true)
       |> maybe_put_flag("verify_after_deploy", opts[:verify_after_deploy] == true)
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)

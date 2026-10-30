@@ -3168,9 +3168,24 @@ defmodule Arbiter.Worker.Watchdog do
       # pipeline needs a human to fix the CI rules, so page once (debounced like
       # `:blocked_other`) and park without attempting the merge — indefinitely,
       # like an exhausted `:ci_failed`, so the poll ceiling can't fail the worker.
+      #
+      # A head older than the CI change that would give it a pipeline stays
+      # blocked forever, so a stale head is synced first (the merge train's head
+      # rules and the freshness budget apply, `ci_freshness_gate/3`); only a head
+      # that is current (or whose syncs are spent) escalates.
       reason == :no_pipeline ->
-        state = debounce_escalate_block(state, reason)
-        reschedule(%{state | max_polls: :infinity, park_reason: :no_pipeline})
+        case ci_freshness_gate(
+               state,
+               Map.get(result, :base_ref) || state.mr_base_ref,
+               Map.get(result, :head_sha)
+             ) do
+          {:halt, reply} ->
+            reply
+
+          {:go, state} ->
+            state = debounce_escalate_block(state, reason)
+            reschedule(%{state | max_polls: :infinity, park_reason: :no_pipeline})
+        end
 
       # Not mechanically resolvable here (:conflict → Phase 2b, :needs_approval /
       # :draft / :blocked_other → human), or the adapter can't perform the

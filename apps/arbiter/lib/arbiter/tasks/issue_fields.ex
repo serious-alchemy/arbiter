@@ -35,6 +35,8 @@ defmodule Arbiter.Tasks.IssueFields do
       authority to the `Issue` changes, which refuse a worker or refine token
       (`Arbiter.Guardrails.Permissions.plan/4`). Granting an operator-grant
       permission is `Arbiter.Tasks.Permissions.grant/3`, not a field write.
+    * `no_lint` — a non-persisted request flag (suppresses the acceptance lint
+      warnings); the controllers drop it before the Ash input.
     * `skills` — not writable over REST/MCP/CLI. It is read only at dispatch
       (`Arbiter.Skills.Selection`); the resource attribute stays for internal
       seeding.
@@ -42,18 +44,21 @@ defmodule Arbiter.Tasks.IssueFields do
 
   alias Arbiter.Tasks.Issue
 
+  @request_flags ~w(no_lint)
+
   @shared ~w(title description acceptance notes qa_notes deployment_notes priority difficulty
              issue_type auto_close verify_after_deploy provider_constraint permissions tracker_type
              tracker_ref tracker_context_type tracker_context_ref target_branch repo)
 
   @create @shared ++
+            @request_flags ++
             ~w(workspace_id source_pr skip_upstream_create parent_id tracker_child_policy)
 
   # Not Ash inputs: `Arbiter.Tasks.Permissions.resolve_edits/2` folds them into
   # `permissions` before the update runs.
   @permission_edits ~w(add_permissions remove_permissions)
 
-  @update @shared ++ ~w(pr_ref pr_body append_notes) ++ @permission_edits
+  @update @shared ++ @request_flags ++ ~w(pr_ref pr_body append_notes) ++ @permission_edits
 
   @always_denied ~w(change_origin)
 
@@ -67,6 +72,10 @@ defmodule Arbiter.Tasks.IssueFields do
   """
   @spec permission_edits() :: [String.t()]
   def permission_edits, do: @permission_edits
+
+  @doc "Non-persisted request flags, accepted on create and update but never an `Issue` input."
+  @spec request_flags() :: [String.t()]
+  def request_flags, do: @request_flags
 
   @doc "Fields a coordinator may set on `PATCH /api/issues/:id`."
   @spec update_fields() :: [String.t()]

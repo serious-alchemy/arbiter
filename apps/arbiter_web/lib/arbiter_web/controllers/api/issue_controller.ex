@@ -51,6 +51,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
   alias Arbiter.Guardrails.Authority
   alias Arbiter.Params
+  alias Arbiter.Tasks.AcceptanceLint
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.BatchCreate
   alias Arbiter.Tasks.BulkRead
@@ -290,20 +291,33 @@ defmodule ArbiterWeb.Api.IssueController do
 
     with :ok <- IssueFields.check(params, :create),
          {:ok, deps} <- fetch_id_lists(params, ["depends_on", "deps"]),
-         {:ok, blocks} <- fetch_id_lists(params, ["blocks"]) do
+         {:ok, blocks} <- fetch_id_lists(params, ["blocks"]),
+         {:ok, fixes} <- fetch_id_lists(params, ["fixes"]) do
       attrs =
         params
         |> Params.strip_attribution()
-        |> Map.drop(["id", "force", "assignee", "workspace", "deps", "depends_on", "blocks"])
+        |> Map.drop([
+          "id",
+          "force",
+          "assignee",
+          "workspace",
+          "deps",
+          "depends_on",
+          "blocks",
+          "no_lint",
+          "fixes"
+        ])
         |> Map.put("workspace_id", ws_id)
         |> coerce_atoms(@atom_fields)
 
       with {:ok, _skip_upstream?} <-
              attrs |> Params.fetch_bool("skip_upstream_create", false) |> Params.to_rest() do
         opts = [
+          lint: Params.boolean(params["no_lint"]) != {:ok, true},
           force: force?,
           deps: deps,
           blocks: blocks,
+          fixes: fixes,
           created_by: Params.actor_label(conn.assigns[:mcp_scope]),
           context: permission_context(conn)
         ]
@@ -459,8 +473,18 @@ defmodule ArbiterWeb.Api.IssueController do
     assignee_warnings = AssigneeCompat.warnings(params)
 
     with {:ok, updated} <- apply_update(conn, id, params) do
-      render(conn, :show, issue: updated, warnings: assignee_warnings)
+      render(conn, :show,
+        issue: updated,
+        warnings: assignee_warnings ++ update_lint(updated, params)
+      )
     end
+  end
+
+  # #1146: acceptance lint on update, only when `acceptance` was written.
+  defp update_lint(updated, params) do
+    if Map.has_key?(params, "acceptance") and Params.boolean(params["no_lint"]) != {:ok, true},
+      do: AcceptanceLint.lint(updated.acceptance),
+      else: []
   end
 
   defp apply_update(conn, id, params) do
@@ -470,7 +494,7 @@ defmodule ArbiterWeb.Api.IssueController do
       attrs =
         params
         |> Params.strip_attribution()
-        |> Map.drop(["id", "workspace_id", "assignee"])
+        |> Map.drop(["id", "workspace_id", "assignee", "no_lint"])
         |> coerce_atoms(@atom_fields)
 
       Ash.update(issue, attrs, context: permission_context(conn))

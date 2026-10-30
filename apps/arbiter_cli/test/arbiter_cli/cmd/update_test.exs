@@ -16,6 +16,26 @@ defmodule ArbiterCli.Cmd.UpdateTest do
     assert out =~ "bd-001"
   end
 
+  test "--no-lint sends no_lint: true; without it the key is absent" do
+    parent = self()
+
+    stub_routes([
+      {{"patch", "/api/issues/bd-001"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:patched, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => "bd-001", "title" => "X"})
+       end}
+    ])
+
+    {_out, _err, 0} = capture(fn -> Update.run(["bd-001", "--priority", "1", "--no-lint"]) end)
+    assert_received {:patched, %{"no_lint" => true}}
+
+    {_out, _err, 0} = capture(fn -> Update.run(["bd-001", "--priority", "1"]) end)
+    assert_received {:patched, body}
+    refute Map.has_key?(body, "no_lint")
+  end
+
   # bd-36ytcl: a ticket's state moves only through its transitions, so the
   # legacy flag is refused (pointing at them) and nothing is sent.
   test "--status is refused with the transition verbs, without a request" do

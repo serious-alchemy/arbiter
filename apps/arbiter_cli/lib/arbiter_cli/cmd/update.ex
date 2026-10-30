@@ -181,6 +181,7 @@ defmodule ArbiterCli.Cmd.Update do
   @default_timeout_s 60
 
   @edit_switches [
+    lint: :boolean,
     priority: :integer,
     difficulty: :string,
     append_notes: :string,
@@ -399,6 +400,7 @@ defmodule ArbiterCli.Cmd.Update do
       |> put_if("acceptance", acceptance)
       |> put_if("qa_notes", opts[:qa_notes])
       |> put_if("deployment_notes", opts[:deployment_notes])
+      |> put_if("no_lint", if(opts[:lint] == false, do: true))
       |> put_if("pr_body", opts[:pr_body])
       |> put_if("description", opts[:description])
       |> put_if("title", opts[:title])
@@ -485,9 +487,17 @@ defmodule ArbiterCli.Cmd.Update do
         end
 
       issue ->
+        print_lint_warnings(issue, mode)
         Output.emit_issue(issue, mode)
     end
   end
+
+  defp print_lint_warnings(issue, :text) do
+    for warning <- issue["warnings"] || [], do: IO.puts(:stderr, "arb: warning: #{warning}")
+    :ok
+  end
+
+  defp print_lint_warnings(_issue, _mode), do: :ok
 
   defp patch!(id, payload) do
     case Client.patch("/api/issues/" <> id, payload) do

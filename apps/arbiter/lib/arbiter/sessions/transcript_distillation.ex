@@ -416,16 +416,7 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
 
     if byte_size(text) <= limit,
       do: text,
-      else:
-        utf8_prefix(binary_part(text, 0, limit)) <> " …[#{byte_size(text) - limit} more bytes]"
-  end
-
-  # A byte cut can split a code point; keep only the valid prefix.
-  defp utf8_prefix(bin) do
-    case :unicode.characters_to_binary(bin) do
-      valid when is_binary(valid) -> valid
-      {_incomplete_or_error, valid, _rest} -> valid
-    end
+      else: Arbiter.Text.head_bytes(text, limit) <> " …[#{byte_size(text) - limit} more bytes]"
   end
 
   defp window(turns, total) do

@@ -160,6 +160,25 @@ defmodule Arbiter.Tasks.CreateTest do
       assert edge.to_issue_id == a.id
     end
 
+    test "fixes attach fixes edges from the new ticket to each named ticket", %{ws: ws} do
+      {:ok, a, _} = Create.run(%{"title" => "orig", "workspace_id" => ws.id}, [])
+
+      assert {:ok, followup, _} =
+               Create.run(%{"title" => "followup", "workspace_id" => ws.id}, fixes: [a.id])
+
+      assert {:ok, [%{edge: edge}]} = Dependencies.list(issue_id: followup.id)
+      assert edge.type == :fixes
+      assert edge.from_issue_id == followup.id
+      assert edge.to_issue_id == a.id
+    end
+
+    test "an unknown fixes target refuses the whole create", %{ws: ws} do
+      assert {:error, _} =
+               Create.run(%{"title" => "ghost", "workspace_id" => ws.id}, fixes: ["fu-nope00"])
+
+      assert [] = Arbiter.Tasks.Dedup.local_matches("ghost", ws.id)
+    end
+
     test "an edge that fails rolls the ticket back (create + edges are atomic)", %{ws: ws} do
       {:ok, parent, _} = Create.run(%{"title" => "parent", "workspace_id" => ws.id}, [])
 

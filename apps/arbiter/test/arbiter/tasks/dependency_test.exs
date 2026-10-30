@@ -173,9 +173,9 @@ defmodule Arbiter.Tasks.DependencyTest do
   end
 
   describe "helpers" do
-    test "types/0 returns all 6 type atoms including :conflicts_with" do
+    test "types/0 returns all 7 type atoms including :conflicts_with" do
       assert Dependency.types() ==
-               ~w(blocks depends_on relates_to discovered_from parent_of conflicts_with)a
+               ~w(blocks depends_on relates_to discovered_from fixes parent_of conflicts_with)a
     end
   end
 

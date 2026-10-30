@@ -526,6 +526,12 @@ defmodule Arbiter.MCP.Catalog do
         "type" => "object",
         "properties" => %{
           "title" => %{"type" => "string", "description" => "Ticket title (required)."},
+          "no_lint" => %{
+            "type" => "boolean",
+            "description" =>
+              "Suppress the acceptance-criteria lint warnings (lines needing post-merge or " <>
+                "external evidence)."
+          },
           "parent_id" => %{
             "type" => "string",
             "description" =>
@@ -555,6 +561,14 @@ defmodule Arbiter.MCP.Catalog do
               "Existing ticket ids that this one blocks: a `blocks` edge (this ticket → " <>
                 "target) per id, written atomically with the ticket like `depends_on`. " <>
                 "Coordinator only."
+          },
+          "fixes" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "Existing ticket ids this ticket fixes: a `fixes` edge (this ticket → target) per " <>
+                "id, written atomically with the ticket. This ticket's spend (and its own " <>
+                "follow-ups') then rolls up into each target. Coordinator only."
           },
           "force" => %{
             "type" => "boolean",
@@ -767,6 +781,10 @@ defmodule Arbiter.MCP.Catalog do
         "properties" => %{
           "id" => %{"type" => "string", "description" => "Ticket id (this or `ids`)."},
           "ids" => @bulk_ids_schema,
+          "no_lint" => %{
+            "type" => "boolean",
+            "description" => "Suppress the acceptance-criteria lint warnings."
+          },
           "confirm_replace_notes" => %{
             "type" => "boolean",
             "description" => "Bulk only: required to send `notes` (replace) with `ids`."
@@ -1185,7 +1203,7 @@ defmodule Arbiter.MCP.Catalog do
         "Add a dependency edge between two tickets in the workspace. A worker may add only a " <>
           "`parent_of` edge from its own task to an unparented ticket in its workspace (no " <>
           "`notes`/`created_by`), the same rule as `POST /api/dependencies`. `type` is one of blocks, " <>
-          "depends_on, relates_to, discovered_from, parent_of, conflicts_with. Use `parent_of` " <>
+          "depends_on, relates_to, discovered_from, fixes, parent_of, conflicts_with. `fixes` (from = the follow-up, to = the ticket it fixes) is non-gating; its spend rolls up into the fixed ticket. Use `parent_of` " <>
           "(from = parent, to = child) to attach a child to a parent ticket — that is how " <>
           "grouping/epics work; the parent then rolls up child progress and can auto-close. " <>
           "`conflicts_with` is a symmetric mutex enforced by the board scheduler " <>

@@ -152,6 +152,34 @@ defmodule ArbiterCli.OutputTest do
       assert out =~ "reviews: 1 run, $0.00 + 1 unpriced"
     end
 
+    test "rolls follow-up spend into 'own + follow-ups = total' and lists each follow-up" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "spend" => %{
+          "total_usd" => 3.0,
+          "run_count" => 1,
+          "unpriced_runs" => 0,
+          "passes" => [%{"kind" => "implement", "count" => 1, "usd" => 3.0, "unpriced_runs" => 0}],
+          "follow_ups" => %{
+            "own_usd" => 3.0,
+            "follow_ups_usd" => 2.5,
+            "total_usd" => 5.5,
+            "items" => [
+              %{"id" => "bd-f1", "title" => "the fix", "usd" => 2.0, "depth" => 1},
+              %{"id" => "bd-f2", "title" => "ci fix", "usd" => 0.5, "depth" => 2}
+            ]
+          }
+        }
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Spend:        $3.00 own + $2.50 follow-ups = $5.50"
+      assert out =~ "implement: 1 run, $3.00"
+      assert out =~ "follow-up bd-f1: $2.00 — the fix"
+      assert out =~ "follow-up bd-f2: $0.50 — ci fix"
+    end
+
     test "prints 'Spend: none recorded' when there is no usage" do
       issue = %{
         "id" => "x",

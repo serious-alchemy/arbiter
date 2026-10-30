@@ -45,6 +45,8 @@ defmodule Arbiter.Tasks.Create do
     * `:deps` — ticket ids that block the new ticket (`blocks` edges, dep → new).
       This is the REST `deps` / `depends_on` param.
     * `:blocks` — ticket ids the new ticket blocks (`blocks` edges, new → target).
+    * `:fixes` — ticket ids the new ticket fixes (`fixes` edges, new → target); its spend
+      rolls up into them (`Arbiter.Usage.FollowUpSpend`).
     * `:created_by` — the attribution label stamped on the edges.
     * `:context` — the Ash context for the create. REST and MCP pass
       `:guardrail_authority` / `:permission_actor` here so the ticket's declared
@@ -57,6 +59,7 @@ defmodule Arbiter.Tasks.Create do
   """
 
   alias Arbiter.Repo
+  alias Arbiter.Tasks.AcceptanceLint
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
@@ -81,9 +84,10 @@ defmodule Arbiter.Tasks.Create do
     parent_id = blank_to_nil(fetch(attrs, :parent_id))
     deps = opts |> Keyword.get(:deps, []) |> List.wrap()
     blocks = opts |> Keyword.get(:blocks, []) |> List.wrap()
+    fixes = opts |> Keyword.get(:fixes, []) |> List.wrap()
 
     with :ok <- dedup(attrs, force?),
-         :ok <- preflight(fetch(attrs, :workspace_id), parent_id, deps ++ blocks) do
+         :ok <- preflight(fetch(attrs, :workspace_id), parent_id, deps ++ blocks ++ fixes) do
       create(attrs, parent_id, deps, blocks, opts)
     else
       {:dup, dup} -> {:duplicate, dup}
@@ -104,8 +108,12 @@ defmodule Arbiter.Tasks.Create do
   end
 
   @doc "The non-blocking filing warnings for a created ticket (missing acceptance)."
-  @spec warnings(Issue.t()) :: [String.t()]
-  def warnings(%Issue{} = issue), do: ac_warnings(issue)
+  @spec warnings(Issue.t(), keyword()) :: [String.t()]
+  def warnings(%Issue{} = issue, opts \\ []),
+    do: ac_warnings(issue) ++ lint_warnings(issue, Keyword.get(opts, :lint, true) != false)
+
+  defp lint_warnings(_issue, false), do: []
+  defp lint_warnings(%Issue{acceptance: acceptance}, true), do: AcceptanceLint.lint(acceptance)
 
   @doc "One operator-facing line for a `{:partial, _, failures}` result."
   @spec failure_message([failure()]) :: String.t()
@@ -174,6 +182,7 @@ defmodule Arbiter.Tasks.Create do
 
   defp create(attrs, parent_id, deps, blocks, opts) do
     skip_upstream? = truthy?(fetch(attrs, :skip_upstream_create))
+    lint? = Keyword.get(opts, :lint, true) != false
 
     create_attrs =
       attrs
@@ -192,19 +201,19 @@ defmodule Arbiter.Tasks.Create do
       end)
 
     case tx do
-      {:ok, %Issue{} = issue} -> finish(issue, skip_upstream?)
+      {:ok, %Issue{} = issue} -> finish(issue, skip_upstream?, lint?)
       {:error, reason} -> {:error, normalize_error(reason)}
     end
   end
 
-  defp finish(issue, skip_upstream?) do
+  defp finish(issue, skip_upstream?, lint?) do
     {issue, upstream} = if skip_upstream?, do: {issue, nil}, else: CreateUpstream.mirror(issue)
 
     # The `:created` broadcast fired inside the transaction, before the commit.
     Issue.broadcast_lifecycle(:updated, issue)
 
     case upstream_failures(upstream) do
-      [] -> {:ok, issue, ac_warnings(issue)}
+      [] -> {:ok, issue, ac_warnings(issue) ++ lint_warnings(issue, lint?)}
       failures -> {:partial, issue, failures}
     end
   end
@@ -236,7 +245,11 @@ defmodule Arbiter.Tasks.Create do
       for target <- blocks,
           do: {issue.id, target, :blocks, "add dependency #{issue.id} -> #{target}"}
 
-    Enum.reduce_while(parent_edge ++ dep_edges ++ block_edges, :ok, fn edge, :ok ->
+    fix_edges =
+      for target <- Keyword.get(opts, :fixes, []) |> List.wrap(),
+          do: {issue.id, target, :fixes, "add fixes edge #{issue.id} -> #{target}"}
+
+    Enum.reduce_while(parent_edge ++ dep_edges ++ block_edges ++ fix_edges, :ok, fn edge, :ok ->
       {from, to, type, what} = edge
 
       case writer.(from, to, type, edge_opts) do
