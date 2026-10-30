@@ -302,6 +302,7 @@ defmodule Arbiter.MCP.Tools.Task do
         |> put_tracker_parent(scope, parent_id)
 
       opts = [
+        lint: args["no_lint"] != true,
         force: force?,
         deps: edges.depends_on,
         blocks: edges.blocks,
@@ -605,13 +606,23 @@ defmodule Arbiter.MCP.Tools.Task do
           case Ash.update(issue, attrs, action: :update, context: permission_context(scope)) do
             {:ok, updated} ->
               {:ok,
-               updated |> Tools.serialize_ticket(args) |> with_deprecation_warnings(warnings)}
+               updated
+               |> Tools.serialize_ticket(args)
+               |> with_warnings(update_lint_warnings(updated, attrs, args))
+               |> with_deprecation_warnings(warnings)}
 
             {:error, err} ->
               {:error, {:invalid, Tools.ash_error_message(err)}}
           end
       end
     end
+  end
+
+  # #1146: acceptance lint on update, only when `acceptance` was written.
+  defp update_lint_warnings(updated, attrs, args) do
+    if Map.has_key?(attrs, "acceptance") and args["no_lint"] != true,
+      do: Arbiter.Tasks.AcceptanceLint.lint(updated.acceptance),
+      else: []
   end
 
   # `add_permissions` / `remove_permissions` fold into one `permissions` list
