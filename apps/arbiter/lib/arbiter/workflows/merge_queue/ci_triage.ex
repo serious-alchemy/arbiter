@@ -12,20 +12,26 @@ defmodule Arbiter.Workflows.MergeQueue.CiTriage do
     * `:infra` - every failing job died of the runner, not the code: a job
       timeout, `runner_system_failure`, a stuck or unschedulable pod, OOM kill,
       a DB pool timeout, a cancelled job.
-    * `:unrelated_tests` - the failures are test failures (optionally beside
-      infra ones) in test files the diff does not touch, whose conventional
-      subject module the diff does not touch, with no changed source file in the
-      stack frames.
+    * `:unrelated_tests` - the failures are ExUnit test failures (optionally
+      beside infra ones) in test files the diff does not touch, whose conventional
+      subject module (or module directory) the diff does not touch, with no
+      changed source file in the stack frames, and a diff that touches no shared
+      build / test scope (`config/`, `mix.exs`, `test/support/`, migrations...).
+      The positive evidence is a numbered `N) test ...` failure block (or an
+      `N tests, M failures` line, M > 0), and the test files come only from those
+      blocks, never from annotations or stray paths in the log.
     * `:target_red` - the target branch is itself red (`:target_hold`).
     * `:needs_agent` - anything touching the diff, a compile error, or anything
-      this cannot read. **The default**: a failure is only waved through on
-      positive evidence, so a real failure is never masked. A mixed pipeline
-      (one infra job, one touching the diff) is `:needs_agent`.
+      this cannot read: an empty or unreadable diff, a truncated log excerpt, a
+      test_helper crash, warnings-as-errors. **The default**: a failure is only
+      waved through on positive evidence, so a real failure is never masked. A
+      mixed pipeline (one infra job, one touching the diff) is `:needs_agent`.
 
   Infra is recognised two ways. A *structured* signal (GitLab `failure_reason`
   / `status`, GitHub `conclusion`) is authoritative. A *log phrase* ("Insufficient
-  cpu", "unschedulable") is only trusted when the log names no changed file and
-  the diff could be read, since a log can mention anything.
+  cpu", "unschedulable") is only trusted when the log names no changed file, the
+  diff could be read, the excerpt is whole and no test-failure block is present
+  (an OOM or a dropped pool connection can be a new bug's symptom).
 
   Pure: callers supply the failing checks and the PR's changed files (or
   `:unknown`). The result is `%{class, reason, evidence}`; `evidence` is one map
@@ -70,7 +76,27 @@ defmodule Arbiter.Workflows.MergeQueue.CiTriage do
   # A build that does not compile is the diff's, whatever else the log prints.
   @compile_errors ~r/CompileError|SyntaxError|TokenMissingError|Compilation failed|Could not compile|warnings as errors/i
 
+  # A test run that failed on warnings, not on a test: the diff's own warnings.
+  @warnings_failure ~r/Test suite (?:failed|aborted)[^\n]*warnings/i
+
   @path_line ~r/((?:[\w.\-]+\/)*[\w.\-]+\.\w+):\d+/
+
+  # An ExUnit numbered failure header, and where its block ends.
+  @block_header ~r/^\s*\d+\) (?:test|doctest|property) /
+  @block_end ~r/^\s*(?:Finished in |Randomized with seed|\d+ (?:tests?|doctests?|properties|property)\b.*failures?)/
+  @block_max_lines 40
+
+  # `N tests, M failures`: only M > 0 is failure evidence.
+  @summary_line ~r/(\d+) (?:tests?|doctests?|properties|property)(?:, \d+ doctests?)?, (\d+) failures?/
+
+  # Files a green-to-red flip can come from without touching a test's own
+  # subject: build config, dependencies, test support, schema migrations. When
+  # the diff changes one, no test failure is "unrelated". Repo equivalents for
+  # the non-Elixir stacks are listed beside the Elixir ones.
+  @shared_scope ~r{(?:^|/)(?:config/|test/support/|spec/support/|priv/repo/migrations/|db/migrate/|\.github/workflows/)|(?:^|/)(?:mix\.exs|mix\.lock|test_helper\.exs|package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Gemfile|Gemfile\.lock|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|pyproject\.toml|poetry\.lock|conftest\.py|spec_helper\.rb|rails_helper\.rb|\.gitlab-ci\.yml)$|(?:^|/)requirements[\w.\-]*\.txt$}
+
+  # A failing "test" that is really the harness.
+  @test_infra ~r{(?:^|/)(?:test_helper\.exs|test/support/[^\s]*|spec/support/[^\s]*|conftest\.py|spec_helper\.rb)$}
 
   @doc """
   Classify `checks` against `changed_files` (a list of repo-relative paths, or
@@ -79,7 +105,8 @@ defmodule Arbiter.Workflows.MergeQueue.CiTriage do
   """
   @spec classify(term(), [String.t()] | :unknown | term(), keyword()) :: result()
   def classify(checks, changed_files, opts \\ []) do
-    changed = if is_list(changed_files), do: changed_files, else: :unknown
+    # An empty list is an unreadable diff, not "the PR touched nothing".
+    changed = if is_list(changed_files) and changed_files != [], do: changed_files, else: :unknown
 
     case Keyword.get(opts, :target_hold) do
       why when is_binary(why) and why != "" -> target_red(checks, changed, why)
@@ -149,7 +176,15 @@ defmodule Arbiter.Workflows.MergeQueue.CiTriage do
     job = to_string(field(check, :name) || "(unnamed job)")
     text = to_string(field(check, :summary) || "")
     refs = refs(check, text)
-    ctx = %{text: text, refs: refs, tests: Enum.filter(refs, &test_path?/1), changed: changed}
+
+    ctx = %{
+      text: text,
+      refs: refs,
+      blocks: failure_blocks(text),
+      failures?: failure_count(text) > 0,
+      truncated?: field(check, :truncated) == true,
+      changed: changed
+    }
 
     {verdict, detail, files} =
       case hard_infra(check) do
@@ -164,36 +199,113 @@ defmodule Arbiter.Workflows.MergeQueue.CiTriage do
     do: entry("(unreadable check)", :unknown, "not a failing-check map", [])
 
   # No structured infra signal: what the log and the diff say.
-  defp judge_log(%{text: text, tests: tests, changed: changed} = ctx) do
+  defp judge_log(%{text: text, blocks: blocks, changed: changed} = ctx) do
+    tests = block_tests(blocks)
+
     cond do
       Regex.match?(@compile_errors, text) ->
         {:touches_diff, "compile error in the log: the build itself is red", tests}
 
+      Regex.match?(@warnings_failure, text) ->
+        {:touches_diff, "the test run failed on warnings (warnings-as-errors)", tests}
+
+      ctx.truncated? ->
+        {:unknown, "the log excerpt was truncated; it may hide a failure of the diff", tests}
+
       changed == :unknown ->
-        {:unknown, "the PR diff could not be read", tests}
+        {:unknown, "the PR diff could not be read (empty, failed or overflowed)", tests}
 
       true ->
-        judge_against_diff(ctx)
+        judge_against_diff(ctx, tests)
     end
   end
 
-  defp judge_against_diff(%{text: text, refs: refs, tests: tests, changed: changed}) do
+  defp judge_against_diff(
+         %{text: text, refs: refs, blocks: blocks, changed: changed} = ctx,
+         tests
+       ) do
     hits = diff_hits(refs, tests, changed)
+    phrase = if blocks == [] and not ctx.failures?, do: soft_infra(text)
 
     cond do
       hits != [] ->
         {:touches_diff, "touches changed file(s): #{Enum.join(hits, ", ")}",
          hit_refs(hits, refs, tests)}
 
-      detail = soft_infra(text) ->
-        {:infra, "log says: #{detail}", []}
+      phrase ->
+        {:infra, "log says: #{phrase}", []}
 
+      not (blocks != [] or ctx.failures?) ->
+        {:unknown,
+         "no ExUnit failure block in the log; cannot tell it from a failure of the diff", []}
+
+      true ->
+        judge_test_scope(blocks, changed, tests)
+    end
+  end
+
+  # Failing tests the diff does not touch: still not "unrelated" when the failure
+  # is in the harness, or the diff changes something every test depends on.
+  defp judge_test_scope(blocks, changed, tests) do
+    cond do
       tests == [] ->
-        {:unknown, "names no test file; cannot tell it from a failure of the diff", []}
+        {:unknown, "names no failing test file; cannot tell it from a failure of the diff", []}
+
+      infra = Enum.find(blocks, &(&1.location && Regex.match?(@test_infra, &1.location))) ->
+        {:touches_diff, "the failure is in test infrastructure (#{infra.location})", tests}
+
+      scope = Enum.find(changed, &Regex.match?(@shared_scope, &1)) ->
+        {:touches_diff, "the diff changes shared build/test scope (#{scope}); any test can break",
+         tests}
 
       true ->
         {:unrelated_test, "failing test file(s) the diff does not touch", tests}
     end
+  end
+
+  # ---- ExUnit evidence --------------------------------------------------
+
+  # The `N) test ...` blocks of an ExUnit report, each with the paths it prints.
+  # `location` is the first one, which ExUnit prints right under the header: the
+  # failing test's own file.
+  defp failure_blocks(text) do
+    lines = String.split(text, "\n")
+
+    lines
+    |> Enum.with_index()
+    |> Enum.filter(fn {line, _} -> Regex.match?(@block_header, line) end)
+    |> Enum.map(fn {_header, i} ->
+      body =
+        lines
+        |> Enum.drop(i + 1)
+        |> Enum.take(@block_max_lines)
+        |> Enum.take_while(
+          &(not Regex.match?(@block_header, &1) and not Regex.match?(@block_end, &1))
+        )
+
+      paths = for [_, path] <- Regex.scan(@path_line, Enum.join(body, "\n")), do: path
+      %{location: List.first(paths), paths: paths}
+    end)
+  end
+
+  # The failing test files: test paths printed inside failure blocks, minus the
+  # harness frames (`test/support/...`) that only sit in a stack.
+  defp block_tests(blocks) do
+    blocks
+    |> Enum.flat_map(fn %{location: location, paths: paths} ->
+      Enum.filter(paths, &(test_path?(&1) and (&1 == location or not test_infra?(&1))))
+    end)
+    |> Enum.uniq()
+  end
+
+  defp test_infra?(path), do: Regex.match?(@test_infra, path)
+
+  # Failures reported by `N tests, M failures` lines (summed over an umbrella).
+  defp failure_count(text) do
+    @summary_line
+    |> Regex.scan(text)
+    |> Enum.map(fn [_, _, failures] -> String.to_integer(failures) end)
+    |> Enum.sum()
   end
 
   defp entry(job, verdict, detail, files),
@@ -240,7 +352,7 @@ defmodule Arbiter.Workflows.MergeQueue.CiTriage do
     subjects =
       Enum.filter(changed, fn file ->
         not test_path?(file) and source_file?(file) and
-          Enum.any?(tests, &(stem(&1) == stem(file)))
+          Enum.any?(tests, &(stem(&1) == stem(file) or same_module_dir?(&1, file)))
       end)
 
     Enum.uniq(direct ++ subjects)
@@ -248,9 +360,50 @@ defmodule Arbiter.Workflows.MergeQueue.CiTriage do
 
   defp hit_refs(hits, refs, tests) do
     direct = Enum.filter(refs, fn ref -> Enum.any?(hits, &same_path?(ref, &1)) end)
-    via_subject = Enum.filter(tests, fn test -> Enum.any?(hits, &(stem(test) == stem(&1))) end)
+
+    via_subject =
+      Enum.filter(tests, fn test ->
+        Enum.any?(hits, &(stem(test) == stem(&1) or same_module_dir?(test, &1)))
+      end)
+
     Enum.uniq(direct ++ via_subject)
   end
+
+  # `lib/app/accounts.ex` (or anything in `lib/app/accounts/`) is the module
+  # directory of `test/app/accounts/user_test.exs`. Roots (`apps/x/`) are compared
+  # loosely: ExUnit prints app-relative paths, the diff repo-relative ones.
+  defp same_module_dir?(test, source) do
+    with {test_root, test_rel} <- split_root(test, ~w(test spec tests)),
+         {src_root, src_rel} <- split_root(source, ~w(lib src)),
+         true <- roots_compatible?(test_root, src_root) do
+      test_dir = Path.dirname(test_rel)
+      src_dir = Path.dirname(src_rel)
+      src_module = Path.rootname(src_rel)
+
+      test_dir == src_module or String.starts_with?(test_dir, src_module <> "/") or
+        (src_dir != "." and test_dir == src_dir)
+    else
+      _ -> false
+    end
+  end
+
+  defp split_root(path, markers) do
+    segments = Path.split(path)
+
+    case Enum.find_index(segments, &(&1 in markers)) do
+      nil ->
+        nil
+
+      i ->
+        {segments |> Enum.take(i) |> Enum.join("/"),
+         segments |> Enum.drop(i + 1) |> Enum.join("/")}
+    end
+  end
+
+  defp roots_compatible?(a, b),
+    do:
+      a == "" or b == "" or a == b or String.ends_with?(a, "/" <> b) or
+        String.ends_with?(b, "/" <> a)
 
   defp same_path?(a, b),
     do: a == b or String.ends_with?(a, "/" <> b) or String.ends_with?(b, "/" <> a)

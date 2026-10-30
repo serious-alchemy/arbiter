@@ -61,7 +61,10 @@ defmodule Arbiter.Mergers.Merger do
 
     * `get_diff/2` — fetch the unified diff text for `mr_ref`. For local
       adapters this is `git diff <base>..<branch>`; for hosted forges it is
-      the diff payload returned by the API.
+      the diff payload returned by the API. `opts.complete: true` asks for the
+      WHOLE diff or an error: GitLab answers `{:error, :diff_overflow}` when
+      `/changes` reports `overflow: true` (the CI triage must not reason from a
+      partial diff).
     * `post_inline_comment/3` — post a single finding as an inline review
       comment (or its adapter-specific equivalent, e.g. a local-file entry
       for `Direct`).
@@ -189,6 +192,9 @@ defmodule Arbiter.Mergers.Merger do
       (`runner_system_failure`, `stuck_or_timeout_failure`, ...); with GitHub's
       `:conclusion` they let `Arbiter.Workflows.MergeQueue.CiTriage` tell a
       runner failure from the code's (#1144).
+    * `:truncated` — true when `:summary` left failure text out (a dropped
+      failure block, a capped output summary, no log). The CI triage then reads
+      the full log at `:log_path` or treats the check as unknown (bd-3ij7dw).
   """
   @type failing_check :: %{
           required(:name) => String.t(),
@@ -198,7 +204,8 @@ defmodule Arbiter.Mergers.Merger do
           optional(:log_path) => String.t() | nil,
           optional(:files) => [String.t()],
           optional(:status) => String.t() | nil,
-          optional(:failure_reason) => String.t() | nil
+          optional(:failure_reason) => String.t() | nil,
+          optional(:truncated) => boolean()
         }
 
   @typedoc """
