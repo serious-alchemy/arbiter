@@ -66,6 +66,23 @@ defmodule Arbiter.Worker.ReviewMrBriefTest do
     assert out =~ "TAILEND"
   end
 
+  test "truncation never splits a multi-byte codepoint (head and tail)" do
+    # "─" is three bytes. The 4_000-byte head cut lands mid-codepoint (4_000 is
+    # not a multiple of 3), and the 1_500-byte tail cut lands mid-codepoint
+    # because the trailing "x" shifts the window off the character boundary.
+    body = String.duplicate("─", 2_000)
+    summary = String.duplicate("─", 1_000) <> "x"
+
+    out =
+      ReviewMrBrief.render(%{body: body, pipeline: "failed"}, [
+        %{name: "j", summary: summary, conclusion: "failure"}
+      ])
+
+    assert String.valid?(out)
+    assert out =~ "[...truncated]"
+    assert byte_size(out) < 12_000
+  end
+
   test "instruction tells the reviewer to check the evidence before NOT MET" do
     text = ReviewMrBrief.instruction()
     assert text =~ "MR/PR description"
