@@ -1202,7 +1202,12 @@ defmodule Arbiter.Worker.Dispatch do
 
     defer = Keyword.get_lazy(opts, :defer_resume, &configured_deferrer/0)
 
-    case defer.(task_id, kind, Keyword.delete(opts, :defer_resume)) do
+    defer_opts =
+      opts
+      |> Keyword.delete(:defer_resume)
+      |> put_waiting_account(info)
+
+    case defer.(task_id, kind, defer_opts) do
       :ok ->
         Logger.info(
           "Dispatch: deferred #{kind} of #{task_id} until a worker slot frees " <>
@@ -1220,6 +1225,13 @@ defmodule Arbiter.Worker.Dispatch do
         {:error, {:slot_cap_full, info}}
     end
   end
+
+  # The account whose pool the resume waits on, so the board holds Ready work
+  # for that account only (not the implementer's, which may differ).
+  defp put_waiting_account(opts, %{seat: %{account_id: id}}) when is_binary(id),
+    do: Keyword.put(opts, :waiting_account, id)
+
+  defp put_waiting_account(opts, _info), do: opts
 
   @doc """
   Operator-facing explanation for an `{:error, {:worker_active, run}}`
