@@ -168,6 +168,28 @@ defmodule Arbiter.Worker.PlacementTimeoutTest do
     assert [] = Enum.filter(PlacementWatch.in_flight(), &(&1.task_id == "bd-cch1jh-run"))
   end
 
+  test "a stall between steps (the owner never answers first_open_args) also times out", ctx do
+    # a silent owner: it is neither this process nor answering `first_spawn_args`
+    owner = spawn(fn -> Process.sleep(:infinity) end)
+    on_exit(fn -> Process.exit(owner, :kill) end)
+
+    started = System.monotonic_time(:millisecond)
+
+    log =
+      capture_log(fn ->
+        assert {:error,
+                {:remote_placement_failed, {:placement_timeout, :first_open, @timeout_ms}}} =
+                 place(ctx, argv([]), [], owner: owner, run_id: Ecto.UUID.generate())
+      end)
+
+    # within the deadline plus a small grace, and nothing was sent to the node
+    assert System.monotonic_time(:millisecond) - started < @timeout_ms + 1_500
+    refute_received {:node_session, {:push, "assign", _}}
+    assert log =~ "placement timed out task=bd-cch1jh-run node=mesaana"
+    assert log =~ "stage=first_open"
+    assert [] = Enum.filter(PlacementWatch.in_flight(), &(&1.task_id == "bd-cch1jh-run"))
+  end
+
   test "a node that answers with a refusal is logged with its reason", ctx do
     test = self()
     put_app_env(:arbiter, :node_placement, placement_timeout_ms: 60_000)
