@@ -325,7 +325,7 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       _b = watch("b", ws)
 
       wait_until(fn -> syncs("b") == 1 end)
-      after_polls(a, 3)
+      wait_until(fn -> role(a) == {:wait, "b"} end)
       assert syncs("a") == 1
     end
 
@@ -561,8 +561,8 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       b = watch("b", ws)
 
       # Queued far longer than the bound: the head keeps its place.
+      wait_until(fn -> role(b) == {:wait, "a"} end)
       after_polls(a, 25)
-      after_polls(b, 3)
       assert role(a) == :head
       assert role(b) == {:wait, "a"}
       assert syncs("b") == 0
@@ -822,7 +822,7 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       forget_train()
 
       a2 = restart(a, ws)
-      after_polls(a2, 3)
+      wait_until(fn -> role(a2) != nil end)
       refute role(a2) == :head
 
       b2 = restart(b, ws)
