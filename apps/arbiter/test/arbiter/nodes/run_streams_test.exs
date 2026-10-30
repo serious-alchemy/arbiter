@@ -192,6 +192,48 @@ defmodule Arbiter.Nodes.RunStreamsTest do
     end
   end
 
+  describe "an exit before the run was ever ready (a pod that died while seeding)" do
+    test "a pod whose worker never ran answers the waiter with a refusal, not silence" do
+      owner = self()
+
+      payload = %{
+        "reason" => "init_failed",
+        "status" => 75,
+        "detail" => "session not served",
+        "size" => 0
+      }
+
+      {t, e} = S.exit(table(), "r1", payload)
+
+      assert [{:reply, _, {:error, {:refused, "startup_failed", detail}}}] =
+               Enum.filter(e, &match?({:reply, _, _}, &1))
+
+      assert detail =~ "init_failed"
+      assert detail =~ "session not served"
+      assert {:push, "exit_ack", %{"run" => "r1"}} in e
+      refute Enum.any?(e, &match?({:send, ^owner, _}, &1))
+      assert S.fetch(t, "r1") == :error
+    end
+
+    test "a pod that disrupted before it started is the same refusal" do
+      for reason <- ~w(failed pod_disrupted preempted) do
+        {_t, e} = S.exit(table(), "r1", %{"reason" => reason, "status" => nil, "size" => 0})
+
+        assert [{:reply, _, {:error, {:refused, "startup_failed", _}}}] =
+                 Enum.filter(e, &match?({:reply, _, _}, &1))
+      end
+    end
+
+    test "a worker that ran and ended before ready was seen is ready, then exited" do
+      owner = self()
+      {t, e} = S.exit(table(), "r1", %{"reason" => "exited", "status" => 1, "size" => 0})
+
+      assert [{:reply, _, {:ok, @handle}}] = Enum.filter(e, &match?({:reply, _, _}, &1))
+      assert {:send, owner, {@handle, {:exit_status, 1}}} in e
+      assert {:ok, %{state: :done}} = S.fetch(t, "r1")
+    end
+  end
+
   describe "cancel and node loss" do
     test "cancel is pushed and re-pushed on every new connection until the run ends" do
       {t, _} = S.ready(table(), "r1")

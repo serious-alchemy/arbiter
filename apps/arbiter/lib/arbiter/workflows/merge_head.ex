@@ -57,6 +57,13 @@ defmodule Arbiter.Workflows.MergeHead do
   # the target for as long as it kept polling.
   @head_ready_ticks 10
 
+  # Ticks a head may sit with its pipeline *pending* (queued, or none at all: the
+  # forge maps "no pipeline" to pending) on one head SHA before it hands its
+  # place on. Queued time does not count toward `@head_ci_wait_ticks`, so without
+  # this a head whose sync triggers no pipeline would hold the target until the
+  # queue ceiling. Twice the CI-wait bound: four hours at the default poll.
+  @head_ci_pending_ticks 480
+
   @type item :: map()
 
   @doc """
@@ -73,13 +80,18 @@ defmodule Arbiter.Workflows.MergeHead do
   @spec head_ready_ticks() :: pos_integer()
   def head_ready_ticks, do: @head_ready_ticks
 
+  @doc "Default bound on a head's pending (queued or no pipeline) ticks on one head SHA."
+  @spec head_ci_pending_ticks() :: pos_integer()
+  def head_ci_pending_ticks, do: @head_ci_pending_ticks
+
   @doc """
   The head's own bookkeeping: ticks in a row of no progress, ticks running CI on
   one head SHA, ticks in a row reported `:ready_to_merge`, the head SHA it was
   last synced from, and whether its merge was refused last tick.
   """
   @spec new_watch() :: map()
-  def new_watch, do: %{stalls: 0, ci_wait: nil, ready: 0, synced_from: nil, refused?: false}
+  def new_watch,
+    do: %{stalls: 0, ci_wait: nil, pending: nil, ready: 0, synced_from: nil, refused?: false}
 
   @doc """
   The train's head, given its items in queue order (`sort/1`), and the incumbent
@@ -128,6 +140,7 @@ defmodule Arbiter.Workflows.MergeHead do
       Map.merge(watch, %{
         stalls: if(stuck?(incumbent, watch), do: watch.stalls + 1, else: 0),
         ci_wait: ci_wait(incumbent, watch.ci_wait),
+        pending: pending(incumbent, Map.get(watch, :pending)),
         ready: ready(incumbent, Map.get(watch, :ready, 0))
       })
 
@@ -143,6 +156,13 @@ defmodule Arbiter.Workflows.MergeHead do
   defp hand_on_reason(item, %{stalls: stalls}) when stalls > @head_stall_grace_ticks do
     "made no progress for #{stalls} ticks (forge block " <>
       "#{inspect(Map.get(item, :last_block_reason))}, last error #{inspect(Map.get(item, :last_error))})"
+  end
+
+  defp hand_on_reason(item, %{pending: {sha, ticks}} = watch)
+       when ticks > 0 do
+    if ticks > limit(item, :ci_pending_ticks, @head_ci_pending_ticks),
+      do: "has had no running pipeline on #{inspect(sha)} for #{ticks} ticks (pending or none)",
+      else: hand_on_reason(item, %{watch | pending: nil})
   end
 
   defp hand_on_reason(item, %{ci_wait: ci_wait, ready: ready}) do
@@ -203,6 +223,24 @@ defmodule Arbiter.Workflows.MergeHead do
   end
 
   defp ci_wait(_item, _wait), do: nil
+
+  # Ticks the head has sat in `ci_phase: :pending` on its head SHA, cumulative
+  # (running ticks between do not reset it); a new SHA or leaving CI restarts it.
+  defp pending(%{status: :ci_running, ci_phase: :pending} = item, pending) do
+    sha = Map.get(item, :last_head_sha)
+
+    cond do
+      stalled?(item) -> nil
+      match?({^sha, _}, pending) -> {sha, elem(pending, 1) + 1}
+      true -> {sha, 1}
+    end
+  end
+
+  defp pending(%{status: :ci_running} = item, {sha, _} = pending) do
+    if Map.get(item, :last_head_sha) == sha and not stalled?(item), do: pending, else: nil
+  end
+
+  defp pending(_item, _pending), do: nil
 
   # Ticks in a row the head has reported itself ready to merge.
   defp ready(%{status: :ready_to_merge}, ready), do: ready + 1

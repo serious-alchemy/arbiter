@@ -18,6 +18,18 @@ defmodule Arbiter.NodeAgent.K8s.PodRuntimeTest do
 
   setup %{tmp_dir: tmp} = ctx do
     fixture = H.fixture!(tmp)
+
+    fixture =
+      case ctx[:session_body] do
+        nil ->
+          fixture
+
+        body ->
+          path = Path.join(tmp, "session.jsonl")
+          File.write!(path, body)
+          Map.put(fixture, :session, path)
+      end
+
     channel = H.start!(tmp, fixture, ctx[:spec] || %{})
 
     dirs = %{
@@ -129,6 +141,66 @@ defmodule Arbiter.NodeAgent.K8s.PodRuntimeTest do
       assert File.read!(Path.join(ctx.dirs.work, "claude-config/settings.json")) == "{}"
       assert File.read!(Path.join(ctx.dirs.run, "prompt-0")) == "do the thing"
       assert File.dir?(Path.join(ctx.dirs.work, "home"))
+    end
+  end
+
+  # The shape `ContainerSpawn.remote_spec/3` gives a resume's `config_dir` mount (its
+  # contract test runs the real builder through `RunSpec` and `PodSpec`): the path is
+  # under the slug of the run's worktree, as Claude Code names it.
+  @transcript ~s({"type":"user","sessionId":"s1"}\n{"type":"assistant"}\n)
+  @session_path Path.join([
+                  "projects",
+                  Arbiter.Usage.ClaudeSessionFile.project_slug(
+                    "/home/arbiter/worktrees/feature-1-6f1e0c52"
+                  ),
+                  "6f1e0c52-3c7a-4a55-9d0e-6b1c1f6a2b10.jsonl"
+                ])
+
+  @transcript_sha Base.encode16(:crypto.hash(:sha256, @transcript), case: :lower)
+
+  describe "a resumed run's session transcript (bd-4ic681)" do
+    @describetag session_body: @transcript,
+                 spec: H.session_spec(@session_path, byte_size(@transcript), @transcript_sha)
+
+    @tag timeout: 60_000
+    test "is fetched through the controller, checked, and lands in the config dir", ctx do
+      assert {out, 0} = sh("seed", ctx.env)
+      assert out =~ "seeded"
+      assert_received {:primary, :session, "run-1"}
+
+      assert File.read!(Path.join([ctx.dirs.work, "claude-config", @session_path])) ==
+               @transcript
+
+      assert File.read!(Path.join(ctx.dirs.work, "claude-config/settings.json")) == "{}"
+    end
+  end
+
+  describe "a session transcript the pod cannot trust fails the seed fast, with a reason" do
+    @describetag session_body: @transcript,
+                 spec:
+                   H.session_spec(
+                     @session_path,
+                     byte_size(@transcript),
+                     String.duplicate("0", 64)
+                   )
+
+    test "a transcript that does not match the digest the spec named is refused and removed",
+         ctx do
+      assert {out, code} = sh("seed", ctx.env)
+      assert code != 0
+      assert out =~ "does not match its digest"
+      refute File.exists?(Path.join([ctx.dirs.work, "claude-config", @session_path]))
+    end
+  end
+
+  describe "a session the primary no longer has fails the seed fast, with a reason" do
+    # no :session_body: the stand-in primary answers 404 like `NodeCheckoutController.session/2`
+    @describetag spec: H.session_spec(@session_path, byte_size(@transcript), @transcript_sha)
+
+    test "the controller relays the refusal and the seed exits 75 naming it", ctx do
+      assert {out, 75} = sh("seed", ctx.env)
+      assert out =~ "the session transcript was not served (status 404)"
+      assert_received {:primary, :session, "run-1"}
     end
   end
 

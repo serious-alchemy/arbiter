@@ -35,6 +35,23 @@ defmodule Arbiter.NodeAgent.K8s.RunReportTest do
     assert %{"reason" => "unschedulable", "message" => "0/3 nodes"} = RunReport.inventory(entry)
   end
 
+  describe "exit/2 for a failed seed" do
+    test "the seed's message is the exit's detail, and the reason is init_failed" do
+      entry = %{run: "run-1", pod: "arb-run-1", cancelled: nil}
+
+      info = %{
+        reason: :init_failed,
+        container: "seed",
+        exit_code: 75,
+        oom?: false,
+        message: "no session"
+      }
+
+      assert %{"reason" => "init_failed", "status" => 75, "detail" => "no session"} =
+               RunReport.exit(entry, {:exit, info})
+    end
+  end
+
   describe "exit/2 for an interrupted pod" do
     @entry %{run: "run-1", pod: "arb-run-1", cancelled: nil}
 

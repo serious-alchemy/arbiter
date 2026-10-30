@@ -52,7 +52,11 @@ Hardening (bd-az0dcu): a head that reports itself ready to merge for
 `merge.train_ready_ticks` polls (default 10) without merging, or that parks on
 an undecidable coverage or a review round, hands its place on. The CI-wait
 bound is `merge.train_ci_wait_ms` (default 2h) and counts only *running* CI, not
-time queued. The time an MR first asked and the head its sync started from are
+time queued; a head with no running pipeline (queued, or none at all) is capped
+separately by `merge.train_ci_pending_max_ms` (default twice the CI-wait bound).
+The sync marker is cleared when a head's place is handed on and whenever its
+Watchdog stops deliberately; a restarted Watchdog is seated again only if its
+sync was applied and its pipeline is running. The time an MR first asked and the head its sync started from are
 recorded on the ticket's lane, so a restarted Watchdog keeps its order and a
 head whose Watchdog crashed (or whose server restarted) keeps its place while
 its synced pipeline runs: no second MR syncs beside it until it settles or the

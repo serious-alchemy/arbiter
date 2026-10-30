@@ -196,6 +196,7 @@ defmodule ArbiterWeb.Api.IssueController do
         render(conn, :show,
           issue: issue,
           estimate: Estimate.payload(issue),
+          spend: spend_payload(issue),
           epic_rollup: Estimate.epic_cost_rollup(issue),
           dependencies: dependencies,
           lifecycle: Projection.view(issue, workers: live),
@@ -211,6 +212,14 @@ defmodule ArbiterWeb.Api.IssueController do
       {:error, _} = err ->
         err
     end
+  end
+
+  # The ticket's actual spend, per pass kind. Best-effort: a ledger read that
+  # fails costs `arb ticket show` its Spend block, not the whole read.
+  defp spend_payload(%{id: id}) do
+    Arbiter.Usage.SpendBreakdown.for_task(id)
+  rescue
+    _ -> nil
   end
 
   defp live_workers do

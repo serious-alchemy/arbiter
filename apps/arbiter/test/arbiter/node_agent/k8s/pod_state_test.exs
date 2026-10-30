@@ -561,6 +561,24 @@ defmodule Arbiter.NodeAgent.K8s.PodStateTest do
                PodState.observe(pod, @opts)
     end
 
+    test "the seed's last words (kubelet termination message) ride on the exit, so a refusal can name why" do
+      seed = %{
+        "name" => "seed",
+        "state" => %{
+          "terminated" => %{
+            "exitCode" => 75,
+            "reason" => "Error",
+            "message" => "arbiter seed: the session transcript was not served (status 404)"
+          }
+        }
+      }
+
+      pod = scheduled(%{"phase" => "Failed", "initContainerStatuses" => [seed]})
+
+      assert {:exit, %{reason: :init_failed, message: message}} = PodState.observe(pod, @opts)
+      assert message =~ "session transcript was not served"
+    end
+
     test "an OOM-killed init container still reports oom?" do
       pod =
         scheduled(%{

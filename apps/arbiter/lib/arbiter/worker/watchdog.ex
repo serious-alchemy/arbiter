@@ -1248,6 +1248,17 @@ defmodule Arbiter.Worker.Watchdog do
 
   # ---- GenServer ----------------------------------------------------------
 
+  # A deliberate stop (pull, resume to work, watch replacement, a finished watch)
+  # or a shutdown drops the sync marker; a crash keeps it, so the restart asks for
+  # its place back (`MergeTrain.resume/3`).
+  @impl true
+  def terminate(reason, state) when reason in [:normal, :shutdown] do
+    _ = clear_train_synced_from(state)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
   @impl true
   # Pre-existing complexity 11 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
@@ -5878,6 +5889,7 @@ defmodule Arbiter.Worker.Watchdog do
         last_head_sha: state.last_head_sha,
         ttl_ms: state.interval_ms * 3 + 1_000,
         ci_wait_ticks: train_ci_wait_ticks(state),
+        ci_pending_ticks: train_ci_pending_ticks(state),
         ready_ticks: train_ready_ticks(state),
         orphan_ms: train_ci_wait_ticks(state) * state.interval_ms
       },
@@ -5902,8 +5914,21 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp train_ready_ticks(state) do
     case train_setting(state, "train_ready_ticks") do
-      n when is_integer(n) and n >= 0 -> n
+      n when is_integer(n) and n >= 1 -> n
       _ -> MergeHead.head_ready_ticks()
+    end
+  end
+
+  # The wall-clock cap on a head with no running pipeline (queued, or none at all:
+  # the forge reports "no pipeline" as pending). Default twice the CI-wait bound
+  # (`MergeHead.head_ci_pending_ticks/0` is that at the default CI-wait).
+  defp train_ci_pending_ticks(state) do
+    case train_setting(state, "train_ci_pending_max_ms") do
+      ms when is_integer(ms) and ms > 0 ->
+        max(1, div(ms + state.interval_ms - 1, state.interval_ms))
+
+      _ ->
+        2 * train_ci_wait_ticks(state)
     end
   end
 
@@ -5997,7 +6022,7 @@ defmodule Arbiter.Worker.Watchdog do
             last_block_reason: block,
             poll_failed?: Map.get(result, :poll_failed?, false),
             last_head_sha: Map.get(result, :head_sha) || state.last_head_sha,
-            ci_phase: if(Map.get(result, :pipeline) == :pending, do: :pending, else: :running)
+            ci_phase: train_ci_phase(result)
           })
 
         case train_call(fn -> MergeTrain.tick(key, entry) end, :head) do
@@ -6010,7 +6035,9 @@ defmodule Arbiter.Worker.Watchdog do
                 "head for #{inspect(state.mr_base_ref)} (handed on to #{inspect(head)})"
             )
 
-            %{state | train_role: {:wait, head}}
+            # Its place is handed on, and so is the pipeline it started: a restart
+            # must not seat it ahead of the MR that took over.
+            clear_train_synced_from(%{state | train_role: {:wait, head}})
         end
     end
   end
@@ -6030,16 +6057,36 @@ defmodule Arbiter.Worker.Watchdog do
       key ->
         state = %{state | train_resumed?: true}
         {status, _block} = train_status(state, result)
-        entry = train_entry(state, status, %{synced_from: sha})
+
+        entry =
+          train_entry(state, status, %{
+            synced_from: sha,
+            ci_phase: train_ci_phase(result),
+            last_head_sha: Map.get(result, :head_sha) || state.last_head_sha
+          })
 
         case train_call(fn -> MergeTrain.resume(key, entry) end, :head) do
           :head -> train_tick(%{state | train_role: :head}, result)
-          {:wait, head} -> %{state | train_role: {:wait, head}}
+          {:wait, head} -> clear_train_synced_from(%{state | train_role: {:wait, head}})
         end
     end
   end
 
   defp train_tick(state, _result), do: state
+
+  defp train_ci_phase(result),
+    do: if(Map.get(result, :pipeline) == :pending, do: :pending, else: :running)
+
+  # The sync under way is no longer this MR's to hold (its place was handed on, or
+  # the Watchdog is stopping): drop the marker from the ticket's lane so a restart
+  # does not seat it ahead of the head that took over. The in-memory marker goes
+  # even if the lane write fails.
+  defp clear_train_synced_from(%{train_synced_from: nil} = state), do: state
+
+  defp clear_train_synced_from(state) do
+    safe(fn -> PullRequest.record_train_synced_from(state.task_id, nil) end)
+    %{state | train_synced_from: nil}
+  end
 
   defp train_status(_state, %{poll_failed?: true}), do: {:ci_running, nil}
 

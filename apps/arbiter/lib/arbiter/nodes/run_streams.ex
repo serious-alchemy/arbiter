@@ -280,13 +280,60 @@ defmodule Arbiter.Nodes.RunStreams do
         do: {run, cursor}
   end
 
+  # The exit reasons of a pod whose worker never ran (`Arbiter.NodeAgent.K8s.PodState`):
+  # its seed init container failed, it failed outright, or it was disrupted first.
+  @never_started ~w(init_failed failed pod_disrupted preempted)
+
+  @doc """
+  The node reports the run ended.
+
+  An exit that arrives while `assign` is still waiting (the run was never `ready`) must
+  answer that wait. A pod whose worker never ran (`@never_started`: the seed failed, say on
+  a session transcript it could not fetch) is a `startup_failed` refusal, a hold like any
+  other: the run never started. A worker that ran and ended before its `ready` was seen is
+  ready, then exited, so its owner reads the exit as it would a local port's. Left
+  unanswered, the placement waits out the prepare budget (25 min) for a pod that is gone.
+  """
   @spec exit(t(), String.t(), map()) :: {t(), [effect()]}
   def exit(table, run, payload) do
+    case Map.fetch(table.streams, run) do
+      {:ok, %{state: :assigned, waiter: waiter}} when not is_nil(waiter) ->
+        exit_unready(table, run, waiter, payload)
+
+      _ ->
+        record_exit(table, run, payload)
+    end
+  end
+
+  defp exit_unready(table, run, waiter, %{"reason" => reason} = payload)
+       when reason in @never_started do
+    error = {:error, {:refused, "startup_failed", startup_detail(payload)}}
+
+    {%{table | streams: Map.delete(table.streams, run)},
+     reply(waiter, error) ++ [{:push, "exit_ack", %{"run" => run}}]}
+  end
+
+  defp exit_unready(table, run, _waiter, payload) do
+    {table, ready_effects} = ready(table, run)
+    {table, exit_effects} = record_exit(table, run, payload)
+    {table, ready_effects ++ exit_effects}
+  end
+
+  defp record_exit(table, run, payload) do
     update(table, run, fn
       %{state: :done} = s -> {s, [{:push, "exit_ack", %{"run" => run}}]}
       s -> {%{s | exit: payload}, []}
     end)
     |> finish_if_complete(run)
+  end
+
+  defp startup_detail(payload) do
+    base = "the pod ended before its worker started (#{payload["reason"]})"
+
+    case payload["detail"] do
+      detail when is_binary(detail) and detail != "" -> base <> ": " <> detail
+      _ -> base
+    end
   end
 
   @doc "Ask the node to stop `run`; remembered so a reconnect asks again."

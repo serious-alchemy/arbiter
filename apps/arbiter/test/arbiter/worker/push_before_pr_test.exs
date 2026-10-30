@@ -21,6 +21,13 @@ defmodule Arbiter.Worker.PushBeforePRTest do
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Test.StubMerger
 
+  # The worker may already be gone at teardown; stopping a dead process is not a failure.
+  defp stop_quietly(pid) do
+    GenServer.stop(pid, :normal)
+  catch
+    :exit, _ -> :ok
+  end
+
   defp git(args, repo),
     do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
@@ -84,7 +91,7 @@ defmodule Arbiter.Worker.PushBeforePRTest do
       )
 
     :ok = Worker.advance(pid, :implement)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    on_exit(fn -> stop_quietly(pid) end)
 
     %{pid: pid, task_id: task_id, repo: repo}
   end
@@ -425,7 +432,7 @@ defmodule Arbiter.Worker.PushBeforePRTest do
       # Worker with no worktree in meta
       {:ok, pid} = Worker.start(task_id: task_id, repo: "stub/repo", meta: %{})
       :ok = Worker.advance(pid, :implement)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      on_exit(fn -> stop_quietly(pid) end)
 
       assert {:ok, _ref} =
                Worker.open_mr(pid, "feature/x", "X", "body", %{
@@ -469,7 +476,7 @@ defmodule Arbiter.Worker.PushBeforePRTest do
         )
 
       :ok = Worker.advance(pid, :implement)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      on_exit(fn -> stop_quietly(pid) end)
 
       {head, 0} =
         System.cmd("git", ["-C", repo.worktree, "rev-parse", "HEAD"], stderr_to_stdout: true)

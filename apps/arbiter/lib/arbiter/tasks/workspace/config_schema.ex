@@ -188,8 +188,14 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                             may run CI on one head SHA before the next MR takes over. Queued
                             (pending) time does not count. Default 7200000 (240 polls at the 30s
                             poll, two hours); set it to your pipeline's real run time.
-      train_ready_ticks     non-negative integer — polls the merge head may report itself ready to
-                            merge without merging before the next MR takes over (default: 10).
+      train_ci_pending_max_ms
+                            positive integer, milliseconds — wall-clock cap on a merge head with no
+                            running pipeline on one head SHA (queued, or none at all: the forge
+                            reports "no pipeline" as pending) before the next MR takes over
+                            (default: twice train_ci_wait_ms).
+      train_ready_ticks     positive integer (>= 1; 0 is ignored) — polls the merge head may report
+                            itself ready to merge without merging before the next MR takes over
+                            (default: 10).
       repos                 map, repo_paths key -> per-repo override of any key
                             above (strategy, config, auto_merge, …). Deep-merged
                             over the workspace-level merge block, so unset

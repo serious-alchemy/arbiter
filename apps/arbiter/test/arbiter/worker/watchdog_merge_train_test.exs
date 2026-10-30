@@ -539,7 +539,9 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
   describe "hand-off bounds (bd-az0dcu)" do
     test "merge.train_ci_wait_ms bounds the head's running CI; queued time does not count" do
       # 60ms at a 15ms poll: the head may run CI for four polls.
-      ws = workspace(%{"merge" => %{"train_ci_wait_ms" => 60}})
+      ws =
+        workspace(%{"merge" => %{"train_ci_wait_ms" => 60, "train_ci_pending_max_ms" => 100_000}})
+
       probe(%{"a0" => 4, "a1" => 0, "b0" => 4, "b1" => 0})
       diffs("a")
       stale_then_running("b")
@@ -569,6 +571,52 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       Agent.update(phase, fn _ -> :running end)
       wait_until(fn -> syncs("b") == 1 end)
       assert role(b) == :head
+    end
+
+    test "merge.train_ci_pending_max_ms hands a head with no running pipeline on" do
+      # 60ms CI-wait, 150ms pending cap at a 15ms poll: ten pending polls.
+      ws =
+        workspace(%{
+          "merge" => %{"train_ci_wait_ms" => 60, "train_ci_pending_max_ms" => 150}
+        })
+
+      probe(%{"a0" => 4, "a1" => 0, "b0" => 4, "b1" => 0})
+      diffs("a")
+      stale_then_running("b")
+
+      # The sync triggered no pipeline: the forge reports it pending, for good.
+      StubMerger.queue_get(mr("a"), [
+        fn ->
+          if syncs("a") > 0,
+            do: %{running("a1", "main") | pipeline: :pending},
+            else: green("a0", "main")
+        end
+      ])
+
+      a = watch("a", ws)
+      wait_until(fn -> syncs("a") == 1 end)
+      b = watch("b", ws)
+
+      after_polls(b, 3)
+      assert role(a) == :head
+      assert syncs("b") == 0
+
+      wait_until(fn -> syncs("b") == 1 end)
+      assert role(b) == :head
+      assert role(a) == {:wait, "b"}
+      assert :sys.get_state(a).train_synced_from == nil
+    end
+
+    test "merge.train_ready_ticks of 0 is normalised: a green head still merges" do
+      ws = workspace(%{"merge" => %{"train_ready_ticks" => 0}})
+      probe(%{"a0" => 4, "a1" => 0})
+      stale_then_running("a")
+
+      watch("a", ws)
+      wait_until(fn -> syncs("a") == 1 end)
+      let_ci_pass("a")
+      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert StubMerger.merge_count("!a") == 1
     end
 
     test "a head parked on an undecidable coverage releases its place" do
@@ -719,6 +767,91 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
 
     alias Arbiter.Tasks.{Issue, PullRequest}
 
+    # Real tickets, so the lane (`train_synced_from`) is what a restart reads back.
+    defp lane_task(ws) do
+      issue = Ash.create!(Issue, %{title: "lane", workspace_id: ws.id}) |> put_state!(:active)
+
+      {:ok, merging} =
+        Issue.pr_opened(issue.id, mr(issue.id),
+          merge_watch: %{"adapter" => "Elixir.Arbiter.Test.StubMerger"}
+        )
+
+      merging.id
+    end
+
+    defp lane_marker(id), do: Ash.get!(Issue, id).merge_watch["train_synced_from"]
+
+    defp restart(id, ws) do
+      {:ok, opts} = PullRequest.watch_opts(id)
+      watch(id, ws, opts)
+    end
+
+    defp train_workspace(config) do
+      Ash.create!(Workspace, %{
+        name: "ws-hand-#{System.unique_integer([:positive])}",
+        prefix: "th#{System.unique_integer([:positive])}",
+        config: config
+      })
+    end
+
+    test "a hand-off clears the sync marker, and a restart does not seat the handed-off MR" do
+      ws = train_workspace(%{"merge" => %{"train_ci_wait_ms" => 60}})
+      [a, b] = [lane_task(ws), lane_task(ws)]
+      probe(%{(a <> "0") => 4, (a <> "1") => 0, (b <> "0") => 4, (b <> "1") => 0})
+      for id <- [a, b], do: stale_then_running(id)
+
+      wa = watch(a, ws)
+      wait_until(fn -> syncs(a) == 1 end)
+      wait_until(fn -> lane_marker(a) == a <> "0" end)
+      wb = watch(b, ws)
+
+      # a's CI-wait bound passes; b takes over and syncs.
+      wait_until(fn -> syncs(b) == 1 end)
+      assert role(wa) == {:wait, b}
+      assert lane_marker(a) == nil
+      wait_until(fn -> lane_marker(b) == b <> "0" end)
+
+      # The server restarts and a polls first.
+      kill(wa)
+      kill(wb)
+      forget_train()
+
+      a2 = restart(a, ws)
+      after_polls(a2, 3)
+      refute role(a2) == :head
+
+      b2 = restart(b, ws)
+      wait_until(fn -> role(b2) == :head end)
+      :ok = MergeTrain.settle_now()
+      refute role(a2) == :head
+      assert syncs(a) == 1
+    end
+
+    test "a deliberate stop clears the sync marker, so a restart is not seated" do
+      ws = train_workspace(%{})
+      [a, b] = [lane_task(ws), lane_task(ws)]
+      probe(%{(a <> "0") => 4, (a <> "1") => 0, (b <> "0") => 4, (b <> "1") => 0})
+      for id <- [a, b], do: stale_then_running(id)
+
+      wa = watch(a, ws)
+      wait_until(fn -> syncs(a) == 1 end)
+      wait_until(fn -> lane_marker(a) == a <> "0" end)
+
+      Watchdog.stop(a)
+      refute Process.alive?(wa)
+      assert lane_marker(a) == nil
+
+      forget_train()
+      b2 = watch(b, ws)
+      after_polls(b2, 3)
+      a2 = restart(a, ws)
+      after_polls(a2, 3)
+      :ok = MergeTrain.settle_now()
+      wait_until(fn -> role(b2) == :head end)
+      after_polls(a2, 4)
+      refute role(a2) == :head
+    end
+
     test "records merge-ready time and the sync under way, and watch_opts hands them back" do
       ws =
         Ash.create!(Workspace, %{
@@ -749,7 +882,35 @@ defmodule Arbiter.Worker.WatchdogMergeTrainTest do
       assert opts[:train_ready_since] == DateTime.to_iso8601(since)
       assert opts[:train_synced_from] == id <> "0"
 
+      # A deliberate stop (pull, resume to work, watch replacement) clears the sync.
+      Watchdog.stop(id)
+      assert Ash.get!(Issue, id).merge_watch["train_synced_from"] == nil
+      assert Ash.get!(Issue, id).merge_watch["train_ready_since"] == DateTime.to_iso8601(since)
+    end
+
+    test "leaving the sync place clears the sync, not the merge-ready time" do
+      ws =
+        Ash.create!(Workspace, %{
+          name: "ws-lane2-#{System.unique_integer([:positive])}",
+          prefix: "tm#{System.unique_integer([:positive])}"
+        })
+
+      issue = Ash.create!(Issue, %{title: "lane", workspace_id: ws.id}) |> put_state!(:active)
+
+      {:ok, merging} =
+        Issue.pr_opened(issue.id, mr(issue.id),
+          merge_watch: %{"adapter" => "Elixir.Arbiter.Test.StubMerger"}
+        )
+
+      id = merging.id
+      probe(%{(id <> "0") => 4, (id <> "1") => 0})
+      stale_then_running(id)
+      w = watch(id, ws)
+      wait_until(fn -> syncs(id) == 1 end)
+      since = :sys.get_state(w).train_ready_since
+
       # Leaving the sync place clears the sync, not the merge-ready time.
+
       serve(id, "main", :closed)
       assert_receive {:watchdog, ^id, {:closed, _}}, 3_000
       wait_until(fn -> Ash.get!(Issue, id).merge_watch["train_synced_from"] == nil end)
