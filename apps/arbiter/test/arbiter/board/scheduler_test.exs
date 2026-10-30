@@ -93,7 +93,7 @@ defmodule Arbiter.Board.SchedulerTest do
 
       assert plan.promote == "bd-2"
 
-      assert %{state: :blocked, reason: "blocked — lib/a.ex in flight on bd-7"} =
+      assert %{state: :blocked, reason: "blocked — lib/a.ex in flight on bd-7 (diff)"} =
                reason(plan, "bd-1")
     end
 
@@ -104,10 +104,11 @@ defmodule Arbiter.Board.SchedulerTest do
           running: [running("bd-7", ["lib/a.ex", "lib/b.ex", "lib/c.ex"])]
         )
 
-      assert %{reason: "blocked — lib/a.ex +2 more in flight on bd-7"} = reason(plan, "bd-1")
+      assert %{reason: "blocked — lib/a.ex +2 more in flight on bd-7 (diff)"} =
+               reason(plan, "bd-1")
     end
 
-    test "the card promoted this cycle is itself treated as in flight" do
+    test "a card promoted this cycle does not hold a card whose text names the same file" do
       plan =
         plan(
           ready: [card("bd-1", files: ["lib/a.ex"]), card("bd-2", files: ["lib/a.ex"])],
@@ -116,8 +117,7 @@ defmodule Arbiter.Board.SchedulerTest do
 
       assert plan.promote == "bd-1"
 
-      assert %{state: :blocked, reason: "blocked — lib/a.ex in flight on bd-1"} =
-               reason(plan, "bd-2")
+      assert %{state: :queued, hold: nil} = reason(plan, "bd-2")
     end
 
     test "a card held by a global block does not claim its files" do
