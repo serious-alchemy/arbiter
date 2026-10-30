@@ -222,6 +222,7 @@ defmodule Arbiter.Tasks.Issue do
         constraints one_of: [:context_only, :inherit_parent, :mint]
       end
 
+      change {Arbiter.Tasks.Issue.Changes.ScrubText, []}
       change {Arbiter.Tasks.Issue.Changes.GenerateId, []}
 
       # bd-842qio: `state` is deliberately not create-accepted — every ticket
@@ -334,6 +335,7 @@ defmodule Arbiter.Tasks.Issue do
       # doesn't immediately re-trip on the next tick (bd-1atwts).
       change {Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear, []}
       change {Arbiter.Tasks.Issue.Changes.NormalizeProviderConstraint, []}
+      change {Arbiter.Tasks.Issue.Changes.ScrubText, []}
       change {Arbiter.Tasks.Issue.Changes.AppendNotes, []}
 
       # A floor only means something on an epic: retyping one away clears it.

@@ -540,7 +540,7 @@ defmodule Arbiter.Worker.PrepushCheck do
   end
 
   defp cap(text, max) when byte_size(text) <= max, do: text
-  defp cap(text, max), do: binary_part(text, 0, max) <> "\n[… truncated …]"
+  defp cap(text, max), do: Arbiter.Text.head_bytes(text, max) <> "\n[… truncated …]"
 
   defp failure_section(output) do
     with [{from, _}] <- Regex.run(~r/^[ \t]+1\) /m, output, return: :index),
@@ -584,7 +584,7 @@ defmodule Arbiter.Worker.PrepushCheck do
     if size <= max do
       text
     else
-      kept = binary_part(text, size - max, max)
+      kept = Arbiter.Text.tail_bytes(text, max)
 
       kept =
         case :binary.split(kept, "\n") do
