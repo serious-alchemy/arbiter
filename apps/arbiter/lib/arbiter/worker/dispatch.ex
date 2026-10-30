@@ -91,6 +91,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Nodes.LocalCapacity
   alias Arbiter.Nodes.Placement
+  alias Arbiter.Nodes.PlacementWatch
   alias Arbiter.Nodes.Recovery
   alias Arbiter.Nodes.Refusal
   alias Arbiter.Quota.SpendCap
@@ -4440,17 +4441,15 @@ defmodule Arbiter.Worker.Dispatch do
               |> Keyword.put(:resolved_skills, resolved_skills)
               |> Keyword.put(:skills_materialized?, skills_materialized?)
 
-            with {:ok, session_opts} <-
-                   build_agent_session_opts(task, worker_pid, path, opts),
-                 {:ok, port, opts} <-
-                   start_session(task, worker_pid, path, worktree_path, session_opts, opts) do
-              # Move the run out of :starting so UI/CLI report a meaningful
-              # state while Claude works. In claude_driven mode the Driver
-              # never ticks the Machine, so without this nudge the run would
-              # remain :starting until "arb done" finished it.
-              _ = Worker.advance(worker_pid, :claude)
-              {:ok, port, opts}
-            else
+            case start_placed_session(task, worker_pid, path, worktree_path, opts) do
+              {:ok, port, opts} ->
+                # Move the run out of :starting so UI/CLI report a meaningful
+                # state while Claude works. In claude_driven mode the Driver
+                # never ticks the Machine, so without this nudge the run would
+                # remain :starting until "arb done" finished it.
+                _ = Worker.advance(worker_pid, :claude)
+                {:ok, port, opts}
+
               {:error, {:no_node_capacity, _info}} = held ->
                 Checkout.teardown(review_checkout_path(opts))
                 held
@@ -4474,17 +4473,43 @@ defmodule Arbiter.Worker.Dispatch do
   # registered, so failing the spawn would crash a run that nothing was wrong with.
   # `remote_only` never runs local, so its failure stands. The home clone was cut
   # thin for the node (no deps), so it is seeded the way a local run's is first.
-  defp start_session(task, worker_pid, path, worktree_path, session_opts, opts) do
-    case start_agent_session(opts, session_opts) do
+  #
+  # bd-3jjt3p: the placement deadline (`PlacementWatch`) starts here, where the node was
+  # chosen, so it covers building the session opts and the credential steps before
+  # `ClaudeSession` as well as its own. A step that overruns it is a placement failure like
+  # any other: the primary takes the run, or `remote_only` holds it. Any other failure to
+  # build the opts is the caller's error, as before.
+  defp start_placed_session(task, worker_pid, path, worktree_path, opts) do
+    node = if Keyword.get(opts, :adopt), do: nil, else: Keyword.get(opts, :node)
+
+    result =
+      PlacementWatch.watch(
+        node,
+        task.id,
+        fn -> build_agent_session_opts(task, worker_pid, path, opts) end,
+        &start_agent_session(opts, &1)
+      )
+
+    case result do
       {:ok, port} ->
         {:ok, port, opts}
 
-      {:error, reason} = error ->
-        if local_fallback?(task, opts) do
-          start_session_locally(task, worker_pid, path, worktree_path, opts, reason)
-        else
-          error
-        end
+      {:build_error, {:remote_placement_failed, {:placement_timeout, _, _}} = reason} ->
+        session_failed(task, worker_pid, path, worktree_path, opts, reason)
+
+      {:build_error, reason} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        session_failed(task, worker_pid, path, worktree_path, opts, reason)
+    end
+  end
+
+  defp session_failed(task, worker_pid, path, worktree_path, opts, reason) do
+    if local_fallback?(task, opts) do
+      start_session_locally(task, worker_pid, path, worktree_path, opts, reason)
+    else
+      {:error, reason}
     end
   end
 

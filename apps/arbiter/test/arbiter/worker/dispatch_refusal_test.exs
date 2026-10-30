@@ -83,6 +83,97 @@ defmodule Arbiter.Worker.DispatchRefusalTest do
     end
   end
 
+  test "a placement timeout (bd-3jjt3p) holds the card like a refusal: no spawn_failed, no escalation",
+       %{task: task, ws: ws, sandbox: sandbox} do
+    :ok = Placement.reserve(task.id, "node-1")
+
+    assert {:error, {:no_node_capacity, info}} =
+             dispatch(task, {:remote_placement_failed, {:placement_timeout, :assign, 1_800_000}})
+
+    assert info.refused == "placement_timeout"
+
+    pid = Worker.whereis(task.id)
+    TestSandbox.own!(sandbox, pid)
+    snap = Worker.state(pid)
+    assert %{state: :finished, outcome: :interrupted} = snap
+    assert snap.meta.stop_reason.category == :placement_refused
+    assert %{state: :queued} = Ash.get!(Issue, task.id)
+    refute Enum.any?(Placement.reservations(), &(&1.task_id == task.id))
+
+    assert [] =
+             Message.inbox("admiral", workspace_id: ws.id)
+             |> Enum.filter(&(&1.directive_ref == task.id))
+  end
+
+  describe "the placement deadline starts where the node is chosen (bd-3jjt3p)" do
+    # A zero budget: building the session opts (before `ClaudeSession` is reached) is
+    # already past the deadline, so it is that step, not the node's answer, that times out.
+    setup %{ws: ws} do
+      put_app_env(:arbiter, :node_placement, placement_timeout_ms: 0)
+      %{ws: ws}
+    end
+
+    defp placement!(ws, mode) do
+      Ash.update!(ws, %{config: %{"worker" => %{"placement" => mode}}}, action: :update)
+    end
+
+    defp dispatch_unstubbed(task, test) do
+      Dispatch.dispatch(task.id,
+        force: true,
+        repo: @repo,
+        start_driver: false,
+        start_claude: true,
+        node: %{id: "node-1", name: "kube-1"},
+        claude_start: fn session_opts ->
+          send(test, {:claude_start, Keyword.get(session_opts, :placement_attempt)})
+          {:error, :stub_never_reached}
+        end
+      )
+    end
+
+    test "remote_only: a step before ClaudeSession that overruns holds the run", %{
+      task: task,
+      ws: ws,
+      sandbox: sandbox
+    } do
+      placement!(ws, "remote_only")
+      :ok = Placement.reserve(task.id, "node-1")
+
+      assert {:error, {:no_node_capacity, info}} = dispatch_unstubbed(task, self())
+      assert info.refused == "placement_timeout"
+      refute_received {:claude_start, _}
+
+      pid = Worker.whereis(task.id)
+      TestSandbox.own!(sandbox, pid)
+      snap = Worker.state(pid)
+      assert %{state: :finished, outcome: :interrupted} = snap
+      assert snap.meta.stop_reason.category == :placement_refused
+      assert %{state: :queued} = Ash.get!(Issue, task.id)
+      refute Enum.any?(Placement.reservations(), &(&1.task_id == task.id))
+    end
+
+    test "prefer_remote: the same overrun falls back to the primary", %{
+      task: task,
+      ws: ws,
+      sandbox: sandbox
+    } do
+      placement!(ws, "prefer_remote")
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          # the fallback spawn is the stub, which refuses in turn: what matters is that it ran
+          assert {:error, _} = dispatch_unstubbed(task, self())
+        end)
+
+      assert log =~ "placement timed out"
+      assert log =~ "stage=session_opts"
+      assert log =~ "falling back to the primary"
+      assert_received {:claude_start, nil}
+
+      if pid = Worker.whereis(task.id), do: TestSandbox.own!(sandbox, pid)
+    end
+  end
+
   test "any other spawn failure still fails the worker and escalates (unchanged)",
        %{task: task, ws: ws, sandbox: sandbox} do
     assert {:error, {:claude_start_failed, {:remote_placement_failed, :prepare_timeout}}} =

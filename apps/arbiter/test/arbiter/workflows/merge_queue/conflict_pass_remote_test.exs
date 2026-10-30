@@ -92,6 +92,33 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictPassRemoteTest do
     end
   end
 
+  describe "a placement timeout (bd-3jjt3p)" do
+    test "holds a remote_only pass instead of failing its spawn", ctx do
+      # a zero deadline: the pass's own steps before ClaudeSession already overrun it
+      put_app_env(:arbiter, :node_placement, placement_timeout_ms: 0)
+      ctx = placement!(ctx, "remote_only")
+
+      assert {:error, {:no_node_capacity, info}} =
+               ConflictResolver.resolve(%{
+                 task_id: ctx.issue.id,
+                 workspace_id: ctx.ws.id,
+                 repo_path: ctx.repo,
+                 repo: "test/repo",
+                 start_claude: true,
+                 placement_opts: [remote_available?: true, nodes: [node_row()]],
+                 slot_admitted: true
+               })
+
+      assert info.refused == "placement_timeout"
+
+      pid = Worker.whereis(ctx.issue.id)
+      on_exit(fn -> stop_quietly(pid) end)
+      assert %{state: :finished, outcome: :interrupted, meta: meta} = Worker.state(pid)
+      assert meta.stop_reason.category == :placement_refused
+      assert Ash.get!(Issue, ctx.issue.id).state == :merging
+    end
+  end
+
   describe "seeding (the stale-ref bugs, bd-cccm1k / bd-4axlg0)" do
     test "the node is seeded with the branch at its current origin head and origin/<target> at the forge tip",
          ctx do

@@ -5,6 +5,8 @@ defmodule ArbiterWeb.Api.NodeJSON do
   """
 
   alias Arbiter.Nodes.{Credentials, JoinToken, Node, NodeEvent, PairingRequest, PlacementWatch}
+  alias Arbiter.Worker
+  alias Arbiter.Workers.RunNode
 
   def node(%Node{} = node) do
     %{
@@ -49,8 +51,23 @@ defmodule ArbiterWeb.Api.NodeJSON do
     %{
       timeout_ms: if(is_integer(timeout), do: timeout),
       in_flight: Enum.map(in_flight, &placement/1),
-      stuck: in_flight |> Enum.filter(&stuck?/1) |> Enum.map(&placement/1)
+      stuck: stuck(in_flight, timeout)
     }
+  end
+
+  # bd-3jjt3p: the attempts past the timeout, plus every run the workers still show in
+  # `placing` past it that has no such attempt (a step that hung before the attempt began).
+  defp stuck(in_flight, timeout) do
+    attempts = Enum.filter(in_flight, &stuck?/1)
+    known = MapSet.new(in_flight, & &1.task_id)
+
+    runs =
+      Worker.list_children()
+      |> PlacementWatch.stuck_runs(timeout)
+      |> Enum.reject(&MapSet.member?(known, &1.task_id))
+      |> Enum.map(&Map.put(&1, :node_name, RunNode.name_for(&1.node_id)))
+
+    Enum.map(attempts ++ runs, &placement/1)
   end
 
   defp stuck?(%{age_ms: age, timeout_ms: ms}), do: is_integer(ms) and age >= ms

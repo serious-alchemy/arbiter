@@ -47,6 +47,25 @@ defmodule Arbiter.Worker.PassPlacementTest do
     {branch_head, main_tip}
   end
 
+  describe "start_failed/4 (bd-3jjt3p)" do
+    test "a placement timeout holds the pass: interrupted with placement_refused, not spawn_failed" do
+      {:ok, worker} = Arbiter.Worker.start(task_id: "bd-pt-timeout", repo: "r")
+      node = %{id: "n1", name: "edge-1"}
+
+      error =
+        {:claude_start_failed, {:remote_placement_failed, {:placement_timeout, :assign, 5}}}
+
+      assert {:error, {:no_node_capacity, info}} =
+               PassPlacement.start_failed("bd-pt-timeout", worker, node, error)
+
+      assert info.refused == "placement_timeout"
+
+      snap = Arbiter.Worker.state(worker)
+      assert %{state: :finished, outcome: :interrupted} = snap
+      assert snap.meta.stop_reason.category == :placement_refused
+    end
+  end
+
   describe "seed/3" do
     test "moves a stale branch and a stale origin/<target> to what the forge has now", ctx do
       stale_head = git!(ctx.clone, ["rev-parse", "refs/heads/" <> @branch])
