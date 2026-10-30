@@ -757,8 +757,17 @@ defmodule Arbiter.Board.Autopilot do
 
   def handle_call({:defer_resume, task_id, kind, opts}, _from, state) do
     {held_for, opts} = Keyword.pop(opts, :held_for)
+    {account, opts} = Keyword.pop(opts, :waiting_account)
     wait = if held_for == :local_capacity, do: :local_capacity, else: :slot
-    entry = %{task_id: task_id, kind: kind, opts: opts, wait: wait, since: state.now.()}
+
+    entry = %{
+      task_id: task_id,
+      kind: kind,
+      opts: opts,
+      wait: wait,
+      since: state.now.(),
+      account: account
+    }
 
     deferred =
       if Enum.any?(state.deferred_resumes, &(&1.task_id == task_id)),
@@ -1090,7 +1099,7 @@ defmodule Arbiter.Board.Autopilot do
     state = track_stalls(state, slot_waiters)
 
     blocked =
-      slot_waiters |> Enum.map(&resume_account(state, &1.task_id)) |> Enum.uniq()
+      slot_waiters |> Enum.map(&waiting_account(state, &1)) |> Enum.uniq()
 
     passable? =
       all_slot_waiters?(state, slot_waiters, blocked) and walk_decides?(state, snapshot, mode)
@@ -1119,6 +1128,11 @@ defmodule Arbiter.Board.Autopilot do
 
   defp pool_account({account_id, _pool}), do: account_id
   defp pool_account(_), do: nil
+
+  # The account Dispatch recorded at defer time; entries without one (older,
+  # or deferred by another caller) fall back to the implementer's account.
+  defp waiting_account(_state, %{account: id}) when is_binary(id), do: id
+  defp waiting_account(state, entry), do: resume_account(state, entry.task_id)
 
   defp resume_account(%{resume_account: fun}, task_id) do
     fun.(task_id)
@@ -1166,7 +1180,7 @@ defmodule Arbiter.Board.Autopilot do
     entry = Map.put(entry, :stalled, stalled)
 
     if stalled >= state.park_after and not Map.get(entry, :parked?, false) do
-      account = resume_account(state, entry.task_id)
+      account = waiting_account(state, entry)
 
       Logger.warning(
         "board autopilot: deferred resume of #{entry.task_id} parked after #{stalled} ticks — " <>
@@ -1197,7 +1211,7 @@ defmodule Arbiter.Board.Autopilot do
           for e <- waiters do
             Logger.warning(
               "board autopilot: holding Ready behind deferred resume #{e.task_id} " <>
-                "(pool #{inspect(resume_account(state, e.task_id))}: no seat)"
+                "(pool #{inspect(waiting_account(state, e))}: no seat)"
             )
           end
         end

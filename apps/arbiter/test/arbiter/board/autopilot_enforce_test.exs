@@ -363,6 +363,61 @@ defmodule Arbiter.Board.AutopilotEnforceTest do
       refute_received {:dispatched, _, _}
     end
 
+    test "blocks the account Dispatch recorded, not the implementer's" do
+      placements = [placement("bd-ready", @pool)]
+
+      pid =
+        start(:enforce, fn -> board(nil, [entry("bd-ready", :next)], placements) end,
+          slot_room: fn _task_id, _kind -> false end,
+          # the implementer is on the Ready card's (claude) account
+          resume_account: fn "bd-parked" -> "acct" end
+        )
+
+      :ok =
+        Autopilot.defer_resume(pid, "bd-parked", :resume, waiting_account: "acct-codex")
+
+      assert {:ok, "bd-ready"} = Autopilot.tick(pid)
+      assert_received {:dispatched, "bd-ready", _}
+      refute_received {:resumed, _, _, _}
+      assert [%{opts: opts}] = :sys.get_state(pid).deferred_resumes
+      refute Keyword.has_key?(opts, :waiting_account)
+    end
+
+    test "an entry without a recorded account falls back to the implementer's" do
+      placements = [placement("bd-ready", @pool)]
+
+      pid =
+        start(:enforce, fn -> board(nil, [entry("bd-ready", :next)], placements) end,
+          slot_room: fn _task_id, _kind -> false end,
+          resume_account: fn "bd-parked" -> "acct" end
+        )
+
+      :ok = Autopilot.defer_resume(pid, "bd-parked", :resume, [])
+      assert :idle = Autopilot.tick(pid)
+      refute_received {:dispatched, _, _}
+    end
+
+    test "parks naming the recorded account" do
+      test = self()
+
+      pid =
+        start(:enforce, fn -> board(nil, [], []) end,
+          slot_room: fn _task_id, _kind -> false end,
+          resume_account: fn _ -> "acct" end,
+          park_after: 2,
+          escalate: fn id, reason, prio ->
+            send(test, {:escalated, id, reason, prio})
+            :ok
+          end
+        )
+
+      :ok = Autopilot.defer_resume(pid, "bd-parked", :resume, waiting_account: "acct-codex")
+      for _ <- 1..4, do: Autopilot.tick(pid)
+
+      assert_received {:escalated, "bd-parked", {:deferred_resume_parked, "acct-codex", 2}, _}
+      refute_received {:escalated, _, _, _}
+    end
+
     test "is parked with an attention item after N stalled ticks, once" do
       test = self()
 
