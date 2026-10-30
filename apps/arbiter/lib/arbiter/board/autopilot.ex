@@ -1093,8 +1093,7 @@ defmodule Arbiter.Board.Autopilot do
       slot_waiters |> Enum.map(&resume_account(state, &1.task_id)) |> Enum.uniq()
 
     passable? =
-      not state.paused? and length(slot_waiters) == length(state.deferred_resumes) and
-        nil not in blocked and walk_decides?(state, snapshot, mode)
+      all_slot_waiters?(state, slot_waiters, blocked) and walk_decides?(state, snapshot, mode)
 
     placements = if passable?, do: snapshot.walk.placements, else: []
     {held, open} = Enum.split_with(placements, &(pool_account(&1.pool) in blocked))
@@ -1111,6 +1110,11 @@ defmodule Arbiter.Board.Autopilot do
       {id, extra} -> promote_or_hold(%{state | holds: []}, id, extra)
       nil -> waiting(state)
     end
+  end
+
+  defp all_slot_waiters?(state, slot_waiters, blocked) do
+    not state.paused? and length(slot_waiters) == length(state.deferred_resumes) and
+      nil not in blocked
   end
 
   defp pool_account({account_id, _pool}), do: account_id
