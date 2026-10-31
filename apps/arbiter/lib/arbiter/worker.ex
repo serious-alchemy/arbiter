@@ -4802,6 +4802,7 @@ defmodule Arbiter.Worker do
 
         with {:ok, push_opts} <- host_push_opts(state, nil, push_opts),
              {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
+          record_pushed_head(worktree, task_id, branch)
           deliver_pass(state)
         else
           {:error, reason} ->
@@ -5771,6 +5772,7 @@ defmodule Arbiter.Worker do
 
       with {:ok, push_opts} <- host_push_opts(state, nil, push_opts),
            {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
+        record_pushed_head(worktree, task_id, branch)
         deliver_pass(state)
       else
         {:error, reason} ->
@@ -10463,7 +10465,7 @@ defmodule Arbiter.Worker do
         with {:ok, push_opts} <- plan_hosted_push(worktree, task_id),
              {:ok, push_opts} <- host_push_opts(state, workspace, push_opts),
              {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
-          :ok
+          record_pushed_head(worktree, task_id)
         else
           {:error, reason} ->
             Logger.warning(
@@ -10483,9 +10485,18 @@ defmodule Arbiter.Worker do
   # first (below) would rebase the rewrite back onto the very commits it
   # replaced and fail on "previously applied" ones. Any other shape goes the
   # ordinary way: reconcile, then a plain push. Never a bare `--force`.
+  #
+  # bd-6ao60c: the lease clearance is the remote head Arbiter last pushed or
+  # observed for this branch (`RemoteHead`), recorded on the ticket so a run that
+  # resumed on another backend (a cluster pass interrupted, then a local
+  # `implement`) still has it. Without it only a clean, patch-equivalent rebase
+  # is cleared, and one whose commits differ (main's `mix format` changed their
+  # context) was refused as diverged.
   defp plan_hosted_push(worktree, task_id) do
     with {:ok, branch} <- Arbiter.Worker.Worktree.current_branch(worktree) do
-      case Arbiter.Reviews.PushState.rewrite_plan(worktree, branch) do
+      expected = Arbiter.Reviews.RemoteHead.recorded(task_id, branch)
+
+      case Arbiter.Reviews.PushState.rewrite_plan(worktree, branch, expected_remote: expected) do
         {:rewrite, lease_sha} ->
           Logger.info(
             "Worker: `#{branch}` was rewritten locally; pushing with --force-with-lease " <>
@@ -10498,6 +10509,19 @@ defmodule Arbiter.Worker do
           with :ok <- reconcile_before_push(worktree, task_id), do: {:ok, [set_upstream: true]}
       end
     end
+  end
+
+  # bd-6ao60c: what the push just landed is the remote head Arbiter now holds for
+  # the branch; the next run's lease (`plan_hosted_push/2`) pins to it.
+  # Only recorded while the worktree is on the pushed branch, so HEAD is what landed.
+  defp record_pushed_head(worktree, task_id, pushed_branch \\ nil) do
+    with {:ok, branch} <- Arbiter.Worker.Worktree.current_branch(worktree),
+         true <- is_nil(pushed_branch) or pushed_branch == branch,
+         head when is_binary(head) <- Arbiter.Worker.Worktree.head_sha(worktree) do
+      Arbiter.Reviews.RemoteHead.record(task_id, branch, head)
+    end
+
+    :ok
   end
 
   # bd-bsmkfu: the host pushes a podman run's branch (its container holds no

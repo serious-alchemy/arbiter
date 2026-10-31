@@ -425,6 +425,102 @@ defmodule Arbiter.Worker.PushBeforePRTest do
     end
   end
 
+  # bd-6ao60c (#1203): the same rebase, but the commits no longer patch-match the
+  # pushed ones (main's `mix format` changed their context), so neither the
+  # patch-equivalence check nor a reconcile rebase can deliver it. What clears it
+  # is the remote head Arbiter recorded when it last pushed the branch, which a
+  # resumed run on any backend reads back from the ticket.
+  describe "a rebased own branch whose commits no longer patch-match (bd-6ao60c)" do
+    defp reformatted_rebase(repo) do
+      {pushed, local, other} = rebased_onto_new_main(repo)
+      File.write!(Path.join(repo.worktree, "work.txt"), "done, reformatted\n")
+      {_, 0} = git(["commit", "-q", "-a", "--amend", "--no-edit"], repo.worktree)
+      {local, 0} = git(["rev-parse", "HEAD"], repo.worktree)
+      _ = local
+      {pushed, String.trim(local), other}
+    end
+
+    defp ticket_worker(repo, record_head) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "pbp-lease-#{System.unique_integer([:positive])}",
+          prefix: "pbl"
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "rebased", workspace_id: ws.id, issue_type: :bug})
+
+      if record_head,
+        do: :ok = Arbiter.Reviews.RemoteHead.record(task.id, "feature/abc", record_head)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "stub/repo",
+          workspace_id: ws.id,
+          meta: %{worktree_path: repo.worktree}
+        )
+
+      :ok = Worker.advance(pid, :implement)
+      on_exit(fn -> stop_quietly(pid) end)
+      {pid, task}
+    end
+
+    test "is delivered with a lease pinned to the head Arbiter recorded", %{repo: repo} do
+      {pushed, local, _other} = reformatted_rebase(repo)
+      {pid, _task} = ticket_worker(repo, pushed)
+
+      assert {:ok, _ref} = Worker.open_mr(pid, "feature/abc", "Add abc", "body", @open_opts)
+      assert origin_sha(repo, "feature/abc") == local
+    end
+
+    test "with no recorded head it is refused and origin is left alone", %{repo: repo} do
+      {pushed, _local, _other} = reformatted_rebase(repo)
+      {pid, _task} = ticket_worker(repo, nil)
+
+      assert {:error, {:push_failed, _}} =
+               Worker.open_mr(pid, "feature/abc", "Add abc", "body", @open_opts)
+
+      assert origin_sha(repo, "feature/abc") == pushed
+    end
+
+    test "a third-party push after the recorded head is never overwritten", %{repo: repo} do
+      {pushed, _local, other} = reformatted_rebase(repo)
+      {pid, _task} = ticket_worker(repo, pushed)
+
+      {_, 0} = git(["checkout", "-q", "feature/abc"], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      {_, 0} = git(["add", "theirs.txt"], other)
+      {_, 0} = git(["commit", "-q", "-m", "theirs"], other)
+      {_, 0} = git(["push", "-q", "origin", "feature/abc"], other)
+      theirs = origin_sha(repo, "feature/abc")
+
+      assert {:error, {:push_failed, _}} =
+               Worker.open_mr(pid, "feature/abc", "Add abc", "body", @open_opts)
+
+      assert origin_sha(repo, "feature/abc") == theirs
+    end
+
+    test "a head recorded for another branch pins nothing", %{repo: repo} do
+      {pushed, _local, _other} = reformatted_rebase(repo)
+      {pid, task} = ticket_worker(repo, nil)
+      :ok = Arbiter.Reviews.RemoteHead.record(task.id, "feature/other", pushed)
+
+      assert {:error, {:push_failed, _}} =
+               Worker.open_mr(pid, "feature/abc", "Add abc", "body", @open_opts)
+
+      assert origin_sha(repo, "feature/abc") == pushed
+    end
+
+    test "a successful push records the delivered head for the next run", %{repo: repo} do
+      {pushed, local, _other} = reformatted_rebase(repo)
+      {pid, task} = ticket_worker(repo, pushed)
+
+      assert {:ok, _ref} = Worker.open_mr(pid, "feature/abc", "Add abc", "body", @open_opts)
+      assert Arbiter.Reviews.RemoteHead.recorded(task.id, "feature/abc") == local
+    end
+  end
+
   describe "no worktree on disk (coordinator / ad-hoc path)" do
     test "worker proceeds without push when worktree_path is absent", %{} do
       task_id = "test-#{System.unique_integer([:positive])}"

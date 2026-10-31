@@ -79,6 +79,9 @@ defmodule Arbiter.Reviews.PushState do
           | :not_on_branch
           | :unknown
 
+  # Why a diverged branch was not cleared for a rewrite (`rewrite_refusal/2`).
+  @type lease_refusal :: :no_recorded_head | {:remote_moved, String.t()}
+
   @type t :: %{
           status: status(),
           branch: String.t() | nil,
@@ -86,7 +89,8 @@ defmodule Arbiter.Reviews.PushState do
           local_head: String.t() | nil,
           remote_head: String.t() | nil,
           ahead_by: non_neg_integer() | nil,
-          checked_out: String.t() | nil
+          checked_out: String.t() | nil,
+          lease_refusal: lease_refusal() | nil
         }
 
   @doc """
@@ -115,7 +119,8 @@ defmodule Arbiter.Reviews.PushState do
       local_head: nil,
       remote_head: nil,
       ahead_by: nil,
-      checked_out: nil
+      checked_out: nil,
+      lease_refusal: nil
     }
 
     case git(path, ["rev-parse", "HEAD"]) do
@@ -132,7 +137,8 @@ defmodule Arbiter.Reviews.PushState do
       local_head: nil,
       remote_head: nil,
       ahead_by: nil,
-      checked_out: nil
+      checked_out: nil,
+      lease_refusal: nil
     }
   end
 
@@ -243,7 +249,7 @@ defmodule Arbiter.Reviews.PushState do
     do:
       "`#{s.branch}` has DIVERGED from `#{ref(s)}` and is NOT pushed: local HEAD is " <>
         "#{short(s.local_head)}, `#{ref(s)}` is #{short(s.remote_head)}, and neither " <>
-        "contains the other."
+        "contains the other." <> refusal_sentence(Map.get(s, :lease_refusal))
 
   def describe(%{status: :no_remote_branch} = s),
     do:
@@ -264,6 +270,19 @@ defmodule Arbiter.Reviews.PushState do
   def describe(_state), do: "push state could not be determined from the worktree."
 
   defp ref(%{remote: remote, branch: branch}), do: remote <> "/" <> branch
+
+  defp refusal_sentence(:no_recorded_head),
+    do:
+      " Not delivered as a rewrite: no recorded remote head for lease (Arbiter holds no " <>
+        "record of the remote SHA it last pushed or observed for this branch, and the " <>
+        "rewritten commits do not patch-match the remote's)."
+
+  defp refusal_sentence({:remote_moved, expected}),
+    do:
+      " Not delivered as a rewrite: the remote branch moved since Arbiter last recorded it " <>
+        "at #{short(expected)}, so it carries a push Arbiter did not make."
+
+  defp refusal_sentence(_), do: ""
 
   defp short(nil), do: "(unknown)"
   defp short(sha) when is_binary(sha), do: String.slice(sha, 0, 12)
@@ -335,7 +354,7 @@ defmodule Arbiter.Reviews.PushState do
         ])
 
       :refuse ->
-        {:error, :diverged, state}
+        {:error, :diverged, %{state | lease_refusal: rewrite_refusal(state, opts)}}
     end
   end
 
@@ -452,6 +471,20 @@ defmodule Arbiter.Reviews.PushState do
   end
 
   def rewrite_lease(_state, _path, _opts), do: :refuse
+
+  @doc """
+  Why `rewrite_lease/3` refused a diverged branch (bd-6ao60c): `:no_recorded_head`
+  when Arbiter holds no remote SHA to pin a lease to (`:expected_remote` unset),
+  `{:remote_moved, sha}` when it holds one the remote is no longer at (someone
+  else pushed). The park text names it instead of the generic "could not be pushed".
+  """
+  @spec rewrite_refusal(t(), keyword()) :: lease_refusal()
+  def rewrite_refusal(_state, opts) do
+    case Keyword.get(opts, :expected_remote) do
+      sha when is_binary(sha) -> {:remote_moved, sha}
+      _ -> :no_recorded_head
+    end
+  end
 
   @doc """
   For a caller that pushes itself (`Arbiter.Worker`'s pre-PR push): is the

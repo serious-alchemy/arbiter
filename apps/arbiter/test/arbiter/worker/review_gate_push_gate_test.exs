@@ -37,6 +37,7 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
   alias Arbiter.CircuitBreaker
   alias Arbiter.Messages.Message
   alias Arbiter.Reviews.Coverage.Entry
+  alias Arbiter.Reviews.RemoteHead
   alias Arbiter.Tasks.{Issue, ReviewPark, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Worker.ReviewGate
@@ -694,6 +695,109 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
 
       git!(["fetch", "-q", "origin"], repo)
       assert sha(repo, "origin/" <> branch) == theirs
+    end
+  end
+
+  # bd-6ao60c (#1203): a ticket's own run rebased its branch (on another node, or
+  # after an interrupted pass) before the gate ever ran, so the gate has no
+  # in-memory `pushed_remote_head`. The remote head Arbiter recorded on the ticket
+  # when it last pushed the branch is what clears the rewrite.
+  describe "a branch rewritten before the gate started (bd-6ao60c)" do
+    # Rewrites the branch's only commit so it no longer patch-matches the pushed
+    # one (main's `mix format` changing the commit's context, in miniature).
+    defp reformat_tip(wt) do
+      File.write!(Path.join(wt, "reformatted.txt"), "reformatted\n")
+      git!(["add", "reformatted.txt"], wt)
+      git!(["commit", "-q", "--amend", "-m", "work, reformatted"], wt)
+      sha(wt, "HEAD")
+    end
+
+    test "is pushed with a lease pinned to the recorded head and reviewed, not parked",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-recorded"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      :ok = RemoteHead.record(task.id, branch, sha(wt, "HEAD"))
+      rewritten = reformat_tip(wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha == rewritten end, 30_000)
+      refute ReviewPark.parked?(Ash.get!(Issue, task.id))
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == rewritten
+      assert RemoteHead.recorded(task.id, branch) == rewritten
+    end
+
+    test "with no recorded head it parks :head_not_pushed and leaves the remote alone",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-unrecorded"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      pushed = sha(wt, "HEAD")
+      _rewritten = reformat_tip(wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 30_000)
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == pushed
+    end
+
+    test "a third party's push after the recorded head is not overwritten",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-recorded-race"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      :ok = RemoteHead.record(task.id, branch, sha(wt, "HEAD"))
+
+      other = Path.join(tmp, "other-recorded")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "origin.git"), other])
+      git!(["config", "user.email", "o@example.com"], other)
+      git!(["config", "user.name", "O"], other)
+      git!(["config", "commit.gpgsign", "false"], other)
+      git!(["checkout", "-q", branch], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      git!(["add", "theirs.txt"], other)
+      git!(["commit", "-q", "-m", "theirs"], other)
+      git!(["push", "-q", "origin", branch], other)
+      theirs = sha(other, "HEAD")
+
+      _rewritten = reformat_tip(wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 30_000)
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == theirs
+    end
+
+    test "a head the gate pushes is recorded for the next run", %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-records"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      head = sha(wt, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha == head end, 20_000)
+      assert RemoteHead.recorded(task.id, branch) == head
     end
   end
 
