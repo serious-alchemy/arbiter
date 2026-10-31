@@ -394,10 +394,13 @@ defmodule Arbiter.Worker.GitCredentialGitlabTest do
     test "plan -> prepare -> spawn_env hands a local worker its push and API env" do
       stub_gitlab()
       ws = workspace()
+      # A separate owner, ended in-test: self() exiting would fire the revoke Task
+      # after the stub is gone.
+      owner = spawn(fn -> receive do: (:stop -> :ok) end)
       {:ok, plan} = GitCredential.plan(ws, "tonic", role: :implementer, host_pushes?: false)
 
       assert {:ok, git} =
-               GitCredential.prepare(plan, ws, self(), [remote: "acme/tonic"] ++ req_options())
+               GitCredential.prepare(plan, ws, owner, [remote: "acme/tonic"] ++ req_options())
 
       assert {:ok, env} = GitCredential.spawn_env(git, %{}, [{"PATH", "/usr/bin"}], [])
 
@@ -408,6 +411,9 @@ defmodule Arbiter.Worker.GitCredentialGitlabTest do
       refute inspect(env) =~ @parent
       assert "glpat-run-token" in git.redact
       assert @parent in git.redact
+
+      Process.exit(owner, :kill)
+      assert_receive {:gitlab, "DELETE", _, _, _}
     end
 
     test "prepare/4 arms the revoke for every spawn, not only a remote one" do
