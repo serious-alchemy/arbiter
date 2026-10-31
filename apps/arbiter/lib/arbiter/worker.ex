@@ -4802,6 +4802,7 @@ defmodule Arbiter.Worker do
 
         with {:ok, push_opts} <- host_push_opts(state, nil, push_opts),
              {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
+          record_pushed_head(worktree, task_id, branch)
           deliver_pass(state)
         else
           {:error, reason} ->
@@ -5771,6 +5772,7 @@ defmodule Arbiter.Worker do
 
       with {:ok, push_opts} <- host_push_opts(state, nil, push_opts),
            {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
+        record_pushed_head(worktree, task_id, branch)
         deliver_pass(state)
       else
         {:error, reason} ->
@@ -10511,8 +10513,10 @@ defmodule Arbiter.Worker do
 
   # bd-6ao60c: what the push just landed is the remote head Arbiter now holds for
   # the branch; the next run's lease (`plan_hosted_push/2`) pins to it.
-  defp record_pushed_head(worktree, task_id) do
+  # Only recorded while the worktree is on the pushed branch, so HEAD is what landed.
+  defp record_pushed_head(worktree, task_id, pushed_branch \\ nil) do
     with {:ok, branch} <- Arbiter.Worker.Worktree.current_branch(worktree),
+         true <- is_nil(pushed_branch) or pushed_branch == branch,
          head when is_binary(head) <- Arbiter.Worker.Worktree.head_sha(worktree) do
       Arbiter.Reviews.RemoteHead.record(task_id, branch, head)
     end

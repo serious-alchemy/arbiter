@@ -19,7 +19,9 @@ defmodule Arbiter.Reviews.RemoteHeadTest do
         prefix: "rh"
       })
 
-    {:ok, task} = Ash.create(Issue, %{title: "remote head", workspace_id: ws.id, issue_type: :bug})
+    {:ok, task} =
+      Ash.create(Issue, %{title: "remote head", workspace_id: ws.id, issue_type: :bug})
+
     %{task: task}
   end
 
