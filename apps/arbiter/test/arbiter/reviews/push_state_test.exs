@@ -375,6 +375,30 @@ defmodule Arbiter.Reviews.PushStateTest do
       assert remote_sha(tmp, b) == theirs
     end
 
+    test "names the missing lease when nothing is recorded and the rewrite is not patch-equivalent",
+         %{tmp: tmp} do
+      {repo, b, pushed} = rebased_branch(tmp, amend: true)
+
+      assert {:error, :diverged, state} = PushState.ensure_pushed(repo, b)
+      assert state.lease_refusal == :no_recorded_head
+      assert PushState.describe(state) =~ "no recorded remote head for lease"
+      assert remote_sha(tmp, b) == pushed
+    end
+
+    test "names the moved remote when the recorded head is no longer the remote's", %{tmp: tmp} do
+      {repo, b, pushed} = rebased_branch(tmp, amend: true)
+      theirs = third_party_push(tmp, b)
+
+      assert {:error, :diverged, state} =
+               PushState.ensure_pushed(repo, b, expected_remote: pushed)
+
+      assert state.lease_refusal == {:remote_moved, pushed}
+      text = PushState.describe(state)
+      assert text =~ "moved since Arbiter last recorded"
+      assert text =~ String.slice(pushed, 0, 12)
+      assert remote_sha(tmp, b) == theirs
+    end
+
     test "refuses an unrecorded rebase when the remote carries a unique commit", %{tmp: tmp} do
       {repo, b, _pushed} = rebased_branch(tmp, amend: true)
       theirs = third_party_push(tmp, b)
