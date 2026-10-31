@@ -600,7 +600,8 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "rejected push PARKS `:head_not_pushed` rather than reviewing a head the " <>
           "MR does not carry. The one divergence it delivers is a rebase of the " <>
           "ticket's own branch (bd-4axlg0): `--force-with-lease` pinned to the " <>
-          "remote head, cleared only when that head is what the gate last saw or " <>
+          "remote head, cleared only when that head is what Arbiter last pushed or " <>
+          "saw (recorded on the ticket, bd-6ao60c) or " <>
           "every remote-only commit is patch-equivalent to a local one; never a " <>
           "bare `--force`. Undeterminable push state (no " <>
           "`origin`, no worktree, git unavailable) fails OPEN — class B's posture, " <>
