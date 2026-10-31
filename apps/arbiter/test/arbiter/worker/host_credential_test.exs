@@ -209,16 +209,22 @@ defmodule Arbiter.Worker.HostCredentialTest do
 
     test "mints a project token for the push, served by the path-pinned helper" do
       stub_gitlab()
+      # Not self(): the revoke Task fires when its owner exits, and a test pid's own
+      # exit would run it after the stub is gone ("cannot find mock/stub").
+      owner = spawn(fn -> receive do: (:stop -> :ok) end)
 
       assert {:ok,
               %{material: %Material{kind: :gitlab_project_token} = material, env: env} = cred} =
-               HostCredential.for_repo(gitlab_ws(), "tonic", opts(owner: self()))
+               HostCredential.for_repo(gitlab_ws(), "tonic", opts(owner: owner))
 
       assert_receive {:gitlab, "POST", "/api/v4/projects/acme/tonic/access_tokens"}
       assert {"ARB_GIT_TOKEN", "glpat-host-run"} in env
       assert {"SSH_AUTH_SOCK", nil} in env
       assert HostCredential.token(cred) == "glpat-host-run"
       assert material.parent_token == "glpat-parent-host"
+
+      Process.exit(owner, :kill)
+      assert_receive {:gitlab, "DELETE", _}
     end
 
     test "the token is revoked when the host's owner exits" do
