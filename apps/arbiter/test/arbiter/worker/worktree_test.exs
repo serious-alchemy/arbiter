@@ -1243,6 +1243,44 @@ defmodule Arbiter.Worker.WorktreeTest do
     end
   end
 
+  describe "attach/2 over a stub directory" do
+    test "replaces a dir holding only .arbiter/ and carries INBOX forward", %{
+      repo: repo,
+      root: root
+    } do
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", "feature/stub"])
+      stub = Path.join(root, "feature-stub")
+      File.mkdir_p!(Path.join(stub, ".arbiter"))
+      File.write!(Path.join([stub, ".arbiter", "INBOX"]), "pending\n")
+
+      assert {:ok, ^stub} = Worktree.attach(repo, "feature/stub")
+      assert {:ok, "feature/stub"} = Worktree.current_branch(stub)
+      assert File.read!(Path.join([stub, ".arbiter", "INBOX"])) == "pending\n"
+    end
+
+    test "create/3 also replaces the stub", %{repo: repo, root: root} do
+      stub = Path.join(root, "feature-stub2")
+      File.mkdir_p!(Path.join(stub, ".arbiter"))
+
+      assert {:ok, ^stub} = Worktree.create(repo, "feature/stub2", "main")
+      assert {:ok, "feature/stub2"} = Worktree.current_branch(stub)
+    end
+
+    test "a dir holding other files is still refused as layout_mismatch", %{
+      repo: repo,
+      root: root
+    } do
+      stub = Path.join(root, "feature-notstub")
+      File.mkdir_p!(Path.join(stub, ".arbiter"))
+      File.write!(Path.join(stub, "other.txt"), "x")
+
+      assert {:error, {:layout_mismatch, ^stub}} =
+               Worktree.create(repo, "feature/notstub", "main", layout: :private_clone)
+
+      assert File.exists?(Path.join(stub, "other.txt"))
+    end
+  end
+
   describe "attach/2" do
     test "checks out an EXISTING branch into a worktree (no -b)", %{repo: repo, root: root} do
       # Create a branch in the repo without making a worktree for it.
