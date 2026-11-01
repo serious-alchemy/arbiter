@@ -1178,7 +1178,7 @@ defmodule Arbiter.Worker do
   """
   @spec resume_merge_after_ruling(String.t(), map()) :: :ok | {:error, term()}
   def resume_merge_after_ruling(task_id, ruling) when is_binary(task_id) and is_map(ruling) do
-    with {:ok, state} <- ticket_round_state(task_id, %{}) do
+    with {:ok, %State{} = state} <- ticket_round_state(task_id, %{}) do
       state = %State{state | meta: Map.put(state.meta, :merge_ruling, ruling)}
       apply_ticket_verdict(state, {:approve, Map.get(ruling, :reasoning) || ""})
     end
