@@ -1585,6 +1585,21 @@ defmodule Arbiter.Worker.StopReasonTest do
       end
     end
 
+    # bd-2z3ogf: NOT from a real CLI capture (none obtainable) — phrasing is
+    # the one already assumed by the weekly test above.
+    test "weekly limit with a dated reset returns retry_after" do
+      local = NaiveDateTime.local_now() |> NaiveDateTime.add(3 * 86_400, :second)
+      zone = StopReason.host_time_zone_name()
+      mon = Enum.at(~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec), local.month - 1)
+      line = "You've hit your weekly limit \u00B7 resets #{mon} #{local.day}, 2am (#{zone})"
+      reason = StopReason.classify(1, [line], "claude")
+
+      assert reason.category == :quota_exhausted
+      assert zone == nil or match?(%DateTime{}, reason.retry_after)
+      assert reason.summary =~ "usage limit"
+      refute reason.summary =~ "5h"
+    end
+
     test "Claude's monthly spend limit is not a time-boxed quota stop" do
       line =
         "You've hit your monthly spend limit \u00B7 raise it at claude.ai/settings/usage?from=cc_cli_limit_message"
