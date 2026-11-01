@@ -11,10 +11,15 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
   # async: false — the OAuthUsage 429 cooldown lives in :persistent_term.
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Quota
   alias Arbiter.Quota.AnthropicQuota
+  alias Arbiter.Quota.Budget
   alias Arbiter.Quota.CloudProbe
   alias Arbiter.Quota.Gate
+  alias Arbiter.Quota.Gate.Snapshot
+  alias Arbiter.Quota.Gate.Snapshot.Anthropic
+  alias Arbiter.Quota.History
   alias Arbiter.Quota.Overage
   alias Arbiter.Tasks.Workspace
 
@@ -155,14 +160,14 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
       quota = poll!(ws, %{"five_hour" => nil})
 
       assert is_nil(quota.utilization_5h)
-      snapshot = Arbiter.Quota.Gate.Snapshot.Anthropic.normalize(quota, [])
+      snapshot = Anthropic.normalize(quota, [])
       assert is_nil(snapshot.utilization)
       assert is_nil(snapshot.status)
       assert is_nil(snapshot.reset_at)
 
       b =
-        Arbiter.Quota.Budget.compute(
-          account: %Arbiter.Accounts.ProviderAccount{
+        Budget.compute(
+          account: %ProviderAccount{
             provider: :claude,
             quota_config: %{"threshold_mode" => "paced"},
             max_concurrent: 3
@@ -188,9 +193,7 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
 
       assert is_boolean(Gate.stale?(quota, now))
 
-      assert is_boolean(
-               Gate.long_window_stale?(Arbiter.Quota.Gate.Snapshot.normalize(quota), now)
-             )
+      assert is_boolean(Gate.long_window_stale?(Snapshot.normalize(quota), now))
 
       assert is_map(Quota.view(quota))
       assert is_map(Quota.serialize(quota_account_id!(ws.id)))
@@ -206,7 +209,7 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
       id = quota_account_id!(ws.id)
       _ = poll!(ws, %{"five_hour" => nil})
 
-      rows = Arbiter.Quota.History.list(id)
+      rows = History.list(id)
       assert Enum.any?(rows, &(&1.window == "7d"))
       refute Enum.any?(rows, &(&1.window == "5h"))
     end
