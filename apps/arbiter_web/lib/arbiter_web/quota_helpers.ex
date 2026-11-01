@@ -591,8 +591,7 @@ defmodule ArbiterWeb.QuotaHelpers do
     else
       windows =
         [inner, outer]
-        |> Enum.reject(&(&1.state == :no_data and &1.window == "7d" and single_window?(view)))
-        |> Enum.reject(&(&1.window == "5h" and claude_without_5h?(view)))
+        |> Enum.reject(&hidden_ring?(&1, view))
         |> Enum.map_join("; ", &ring_phrase/1)
 
       "#{name}: #{windows}"
@@ -606,6 +605,11 @@ defmodule ArbiterWeb.QuotaHelpers do
       "estimated from Arbiter's usage ledger, rolling #{window}: #{used} of #{cap} tokens; no fixed reset"
 
   defp estimate_note(_view), do: nil
+
+  defp hidden_ring?(ring, view) do
+    (ring.state == :no_data and ring.window == "7d" and single_window?(view)) or
+      (ring.window == "5h" and claude_without_5h?(view))
+  end
 
   defp single_window?(view), do: Map.get(view, :secondary_label, "7d") == nil
 
