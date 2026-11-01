@@ -521,6 +521,12 @@ defmodule Arbiter.Application do
       ),
       # bd-7wx2lh: warm the `agy models` cache and log any configured agy tier
       # model the CLI no longer serves (spawns would fall back; see ModelCheck).
+      # 5H C10: one-time notice for primary-window quota keys, inert for Claude.
+      Supervisor.child_spec(
+        {Task, fn -> Arbiter.Quota.PrimaryKeyDeprecation.warn_at_boot() end},
+        id: :primary_key_deprecation_boot_task,
+        restart: :temporary
+      ),
       Supervisor.child_spec(
         {Task, fn -> ModelCheck.warn_at_boot() end},
         id: :agy_model_check_boot_task,

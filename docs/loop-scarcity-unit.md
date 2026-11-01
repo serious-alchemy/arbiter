@@ -17,6 +17,12 @@ wrong for how this installation actually runs:
 > the marginal dollar cost of the next Claude token is zero… what is genuinely
 > finite is the 5-hour and 7-day utilization windows
 
+*Update (5H C10, bd-138qku):* Anthropic has since retired the 5h window, so for
+Claude the single binding finite resource is the **7d window**. The thesis
+stands with one denominator instead of two: scarcity is a run's share of the
+provider's primary *gating* window (7d for Claude; 5h or session for providers
+that still have one).
+
 The consequence is not cosmetic. A loop optimising a unit that does not bind can
 propose a change that reduces imputed spend while making the binding constraint
 worse, and it is *indifferent* to a change that materially relieves it. Every

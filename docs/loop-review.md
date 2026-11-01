@@ -103,7 +103,7 @@ warrants at least the same gate.
    under `--propose`; one becomes a detector only when a human merges it into
    `Arbiter.Loop.FindingBuckets`. The call's own cost lands on its own
    `usage_events` row (step `loop_discovery`), and the report states its
-   dollars and 5h-window share in place of "no model call". Design:
+   dollars and primary-window (7d for Claude) share in place of "no model call". Design:
    `docs/design/loop-inference-discovery-pass.md`.
 
 5. **CI: first-push red rate and fix_pass outcomes** (bd-cuu8n3). The share

@@ -152,7 +152,7 @@ Three more problems sit in the same path:
     (`apps/arbiter/lib/arbiter/accounts/concurrency.ex:352-363`). The scheduler
     can fill the seat, and the fix round then lands on top of it.
   - **Lag.** Snapshots lag dispatch by up to 20 minutes.
-  - **Resets.** Right after a 5h reset, the stale window fails open: the gate
+  - **Resets.** Right after a primary-window reset (Claude has no 5h window now; 7d gates), the stale window fails open: the gate
     drops rules 1 and 3 (`apps/arbiter/lib/arbiter/quota/gate.ex:1204-1218`).
 - **The static cap does more than one job.** It also stands in for:
   - machine load;

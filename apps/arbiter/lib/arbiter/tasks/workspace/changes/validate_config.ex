@@ -1929,15 +1929,16 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   # Quota-aware dispatch throttle config (bd-7cd38f, bd-1tuxv8):
   #   * on_exhaustion ∈ {"throttle","continue"}
   #   * overage_alert_usd a positive number (or its JSON string form)
-  #   * throttle_threshold a number in (0, 1] — the 5h/session window ceiling
+  #   * throttle_threshold a number in (0, 1] — the primary (5h/session) ceiling;
+  #     inert for Claude (5h retired, 7d gates)
   #   * weekly_threshold a number in (0, 1] — the 7d/weekly window ceiling
   #   * weekly_warning_policy ∈ {"ignore","hold"} — what a 7d `allowed_warning`
   #     does (default "ignore"; see Arbiter.Quota.Gate.weekly_warning_policy/1)
   #   * threshold_mode ∈ {"flat","paced"} (bd-2daof2; default "flat")
   #   * paced_floor / weekly_paced_floor numbers in (0, 1] — the paced-mode
-  #     head start on the 5h/session and 7d/weekly windows
+  #     head start on the primary (5h/session, inert for Claude) and 7d/weekly windows
   #   * pace_exempt_threshold / weekly_pace_exempt_threshold numbers in (0, 1] —
-  #     the dedicated cap of the P0 pace exemption on the 5h and 7d windows
+  #     the dedicated cap of the P0 pace exemption on the primary (inert for Claude) and 7d windows
   #     (bd-6bxv7h; tighten-only against the account's)
   #   * pace_exempt_priority an integer 0..4, or "none" — narrows the account's
   # `window_seconds` is deliberately not a workspace key: window length belongs

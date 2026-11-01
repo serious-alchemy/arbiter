@@ -447,3 +447,27 @@ call sites are unchanged and harmless — `PreflightHold.retry_not_before/3`
 simply never receives a `:quota_exhausted` shape from this path anymore — but
 a quota-exhausted dispatch will now be discovered the same way an auth
 failure is: by the provider's own rejection once dispatched, not pre-guessed.
+
+## Claude has no 5h window (5H C10, bd-138qku)
+
+Anthropic retired the 5h window. A Claude snapshot now carries no primary
+window (`Gate.Snapshot.window_label` is `nil`) and the **7d window is the
+gate**. Primary-class keys (those that only govern a provider's 5h/session
+window) are therefore inert for Claude accounts. They are still accepted and
+stored exactly as before — no migration, existing configs validate unchanged —
+and Codex and Antigravity, which keep a real primary window, still honour them.
+
+On boot, `Arbiter.Quota.PrimaryKeyDeprecation` logs **one** warning listing any
+primary-class key set on a Claude account's `quota_config`, in a workspace's
+`config["quota"]`, or overridden in the `:quota` app env.
+
+| Key | Window | Claude | Codex / Antigravity |
+| --- | --- | --- | --- |
+| `throttle_threshold` | primary (5h/session) | **inert** (warned) | flat ceiling |
+| `paced_floor` | primary | **inert** (warned) | paced head start |
+| `pace_exempt_threshold` | primary | **inert** (warned) | P0 exempt cap |
+| `weekly_threshold` | 7d | **the gate** | 7d ceiling |
+| `weekly_paced_floor` | 7d | paced head start | paced head start |
+| `weekly_pace_exempt_threshold` | 7d | P0 exempt cap | P0 exempt cap |
+| `weekly_warning_policy` | 7d | applies | applies |
+| `threshold_mode`, `on_exhaustion`, `overage_alert_usd`, `pace_exempt_priority` | window-agnostic | applies | applies |
