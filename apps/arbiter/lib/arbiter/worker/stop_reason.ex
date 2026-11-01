@@ -736,7 +736,7 @@ defmodule Arbiter.Worker.StopReason do
 
         %__MODULE__{
           category: :quota_exhausted,
-          summary: "agent's 5h plan usage limit was reached (not a billing/credit failure)",
+          summary: "agent's plan usage limit was reached (not a billing/credit failure)",
           remediation: quota_remediation(retry_after),
           exit_status: exit_status,
           signal: signal,
@@ -1852,7 +1852,8 @@ defmodule Arbiter.Worker.StopReason do
   # The `|<epoch>` form is unambiguous, so it wins when both are present; the
   # wall-clock form (bd-cfhj7z) is the fallback.
   defp retry_after_from(haystack) do
-    epoch_reset_from(haystack) || wallclock_reset_from(haystack)
+    epoch_reset_from(haystack) || wallclock_reset_from(haystack) ||
+      dated_reset_from(haystack)
   end
 
   # bd-a6vh2x: `Resets in 11m34s` is a duration from the moment the message was
@@ -1920,6 +1921,74 @@ defmodule Arbiter.Worker.StopReason do
   #     branch, in either direction.
   @wallclock_past_slack_seconds 3_600
   @wallclock_max_horizon_seconds 6 * 3_600
+
+  # bd-2z3ogf: the weekly limit names a *date* as well as a clock time
+  # (`resets Oct 9, 2am (America/New_York)`). Same line-leading anchor, zone
+  # handling and host-zone check as the same-day form above; the year is
+  # optional and inferred. Phrasing is tolerant (optional `.`/`,`, minutes,
+  # full or abbreviated month name) because no real weekly capture has been
+  # obtained to pin it.
+  @quota_reset_dated_signature ~r/
+      ^[ \t]*you.{0,3}ve[ ]hit[ ]your[ ](?:weekly|session|usage|opus|sonnet)[ ]limit
+      [^\n]*?
+      \bresets[ \t]+(?:on[ \t]+)?(?<month>[a-z]{3,9})\.?[ \t]+(?<day>\d{1,2})(?:st|nd|rd|th)?
+      (?:,?[ \t]+(?<year>\d{4}))?,?[ \t]*(?:at[ \t]+)?
+      (?<hour>\d{1,2})(?::(?<minute>\d{2}))?[ \t]*(?<meridiem>am|pm)
+      (?<tail>[^\n]*)
+  /mix
+
+  @months ~w(jan feb mar apr may jun jul aug sep oct nov dec)
+
+  defp dated_reset_from(haystack) do
+    with %{"month" => mon, "day" => day, "hour" => raw_hour, "meridiem" => mer} = caps <-
+           Regex.named_captures(@quota_reset_dated_signature, haystack),
+         month when is_integer(month) <- month_number(mon),
+         {day, ""} <- Integer.parse(day),
+         {hour12, ""} when hour12 in 0..12 <- Integer.parse(raw_hour),
+         minute when minute in 0..59 <- parse_minute(caps["minute"]),
+         {:ok, zone} <- zone_from_tail(caps["tail"]),
+         true <- host_zone_matches?(zone),
+         local_now = NaiveDateTime.local_now(),
+         {:ok, naive} <-
+           dated_candidate(
+             local_now,
+             caps["year"],
+             month,
+             day,
+             to_24h(hour12, String.downcase(mer)),
+             minute
+           ) do
+      naive
+      |> NaiveDateTime.add(-local_utc_offset_seconds(), :second)
+      |> DateTime.from_naive!("Etc/UTC")
+    else
+      _ -> nil
+    end
+  end
+
+  defp month_number(name) do
+    key = name |> String.downcase() |> String.slice(0, 3)
+    idx = Enum.find_index(@months, &(&1 == key))
+    if idx, do: idx + 1
+  end
+
+  # No year printed: this year, or next when that date is already well past
+  # (a late-December stop naming a January reset).
+  defp dated_candidate(local_now, year, month, day, hour, minute) do
+    this_year = local_now.year
+    missing? = year in [nil, ""]
+    year = if missing?, do: this_year, else: String.to_integer(year)
+
+    with {:ok, date} <- Date.new(year, month, day),
+         {:ok, naive} <- NaiveDateTime.new(date, Time.new!(hour, minute, 0)) do
+      if missing? and
+           NaiveDateTime.diff(local_now, naive, :second) > @wallclock_past_slack_seconds do
+        NaiveDateTime.new(Date.new!(year + 1, month, day), Time.new!(hour, minute, 0))
+      else
+        {:ok, naive}
+      end
+    end
+  end
 
   defp wallclock_reset_from(haystack) do
     with {hour, minute, zone} <- parse_wallclock(haystack),
@@ -2064,6 +2133,6 @@ defmodule Arbiter.Worker.StopReason do
 
   defp quota_remediation(nil) do
     "Provider-side plan usage limit, not a billing failure — no action needed. " <>
-      "Wait for the 5h window to reset (no reset time was reported), then re-dispatch."
+      "Wait for the usage limit to reset (no reset time was reported), then re-dispatch."
   end
 end
