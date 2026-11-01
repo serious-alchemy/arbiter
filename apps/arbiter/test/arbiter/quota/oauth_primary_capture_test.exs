@@ -126,6 +126,67 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
       assert quota.per_model_utilization == %{"sonnet" => 0.55}
     end
 
+    test "five_hour: null with a valid seven_day still writes the 7d snapshot (bd-bmoe8s)" do
+      ws = workspace!()
+      quota = poll!(ws, %{"five_hour" => nil})
+
+      assert quota.utilization_7d == 0.08
+      assert %DateTime{} = quota.reset_7d_at
+      assert quota.capture_source == "oauth_poll"
+      assert DateTime.diff(DateTime.utc_now(), quota.captured_at) < 30
+      refute Gate.stale?(quota)
+    end
+
+    test "five_hour: null does not carry over the previous window's 5h numbers" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+      assert Quota.latest(quota_account_id!(ws.id)).reset_5h_at
+
+      quota = poll!(ws, %{"five_hour" => nil})
+
+      assert quota.utilization_5h in [nil, 0.0]
+      assert is_nil(quota.reset_5h_at)
+      assert quota.utilization_7d == 0.08
+    end
+
+    test "seven_day: null with a valid five_hour still writes the 5h data" do
+      ws = workspace!()
+      quota = poll!(ws, %{"seven_day" => nil})
+
+      assert quota.utilization_5h == 0.24
+      assert quota.capture_source == "oauth_poll"
+    end
+
+    test "limits[] weekly_all backs a null seven_day; weekly_scoped feeds per-model" do
+      ws = workspace!()
+
+      quota =
+        poll!(ws, %{
+          "five_hour" => nil,
+          "seven_day" => nil,
+          "seven_day_sonnet" => nil,
+          "limits" => [
+            %{
+              "kind" => "weekly_all",
+              "percent" => 61,
+              "resets_at" => "2026-11-02T15:59:59.560724+00:00",
+              "is_active" => true
+            },
+            %{
+              "kind" => "weekly_scoped",
+              "percent" => 40,
+              "scope" => %{"model" => %{"display_name" => "Sonnet"}},
+              "is_active" => false
+            }
+          ]
+        })
+
+      assert quota.utilization_7d == 0.61
+      assert quota.reset_7d_at == ~U[2026-11-02 15:59:59Z]
+      assert quota.representative_claim == "seven_day"
+      assert quota.per_model_utilization == %{"sonnet" => 0.4}
+    end
+
     test "a 429 cooldown leaves the previous row intact rather than writing nils" do
       ws = workspace!()
       polled = poll!(ws)

@@ -1153,6 +1153,15 @@ defmodule Arbiter.Quota do
     end
   end
 
+  # The API reported no 5h window (`five_hour: null`, bd-bmoe8s) while the
+  # poll otherwise succeeded: record "idle" (0%, no reset) explicitly so the
+  # previous window's numbers are overwritten rather than carried over.
+  defp no_five_hour_window(primary, %{utilization_5h: nil}) do
+    Map.merge(primary, %{utilization_5h: 0.0, status_5h: "allowed", reset_5h_at: nil})
+  end
+
+  defp no_five_hour_window(primary, _usage), do: primary
+
   # Persist one parsed `/api/oauth/usage` snapshot (bd-b0zody).
   #
   # The poll is the *primary* quota source: when the body carried an aggregate
@@ -1185,7 +1194,7 @@ defmodule Arbiter.Quota do
     }
 
     {action, attrs} =
-      if is_number(usage.utilization_5h) do
+      if is_number(usage.utilization_5h) or is_number(usage.utilization_7d) do
         primary =
           %{
             utilization_5h: usage.utilization_5h,
@@ -1199,6 +1208,7 @@ defmodule Arbiter.Quota do
           }
           |> Enum.reject(fn {_k, v} -> is_nil(v) end)
           |> Map.new()
+          |> no_five_hour_window(usage)
           |> Map.merge(%{captured_at: now, capture_source: @oauth_poll_source})
 
         {:record_oauth_snapshot, Map.merge(secondary, primary)}
