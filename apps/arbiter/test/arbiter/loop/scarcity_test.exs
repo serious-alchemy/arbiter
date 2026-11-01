@@ -150,6 +150,16 @@ defmodule Arbiter.Loop.ScarcityTest do
       assert Scarcity.billing_mode(nil, %{utilization_5h: 0.0}) == {:subscription, :inferred}
     end
 
+    test "a 7d-only snapshot (5h retired, utilization_5h nil) infers subscription billing" do
+      snap = %{utilization_5h: nil, utilization_7d: 0.61}
+      assert Scarcity.billing_mode(%{}, snap) == {:subscription, :inferred}
+    end
+
+    test "both windows nil is metered" do
+      snap = %{utilization_5h: nil, utilization_7d: nil}
+      assert Scarcity.billing_mode(%{}, snap) == {:metered, :default}
+    end
+
     test "no window evidence at all falls back to metered — dollars still bind there" do
       assert Scarcity.billing_mode(%{}, nil) == {:metered, :default}
       assert Scarcity.billing_mode(nil, %{utilization_5h: nil}) == {:metered, :default}

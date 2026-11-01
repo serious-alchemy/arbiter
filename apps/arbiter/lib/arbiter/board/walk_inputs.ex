@@ -162,16 +162,17 @@ defmodule Arbiter.Board.WalkInputs do
       primary.
   """
   @spec node_groups(Placement.mode(), boolean(), map(), String.t() | nil) :: [[String.t()]]
-  def node_groups(mode, remote_ok?, remote, workspace_id)
+  def node_groups(mode, remote_ok?, remote, workspace_id, allowed \\ nil)
 
-  def node_groups(:local_only, _remote_ok?, _remote, _ws_id), do: [[@local]]
-  def node_groups(_mode, false, _remote, _ws_id), do: [[@local]]
+  def node_groups(:local_only, _remote_ok?, _remote, _ws_id, _allowed), do: [[@local]]
+  def node_groups(_mode, false, _remote, _ws_id, _allowed), do: [[@local]]
 
-  def node_groups(mode, true, remote, workspace_id) do
+  def node_groups(mode, true, remote, workspace_id, allowed) do
     {constrained, free} =
       remote
       |> Enum.filter(fn {_id, node} ->
-        pin_allows?(Map.get(node, :workspace_ids, []), workspace_id)
+        pin_allows?(Map.get(node, :workspace_ids, []), workspace_id) and
+          Arbiter.Nodes.Allowlist.allows?(allowed, node)
       end)
       |> Enum.split_with(fn {_id, node} -> Map.get(node, :constrained?, false) end)
 
@@ -415,6 +416,9 @@ defmodule Arbiter.Board.WalkInputs do
            cap: Capacity.offered(row),
            used: (Map.get(row, :live) || 0) + Map.get(reserved, row.id, 0),
            label: Map.get(row, :name) || row.id,
+           name: Map.get(row, :name),
+           kind: Map.get(row, :kind),
+           labels: Map.get(row, :labels) || [],
            constrained?: Map.get(row, :constrained?, false) == true,
            workspace_ids: Map.get(row, :workspace_ids) || []
          }}
@@ -629,7 +633,13 @@ defmodule Arbiter.Board.WalkInputs do
     if mode == :remote_only and verdict == {:local_only, :scoped_git_credential} do
       []
     else
-      node_groups(mode, ctx.remote != %{} and verdict == :ok, ctx.remote, ws.id)
+      node_groups(
+        mode,
+        ctx.remote != %{} and verdict == :ok,
+        ctx.remote,
+        ws.id,
+        Arbiter.Nodes.Allowlist.selectors(ws)
+      )
     end
   end
 

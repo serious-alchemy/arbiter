@@ -105,6 +105,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       `Arbiter.Worker.VisualBaselines.Config` (bd-9obzu9, GitHub #936).
     * If `"worker.placement"` is present it must be `"local_only"` (the default),
       `"prefer_remote"` or `"remote_only"` (RW8, `Arbiter.Nodes.Placement`).
+    * If `"worker.placement_nodes"` is present it must be a list of node selectors
+      (`name:<node>`, `label:<k=v>`, `kind:<cluster,machine>`; bd-d7tb2d).
     * If `"attention"` is present, it must be a map whose
       `"coordinator_limit_minutes"` / `"run_crashed_max_resumes"` are
       non-negative integers — `0` turns a limit off (bd-8nlez1,
@@ -186,6 +188,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     changeset
     |> validate_worker_block(worker, "worker")
     |> validate_placement(worker)
+    |> validate_placement_nodes(worker)
     |> validate_image(Map.get(worker, "image"), "worker.image", :workspace)
     |> validate_visual_baselines(worker)
     |> validate_worker_repos(Map.get(worker, "repos"))
@@ -242,6 +245,40 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           message: ~s(worker.placement must be "local_only", "prefer_remote" or "remote_only")
         )
     end
+  end
+
+  # bd-d7tb2d: `worker.placement_nodes`, a list of node selectors (`Arbiter.Nodes.Allowlist`).
+  defp validate_placement_nodes(changeset, worker) do
+    case Map.fetch(worker, "placement_nodes") do
+      :error ->
+        changeset
+
+      {:ok, list} when is_list(list) ->
+        if Enum.all?(list, &valid_selector?/1),
+          do: changeset,
+          else: placement_nodes_error(changeset)
+
+      {:ok, _} ->
+        placement_nodes_error(changeset)
+    end
+  end
+
+  defp valid_selector?(sel) when is_binary(sel) do
+    case Arbiter.Nodes.Allowlist.parse(sel) do
+      {:kind, k} -> k in ["cluster", "machine", "local"]
+      nil -> false
+      _ -> true
+    end
+  end
+
+  defp valid_selector?(_), do: false
+
+  defp placement_nodes_error(changeset) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message:
+        ~s(worker.placement_nodes must be a list of "name:<node>", "label:<k=v>" or "kind:<cluster,machine>" strings)
+    )
   end
 
   defp validate_worker_repos(changeset, nil), do: changeset

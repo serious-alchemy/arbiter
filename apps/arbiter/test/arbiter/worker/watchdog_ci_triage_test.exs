@@ -183,6 +183,28 @@ defmodule Arbiter.Worker.WatchdogCiTriageTest do
       assert notes(t) =~ "drain_test.exs"
     end
 
+    test "an overlapping failing set ({X,Y} -> {Y}) is a repeat: fix pass after ONE re-run" do
+      ws = workspace()
+      t = task(ws)
+
+      both = [
+        %{name: "job A", summary: exunit(@coverage), conclusion: "failure"},
+        %{name: "job B", summary: exunit(@drain), conclusion: "failure"}
+      ]
+
+      StubMerger.set_failing_checks("!tu5", both)
+      StubMerger.queue_get("!tu5", [red("h1"), pending("h1")])
+
+      start(t, ws, "!tu5")
+      wait_until(fn -> length(reruns("!tu5")) == 1 end)
+
+      StubMerger.set_failing_checks("!tu5", untouched_test("job B", @drain))
+      StubMerger.queue_get("!tu5", [pending("h1"), red("h1")])
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert length(reruns("!tu5")) == 1
+    end
+
     test "a different failing set may use the second re-run, then the budget is spent" do
       ws = workspace()
       t = task(ws)

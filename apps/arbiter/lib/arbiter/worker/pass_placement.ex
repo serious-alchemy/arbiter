@@ -88,7 +88,8 @@ defmodule Arbiter.Worker.PassPlacement do
       local_work?: local_work?(Map.get(attrs, :clone_path)),
       git_credential: Placement.git_credential(workspace, Map.get(attrs, :repo)),
       registry: Placement.image_registry(workspace, Map.get(attrs, :repo)),
-      mode: mode
+      mode: mode,
+      allowed_nodes: Arbiter.Nodes.Allowlist.selectors(workspace)
     }
 
     LocalCapacity.gate(request, Keyword.get(opts, :placement_opts, []))
@@ -188,7 +189,8 @@ defmodule Arbiter.Worker.PassPlacement do
       no_pr?: false,
       git_credential: Placement.git_credential(workspace, Map.get(task, :repo)),
       registry: Placement.image_registry(workspace, Map.get(task, :repo)),
-      mode: mode
+      mode: mode,
+      allowed_nodes: Arbiter.Nodes.Allowlist.selectors(workspace)
     }
 
     case Placement.place(request, Keyword.get(opts, :placement_opts, [])) do

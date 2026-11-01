@@ -460,6 +460,13 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                       has a free slot). Reviewers, fix/conflict passes, other
                       providers and bwrap-jailed runs always stay local
                       whatever this says. See `arb node`.
+      placement_nodes list of node selectors — with prefer_remote / remote_only,
+                      only matching nodes are considered: "name:<node>",
+                      "label:<k=v>" or "kind:<cluster,machine>" (bare "machine",
+                      "k=v" or a node name also work). Unset (default): any node.
+                      A remote_only run with no allowed node free is held with a
+                      reason naming the allowlist. `arb server doctor` shows the
+                      effective set.
       seed_paths      list of repo-relative paths — copied (cp -a --reflink=auto,
                       never symlinked, so a worker's build cannot write through
                       to the source repo or race a sibling) from the source repo
