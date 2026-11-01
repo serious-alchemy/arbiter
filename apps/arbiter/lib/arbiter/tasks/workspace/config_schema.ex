@@ -431,7 +431,9 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
     quota  (map — quota-aware dispatch throttle)
       on_exhaustion       one of: #{Enum.join(@quota_modes, ", ")}
       overage_alert_usd   positive number (or its JSON string form)
-      throttle_threshold  number in (0, 1] — 5h/session window ceiling
+      throttle_threshold  number in (0, 1] — primary (5h/session) window ceiling.
+                          INERT for Claude: Anthropic retired the 5h window, so
+                          weekly_threshold gates it. Still accepted, never rejected.
                           (default: 0.85)
       weekly_threshold    number in (0, 1] — 7d/weekly window ceiling
                           (default: 0.90; higher than the 5h ceiling because
@@ -447,7 +449,7 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                           grants it; a workspace can only narrow it, never
                           grant it). "none" switches it off here.
       pace_exempt_threshold, weekly_pace_exempt_threshold
-                          number in (0, 1] — lowers the account's 5h / 7d
+                          number in (0, 1] — lowers the account's primary (inert for Claude) / 7d
                           exempt cap, the ceiling an exempt dispatch may lift
                           the paced line to. Never raises it; never above the
                           flat ceiling.

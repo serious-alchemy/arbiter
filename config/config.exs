@@ -71,20 +71,25 @@ config :arbiter,
   ]
 
 # Quota-aware dispatch throttle (bd-7cd38f). Governs what the fleet dispatcher
-# does when the workspace nears / crosses the Anthropic 5h quota cap, consuming
+# does when the workspace nears / crosses the Anthropic quota cap (the 7d weekly
+# window — Anthropic retired the 5h window, so for Claude only the weekly
+# window gates; the 5h-named keys below govern Codex/Antigravity), consuming
 # the quota snapshots `Arbiter.Quota.CloudProbe` polls off `/api/oauth/usage`
 # (bd-b0zody; the pass-through proxy that used to capture the same figures off
 # response headers was removed in bd-7cvh8z):
 #
 #   * on_exhaustion: :throttle (default) — near the cap, HOLD new dispatches in a
 #     per-workspace draining queue and drain them in priority order as headroom
-#     frees / the 5h window resets. Work is delayed, never dropped.
+#     frees / the gating window resets. Work is delayed, never dropped.
 #   * on_exhaustion: :continue — dispatch proceeds past the cap (paid API
 #     overage); overage spend is recorded and an alert fires once per
 #     `overage_alert_usd` crossing, but dispatch never auto-stops.
 #
-# `throttle_threshold` is the `utilization_5h` at/above which :throttle holds
-# (0.85 = Ryan's hand-enforced ceiling, between the dashboard's 0.7/0.9 bands).
+# `throttle_threshold` is the primary-window (5h/session) `utilization` at/above
+# which :throttle holds — INERT for Claude since the 5h window was retired (boot
+# warning: Arbiter.Quota.PrimaryKeyDeprecation); `weekly_threshold` gates Claude
+# (0.85 = Ryan's hand-enforced ceiling, between the dashboard's 0.7/0.9 bands;
+# the shipped 0.85 below is not warned about, only an operator override).
 # `overage_alert_usd` is the global default alert threshold for :continue, below
 # a per-workspace `quota.overage_alert_usd` override.
 #
@@ -94,7 +99,7 @@ config :arbiter,
 #
 # Staleness (optional overrides): `staleness_threshold_seconds` (default 300)
 # and `polled_staleness_threshold_seconds` (default 1200) are how old a
-# header-captured / polled snapshot the gate still trusts before the 5h window
+# header-captured / polled snapshot the gate still trusts before the gating window
 # fails open; `stale_alert_threshold_seconds` (default 1800) is when
 # `Arbiter.Quota.StalenessWatch` raises the "quota accounting is blind" alert.
 config :arbiter, :quota,
@@ -130,7 +135,7 @@ config :arbiter, :quota_grant_refresher, enabled: true, interval_ms: 60_000
 
 # Raises an operator alert when a Claude account's persisted quota snapshot is
 # older than `:quota` `:stale_alert_threshold_seconds` (default 1800 s, never
-# below the gate's own staleness margin) — quota accounting is blind and the 5h
+# below the gate's own staleness margin) — quota accounting is blind and the gate
 # gate fails open — independent of whether anything reports a poll failure.
 # Clears itself when a fresh snapshot lands. `Arbiter.Quota.StalenessWatch`
 # (bd-2wnkoq).

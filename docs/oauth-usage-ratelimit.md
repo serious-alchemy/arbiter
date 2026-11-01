@@ -207,7 +207,7 @@ never skipped anything):
 A 429 therefore costs two polls, and the next successful poll can land about
 900s after the last one. The gate's staleness margin for a polled row
 (1200s, `Arbiter.Quota.Gate.staleness_threshold_seconds/1`) absorbs that
-without failing the 5h window open. A longer blackout — a second 429 in a row,
+without failing the gating window open (the 7d window for Claude). A longer blackout — a second 429 in a row,
 a long `Retry-After`, a lapsed credential — ages the snapshot past that
 margin; once it is older than 30 minutes, `Arbiter.Quota.StalenessWatch`
 raises an operator alert that quota accounting is blind.

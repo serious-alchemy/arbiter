@@ -1090,6 +1090,11 @@ installation settings (operator-owned)
 
 ### 9.1 Statement
 
+> **Amended (5H C10, bd-138qku).** Claude no longer has a 5h window, so "today's"
+> behaviour for Claude is the 7d gate: Claude's gate *is* the 7d gate, and the
+> invariants below are read against that. Primary-window keys are inert for
+> Claude (see `docs/quota-and-auth.md`).
+
 - **I1: off means identical.** With every new switch at its default, every
   decision surface returns exactly what it returns today, for every input. The
   surfaces are `Pace.evaluate/4`, `Gate.check/4`, `gating_window/3`,
