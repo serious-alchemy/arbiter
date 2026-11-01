@@ -144,9 +144,71 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
 
       quota = poll!(ws, %{"five_hour" => nil})
 
-      assert quota.utilization_5h in [nil, 0.0]
+      assert is_nil(quota.utilization_5h)
+      assert is_nil(quota.status_5h)
       assert is_nil(quota.reset_5h_at)
       assert quota.utilization_7d == 0.08
+    end
+
+    test "five_hour: null leaves only 7d binding through Snapshot + Budget (bd-93zaej)" do
+      ws = workspace!()
+      quota = poll!(ws, %{"five_hour" => nil})
+
+      assert is_nil(quota.utilization_5h)
+      snapshot = Arbiter.Quota.Gate.Snapshot.Anthropic.normalize(quota, [])
+      assert is_nil(snapshot.utilization)
+      assert is_nil(snapshot.status)
+      assert is_nil(snapshot.reset_at)
+
+      b =
+        Arbiter.Quota.Budget.compute(
+          account: %Arbiter.Accounts.ProviderAccount{
+            provider: :claude,
+            quota_config: %{"threshold_mode" => "paced"},
+            max_concurrent: 3
+          },
+          pool: "claude",
+          quota: quota,
+          seats: 1,
+          horizon: 2.0
+        )
+
+      primary = Enum.find(b.windows, &(&1.window == "5h"))
+      assert primary.status == :no_reading
+      assert is_nil(primary.n)
+      assert Enum.find(b.windows, &(&1.window == "7d")).status == :ok
+      assert b.quota_binding in [nil, "7d"]
+      refute b.quota_binding == "5h"
+    end
+
+    test "five_hour: null: every nil-5h reader on the poll/admission path is crash-free" do
+      ws = workspace!()
+      quota = poll!(ws, %{"five_hour" => nil})
+      now = DateTime.utc_now()
+
+      assert is_boolean(Gate.stale?(quota, now))
+
+      assert is_boolean(
+               Gate.long_window_stale?(Arbiter.Quota.Gate.Snapshot.normalize(quota), now)
+             )
+
+      assert is_map(Quota.view(quota))
+      assert is_map(Quota.serialize(quota_account_id!(ws.id)))
+
+      for pace <- [true, false] do
+        window = Gate.gating_window(quota, ws, now: now, pace: pace)
+        refute match?(%{window: "5h"}, window)
+      end
+    end
+
+    test "five_hour: null still appends a 7d quota_samples row and no 5h row (bd-93zaej)" do
+      ws = workspace!()
+      id = quota_account_id!(ws.id)
+      _ = poll!(ws, %{"five_hour" => nil})
+
+      rows = Arbiter.Quota.History.list(id)
+      assert Enum.any?(rows, &(&1.window == "7d"))
+      refute Enum.any?(rows, &(&1.window == "5h"))
     end
 
     test "seven_day: null with a valid five_hour still writes the 5h data" do

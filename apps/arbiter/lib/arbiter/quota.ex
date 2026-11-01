@@ -1154,10 +1154,12 @@ defmodule Arbiter.Quota do
   end
 
   # The API reported no 5h window (`five_hour: null`, bd-bmoe8s) while the
-  # poll otherwise succeeded: record "idle" (0%, no reset) explicitly so the
-  # previous window's numbers are overwritten rather than carried over.
+  # poll otherwise succeeded: store the absent window as explicit nils
+  # (bd-93zaej). A 0.0 primary with a nil reset reads as a LIVE window
+  # downstream (Snapshot/Pace/Budget) and would create a phantom binding cap.
+  # Explicit nils (not dropped keys) also overwrite the previous window's numbers.
   defp no_five_hour_window(primary, %{utilization_5h: nil}) do
-    Map.merge(primary, %{utilization_5h: 0.0, status_5h: "allowed", reset_5h_at: nil})
+    Map.merge(primary, %{utilization_5h: nil, status_5h: nil, reset_5h_at: nil})
   end
 
   defp no_five_hour_window(primary, _usage), do: primary
