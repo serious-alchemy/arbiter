@@ -53,7 +53,7 @@ defmodule Arbiter.Quota.Gate.Snapshot do
           captured_at: DateTime.t() | nil,
           capture_source: String.t() | nil,
           overage_status: String.t() | nil,
-          window_label: String.t(),
+          window_label: String.t() | nil,
           secondary_utilization: float() | nil,
           secondary_status: String.t() | nil,
           secondary_reset_at: DateTime.t() | nil,

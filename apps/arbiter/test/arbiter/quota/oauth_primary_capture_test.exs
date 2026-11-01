@@ -178,9 +178,9 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
           horizon: 2.0
         )
 
-      primary = Enum.find(b.windows, &(&1.window == "5h"))
-      assert primary.status == :no_reading
-      assert is_nil(primary.n)
+      # No primary window at all (bd-9v8psv): there is no "5h" entry to be a
+      # `:no_reading` placeholder, so 7d is the only window.
+      assert Enum.map(b.windows, & &1.window) == ["7d"]
       assert Enum.find(b.windows, &(&1.window == "7d")).status == :ok
       assert b.quota_binding in [nil, "7d"]
       refute b.quota_binding == "5h"
