@@ -24,6 +24,26 @@ defmodule Arbiter.Repo do
       """
     end
 
+    # A path that does not exist yet: create and initialize it once, here,
+    # on a single connection, before the pool starts. Otherwise several pool
+    # connections race to create the file ("database is locked") and the
+    # empty-file guard above trips on the half-created file at the restart.
+    if db_path != "" and db_path != ":memory:" and not File.exists?(db_path) do
+      create_database!(db_path)
+    end
+
     {:ok, config}
+  end
+
+  defp create_database!(db_path) do
+    File.mkdir_p!(Path.dirname(db_path))
+    {:ok, conn} = Exqlite.Sqlite3.open(db_path)
+
+    try do
+      # WAL mode writes the header page, so the file is non-empty on disk.
+      :ok = Exqlite.Sqlite3.execute(conn, "PRAGMA journal_mode=WAL")
+    after
+      Exqlite.Sqlite3.close(conn)
+    end
   end
 end
