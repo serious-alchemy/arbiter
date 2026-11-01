@@ -1007,8 +1007,9 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       Enum.join(
         [
           "This workspace is dispatching past the Anthropic plan cap in `:continue` " <>
-            "mode and has now spent about $#{fmt_usd(spend_usd)} in paid overage this " <>
-            "5h window — crossing the $#{fmt_usd(threshold_usd)} alert threshold.",
+            "mode and has now spent about $#{fmt_usd(spend_usd)} in paid overage over the " <>
+            "5h spend window (the open 5h window, else the trailing 5 hours; a 7d-only " <>
+            "Claude has no 5h window) — crossing the $#{fmt_usd(threshold_usd)} alert threshold.",
           "Dispatch has NOT stopped. This is an informational alert (cap + alert, " <>
             "not auto-stop): switch this workspace to `:throttle`, raise " <>
             "`quota.overage_alert_usd`, or let it ride — your call. It clears by " <>
@@ -1274,9 +1275,9 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       (the names metered under it);
     * `:captured_at`, `:age_seconds`, `:capture_source` — the snapshot's;
       `:threshold_seconds` — the age the alert trips at;
-    * `:last_poll_at` — when the `/api/oauth/usage` poll last succeeded, if
-      that is newer than `:captured_at` (the poll works, but has not carried
-      the 5h figure the gate reads), else nil;
+    * `:last_poll_at` — unused (kept for older callers); the staleness watch
+      now reports the newest of the snapshot and the last successful poll as
+      `:captured_at`;
     * `:cap_reached_until` — the reset of a 5h window whose last reading
       showed the cap reached, which `Arbiter.Quota.Gate.in_overage?/2` keeps
       counting until then; else nil;
@@ -1342,9 +1343,9 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       "Quota accounting has been blind for #{span(info.age_seconds)}: the latest " <>
         "Claude quota snapshot for account #{info.account} was captured at #{captured} " <>
         "(source: #{snapshot_source_label(info.capture_source)}), and this alert trips at " <>
-        "#{span(info.threshold_seconds)}." <> last_poll_note(info.last_poll_at),
-      "The 5h gate is failing open — no 5h hold engages — and so is 5h overage detection: " <>
-        "a 5h cap crossed since #{captured} is not detected, recorded or alerted." <>
+        "#{span(info.threshold_seconds)}.",
+      "Quota accounting is blind: usage after #{captured} is invisible to the gate, so a cap " <>
+        "crossed since then is not detected, recorded or alerted." <>
         cap_reached_note(info.cap_reached_until),
       long_window_line(info.long_window, captured),
       "This alert reads the snapshot itself, so it fires whether or not anything reports a " <>
@@ -1359,13 +1360,6 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp snapshot_source_label("oauth_poll"), do: "/api/oauth/usage poll"
   defp snapshot_source_label("headers"), do: "proxy rate-limit headers"
   defp snapshot_source_label(_), do: "unrecorded"
-
-  defp last_poll_note(%DateTime{} = at),
-    do:
-      " The /api/oauth/usage poll last succeeded at #{iso(at)}, but has not carried the " <>
-        "aggregate 5h figure the gate reads since the snapshot."
-
-  defp last_poll_note(_), do: ""
 
   defp cap_reached_note(%DateTime{} = reset_at),
     do:
@@ -1575,7 +1569,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   # (`Arbiter.Quota.Gate.long_window_stale?/1`).
   defp aging_snapshot_impact,
     do:
-      "the 5h rule fails open on age, and a 7d hold stays in force until the 7d window " <>
+      "a primary-window rule (where the provider reports one) fails open on age, and a 7d hold stays in force until the 7d window " <>
         "resets (`arb quota` shows when) or a fresh poll shows it cleared."
 
   @doc """

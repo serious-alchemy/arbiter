@@ -447,6 +447,18 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
       })
     end
 
+    test "overage_alert names the explicit spend window, not a bare '5h window'" do
+      CoordinatorNotifier.overage_alert(
+        %{workspace_id: uniq("ws"), provider: :claude},
+        12.5,
+        10.0
+      )
+
+      alert = only_alert(:overage_alert)
+      assert alert.detail =~ "5h spend window"
+      assert alert.detail =~ "trailing 5 hours"
+    end
+
     test "raises one operator alert saying how long quota accounting has been blind" do
       ws = uniq("ws")
 
@@ -459,8 +471,9 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
       assert alert.subject =~ "claude:default"
       assert alert.subject =~ "2026-09-17T00:29:42Z"
       assert alert.detail =~ "blind for 19h 3m"
-      assert alert.detail =~ "5h gate is failing open"
-      assert alert.detail =~ "5h overage detection"
+      refute alert.detail =~ "5h gate is failing open"
+      refute alert.detail =~ "failing open"
+      assert alert.detail =~ "Quota accounting is blind"
       assert alert.detail =~ "/api/oauth/usage poll"
       no_mail(ws)
     end
@@ -541,14 +554,6 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
       alert = only_alert(:quota_snapshot_stale)
       assert alert.detail =~ "2026-09-17T02:00:00Z"
       assert alert.detail =~ "keeps being recorded as overage"
-    end
-
-    test "says the poll is succeeding when it is, but not carrying the 5h figure" do
-      info = stale_info(%{last_poll_at: ~U[2026-09-17 19:30:00Z]})
-      CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: uniq("ws")}, info)
-
-      alert = only_alert(:quota_snapshot_stale)
-      assert alert.detail =~ "last succeeded at 2026-09-17T19:30:00Z"
     end
 
     test "a repeat refreshes the account's one alert instead of stacking" do

@@ -194,6 +194,7 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
       pool: r.pool,
       window: r.window,
       rung: r.rung,
+      rho_source: rho_source(r.rung),
       rho: r.rho,
       raw_rho: r.raw_rho,
       floored?: r.floored?,
@@ -203,6 +204,11 @@ defmodule Arbiter.Board.AdmissionShadowReport.Quota do
       pairs: pairs
     }
   end
+
+  # Where ρ came from: the account's own fit, a peer account's, or the prior.
+  defp rho_source(0), do: :fit
+  defp rho_source(1), do: :peer
+  defp rho_source(_rung), do: :prior
 
   defp background_of(%{fit: %{background_share_per_hour: b}}), do: b
   defp background_of(_), do: nil
