@@ -65,6 +65,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {"restart_safety", :core, nil, :always, plain(&check_restart_safety/0)},
       {"merge_routing", :core, nil, :always, plain(&check_merge_routing/0)},
       {"nodes", :core, nil, :always, plain(&check_nodes/0)},
+      {"placement_nodes", :core, nil, :always, &check_placement_nodes/1},
       {"cli_versions", :core, nil, :always, plain(&check_cli_versions/0)},
       {"pr_patrol", :core, nil, :always, plain(&check_pr_patrol/0)},
       {"socket_paths", :core, nil, :always, plain(&check_socket_paths/0)},
@@ -2135,6 +2136,33 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
       other ->
         [unknown_result("nodes", other)]
+    end
+  end
+
+  @doc """
+  bd-d7tb2d: each workspace's effective node set (`worker.placement` and
+  `worker.placement_nodes`), read from the server's doctor scope. One line per
+  workspace that places remotely; informational (never fails).
+  """
+  @spec check_placement_nodes(Scope.t()) :: [Result.t()]
+  def check_placement_nodes(%Scope{placement_nodes: rows}) do
+    remote = Enum.reject(rows, &(&1["mode"] in [nil, "local_only"]))
+
+    case remote do
+      [] ->
+        [nodes_result("placement nodes", :na, "no workspace places runs on a node")]
+
+      _ ->
+        for w <- remote do
+          allow = w["allowlist"] || "unset: any node"
+          set = if w["nodes"] in [nil, []], do: "none", else: Enum.join(w["nodes"], ", ")
+
+          nodes_result(
+            "placement nodes: " <> to_string(w["workspace"]),
+            :ok,
+            "#{w["mode"]}; worker.placement_nodes #{allow}; effective nodes: #{set}"
+          )
+        end
     end
   end
 

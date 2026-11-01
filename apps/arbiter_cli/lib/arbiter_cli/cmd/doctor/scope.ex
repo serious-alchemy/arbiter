@@ -13,7 +13,11 @@ defmodule ArbiterCli.Cmd.Doctor.Scope do
 
   alias ArbiterCli.Client
 
-  defstruct known?: false, providers: %{}, podman_in_use: true, egress_enforced: true
+  defstruct known?: false,
+            providers: %{},
+            podman_in_use: true,
+            egress_enforced: true,
+            placement_nodes: []
 
   @type t :: %__MODULE__{}
 
@@ -29,7 +33,8 @@ defmodule ArbiterCli.Cmd.Doctor.Scope do
           known?: true,
           providers: providers,
           podman_in_use: body["podman_in_use"] == true,
-          egress_enforced: body["egress_enforced"] == true
+          egress_enforced: body["egress_enforced"] == true,
+          placement_nodes: List.wrap(body["placement_nodes"])
         }
 
       _ ->

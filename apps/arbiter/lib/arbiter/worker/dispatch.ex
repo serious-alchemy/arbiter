@@ -3079,7 +3079,8 @@ defmodule Arbiter.Worker.Dispatch do
       local_work?: local_work?(task, opts, Placement.mode(workspace)),
       git_credential: Placement.git_credential(workspace, Keyword.get(opts, :repo) || task.repo),
       registry: Placement.image_registry(workspace, Keyword.get(opts, :repo) || task.repo),
-      mode: Placement.mode(workspace)
+      mode: Placement.mode(workspace),
+      allowed_nodes: Arbiter.Nodes.Allowlist.selectors(workspace)
     }
   end
 

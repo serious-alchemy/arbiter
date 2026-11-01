@@ -6419,7 +6419,7 @@ defmodule Arbiter.Worker do
   # gateway_error: the local proxy got a transient 502/503 from Anthropic; the
   # session context is intact so a `claude --resume` picks up where it left off
   # (bd-298jz0 investigation — Mode A from issue #512 harness safety net).
-  # quota_exhausted (bd-3hr6g2): the CLI's own 5h plan usage limit, not a
+  # quota_exhausted (bd-3hr6g2): the CLI's own plan usage limit, not a
   # billing failure — the account provably has capacity again once the window
   # resets, so a resume (rather than a permanent :failed) is the correct
   # outcome. Distinct backoff: see resume_backoff_for/2.
@@ -6470,8 +6470,10 @@ defmodule Arbiter.Worker do
     prev_fp = meta && Map.get(meta, :resume_fingerprint)
     cur_fp = worktree_fingerprint(state)
 
+    weekly_reset = weekly_reset_for(state, reason)
+
     decision =
-      with :ok <- quota_resume_guard(state, reason) do
+      with :ok <- quota_resume_guard(state, reason, weekly_reset, attempts) do
         resume_decision(
           reason.category,
           session_id,
@@ -6490,7 +6492,7 @@ defmodule Arbiter.Worker do
         # schedule the respawn after a bounded backoff. The session that just
         # exited rides along so the deferred handler can fail cleanly if the
         # respawn itself can't be built.
-        backoff = resume_backoff_for(reason, attempts)
+        backoff = resume_backoff_for(reason, attempts, weekly_reset_at: weekly_reset)
 
         Logger.info(
           "Worker: bd-4g0fsh scheduling resume task=#{state.task_id} " <>
@@ -6678,16 +6680,58 @@ defmodule Arbiter.Worker do
   # argv for `--resume` (grok) would wait that long only to fail: fail now, the
   # dispatch gate holds the provider and the task goes back to the queue.
   # bd-3wgdie: a reset time past any real plan window is not worth parking for.
-  defp quota_resume_guard(_state, %{category: category}) when category != :quota_exhausted,
-    do: :ok
+  @quota_unknown_reset_max_attempts 3
+  defp quota_resume_guard(_state, %{category: category}, _weekly, _attempts)
+       when category != :quota_exhausted,
+       do: :ok
 
-  defp quota_resume_guard(state, reason) do
+  defp quota_resume_guard(state, reason, weekly_reset, attempts) do
+    reset = reason.retry_after || weekly_reset
+
     cond do
-      not resumable_in_place?(state) -> {:fail, :provider_not_resumable}
-      quota_wait_exceeds_max?(reason.retry_after) -> {:fail, :quota_wait_exceeds_max}
-      true -> :ok
+      not resumable_in_place?(state) ->
+        {:fail, :provider_not_resumable}
+
+      quota_wait_exceeds_max?(reset) ->
+        {:fail, :quota_wait_exceeds_max}
+
+      # bd-2z3ogf: no reset time anywhere (message nor account snapshot) — a
+      # blind backoff only gets N tries before it escalates.
+      quota_unknown_reset_exhausted?(reset, attempts) ->
+        {:fail, :quota_reset_unknown}
+
+      true ->
+        :ok
     end
   end
+
+  @doc false
+  @spec quota_unknown_reset_exhausted?(DateTime.t() | nil, non_neg_integer()) :: boolean()
+  def quota_unknown_reset_exhausted?(reset, attempts),
+    do: is_nil(reset) and attempts >= @quota_unknown_reset_max_attempts
+
+  # bd-2z3ogf: the 7d reset recorded in the account's latest quota snapshot,
+  # consulted only when the stop message carried no reset time of its own.
+  defp weekly_reset_for(%State{} = state, %{category: :quota_exhausted, retry_after: nil}) do
+    now = DateTime.utc_now()
+
+    with %Arbiter.Tasks.Issue{workspace_id: ws_id} when is_binary(ws_id) <-
+           load_issue(state.task_id),
+         {:ok, agent_type} <- quota_stop_agent_type(state),
+         %{secondary_reset_at: %DateTime{} = at} <-
+           ws_id |> Arbiter.Quota.latest_for_workspace(agent_type) |> GateSnapshot.normalize(),
+         :gt <- DateTime.compare(at, now) do
+      at
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp weekly_reset_for(_state, _reason), do: nil
 
   # bd-cwq8b0: can this worker's provider rewrite its argv for a `--resume`?
   # Same test `inject_resume_argv/4` applies at respawn time.
@@ -6869,7 +6913,11 @@ defmodule Arbiter.Worker do
   # a short buffer for clock skew), falling back to the known 5h window length
   # when no reset timestamp was parsed from the crash output.
   @quota_reset_buffer_ms 60_000
-  @quota_default_wait_ms :timer.hours(5)
+  # bd-2z3ogf: the 5h window is retired; with no reset time known (neither in
+  # the stop message nor the account's 7d snapshot) wait a bounded, doubling
+  # backoff and escalate after this many attempts instead of a blind 5h park.
+  @quota_unknown_reset_base_ms :timer.hours(1)
+  @quota_unknown_reset_cap_ms :timer.hours(4)
 
   # bd-3wgdie: the module docstring covers both the 5h AND the 7-day plan
   # limit under the same :quota_exhausted category, and a malformed/adversarial
@@ -6882,24 +6930,43 @@ defmodule Arbiter.Worker do
   @quota_max_wait_ms :timer.hours(24 * 8)
 
   @doc false
-  @spec resume_backoff_for(Arbiter.Worker.StopReason.t(), non_neg_integer()) ::
+  @spec resume_backoff_for(Arbiter.Worker.StopReason.t(), non_neg_integer(), keyword()) ::
           non_neg_integer()
+  def resume_backoff_for(reason, attempt, opts \\ [])
+
   def resume_backoff_for(
         %Arbiter.Worker.StopReason{category: :quota_exhausted} = reason,
-        _attempt
+        attempt,
+        opts
       ) do
-    quota_resume_backoff_ms(reason.retry_after)
+    quota_resume_backoff_ms(reason.retry_after, Keyword.put(opts, :attempt, attempt))
   end
 
-  def resume_backoff_for(%Arbiter.Worker.StopReason{category: category}, attempt) do
+  def resume_backoff_for(%Arbiter.Worker.StopReason{category: category}, attempt, _opts) do
     resume_backoff_ms(category, attempt)
   end
 
   @doc false
-  @spec quota_resume_backoff_ms(DateTime.t() | nil) :: non_neg_integer()
-  def quota_resume_backoff_ms(nil), do: @quota_default_wait_ms
+  @spec quota_resume_backoff_ms(DateTime.t() | nil, keyword()) :: non_neg_integer()
+  def quota_resume_backoff_ms(retry_after, opts \\ [])
 
-  def quota_resume_backoff_ms(%DateTime{} = retry_after) do
+  # No reset in the message: prefer the account snapshot's 7d reset
+  # (`:weekly_reset_at`), clamped and checked like any parsed reset; else a
+  # bounded doubling backoff by `:attempt` (the guard escalates after N).
+  def quota_resume_backoff_ms(nil, opts) do
+    case Keyword.get(opts, :weekly_reset_at) do
+      %DateTime{} = at ->
+        if quota_wait_exceeds_max?(at),
+          do: @quota_max_wait_ms,
+          else: quota_resume_backoff_ms(at)
+
+      _ ->
+        attempt = Keyword.get(opts, :attempt, 0)
+        min(@quota_unknown_reset_base_ms * Integer.pow(2, attempt), @quota_unknown_reset_cap_ms)
+    end
+  end
+
+  def quota_resume_backoff_ms(%DateTime{} = retry_after, _opts) do
     ms =
       case DateTime.diff(retry_after, DateTime.utc_now(), :millisecond) do
         ms when ms > 0 -> ms + @quota_reset_buffer_ms

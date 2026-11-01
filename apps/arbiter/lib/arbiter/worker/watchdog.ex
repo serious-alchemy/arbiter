@@ -3881,10 +3881,11 @@ defmodule Arbiter.Worker.Watchdog do
 
   # bd-3ij7dw: the same untouched failing test set on consecutive attempts of one
   # head reproduced; a second re-run would only re-roll the dice until a lucky
-  # pass merges. Only a DIFFERENT set (a genuine flake moving around) may use
+  # pass merges. Any overlap with the previous set counts as a repeat; only a
+  # DISJOINT set (a genuine flake moving around) may use
   # the rest of the budget. Infra has no test set and keeps the whole budget.
   defp repeat_failure?(%{set: set}, %{class: :unrelated_tests} = triage) when is_list(set),
-    do: triage_signature(triage) == set
+    do: Enum.any?(triage_signature(triage) || [], &(&1 in set))
 
   defp repeat_failure?(_rerun, _triage), do: false
 
