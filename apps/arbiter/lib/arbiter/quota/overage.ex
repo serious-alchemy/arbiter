@@ -14,10 +14,13 @@ defmodule Arbiter.Quota.Overage do
   is the account's, so every workspace metered under it contributes to the
   overage figure, and the window comes from the account's snapshot.
 
-  The window is `[reset_5h_at - 5h, now]` — i.e. spend since the current 5h
-  window opened. When the snapshot carries no `reset_5h_at`, or one that has
-  already passed (a stale snapshot whose window closed, bd-2wnkoq), we fall
-  back to the trailing 5 hours from now — see `window_start/2`.
+  The spend window is explicit (bd-5zwj09): while the snapshot reports a primary
+  (5h) window still ahead of now it is `[reset - 5h, now]`; otherwise it is the
+  **trailing 5 hours** `[now - 5h, now]`. Anthropic retired the 5h window, so a
+  long-only Claude (no `reset_5h_at`; only a 7d reset) always takes the trailing
+  form — its 7d reset is never used to derive the start, since a week-long span
+  is not an "overage window". A stale primary reset (bd-2wnkoq) takes the same
+  trailing form. See `window_start/2`.
   """
 
   alias Arbiter.Accounts.ProviderAccount
@@ -66,7 +69,7 @@ defmodule Arbiter.Quota.Overage do
   defp account_id(_), do: nil
 
   @doc """
-  Start of the current 5h window as a `DateTime`, as of `now` (default
+  Start of the Claude spend window as a `DateTime`, as of `now` (default
   `DateTime.utc_now/0`). Derived from the snapshot's primary-window reset
   while that reset is still ahead of `now` (the window opens 5h before it
   resets); otherwise the trailing `now - 5h`.
@@ -76,6 +79,9 @@ defmodule Arbiter.Quota.Overage do
   the start from it would stretch "the current 5h window" back to one that
   ended hours ago and sum all the spend since (bd-2wnkoq), so that case takes
   the same trailing-5h approximation as a snapshot with no reset at all.
+
+  A snapshot with no primary window (`reset_at` nil, e.g. a long-only Claude
+  carrying only `secondary_reset_at`) is the trailing 5h.
 
   Accepts a normalized `Arbiter.Quota.Gate.Snapshot` (any provider) as well as a
   raw `AnthropicQuota` row. The 5h span is Anthropic's; for Codex / Google —
