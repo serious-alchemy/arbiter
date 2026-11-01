@@ -32,6 +32,22 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       assert result == :ok
     end
 
+    test "does not create a directory when the worktree path does not exist" do
+      task_id = new_task_id()
+      missing = Path.join(System.tmp_dir!(), "wt-missing-#{System.unique_integer([:positive])}")
+      start_worker(task_id, missing)
+
+      assert :ok =
+               WorktreeDelivery.maybe_deliver(%{
+                 kind: :mailbox,
+                 to_ref: task_id,
+                 body: "hi",
+                 inserted_at: DateTime.utc_now()
+               })
+
+      refute File.exists?(missing)
+    end
+
     test "no-ops for notification kind" do
       result =
         WorktreeDelivery.maybe_deliver(%{
@@ -48,6 +64,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       task_id = new_task_id()
       tmp = System.tmp_dir!() |> Path.join("arb-inbox-#{task_id}")
       on_exit(fn -> File.rm_rf!(tmp) end)
+      File.mkdir_p!(tmp)
       start_worker(task_id, tmp)
 
       for kind <- [:completion, :failure, :escalation, :info] do
@@ -85,6 +102,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       task_id = new_task_id()
       tmp = System.tmp_dir!() |> Path.join("arb-inbox-#{task_id}")
       on_exit(fn -> File.rm_rf!(tmp) end)
+      File.mkdir_p!(tmp)
       start_worker(task_id, tmp)
 
       WorktreeDelivery.maybe_deliver(%{
@@ -107,6 +125,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       tmp = System.tmp_dir!() |> Path.join("arb-inbox-#{task_id}")
       File.mkdir_p!(tmp)
       on_exit(fn -> File.rm_rf!(tmp) end)
+      File.mkdir_p!(tmp)
       start_worker(task_id, tmp)
 
       refute File.exists?(Path.join(tmp, ".arbiter"))
@@ -125,6 +144,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       task_id = new_task_id()
       tmp = System.tmp_dir!() |> Path.join("arb-inbox-#{task_id}")
       on_exit(fn -> File.rm_rf!(tmp) end)
+      File.mkdir_p!(tmp)
       start_worker(task_id, tmp)
 
       WorktreeDelivery.maybe_deliver(%{
@@ -151,6 +171,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       task_id = new_task_id()
       tmp = System.tmp_dir!() |> Path.join("arb-inbox-#{task_id}")
       on_exit(fn -> File.rm_rf!(tmp) end)
+      File.mkdir_p!(tmp)
       start_worker(task_id, tmp)
 
       WorktreeDelivery.maybe_deliver(%{
@@ -179,6 +200,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       task_id = new_task_id()
       tmp = System.tmp_dir!() |> Path.join("arb-inbox-#{task_id}")
       on_exit(fn -> File.rm_rf!(tmp) end)
+      File.mkdir_p!(tmp)
       start_worker(task_id, tmp)
 
       WorktreeDelivery.maybe_deliver(%{
@@ -199,6 +221,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       task_id = new_task_id()
       tmp = System.tmp_dir!() |> Path.join("arb-inbox-e2e-#{task_id}")
       on_exit(fn -> File.rm_rf!(tmp) end)
+      File.mkdir_p!(tmp)
       start_worker(task_id, tmp)
 
       {:ok, _msg} =

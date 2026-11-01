@@ -106,12 +106,64 @@ defmodule Arbiter.Worker.Worktree do
              is_list(opts) do
     seed_paths = seed_paths(opts)
 
-    case layout(opts) do
-      :private_clone ->
-        create_clone(repo_path, branch_name, base_branch, seed_paths)
+    with_stub_cleared(branch_name, fn ->
+      case layout(opts) do
+        :private_clone ->
+          create_clone(repo_path, branch_name, base_branch, seed_paths)
 
-      :linked_worktree ->
-        create_linked(repo_path, branch_name, base_branch, seed_paths, local_base?(opts))
+        :linked_worktree ->
+          create_linked(repo_path, branch_name, base_branch, seed_paths, local_base?(opts))
+      end
+    end)
+  end
+
+  # A leaf holding nothing but `.arbiter/` (no `.git`) is a stub a late mailbox
+  # write left behind after the worktree was removed. It would otherwise read as
+  # a layout mismatch and wedge every resume/dispatch. Replace it, carrying any
+  # pending INBOX into the freshly provisioned checkout. A directory holding
+  # anything else is left alone (and still fails as a layout mismatch).
+  defp with_stub_cleared(branch_name, fun) do
+    path = worktree_path(branch_name)
+
+    case stub_dir_inbox(path) do
+      :not_stub ->
+        fun.()
+
+      {:stub, inbox} ->
+        Logger.info("Worktree: replacing stale stub directory at #{path}")
+        File.rm_rf!(path)
+
+        with {:ok, wt_path} = ok <- fun.() do
+          restore_inbox(wt_path, inbox)
+          ok
+        end
+    end
+  end
+
+  defp stub_dir_inbox(path) do
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(path),
+         {:ok, [".arbiter"]} <- File.ls(path),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(Path.join(path, ".arbiter")) do
+      case File.read(Path.join([path, ".arbiter", "INBOX"])) do
+        {:ok, content} -> {:stub, content}
+        _ -> {:stub, nil}
+      end
+    else
+      _ -> :not_stub
+    end
+  end
+
+  defp restore_inbox(_path, nil), do: :ok
+
+  defp restore_inbox(path, content) do
+    dir = Path.join(path, ".arbiter")
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.write(Path.join(dir, "INBOX"), content, [:append]) do
+      :ok
+    else
+      {:error, reason} ->
+        Logger.warning("Worktree: could not carry INBOX into #{path}: #{inspect(reason)}")
     end
   end
 
@@ -828,13 +880,15 @@ defmodule Arbiter.Worker.Worktree do
       when is_binary(repo_path) and is_binary(branch_name) and is_list(opts) do
     seed_paths = seed_paths(opts)
 
-    case layout(opts) do
-      :private_clone ->
-        attach_clone(repo_path, branch_name, Keyword.get(opts, :base), seed_paths)
+    with_stub_cleared(branch_name, fn ->
+      case layout(opts) do
+        :private_clone ->
+          attach_clone(repo_path, branch_name, Keyword.get(opts, :base), seed_paths)
 
-      :linked_worktree ->
-        attach_linked(repo_path, branch_name, seed_paths)
-    end
+        :linked_worktree ->
+          attach_linked(repo_path, branch_name, seed_paths)
+      end
+    end)
   end
 
   defp attach_clone(repo_path, branch_name, base, seed_paths) do

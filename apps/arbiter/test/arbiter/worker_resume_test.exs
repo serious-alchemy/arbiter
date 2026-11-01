@@ -139,8 +139,23 @@ defmodule Arbiter.Worker.ResumeTest do
       assert Worker.quota_resume_backoff_ms(retry_after) == 60_000
     end
 
-    test "falls back to the known 5h window when no reset time was parsed" do
-      assert Worker.quota_resume_backoff_ms(nil) == :timer.hours(5)
+    test "no reset anywhere: bounded doubling backoff, capped" do
+      assert Worker.quota_resume_backoff_ms(nil) == :timer.hours(1)
+      assert Worker.quota_resume_backoff_ms(nil, attempt: 1) == :timer.hours(2)
+      assert Worker.quota_resume_backoff_ms(nil, attempt: 9) == :timer.hours(4)
+    end
+
+    test "waits until the account snapshot's 7d reset when the message has none (bd-2z3ogf)" do
+      at = DateTime.add(DateTime.utc_now(), :timer.hours(48), :millisecond)
+      ms = Worker.quota_resume_backoff_ms(nil, weekly_reset_at: at)
+      assert ms > :timer.hours(48)
+      assert ms < :timer.hours(48) + 120_000
+    end
+
+    test "a far-out 7d reset is clamped to the 8-day max" do
+      at = DateTime.add(DateTime.utc_now(), :timer.hours(24 * 30), :millisecond)
+      assert Worker.quota_resume_backoff_ms(nil, weekly_reset_at: at) == :timer.hours(24 * 8)
+      assert Worker.quota_wait_exceeds_max?(at)
     end
 
     # bd-3wgdie: unlike resume_backoff_ms/2, this path fed the wall-clock diff
@@ -152,8 +167,16 @@ defmodule Arbiter.Worker.ResumeTest do
     end
   end
 
+  describe "quota_unknown_reset_exhausted?/2 (bd-2z3ogf)" do
+    test "escalates after 3 attempts only when no reset is known" do
+      refute Worker.quota_unknown_reset_exhausted?(nil, 2)
+      assert Worker.quota_unknown_reset_exhausted?(nil, 3)
+      refute Worker.quota_unknown_reset_exhausted?(DateTime.utc_now(), 9)
+    end
+  end
+
   describe "quota_wait_exceeds_max?/1 — routes absurd waits to fail instead of resume" do
-    test "false for no reset time (falls back to the known 5h default)" do
+    test "false for no reset time (bounded backoff applies)" do
       refute Worker.quota_wait_exceeds_max?(nil)
     end
 
@@ -182,14 +205,15 @@ defmodule Arbiter.Worker.ResumeTest do
       assert ms > 7_200_000
     end
 
-    test "a quota exhaustion with no reset time falls back to the 5h default" do
+    test "a quota exhaustion with no reset time uses the bounded backoff" do
       reason = %Arbiter.Worker.StopReason{
         category: :quota_exhausted,
         summary: "s",
         retry_after: nil
       }
 
-      assert Worker.resume_backoff_for(reason, 0) == :timer.hours(5)
+      assert Worker.resume_backoff_for(reason, 0) == :timer.hours(1)
+      assert Worker.resume_backoff_for(reason, 2) == :timer.hours(4)
     end
 
     test "a gateway error still uses the ordinary exponential backoff" do

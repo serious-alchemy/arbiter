@@ -306,9 +306,10 @@ defmodule Arbiter.Loop.Scarcity do
   # A unified 5h utilization figure — even `0.0` — is direct evidence of a
   # windowed plan. Only its total absence leaves dollars as the readable unit.
   defp inferred_mode(snapshot) when is_map(snapshot) do
-    if is_number(fetch(snapshot, :utilization_5h)),
-      do: {:subscription, :inferred},
-      else: {:metered, :default}
+    if is_number(fetch(snapshot, :utilization_5h)) or
+         is_number(fetch(snapshot, :utilization_7d)),
+       do: {:subscription, :inferred},
+       else: {:metered, :default}
   end
 
   defp inferred_mode(_), do: {:metered, :default}

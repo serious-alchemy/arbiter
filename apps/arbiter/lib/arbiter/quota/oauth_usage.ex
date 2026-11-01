@@ -241,20 +241,24 @@ defmodule Arbiter.Quota.OAuthUsage do
   # fractions (see `Arbiter.Quota.parse_unified_headers/1`). Normalize to the
   # same 0-1 fraction scale so both sources render identically downstream.
   defp parse_usage(body) when is_map(body) do
+    limits = Map.get(body, "limits")
     five_hour = Map.get(body, "five_hour")
-    seven_day = Map.get(body, "seven_day")
+    # Anthropic now reports `five_hour: null` and may null `seven_day`; the
+    # `limits[]` array (kind: weekly_all | weekly_scoped) backs the weekly
+    # figures when the legacy keys are null (bd-bmoe8s).
+    seven_day = Map.get(body, "seven_day") || weekly_all_window(limits)
     extra_usage = Map.get(body, "extra_usage")
 
     %{
       utilization_5h: utilization(five_hour),
       utilization_7d: utilization(seven_day),
-      per_model_utilization: per_model_utilization(body),
+      per_model_utilization: per_model_utilization(body, limits),
       extra_usage: normalize_extra_usage(extra_usage),
       reset_5h_at: resets_at(five_hour),
       reset_7d_at: resets_at(seven_day),
       status_5h: window_status(five_hour, :five_hour),
       status_7d: window_status(seven_day, :seven_day),
-      representative_claim: representative_claim(Map.get(body, "limits")),
+      representative_claim: representative_claim(limits),
       overage_status: overage_status(extra_usage)
     }
   end
@@ -333,6 +337,7 @@ defmodule Arbiter.Quota.OAuthUsage do
     |> case do
       %{"group" => "session"} -> "five_hour"
       %{"group" => "weekly"} -> "seven_day"
+      %{"kind" => "weekly" <> _} -> "seven_day"
       _ -> nil
     end
   end
@@ -352,16 +357,46 @@ defmodule Arbiter.Quota.OAuthUsage do
 
   defp overage_status(_), do: nil
 
-  defp per_model_utilization(body) do
-    for {key, %{"utilization" => u}} <- body,
-        is_binary(key),
-        key != "seven_day",
-        String.starts_with?(key, "seven_day_"),
-        is_number(u),
-        into: %{} do
-      {String.replace_prefix(key, "seven_day_", ""), u / 100.0}
+  defp per_model_utilization(body, limits) do
+    legacy =
+      for {key, %{"utilization" => u}} <- body,
+          is_binary(key),
+          key != "seven_day",
+          String.starts_with?(key, "seven_day_"),
+          is_number(u),
+          into: %{} do
+        {String.replace_prefix(key, "seven_day_", ""), u / 100.0}
+      end
+
+    Map.merge(scoped_from_limits(limits), legacy)
+  end
+
+  # `limits[]` entry `kind: weekly_all` → a legacy-shaped `seven_day` window.
+  defp weekly_all_window(limits) when is_list(limits) do
+    case Enum.find(
+           limits,
+           &match?(%{"kind" => "weekly_all", "percent" => p} when is_number(p), &1)
+         ) do
+      %{"percent" => p} = l -> %{"utilization" => p, "resets_at" => Map.get(l, "resets_at")}
+      _ -> nil
     end
   end
+
+  defp weekly_all_window(_), do: nil
+
+  # `kind: weekly_scoped` → per-model map keyed by the lowercased display name.
+  defp scoped_from_limits(limits) when is_list(limits) do
+    for %{"kind" => "weekly_scoped", "percent" => p} = l <- limits,
+        is_number(p),
+        name when is_binary(name) and name != "" <- [
+          get_in(l, ["scope", "model", "display_name"])
+        ],
+        into: %{} do
+      {name |> String.downcase() |> String.replace(~r/\s+/, "_"), p / 100.0}
+    end
+  end
+
+  defp scoped_from_limits(_), do: %{}
 
   defp normalize_extra_usage(nil), do: %{}
   defp normalize_extra_usage(n) when is_number(n), do: %{"amount_usd" => n / 1.0}
