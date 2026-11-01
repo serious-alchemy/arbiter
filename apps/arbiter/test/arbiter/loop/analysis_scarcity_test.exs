@@ -283,7 +283,9 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
       calibration:
         Scarcity.calibrate(
           500_000.0,
-          %{utilization_7d: 0.5, captured_at: ~U[2026-09-04 09:00:00Z]}, window: :seven_day)
+          %{utilization_7d: 0.5, captured_at: ~U[2026-09-04 09:00:00Z]},
+          window: :seven_day
+        )
     }
   end
 
