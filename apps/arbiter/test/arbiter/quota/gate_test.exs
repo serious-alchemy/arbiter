@@ -54,7 +54,7 @@ defmodule Arbiter.Quota.GateTest do
 
     test "snapshot with no reset_5h_at but captured_at > 5h ago is stale" do
       very_old = DateTime.utc_now() |> DateTime.add(-18_100, :second)
-      assert Gate.stale?(quota(%{captured_at: very_old, reset_5h_at: nil}))
+      assert Gate.stale?(quota(%{captured_at: very_old, reset_5h_at: nil, utilization_5h: 0.5}))
     end
 
     test "fresh snapshot with both fields set is not stale" do
@@ -78,7 +78,7 @@ defmodule Arbiter.Quota.GateTest do
         DateTime.utc_now()
         |> DateTime.add(-75, :second)
 
-      assert Gate.stale?(quota(%{captured_at: stale_75s, reset_5h_at: nil}))
+      assert Gate.stale?(quota(%{captured_at: stale_75s, reset_5h_at: nil, utilization_5h: 0.5}))
     end
 
     test "staleness_threshold_seconds defaults to 300 (5 minutes)" do
@@ -120,6 +120,7 @@ defmodule Arbiter.Quota.GateTest do
         quota(%{
           oauth_captured_at: recent,
           captured_at: very_old_primary,
+          utilization_5h: 0.5,
           capture_source: "headers"
         })
 

@@ -396,7 +396,8 @@ defmodule Arbiter.Quota.Budget do
       stale?: Gate.long_window_stale?(s, ctx.now)
     }
 
-    [primary | if(s.secondary_window_label, do: [long], else: [])]
+    (if(s.window_label, do: [primary], else: []) ++
+       if(s.secondary_window_label, do: [long], else: []))
     |> Enum.map(&eval_window(&1, s, ctx))
   end
 

@@ -688,7 +688,7 @@ defmodule Arbiter.Quota.Gate do
         now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
         policy = merge_account(policy, Keyword.get(opts, :account))
         pace_opts = [now: now, priority: nil]
-        primary? = not snapshot_stale?(s, now)
+        primary? = s.window_label != nil and not snapshot_stale?(s, now)
         long? = not snapshot_long_stale?(s, now)
 
         [
@@ -783,7 +783,8 @@ defmodule Arbiter.Quota.Gate do
       now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
       [
-        {:primary, not snapshot_stale?(s, now), s.window_label, s.utilization, s.reset_at},
+        {:primary, s.window_label != nil and not snapshot_stale?(s, now), s.window_label,
+         s.utilization, s.reset_at},
         {:long, not snapshot_long_stale?(s, now) and s.secondary_window_label != nil,
          s.secondary_window_label, s.secondary_utilization, s.secondary_reset_at}
       ]
@@ -1040,6 +1041,10 @@ defmodule Arbiter.Quota.Gate do
   # staleness checks and the paced math together — a pinned clock must not
   # quietly age the snapshot against the real one.
   defp snapshot_stale?(nil, _now), do: false
+
+  # No primary window (Anthropic retired the 5h, bd-9v8psv): nothing to age, so
+  # nothing to fail open on. `long_window_stale?/2` governs the 7d.
+  defp snapshot_stale?(%Snapshot{window_label: nil}, _now), do: false
 
   defp snapshot_stale?(%Snapshot{} = snapshot, now) do
     reset_elapsed?(snapshot.reset_at, now) or

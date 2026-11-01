@@ -97,7 +97,7 @@ defmodule Arbiter.Quota.Headroom do
   # not quietly age the snapshot against the real one.
   defp snapshot_windows(%Snapshot{} = s, now) do
     primary =
-      if Gate.stale?(s, now),
+      if is_nil(s.window_label) or Gate.stale?(s, now),
         do: [],
         else: [{:primary, s.window_label, s.utilization, s.reset_at}]
 
