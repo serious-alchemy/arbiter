@@ -28,7 +28,8 @@ defmodule Arbiter.Repo do
     # on a single connection, before the pool starts. Otherwise several pool
     # connections race to create the file ("database is locked") and the
     # empty-file guard above trips on the half-created file at the restart.
-    if db_path != "" and db_path != ":memory:" and not File.exists?(db_path) do
+    if is_binary(db_path) and db_path != "" and db_path != ":memory:" and
+         not File.exists?(db_path) do
       create_database!(db_path)
     end
 
