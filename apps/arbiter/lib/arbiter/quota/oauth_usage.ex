@@ -69,6 +69,8 @@ defmodule Arbiter.Quota.OAuthUsage do
   no separate probe that spends a billed request to keep it warm.
   """
 
+  require Logger
+
   alias Arbiter.Agents.Claude.ConfigDir
 
   @default_base_url "https://api.anthropic.com"
@@ -111,8 +113,34 @@ defmodule Arbiter.Quota.OAuthUsage do
           status_5h: String.t() | nil,
           status_7d: String.t() | nil,
           representative_claim: String.t() | nil,
-          overage_status: String.t() | nil
+          overage_status: String.t() | nil,
+          limits: [limit()],
+          spend: map() | nil
         }
+
+  @typedoc """
+  One `limits[]` entry: `percent` is a 0-1 fraction; `scope` is the raw value
+  (nil, a string, or a `%{"model" => ..., "surface" => ...}` map).
+  """
+  @type limit :: %{
+          kind: String.t() | nil,
+          group: String.t() | nil,
+          scope: term(),
+          percent: float() | nil,
+          severity: String.t() | nil,
+          resets_at: DateTime.t() | nil,
+          is_active: boolean()
+        }
+
+  # `limits[].severity` values we know how to map onto the `status_*` strings
+  # the gate reads. Anything else is "unknown" and is treated as a warning
+  # (bd-6sxrud).
+  @severity_status %{
+    "normal" => "allowed",
+    "warning" => "allowed_warning",
+    "critical" => "allowed_warning",
+    "rejected" => "rejected"
+  }
 
   @doc """
   Fetch the current oauth/usage snapshot.
@@ -240,7 +268,9 @@ defmodule Arbiter.Quota.OAuthUsage do
   # `anthropic-ratelimit-unified-*` headers this app already parses as 0-1
   # fractions (see `Arbiter.Quota.parse_unified_headers/1`). Normalize to the
   # same 0-1 fraction scale so both sources render identically downstream.
-  defp parse_usage(body) when is_map(body) do
+  @doc false
+  @spec parse_usage(term()) :: usage()
+  def parse_usage(body) when is_map(body) do
     limits = Map.get(body, "limits")
     five_hour = Map.get(body, "five_hour")
     # Anthropic now reports `five_hour: null` and may null `seven_day`; the
@@ -257,13 +287,15 @@ defmodule Arbiter.Quota.OAuthUsage do
       reset_5h_at: resets_at(five_hour),
       reset_7d_at: resets_at(seven_day),
       status_5h: window_status(five_hour, :five_hour),
-      status_7d: window_status(seven_day, :seven_day),
+      status_7d: status_7d(seven_day, limits),
       representative_claim: representative_claim(limits),
-      overage_status: overage_status(extra_usage)
+      overage_status: overage_status(extra_usage),
+      limits: parse_limits(limits),
+      spend: spend(Map.get(body, "spend"))
     }
   end
 
-  defp parse_usage(_),
+  def parse_usage(_),
     do: %{
       utilization_5h: nil,
       utilization_7d: nil,
@@ -274,8 +306,79 @@ defmodule Arbiter.Quota.OAuthUsage do
       status_5h: nil,
       status_7d: nil,
       representative_claim: nil,
-      overage_status: nil
+      overage_status: nil,
+      limits: [],
+      spend: nil
     }
+
+  # The `spend` block is kept verbatim (bd-6sxrud); its shape is not yet
+  # modeled, so nothing downstream may depend on its keys.
+  defp spend(%{} = spend), do: spend
+  defp spend(_), do: nil
+
+  defp parse_limits(limits) when is_list(limits) do
+    for %{} = l <- limits do
+      %{
+        kind: string_or_nil(Map.get(l, "kind")),
+        group: string_or_nil(Map.get(l, "group")),
+        scope: Map.get(l, "scope"),
+        percent: percent(Map.get(l, "percent")),
+        severity: string_or_nil(Map.get(l, "severity")),
+        resets_at: resets_at(l),
+        is_active: Map.get(l, "is_active") == true
+      }
+    end
+  end
+
+  defp parse_limits(_), do: []
+
+  defp string_or_nil(v) when is_binary(v), do: v
+  defp string_or_nil(_), do: nil
+
+  defp percent(p) when is_number(p), do: p / 100.0
+  defp percent(_), do: nil
+
+  # 7d status: the `weekly_all` limit's `severity` when it carries one, else the
+  # utilization-derived status. Severity can only raise the derived status, never
+  # lower it: a full window (>= 100%), a `locked_reason`, or our own burn-rate
+  # warning still reads as such when the API says "normal". A window with no
+  # utilization at all has no status.
+  defp status_7d(seven_day, limits) do
+    derived = window_status(seven_day, :seven_day)
+
+    case {derived, weekly_all_severity(limits)} do
+      {nil, _} -> nil
+      {_, nil} -> derived
+      {_, severity} -> worst_status(derived, severity_status(severity))
+    end
+  end
+
+  @status_rank %{"allowed" => 0, "allowed_warning" => 1, "rejected" => 2}
+
+  defp worst_status(a, b), do: Enum.max_by([a, b], &Map.fetch!(@status_rank, &1))
+
+  defp weekly_all_severity(limits) when is_list(limits) do
+    Enum.find_value(limits, fn
+      %{"kind" => "weekly_all", "severity" => s} when is_binary(s) and s != "" -> s
+      _ -> nil
+    end)
+  end
+
+  defp weekly_all_severity(_), do: nil
+
+  defp severity_status(severity) do
+    case Map.fetch(@severity_status, severity) do
+      {:ok, status} ->
+        status
+
+      :error ->
+        Logger.warning(
+          "Arbiter.Quota.OAuthUsage: unknown limits[] severity #{inspect(severity)}; treating as allowed_warning"
+        )
+
+        "allowed_warning"
+    end
+  end
 
   defp utilization(%{"utilization" => u}) when is_number(u), do: u / 100.0
   defp utilization(_), do: nil

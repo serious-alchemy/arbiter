@@ -82,6 +82,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
       upsert_fields [
         :per_model_utilization,
         :extra_usage,
+        :spend,
         :oauth_utilization_5h,
         :oauth_utilization_7d,
         :oauth_captured_at
@@ -92,6 +93,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
         :provider,
         :per_model_utilization,
         :extra_usage,
+        :spend,
         :oauth_utilization_5h,
         :oauth_utilization_7d,
         :oauth_captured_at
@@ -115,6 +117,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
       upsert_fields [
         :per_model_utilization,
         :extra_usage,
+        :spend,
         :oauth_utilization_5h,
         :oauth_utilization_7d,
         :oauth_captured_at,
@@ -135,6 +138,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
         :provider,
         :per_model_utilization,
         :extra_usage,
+        :spend,
         :oauth_utilization_5h,
         :oauth_utilization_7d,
         :oauth_captured_at,
@@ -214,6 +218,12 @@ defmodule Arbiter.Quota.AnthropicQuota do
       default %{}
 
       description "Overage spend beyond the plan's included quota, as returned by /api/oauth/usage."
+    end
+
+    attribute :spend, :map do
+      public? true
+
+      description "Raw `spend` block from /api/oauth/usage (used/limit/percent/severity/enabled); shape not yet modeled. nil until a poll carries one."
     end
 
     attribute :oauth_utilization_5h, :float do

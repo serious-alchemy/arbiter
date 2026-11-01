@@ -214,6 +214,34 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
       refute Enum.any?(rows, &(&1.window == "5h"))
     end
 
+    test "the live five_hour: null body: 5h nil, 7d trio + spend stored, 7d row appended" do
+      ws = workspace!()
+      id = quota_account_id!(ws.id)
+
+      body = Arbiter.Quota.OAuthUsageFixtures.five_hour_null()
+      quota = poll!(ws, body)
+
+      assert quota.utilization_5h == nil
+      assert quota.status_5h == nil
+      assert quota.reset_5h_at == nil
+      assert quota.utilization_7d == 0.61
+      assert quota.status_7d == "allowed"
+      assert quota.reset_7d_at == ~U[2026-11-02 15:59:59Z]
+      assert %DateTime{} = quota.captured_at
+      assert quota.spend == body["spend"]
+
+      rows = History.list(id)
+      assert Enum.any?(rows, &(&1.window == "7d"))
+      refute Enum.any?(rows, &(&1.window == "5h"))
+    end
+
+    test "a body without spend leaves the previously stored spend alone" do
+      ws = workspace!()
+      _ = poll!(ws, %{"spend" => %{"enabled" => true}})
+      quota = poll!(ws, %{"spend" => nil})
+      assert quota.spend == %{"enabled" => true}
+    end
+
     test "seven_day: null with a valid five_hour still writes the 5h data" do
       ws = workspace!()
       quota = poll!(ws, %{"seven_day" => nil})
