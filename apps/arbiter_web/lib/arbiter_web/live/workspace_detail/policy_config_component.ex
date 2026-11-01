@@ -489,7 +489,7 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
             <.mobile_group title="Quotas & concurrency">
               <.setting_row
                 name="Pause on quota exhaustion"
-                consequence="throttle stops dispatching at 100% of the 5h window; continue keeps dispatching into paid overage"
+                consequence="throttle stops dispatching at 100% of the rate-limit window (7d for Claude); continue keeps dispatching into paid overage"
               >
                 <:control>
                   <Forms.select
