@@ -554,3 +554,117 @@ defmodule Arbiter.Quota.OAuthUsageTest do
     end
   end
 end
+
+defmodule Arbiter.Quota.OAuthUsageParseTest do
+  @moduledoc "`parse_usage/1` over the recorded live and legacy bodies (bd-6sxrud)."
+  use ExUnit.Case, async: true
+
+  import ExUnit.CaptureLog
+
+  alias Arbiter.Quota.OAuthUsage
+  alias Arbiter.Quota.OAuthUsageFixtures, as: Fixtures
+
+  describe "five_hour: null live shape" do
+    setup do: %{usage: OAuthUsage.parse_usage(Fixtures.five_hour_null())}
+
+    test "5h trio is nil, 7d comes from seven_day", %{usage: u} do
+      assert u.utilization_5h == nil
+      assert u.status_5h == nil
+      assert u.reset_5h_at == nil
+      assert u.utilization_7d == 0.61
+      assert u.reset_7d_at == ~U[2026-11-02 15:59:59Z]
+      assert u.status_7d == "allowed"
+    end
+
+    test "limits[] are parsed into windows", %{usage: u} do
+      assert [all, scoped] = u.limits
+
+      assert %{
+               kind: "weekly_all",
+               group: "weekly",
+               scope: nil,
+               percent: 0.61,
+               severity: "normal",
+               is_active: true,
+               resets_at: ~U[2026-11-02 15:59:59Z]
+             } = all
+
+      assert scoped.kind == "weekly_scoped"
+      assert scoped.percent == 0.0
+      assert scoped.is_active == false
+
+      assert scoped.scope == %{
+               "model" => %{"id" => nil, "display_name" => "Fable"},
+               "surface" => nil
+             }
+    end
+
+    test "spend is kept as the raw map", %{usage: u} do
+      assert u.spend == Fixtures.five_hour_null()["spend"]
+    end
+
+    test "weekly_all backs the 7d trio when seven_day is null" do
+      body = Map.put(Fixtures.five_hour_null(), "seven_day", nil)
+      u = OAuthUsage.parse_usage(body)
+      assert u.utilization_7d == 0.61
+      assert u.reset_7d_at == ~U[2026-11-02 15:59:59Z]
+      assert u.status_7d == "allowed"
+    end
+  end
+
+  describe "legacy shape" do
+    test "5h and 7d windows parse as before; spend is nil" do
+      u = OAuthUsage.parse_usage(Fixtures.legacy())
+      assert u.utilization_5h == 0.42
+      assert u.utilization_7d == 0.10
+      assert u.status_5h == "allowed"
+      assert u.spend == nil
+      assert Enum.map(u.limits, & &1.kind) == ["session", "weekly_all"]
+    end
+  end
+
+  describe "status_7d from severity" do
+    defp with_severity(sev) do
+      body = Fixtures.five_hour_null()
+
+      limits =
+        Enum.map(body["limits"], fn
+          %{"kind" => "weekly_all"} = l -> Map.put(l, "severity", sev)
+          l -> l
+        end)
+
+      OAuthUsage.parse_usage(%{body | "limits" => limits})
+    end
+
+    test "warning severity maps to allowed_warning" do
+      assert with_severity("warning").status_7d == "allowed_warning"
+    end
+
+    test "rejected severity maps to rejected" do
+      assert with_severity("rejected").status_7d == "rejected"
+    end
+
+    test "an unknown severity maps to allowed_warning and logs one warning" do
+      log = capture_log(fn -> assert with_severity("mauve").status_7d == "allowed_warning" end)
+      assert length(Regex.scan(~r/unknown limits\[\] severity/, log)) == 1
+      assert log =~ "mauve"
+    end
+
+    test "utilization >= 100% stays rejected even when severity says normal" do
+      body = Fixtures.five_hour_null()
+      body = %{body | "seven_day" => %{"utilization" => 100, "resets_at" => nil}}
+      assert OAuthUsage.parse_usage(body).status_7d == "rejected"
+    end
+
+    test "no severity falls back to the utilization-derived status" do
+      body = Map.put(Fixtures.legacy(), "limits", nil)
+      assert OAuthUsage.parse_usage(body).status_7d == "allowed"
+    end
+  end
+
+  test "a non-map body parses to the empty shape" do
+    u = OAuthUsage.parse_usage(nil)
+    assert u.limits == []
+    assert u.spend == nil
+  end
+end

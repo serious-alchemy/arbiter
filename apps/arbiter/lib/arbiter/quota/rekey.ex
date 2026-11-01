@@ -41,6 +41,7 @@ defmodule Arbiter.Quota.Rekey do
   @oauth_columns [
     :per_model_utilization,
     :extra_usage,
+    :spend,
     :oauth_utilization_5h,
     :oauth_utilization_7d,
     :oauth_captured_at

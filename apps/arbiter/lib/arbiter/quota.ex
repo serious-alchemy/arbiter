@@ -1195,6 +1195,10 @@ defmodule Arbiter.Quota do
       oauth_captured_at: now
     }
 
+    # A body without `spend` must not nil out one a previous poll stored.
+    secondary =
+      if is_map(usage.spend), do: Map.put(secondary, :spend, usage.spend), else: secondary
+
     {action, attrs} =
       if is_number(usage.utilization_5h) or is_number(usage.utilization_7d) do
         primary =
