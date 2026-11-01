@@ -41,6 +41,20 @@ defmodule Arbiter.Quota.OverageTest do
       assert Overage.window_start(%Snapshot{reset_at: @now}, @now) == trailing
     end
 
+    test "a long-only Claude (no primary reset, only a 7d reset) spends over the trailing 5h" do
+      trailing = DateTime.add(@now, -@five_hours, :second)
+      long_reset = DateTime.add(@now, 3 * 86_400, :second)
+
+      assert Overage.window_start(%Snapshot{reset_at: nil, secondary_reset_at: long_reset}, @now) ==
+               trailing
+
+      assert Overage.window_start(
+               %AnthropicQuota{reset_5h_at: nil, reset_7d_at: long_reset},
+               @now
+             ) ==
+               trailing
+    end
+
     test "no reset at all is the trailing 5h" do
       trailing = DateTime.add(@now, -@five_hours, :second)
 

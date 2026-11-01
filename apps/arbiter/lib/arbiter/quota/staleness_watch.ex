@@ -7,7 +7,7 @@ defmodule Arbiter.Quota.StalenessWatch do
   ## Why a separate check
 
   A stale snapshot silences the gate by design: `Arbiter.Quota.Gate` fails the
-  5h window open once `captured_at` is older than it trusts, and 5h overage
+  primary window open once `captured_at` is older than it trusts, and 5h overage
   detection goes with it (`Arbiter.Quota.Gate.in_overage?/2` cannot see a cap
   crossed after the last reading). That is correct in isolation and dangerous
   in aggregate: every other quota alarm — `quota_poll_failing`,
@@ -28,11 +28,14 @@ defmodule Arbiter.Quota.StalenessWatch do
   snapshot of every Claude provider account a workspace is metered under —
   the accounts CloudProbe polls — and sorts each into one of:
 
-    * **no snapshot yet** — no row, or a row the poll never wrote a 5h figure
-      into (`captured_at` nil). Benign: a fresh install, or one that has never
-      had a working Claude credential. No alert.
-    * **fresh** — `captured_at` younger than the threshold.
-    * **stale** — `captured_at` at least the threshold old: raises (or, while
+    * **no snapshot yet** — no row, or a row nothing was ever observed into
+      (neither `captured_at` nor `oauth_captured_at`). Benign: a fresh install,
+      or one that has never had a working Claude credential. No alert.
+    * **fresh** — the newer of `captured_at` and `oauth_captured_at` (the last
+      successful poll) is younger than the threshold. A missing 5h figure is
+      normal: Anthropic retired the 5h window, so a long-only Claude's poll
+      succeeds without ever advancing `captured_at` (bd-5zwj09).
+    * **stale** — that observation is at least the threshold old: raises (or, while
       one is active, refreshes) the account's
       `Arbiter.Messages.CoordinatorNotifier.quota_snapshot_stale/2` alert.
 
@@ -53,8 +56,8 @@ defmodule Arbiter.Quota.StalenessWatch do
 
   The effective threshold is never below
   `Arbiter.Quota.Gate.staleness_threshold_seconds/1` for the snapshot's own
-  `capture_source` (see `threshold_seconds/1`): the alert says the 5h gate is
-  failing open, and below that age it is not.
+  `capture_source` (see `threshold_seconds/1`): the alert says quota accounting is
+  blind, and below that age it is not.
 
   ## Timing
 
@@ -266,9 +269,39 @@ defmodule Arbiter.Quota.StalenessWatch do
       {{:error, {:exception, Exception.message(e)}}, state}
   end
 
-  defp assess(%{account: account, quota: %AnthropicQuota{captured_at: %DateTime{} = at} = q}, now) do
+  defp assess(%{account: account, quota: %AnthropicQuota{} = q}, now) do
+    case last_observed(q) do
+      {at, source} -> assess_age(account, at, source, now)
+      nil -> %{status: :no_snapshot, account: account_label(account)}
+    end
+  end
+
+  defp assess(%{account: account}, _now),
+    do: %{status: :no_snapshot, account: account_label(account)}
+
+  # Classified on poll success (bd-5zwj09): Anthropic retired the 5h window, so
+  # a long-only Claude's poll succeeds without writing primary-window figures
+  # and `captured_at` never advances. The snapshot is as fresh as the newer of
+  # `captured_at` and `oauth_captured_at`; a missing 5h figure is normal.
+  defp last_observed(%AnthropicQuota{} = q) do
+    case {q.captured_at, q.oauth_captured_at} do
+      {nil, nil} ->
+        nil
+
+      {at, nil} ->
+        {at, q.capture_source}
+
+      {nil, polled} ->
+        {polled, "oauth_poll"}
+
+      {at, polled} ->
+        if DateTime.after?(polled, at), do: {polled, "oauth_poll"}, else: {at, q.capture_source}
+    end
+  end
+
+  defp assess_age(account, at, source, now) do
     age = max(DateTime.diff(now, at, :second), 0)
-    threshold = threshold_seconds(q.capture_source)
+    threshold = threshold_seconds(source)
 
     %{
       status: if(age >= threshold, do: :stale, else: :fresh),
@@ -277,9 +310,6 @@ defmodule Arbiter.Quota.StalenessWatch do
       threshold_seconds: threshold
     }
   end
-
-  defp assess(%{account: account}, _now),
-    do: %{status: :no_snapshot, account: account_label(account)}
 
   # One account's alert failing to build must not cost the others theirs, nor
   # the clearing that follows — so each is raised on its own.
@@ -305,20 +335,15 @@ defmodule Arbiter.Quota.StalenessWatch do
       account_id: account.id,
       account: result.account,
       workspaces: Enum.map(workspaces, & &1.name),
-      captured_at: q.captured_at,
+      captured_at: elem(last_observed(q), 0),
       age_seconds: result.age_seconds,
       threshold_seconds: result.threshold_seconds,
-      capture_source: q.capture_source,
-      last_poll_at: later_than(q.oauth_captured_at, q.captured_at),
+      capture_source: elem(last_observed(q), 1),
+      last_poll_at: nil,
       cap_reached_until: if(Gate.primary_in_overage?(snapshot), do: snapshot.reset_at),
       long_window: long_window(snapshot, account, workspaces, now)
     }
   end
-
-  defp later_than(%DateTime{} = at, %DateTime{} = than),
-    do: if(DateTime.after?(at, than), do: at)
-
-  defp later_than(_at, _than), do: nil
 
   defp long_window(%Snapshot{secondary_window_label: nil}, _account, _workspaces, _now), do: nil
 
