@@ -155,14 +155,14 @@ defmodule Arbiter.Quota.StalenessWatchTest do
       assert %{checks: 1} = StalenessWatch.state(pid)
     end
 
-    test "the alert says how long accounting has been blind, and that the 5h side fails open" do
+    test "the alert says how long accounting has been blind, and not that a 5h gate fails open" do
       blind_install!()
       StalenessWatch.check_now(start_watch())
 
       assert [alert] = stale_alerts()
       assert alert.detail =~ "blind for 19h"
-      assert alert.detail =~ "5h gate is failing open"
-      assert alert.detail =~ "5h overage detection"
+      refute alert.detail =~ "failing open"
+      assert alert.detail =~ "Quota accounting is blind"
     end
 
     test "the alert says a 7d hold is in force, and when it lifts" do
@@ -226,9 +226,8 @@ defmodule Arbiter.Quota.StalenessWatchTest do
                "recorded as overage until it resets at #{DateTime.to_iso8601(reset_5h)}"
     end
 
-    test "the alert says so when the poll is succeeding but not carrying the 5h figure" do
+    test "a poll that keeps succeeding without a 5h figure is fresh, not stale (long-only Claude)" do
       %{account: account} = blind_install!()
-      polled_at = ago(120)
 
       Ash.create!(
         AnthropicQuota,
@@ -237,7 +236,28 @@ defmodule Arbiter.Quota.StalenessWatchTest do
           provider: "claude",
           per_model_utilization: %{},
           extra_usage: %{},
-          oauth_captured_at: polled_at
+          oauth_captured_at: ago(120)
+        },
+        action: :record_oauth_usage
+      )
+
+      pid = start_watch()
+      assert {:ok, results} = StalenessWatch.check_now(pid)
+      assert [%{status: :fresh}] = Map.values(results)
+      assert stale_alerts() == []
+    end
+
+    test "a poll that stopped succeeding is stale on the poll's own age" do
+      %{account: account} = blind_install!()
+
+      Ash.create!(
+        AnthropicQuota,
+        %{
+          provider_account_id: account.id,
+          provider: "claude",
+          per_model_utilization: %{},
+          extra_usage: %{},
+          oauth_captured_at: ago(2 * 3_600)
         },
         action: :record_oauth_usage
       )
@@ -245,7 +265,8 @@ defmodule Arbiter.Quota.StalenessWatchTest do
       StalenessWatch.check_now(start_watch())
 
       assert [alert] = stale_alerts()
-      assert alert.detail =~ "last succeeded at #{DateTime.to_iso8601(polled_at)}"
+      assert alert.detail =~ "blind for 2h"
+      refute alert.detail =~ "failing open"
     end
   end
 
@@ -263,7 +284,7 @@ defmodule Arbiter.Quota.StalenessWatchTest do
       assert %{accounts: %{^account_id => %{status: :no_snapshot}}} = StalenessWatch.state(pid)
     end
 
-    test "a row the poll never wrote a 5h figure into is still 'no snapshot yet'" do
+    test "a row only the poll wrote to (no 5h figure) is judged on the poll, and a recent one raises nothing" do
       ws = workspace!()
       account = account!()
       link!(ws, account)
@@ -275,7 +296,7 @@ defmodule Arbiter.Quota.StalenessWatchTest do
           provider: "claude",
           per_model_utilization: %{},
           extra_usage: %{},
-          oauth_captured_at: ago(19 * 3_600)
+          oauth_captured_at: ago(60)
         },
         action: :record_oauth_usage
       )

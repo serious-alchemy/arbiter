@@ -103,8 +103,8 @@ defmodule Arbiter.Workflows.DispatchQueue do
   when known, else a bounded exponential backoff), and `maybe_drain/1` skips
   re-checking/re-dispatching a held item until that time passes, regardless of
   what the gate says. `schedule_reset_drain/1`'s timer wakes the queue at
-  `next_reset_at/1` — the earliest of any held provider's snapshot reset_at
-  *or* any item's own `retry_not_before` — so a hold that falls after the raw
+  `next_reset_at/1` — the earliest of any held provider's snapshot reset (primary `reset_at` or the
+  long window's `secondary_reset_at`, bd-5zwj09) *or* any item's own `retry_not_before` — so a hold that falls after the raw
   snapshot reset (the reset-buffer or a no-reset-time backoff) still gets its
   own precise wake instead of waiting on the next 5-minute broadcast.
 
@@ -1182,14 +1182,17 @@ defmodule Arbiter.Workflows.DispatchQueue do
   # this the queue only re-arms a timer for the snapshot's reset, then finds
   # `maybe_drain/1` still holds the item and has nothing left to wake it until
   # the next `quota_updated` broadcast (up to 5 minutes late).
-  defp next_reset_at(%State{} = state) do
+  @doc false
+  def next_reset_at(%State{} = state) do
     snapshot_resets =
       state
       |> provider_snapshots()
       |> Map.values()
       |> Enum.map(&Snapshot.normalize/1)
       |> Enum.flat_map(fn
-        %{reset_at: %DateTime{} = reset} -> [reset]
+        # A long-only Claude has no primary reset: its long window's reset is
+        # the only one the queue can wake on (bd-5zwj09).
+        %{} = s -> for at <- [s.reset_at, s.secondary_reset_at], match?(%DateTime{}, at), do: at
         _ -> []
       end)
 
