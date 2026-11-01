@@ -254,6 +254,56 @@ defmodule Arbiter.Nodes.PlacementTest do
     end
   end
 
+  describe "worker.placement_nodes allowlist (bd-d7tb2d)" do
+    defp fleet do
+      [
+        row("vstim-k8s", kind: :cluster, labels: ["team=v"]),
+        row("mesaana", kind: :machine)
+      ]
+    end
+
+    test "kind: machine never places on a cluster node" do
+      for _ <- 1..3 do
+        assert {:ok, {:node, %{name: "mesaana"}}} =
+                 place(%{allowed_nodes: [{:kind, "machine"}]}, fleet())
+
+        Placement.release(@eligible.task_id)
+      end
+    end
+
+    test "name: mesaana places only on mesaana" do
+      assert {:ok, {:node, %{name: "mesaana"}}} =
+               place(%{allowed_nodes: [{:name, "mesaana"}]}, fleet())
+    end
+
+    test "a label selector matches by node label" do
+      assert {:ok, {:node, %{name: "vstim-k8s"}}} =
+               place(%{allowed_nodes: [{:label, "team=v"}]}, fleet())
+    end
+
+    test "unset allows any node" do
+      rows = [row("vstim-k8s", kind: :cluster)]
+      assert {:ok, {:node, %{name: "vstim-k8s"}}} = place(%{}, rows)
+      assert {:ok, {:node, %{name: "vstim-k8s"}}} = place(%{allowed_nodes: nil}, rows)
+    end
+
+    test "remote_only with no allowed node holding capacity is held, naming the allowlist" do
+      rows = [row("vstim-k8s", kind: :cluster), row("mesaana", kind: :machine, live: 2)]
+
+      assert {:error, {:no_node_capacity, info}} =
+               place(%{mode: :remote_only, allowed_nodes: [{:name, "mesaana"}]}, rows)
+
+      assert info.message =~ "worker.placement_nodes"
+      assert info.message =~ "name:mesaana"
+      assert info.reason == :allowlist
+    end
+
+    test "prefer_remote falls back to local when no allowed node has capacity" do
+      assert {:ok, {:local, :no_node}} =
+               place(%{allowed_nodes: [{:name, "nope"}]}, fleet())
+    end
+  end
+
   describe "constrained nodes (A3) and degraded: netpol_unenforced (A7)" do
     test "a constrained node ranks last even when it is the emptiest" do
       rows = [row("idle-but-constrained", constrained?: true), row("busy", live: 1, max: 2)]
