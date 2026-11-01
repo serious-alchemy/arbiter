@@ -110,6 +110,7 @@ defmodule Arbiter.Nodes.Placement do
   false` is the kill switch.
   """
 
+  alias Arbiter.Nodes.Allowlist
   alias Arbiter.Nodes.Overview
   alias Arbiter.Settings
   alias Arbiter.Worker.GitCredential
@@ -184,6 +185,7 @@ defmodule Arbiter.Nodes.Placement do
           optional(:local_work?) => boolean(),
           optional(:git_credential) => GitCredential.kind() | atom() | nil,
           optional(:labels) => [String.t()],
+          optional(:allowed_nodes) => [Allowlist.selector()] | nil,
           optional(:registry) => String.t() | nil
         }
   @type info :: %{
@@ -395,7 +397,7 @@ defmodule Arbiter.Nodes.Placement do
 
   defp none(%{mode: :remote_only} = request, rows) do
     case registry_mismatch(request, rows) do
-      nil -> none_full(request, rows)
+      nil -> none_allowlisted(request, rows)
       mismatch -> {:error, {:no_node_capacity, mismatch}}
     end
   end
@@ -469,6 +471,35 @@ defmodule Arbiter.Nodes.Placement do
     end
   end
 
+  # bd-d7tb2d: `worker.placement_nodes` is set and no allowed node can take the run: the
+  # hold names the allowlist, so an operator does not read it as a full fleet.
+  defp none_allowlisted(%{allowed_nodes: [_ | _] = allowed} = request, rows) do
+    matching = Enum.filter(rows, &Allowlist.allows?(allowed, &1))
+    phrase = Allowlist.describe(allowed)
+
+    detail =
+      if matching == [],
+        do: "no enrolled node matches it",
+        else: "none of its #{length(matching)} matching node(s) is online with a free slot"
+
+    {:error,
+     {:no_node_capacity,
+      %{
+        task_id: request.task_id,
+        node: nil,
+        mode: :remote_only,
+        reason: :allowlist,
+        allowed_nodes: phrase,
+        nodes_known: length(rows),
+        derated: derated(matching),
+        message:
+          "held — worker.placement_nodes allowlist [#{phrase}]: #{detail} for #{request.task_id}. " <>
+            "It starts when an allowed node frees a slot; widen worker.placement_nodes to use others."
+      }}}
+  end
+
+  defp none_allowlisted(request, rows), do: none_full(request, rows)
+
   defp none_full(request, rows) do
     info = %{
       task_id: request.task_id,
@@ -505,7 +536,7 @@ defmodule Arbiter.Nodes.Placement do
       row.health == :ready and
       is_integer(row.max) and row.max > 0 and
       row.live + Map.get(reserved, row.id, 0) < Arbiter.Nodes.Capacity.offered(row) and
-      network_enforced?(row) and
+      node_usable?(row, request) and
       pin_allows?(Map.get(row, :workspace_ids, []), Map.get(request, :workspace_id)) and
       labels_match?(Map.get(row, :labels, []), Map.get(request, :labels, [])) and
       registry_covered?(row, Map.get(request, :registry))
@@ -561,6 +592,9 @@ defmodule Arbiter.Nodes.Placement do
     ) or
       Map.get(row, :allow_unenforced_network) == true
   end
+
+  defp node_usable?(row, request),
+    do: network_enforced?(row) and Allowlist.allows?(Map.get(request, :allowed_nodes), row)
 
   defp pin_allows?([], _workspace_id), do: true
   defp pin_allows?(pins, workspace_id), do: workspace_id in pins

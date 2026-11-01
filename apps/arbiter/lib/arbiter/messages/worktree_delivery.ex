@@ -45,7 +45,9 @@ defmodule Arbiter.Messages.WorktreeDelivery do
         :ok
 
       path ->
-        write_inbox(path, body, inserted_at)
+        # Never mkdir a missing worktree: it would be re-created as a stub holding
+        # only `.arbiter/`. The message stays queued in the DB.
+        if File.dir?(path), do: write_inbox(path, body, inserted_at), else: :ok
     end
   end
 

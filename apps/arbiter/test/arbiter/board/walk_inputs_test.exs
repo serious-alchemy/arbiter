@@ -302,6 +302,23 @@ defmodule Arbiter.Board.WalkInputsTest do
                [["n1"], ["local"], ["n2"]]
     end
 
+    test "an allowlist (worker.placement_nodes) keeps only matching nodes" do
+      remote = %{
+        "n1" => %{cap: 4, used: 0, name: "mesaana", kind: :machine, labels: []},
+        "n2" => %{cap: 4, used: 0, name: "k8s", kind: :cluster, labels: []}
+      }
+
+      assert WalkInputs.node_groups(:remote_only, true, remote, "ws", [{:kind, "machine"}]) ==
+               [["n1"]]
+
+      assert WalkInputs.node_groups(:remote_only, true, remote, "ws", [{:name, "none"}]) == []
+
+      assert WalkInputs.node_groups(:prefer_remote, true, remote, "ws", [{:name, "none"}]) ==
+               [["local"]]
+
+      assert WalkInputs.node_groups(:remote_only, true, remote, "ws", nil) == [["n1", "n2"]]
+    end
+
     test "remote_only never offers the primary; a node pinned elsewhere is not offered" do
       assert WalkInputs.node_groups(:remote_only, true, @remote, "ws") == [["n1"], ["n2"]]
 
