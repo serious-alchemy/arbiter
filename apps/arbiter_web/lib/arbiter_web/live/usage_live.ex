@@ -650,7 +650,7 @@ defmodule ArbiterWeb.UsageLive do
                   <span class="font-[family-name:var(--font-mono)] font-semibold">
                     {format_usd(@overage_spend)}
                   </span>
-                  spent this 5h window past the plan cap.
+                  spent this billing period past the plan cap.
                 </p>
               </div>
             </.panel>

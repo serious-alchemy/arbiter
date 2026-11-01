@@ -872,7 +872,9 @@ defmodule ArbiterWeb.Layouts do
             ring={@rings.outer}
           />
         <% end %>
+        <%!-- Claude has no 5h window any more: one 7d ring, no inner ring. --%>
         <.quota_ring
+          :if={not claude_without_5h?(@quota)}
           id={"quota-ring-#{@quota.provider}-5h"}
           position="inner"
           r={11.0}

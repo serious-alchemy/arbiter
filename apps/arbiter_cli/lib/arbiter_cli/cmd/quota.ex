@@ -392,9 +392,12 @@ defmodule ArbiterCli.Cmd.Quota do
     emit_gating_workspaces(q["gating_workspaces"])
     IO.puts("")
 
-    IO.puts(
-      "  5h:  #{format_frac(q["utilization_5h"])} used   status=#{q["status_5h"] || "—"}   resets #{q["reset_5h_at"] || "—"}"
-    )
+    # Anthropic retired the 5h window: no 5h figure means no 5h line.
+    if q["utilization_5h"] != nil do
+      IO.puts(
+        "  5h:  #{format_frac(q["utilization_5h"])} used   status=#{q["status_5h"] || "—"}   resets #{q["reset_5h_at"] || "—"}"
+      )
+    end
 
     IO.puts(
       "  7d:  #{format_frac(q["utilization_7d"])} used   status=#{q["status_7d"] || "—"}   resets #{q["reset_7d_at"] || "—"}"
@@ -459,7 +462,7 @@ defmodule ArbiterCli.Cmd.Quota do
   # "dispatches may be incorrectly held", which was backwards for both.
   defp stale_indicator(%{"stale" => true} = q, captured_at_str) do
     base =
-      " ⚠️ STALE (older than the gate trusts — the 5h gate fails open; a 7d hold stays in force)"
+      " ⚠️ STALE (older than the gate trusts — a stale 7d hold stays in force)"
 
     base <> stale_detail(q, captured_at_str)
   end

@@ -313,6 +313,25 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       assert has_element?(view, "#nav-rail #theme-toggle")
     end
 
+    test "claude with no 5h reading draws one 7d ring and no 5h ring", %{conn: conn, ws: ws} do
+      configure!(ws, "claude")
+      now = DateTime.to_unix(DateTime.utc_now())
+
+      {:ok, _} =
+        Quota.capture(ws.id, [
+          {"anthropic-ratelimit-unified-7d-utilization", "0.41"},
+          {"anthropic-ratelimit-unified-7d-reset", to_string(now + 302_400)}
+        ])
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view, @async_wait)
+
+      assert has_element?(view, "#quota-ring-claude-7d[data-ring-pct='41']")
+      refute has_element?(view, "#quota-ring-claude-5h")
+      refute has_element?(view, "#quota-popover-claude-5h")
+      assert has_element?(view, "#quota-popover-claude-7d")
+    end
+
     test "the ring arc is utilisation; claude and antigravity have the elapsed hairline, codex none",
          %{conn: conn, ws: ws} do
       configure!(ws, ["claude", "gemini", "codex"])

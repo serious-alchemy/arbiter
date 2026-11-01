@@ -224,10 +224,17 @@ defmodule ArbiterWeb.QuotaHelpers do
   """
   def quota_binding_class(nil, _window), do: nil
 
-  def quota_binding_class(representative_claim, window) when representative_claim == window,
-    do: nil
+  def quota_binding_class(representative_claim, window) do
+    if binding_window?(representative_claim, window), do: nil, else: "opacity-50"
+  end
 
-  def quota_binding_class(_representative_claim, _window), do: "opacity-50"
+  # `weekly_all` is the 7d window's `limits[]` kind (Anthropic retired the 5h
+  # window), so it binds exactly where `seven_day` does. A scoped active limit
+  # (`weekly_scoped…`) is a per-model cap, not the all-models 7d bar.
+  defp binding_window?(claim, window), do: canonical_window(claim) == canonical_window(window)
+
+  defp canonical_window("weekly_all"), do: "seven_day"
+  defp canonical_window(other), do: other
 
   @doc """
   Tooltip explanation for a dimmed bar row that isn't the binding window per
@@ -237,16 +244,25 @@ defmodule ArbiterWeb.QuotaHelpers do
   """
   def quota_binding_title(nil, _window), do: nil
 
-  def quota_binding_title(representative_claim, window) when representative_claim == window,
-    do: nil
+  def quota_binding_title(representative_claim, window) do
+    if binding_window?(representative_claim, window),
+      do: nil,
+      else: not_binding_title(representative_claim)
+  end
 
-  def quota_binding_title("five_hour", _window),
+  defp not_binding_title("five_hour"),
     do: "not the binding window — Anthropic is currently limiting on 5h"
 
-  def quota_binding_title("seven_day", _window),
+  defp not_binding_title(claim) when claim in ["seven_day", "weekly_all"],
     do: "not the binding window — Anthropic is currently limiting on 7d"
 
-  def quota_binding_title(claim, _window) when is_binary(claim),
+  defp not_binding_title("weekly_scoped:" <> name) when name != "",
+    do: "not the binding window — Anthropic is currently limiting on the #{name} weekly limit"
+
+  defp not_binding_title("weekly_scoped" <> _),
+    do: "not the binding window — Anthropic is currently limiting on a model-scoped weekly limit"
+
+  defp not_binding_title(claim) when is_binary(claim),
     do: "not the binding window — Anthropic is currently limiting on #{claim}"
 
   @doc """
@@ -355,6 +371,26 @@ defmodule ArbiterWeb.QuotaHelpers do
   second bar pinned at 0%.
   """
   def quota_windows(view) do
+    if claude_without_5h?(view), do: [seven_day_window(view)], else: dual_windows(view)
+  end
+
+  @doc """
+  Claude has no 5h window any more (Anthropic retired it): a Claude view with
+  no 5h utilisation renders one 7d ring/bar, never a phantom 5h one.
+  """
+  def claude_without_5h?(%{provider: "claude"} = view), do: is_nil(view.utilization_5h)
+  def claude_without_5h?(_view), do: false
+
+  defp seven_day_window(view) do
+    %{
+      window: "7d",
+      label: Map.get(view, :secondary_label) || "7d",
+      utilization: view.utilization_7d,
+      reset_at: view.reset_7d_at
+    }
+  end
+
+  defp dual_windows(view) do
     primary = %{
       window: "5h",
       label: Map.get(view, :primary_label) || "5h",
@@ -556,6 +592,7 @@ defmodule ArbiterWeb.QuotaHelpers do
       windows =
         [inner, outer]
         |> Enum.reject(&(&1.state == :no_data and &1.window == "7d" and single_window?(view)))
+        |> Enum.reject(&(&1.window == "5h" and claude_without_5h?(view)))
         |> Enum.map_join("; ", &ring_phrase/1)
 
       "#{name}: #{windows}"

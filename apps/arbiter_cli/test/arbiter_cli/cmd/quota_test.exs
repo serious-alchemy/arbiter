@@ -281,6 +281,17 @@ defmodule ArbiterCli.Cmd.QuotaTest do
     end
   end
 
+  describe "arb quota without a 5h window" do
+    test "omits the 5h line when utilization_5h is nil, keeps 7d" do
+      snap = Map.merge(@snapshot, %{"utilization_5h" => nil, "status_5h" => nil})
+      stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => snap}})
+
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      refute out =~ "5h:"
+      assert out =~ "7d:  8.0% used"
+    end
+  end
+
   describe "arb quota" do
     test "renders 5h and 7d utilization, status, and reset times in text mode" do
       stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => @snapshot}})
@@ -390,7 +401,7 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
       assert code == 0
       assert out =~ "STALE"
-      assert out =~ "5h gate fails open"
+      refute out =~ "5h gate"
       assert out =~ "7d hold stays in force"
       refute out =~ "incorrectly held"
       # And the 7d hold is still reported as gating, stale snapshot or not.
@@ -457,8 +468,7 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "captured at:           2026-06-23T20:20:06Z (19h 3m ago) ⚠️ STALE"
 
       assert out =~
-               "STALE (older than the gate trusts — the 5h gate fails open; " <>
-                 "a 7d hold stays in force)"
+               "STALE (older than the gate trusts — a stale 7d hold stays in force)"
     end
 
     test "a fresh snapshot's age is shown too" do

@@ -472,6 +472,35 @@ defmodule ArbiterWeb.QuotaHelpersTest do
     test "no explanation title when representative_claim is unknown" do
       assert quota_binding_title(nil, "five_hour") == nil
     end
+
+    test "weekly_all binds the seven_day row, with no five_hour copy" do
+      assert quota_binding_title("weekly_all", "seven_day") == nil
+      assert quota_binding_class("weekly_all", "seven_day") == nil
+    end
+
+    test "a scoped active limit means the all-models 7d row is not the binding one" do
+      assert quota_binding_class("weekly_scoped:sonnet", "seven_day") == "opacity-50"
+
+      title = quota_binding_title("weekly_scoped:sonnet", "seven_day")
+      assert title =~ "sonnet weekly limit"
+      refute title =~ "5h"
+      refute title =~ "five_hour"
+    end
+
+    test "claude_without_5h?/1 and quota_windows/1 yield a single 7d window" do
+      view = %{
+        provider: "claude",
+        utilization_5h: nil,
+        reset_5h_at: nil,
+        utilization_7d: 0.4,
+        reset_7d_at: nil,
+        primary_label: "5h",
+        secondary_label: "7d"
+      }
+
+      assert quota_windows(view) |> Enum.map(& &1.window) == ["7d"]
+      assert quota_windows(%{view | provider: "codex"}) |> Enum.map(& &1.window) == ["5h", "7d"]
+    end
   end
 
   describe "quota_note_color/2 — note/countdown colour derived from pace state" do
