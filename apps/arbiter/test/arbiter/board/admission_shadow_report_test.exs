@@ -312,6 +312,95 @@ defmodule Arbiter.Board.AdmissionShadowReportTest do
     end
   end
 
+  describe "7d binding and ρ source (bd-9q51ze)" do
+    defp calib(account, window, rung, extra \\ %{}) do
+      Map.merge(
+        %{
+          account_id: account,
+          provider: "claude",
+          pool: "claude",
+          window: window,
+          rung: rung,
+          rho: 0.01,
+          raw_rho: 0.01,
+          floored?: false,
+          passed_over: [],
+          horizon_hours: 2.0,
+          fit: %{status: :insufficient, n: 0},
+          observations: []
+        },
+        extra
+      )
+    end
+
+    defp brow(account, binding, label \\ "claude:default"),
+      do: %{
+        "account_id" => account,
+        "pool" => "claude",
+        "label" => label,
+        "budget" => 2,
+        "cap" => 3,
+        "binding" => binding
+      }
+
+    test "each fit reports where its ρ came from: fit, peer or prior" do
+      calibration = [
+        calib("a", "7d", 0),
+        calib("b", "7d", 1, %{passed_over: [{0, :too_few_observations}]}),
+        calib("c", "7d", 2, %{passed_over: [{0, :too_few_observations}, {1, :no_peer_fit}]})
+      ]
+
+      %{calibration: %{fits: fits}} = build(%{calibration: calibration})
+
+      assert Map.new(fits, &{&1.account_id, &1.rho_source}) ==
+               %{"a" => :fit, "b" => :peer, "c" => :prior}
+    end
+
+    test "the share of rows where 7d binds, per account and overall" do
+      events = [
+        event(0, %{budgets: [brow("a", "window:7d"), brow("b", "ceiling")]}),
+        event(1, %{budgets: [brow("a", "window:7d"), brow("b", "window:7d")]}),
+        event(2, %{budgets: [brow("a", "ceiling"), brow("b", "paused")]}),
+        event(3, %{budgets: [brow("a", "window:5h"), brow("b", "ceiling")]})
+      ]
+
+      calibration = [calib("a", "7d", 0), calib("b", "7d", 2)]
+
+      %{window_binding: wb} = build(%{events: events, calibration: calibration})
+
+      assert wb.rows == 8
+      assert wb.long_binds == 3
+      assert_in_delta wb.long_share, 3 / 8, 1.0e-9
+
+      a = Enum.find(wb.accounts, &(&1.account_id == "a"))
+      b = Enum.find(wb.accounts, &(&1.account_id == "b"))
+
+      assert %{rows: 4, long_binds: 2, rho_source: :fit} = a
+      assert_in_delta a.long_share, 0.5, 1.0e-9
+      assert %{rows: 4, long_binds: 1, rho_source: :prior} = b
+      assert_in_delta b.long_share, 0.25, 1.0e-9
+    end
+
+    test "no budget rows reports nil shares, not zero" do
+      %{window_binding: wb} = build(%{calibration: [calib("a", "7d", 2)]})
+
+      assert wb.rows == 0
+      assert wb.long_share == nil
+      assert [%{account_id: "a", rho_source: :prior, rows: 0, long_share: nil}] = wb.accounts
+    end
+
+    test "format/1 prints the ρ source and the 7d share" do
+      events = [event(0, %{budgets: [brow("a", "window:7d"), brow("a", "ceiling")]})]
+      text = Report.format(build(%{events: events, calibration: [calib("a", "7d", 0)]}))
+
+      assert text =~ "7d binding"
+      assert text =~ "a"
+      assert text =~ "ρ source fit"
+      assert text =~ "7d binds 1 of 2 rows (50.0%)"
+      assert text =~ "source fit"
+    end
+  end
+
   describe "stability" do
     test "published budget changes per pool per day and the median dwell" do
       snapshots =

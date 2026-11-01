@@ -321,6 +321,65 @@ defmodule Arbiter.Quota.BudgetCalibrationTest do
     end
   end
 
+  describe "the 7d window alone (bd-9q51ze, 5H C5)" do
+    @week_minutes 7 * 24 * 60
+
+    # A 7d series with the seats column moving, captured every 6 hours inside
+    # one week (no reset), the draw exactly `rho` per seat-hour plus `bg`/h.
+    defp insert_7d_series(account, rho, bg, n) do
+      seats = fn i -> rem(i * 7, 5) + 1 end
+
+      {_, _} =
+        Enum.reduce(0..n, {0.0, nil}, fn i, {util, prev_seats} ->
+          util =
+            if prev_seats == nil,
+              do: util,
+              else: util + rho * (prev_seats + seats.(i)) / 2 * 6 + bg * 6
+
+          Ash.create!(QuotaSnapshot, %{
+            provider_account_id: account,
+            provider: "claude",
+            bucket: "claude",
+            window: "7d",
+            utilization: util,
+            resets_at: at(@week_minutes + 600),
+            captured_at: at(i * 360),
+            seats: seats.(i)
+          })
+
+          {util, seats.(i)}
+        end)
+
+      :ok
+    end
+
+    test "rho for the 7d window is fitted from its own samples (rung 0)" do
+      account = Ecto.UUID.generate()
+      insert_7d_series(account, 0.0004, 0.00005, 22)
+
+      assert [result] = BudgetCalibration.calibrate(since: at(-60), until: at(@week_minutes))
+
+      assert %{account_id: ^account, window: "7d", pool: "claude"} = result
+      assert result.fit.n >= 8
+      assert result.rung == 0
+      assert_in_delta result.raw_rho, 0.0004, 1.0e-6
+      assert_in_delta result.prior, 1 / (168 * 2), 1.0e-12
+      assert result.rho >= result.floor
+    end
+
+    test "under 8 observations the prior stands, with the reason" do
+      account = Ecto.UUID.generate()
+      insert_7d_series(account, 0.0004, 0.00005, 7)
+
+      assert [result] = BudgetCalibration.calibrate(since: at(-60), until: at(@week_minutes))
+
+      assert length(result.observations) < 8
+      assert result.rung == 2
+      assert_in_delta result.rho, 1 / (168 * 2), 1.0e-12
+      assert [{0, :too_few_observations}, {1, :no_peer_fit}] = result.passed_over
+    end
+  end
+
   describe "horizon/2 (H)" do
     defp tr(ticket, to, from, minutes),
       do: %{ticket_id: ticket, to_state: to, from_state: from, at: at(minutes)}
