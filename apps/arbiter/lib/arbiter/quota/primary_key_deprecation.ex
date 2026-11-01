@@ -47,8 +47,8 @@ defmodule Arbiter.Quota.PrimaryKeyDeprecation do
           do: {"workspace #{w.name}", key}
 
     env_hits =
-      for key <- @primary_keys,
-          Keyword.has_key?(app_env, String.to_existing_atom(key)),
+      for {key, atom} <- @primary_atoms,
+          overridden?(app_env, atom),
           do: {"app env :quota", key}
 
     account_hits ++ workspace_hits ++ env_hits

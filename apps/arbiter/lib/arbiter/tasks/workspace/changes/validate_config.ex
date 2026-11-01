@@ -1929,7 +1929,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   # Quota-aware dispatch throttle config (bd-7cd38f, bd-1tuxv8):
   #   * on_exhaustion ∈ {"throttle","continue"}
   #   * overage_alert_usd a positive number (or its JSON string form)
-  #   * throttle_threshold a number in (0, 1] — the primary (5h/session) window ceiling; inert for Claude (5h retired, 7d gates)
+  #   * throttle_threshold a number in (0, 1] — the primary (5h/session) ceiling;
+  #     inert for Claude (5h retired, 7d gates)
   #   * weekly_threshold a number in (0, 1] — the 7d/weekly window ceiling
   #   * weekly_warning_policy ∈ {"ignore","hold"} — what a 7d `allowed_warning`
   #     does (default "ignore"; see Arbiter.Quota.Gate.weekly_warning_policy/1)
