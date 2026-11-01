@@ -21,6 +21,9 @@ defmodule Arbiter.Board.AdmissionShadowReport do
     * **Pace safety**, **Calibration**, **Stability** and **Near resets** —
       from `quota_snapshots` and `Arbiter.Quota.BudgetCalibration`
       (`Arbiter.Board.AdmissionShadowReport.Quota`).
+    * **7d binding and ρ source** — per account, where its 7d ρ came from (own fit,
+      a peer's, or the prior) and the share of budget rows where `window:7d`
+      binds (bd-9q51ze: Anthropic retired the 5h window).
     * **Gate** — each §10.4 criterion as `:met`, `:unmet` or `:unknown`. An
       operator's review of the disagreement classes is never inferred.
 
@@ -44,6 +47,7 @@ defmodule Arbiter.Board.AdmissionShadowReport do
   @gate_comparable 50
   @gate_bias 0.25
   @none "(none)"
+  @long_window "7d"
 
   @type data :: %{
           since: DateTime.t(),
@@ -143,6 +147,7 @@ defmodule Arbiter.Board.AdmissionShadowReport do
       throughput: throughput(events, until),
       pace: pace,
       calibration: calibration,
+      window_binding: window_binding(events, calibration),
       stability: stability,
       near_resets: near_resets
     }
@@ -189,6 +194,40 @@ defmodule Arbiter.Board.AdmissionShadowReport do
   defp pool_of(record), do: record["pool_label"] || record["pool"] || @none
 
   defp cause_counts(records), do: records |> Enum.frequencies_by(&(&1["cause"] || "unknown"))
+
+  # Anthropic retired the 5h window (bd-9q51ze): a Claude budget is sized off
+  # the 7d window, so the operator needs to see how often 7d is the binding
+  # window and whether the ρ it was sized with was measured or the prior.
+  # `rows` counts every budget row of every hold-change event; `long_binds`
+  # those whose binding is `window:7d`.
+  defp window_binding(events, calibration) do
+    rows = Enum.flat_map(events, & &1.budgets)
+
+    sources =
+      for f <- calibration.fits, f.window == @long_window, do: {f.account_id, f.rho_source}
+
+    by_account = Enum.group_by(rows, & &1["account_id"])
+
+    accounts =
+      (Map.keys(by_account) ++ Enum.map(sources, &elem(&1, 0)))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> Enum.sort()
+      |> Enum.map(fn id ->
+        Map.merge(long_share(Map.get(by_account, id, [])), %{
+          account_id: id,
+          rho_source: Enum.find_value(sources, fn {a, src} -> a == id && src end)
+        })
+      end)
+
+    Map.put(long_share(rows), :accounts, accounts)
+  end
+
+  defp long_share(rows) do
+    binds = Enum.count(rows, &(&1["binding"] == "window:" <> @long_window))
+    n = length(rows)
+    %{rows: n, long_binds: binds, long_share: if(n > 0, do: binds / n)}
+  end
 
   defp budget_counts(budgets, compare) do
     budgets
@@ -360,6 +399,7 @@ defmodule Arbiter.Board.AdmissionShadowReport do
       throughput_text(report.throughput),
       pace_text(report.pace),
       calibration_text(report.calibration),
+      window_binding_text(report.window_binding),
       stability_text(report.stability),
       near_resets_text(report.near_resets),
       gate_text(report.gate)
@@ -456,6 +496,23 @@ defmodule Arbiter.Board.AdmissionShadowReport do
       Enum.map_join(fits, "\n", &fit_line/1)
   end
 
+  defp window_binding_text(%{accounts: []} = wb),
+    do: "7d binding and ρ source\n  no 7d fit; #{wb.rows} budget rows"
+
+  defp window_binding_text(wb) do
+    lines =
+      Enum.map_join(wb.accounts, "\n", fn a ->
+        "  #{a.account_id}: ρ source #{a.rho_source || "n/a"}, #{binds_text(a)}"
+      end)
+
+    "7d binding and ρ source (#{binds_text(wb)} overall)\n" <> lines
+  end
+
+  defp binds_text(%{rows: 0}), do: "no budget rows"
+
+  defp binds_text(w),
+    do: "7d binds #{w.long_binds} of #{w.rows} rows (#{pct(w.long_share)})"
+
   defp fit_line(f) do
     se = if f.se, do: " se #{pct(f.se)}", else: ""
     t = if f.t, do: " t #{Float.round(f.t * 1.0, 2)}", else: ""
@@ -466,7 +523,7 @@ defmodule Arbiter.Board.AdmissionShadowReport do
         "\n      passed over rung #{rung}: #{inspect(why)}"
       end)
 
-    "  #{f.pool} / #{f.window} (#{f.account_id}): rung #{f.rung}, ρ #{pct(f.rho)}/seat-h#{se}#{t}#{floor}" <>
+    "  #{f.pool} / #{f.window} (#{f.account_id}): rung #{f.rung} (#{f.rho_source}), ρ #{pct(f.rho)}/seat-h#{se}#{t}#{floor}" <>
       passed
   end
 
