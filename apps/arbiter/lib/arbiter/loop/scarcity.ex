@@ -14,17 +14,22 @@ defmodule Arbiter.Loop.Scarcity do
   decision, in code. The full reasoning — including the units considered and
   rejected — is in `docs/loop-scarcity-unit.md`.
 
-  ## The unit: `window_share_5h`
+  ## The unit: `window_share`
 
-  **A run's draw on one 5-hour utilization window, as a fraction of that
-  window's capacity.** Not the 7-day window, and not raw utilization:
+  **A run's draw on the provider's primary utilization window, as a fraction of
+  that window's capacity.** The unit is `window_share`; *which* window it is
+  denominated in travels beside it as `calibration.window` (`:five_hour` or
+  `:seven_day`) and is named in every line of report text. It was
+  `window_share_5h` until the 5h window stopped existing for Claude
+  (bd-50qt34, C11); `normalize_unit/1` still reads the old atom.
 
-    * **5h, not 7d.** The 5h window is what actually stalls dispatch here —
-      `Arbiter.Quota.Gate.Snapshot` normalizes *only* the primary window and
-      Anthropic gating "keys on the 5h window and ignores the 7d one". A metric
-      denominated in the window that does not gate would describe a constraint
-      that never binds. The 7d window is carried alongside as context
-      (`utilization_7d` on the calibration) but is not the objective.
+    * **The provider's primary window, not a fixed one.** `primary_window/1`
+      asks `Arbiter.Quota.Gate.Snapshot` which window the provider actually
+      gates on. A snapshot with a primary (5h) window calibrates on 5h; Claude
+      with no primary window (`window_label: nil`, bd-9v8psv) calibrates on 7d,
+      the window that binds. A metric denominated in a window that does not gate
+      would describe a constraint that never binds. The other window rides along
+      as context (`utilization_7d` on the calibration) but is not the objective.
     * **Per-run share, not observed utilization.** `anthropic_quotas` is a
       *latest-only cache* — one upserted row per `{workspace_id, provider}`,
       explicitly "a cache of the latest reading, not a time series". There is
@@ -45,7 +50,7 @@ defmodule Arbiter.Loop.Scarcity do
 
   This is safe against the obvious objection because capacity is **calibrated
   from the same weighting**: `calibrate/2` divides the observed weighted draw of
-  the current window by the observed `utilization_5h`, so any global scale error
+  the current window by the observed utilization of that window, so any global scale error
   in the vector appears in numerator and denominator alike and cancels. Only the
   *relative* weights matter, and the relative cost of a cached read versus an
   output token is the one thing pricing does tell us. (There is a test pinning
@@ -73,9 +78,9 @@ defmodule Arbiter.Loop.Scarcity do
   refuses to calibrate from it (`reason: :stale_snapshot`), reusing
   `Arbiter.Quota.Gate.stale?/1` — the predicate the dispatch gate already fails
   open on for the 5h window — as the single definition of "too old to trust".
-  (The gate's long-window predicate, `long_window_stale?/1`, is deliberately
-  stickier; it is irrelevant here because calibration divides by
-  `utilization_5h`.)
+  When the calibration window is the 7d, the caller uses the gate's long-window
+  predicate, `Arbiter.Quota.Gate.long_window_stale?/1`, instead: it is the one
+  that ages the window the utilization figure actually describes.
 
   ## Coverage: capacity is a lower bound, shares are upper bounds
 
@@ -95,7 +100,7 @@ defmodule Arbiter.Loop.Scarcity do
 
   What remains after scoping both sides identically is non-Arbiter traffic, which
   under-counts `observed`, hence under-estimates `capacity = observed /
-  utilization`, hence **over-estimates** every share. So `window_share_5h` is an
+  utilization`, hence **over-estimates** every share. So `window_share` is an
   upper bound on a run's true draw, and a share above 100% of a window is a known
   over-estimate rather than a measurement. This is reported out loud on the
   report's calibration line. It does not undermine the *comparisons* the loop
@@ -122,12 +127,19 @@ defmodule Arbiter.Loop.Scarcity do
   """
 
   alias Arbiter.Loop.Scarcity.Draw
+  alias Arbiter.Quota.Gate.Snapshot
+  alias Arbiter.Quota.Overage
+
+  @seven_days_seconds 7 * 24 * 60 * 60
 
   # Pricing-derived relative weights; see moduledoc for why only ratios matter.
   @weights %{input: 1.0, cache_write: 1.25, cache_read: 0.1, output: 5.0}
 
+  @type window :: :five_hour | :seven_day
+  @type unit :: :window_share | :cost_usd
+
   @type calibration :: %{
-          window: :five_hour,
+          window: window(),
           status: :calibrated | :uncalibrated,
           reason: nil | :no_snapshot | :stale_snapshot | :no_utilization | :no_observed_tokens,
           utilization: float() | nil,
@@ -160,12 +172,16 @@ defmodule Arbiter.Loop.Scarcity do
   def weighted_tokens(_), do: 0.0
 
   @doc """
-  Calibrate one 5h window's capacity from the weighted draw observed over that
+  Calibrate one window's capacity from the weighted draw observed over that
   window and the utilization the provider reported for it.
 
-  `snapshot` is any map carrying `:utilization_5h` (an `AnthropicQuota` row,
-  an `Arbiter.Quota.view/1` map, or `nil`). `opts` may carry:
+  `snapshot` is any map carrying `:utilization_5h` / `:utilization_7d` (an
+  `AnthropicQuota` row, an `Arbiter.Quota.view/1` map, or `nil`). `opts` may
+  carry:
 
+    * `:window` — `:five_hour` (default) or `:seven_day`: which window the
+      draw/utilization pair describes, and therefore which utilization field is
+      the divisor. Callers pick it with `primary_window/1`.
     * `:since` — the start of the calibration window, purely so the report can
       cite it.
     * `:stale` — the snapshot the caller *rejected* as too old to calibrate from
@@ -183,7 +199,8 @@ defmodule Arbiter.Loop.Scarcity do
   def calibrate(observed_weighted_tokens, snapshot, opts \\ []) do
     observed = observed_weighted_tokens / 1
     stale = Keyword.get(opts, :stale)
-    base = blank_calibration(observed, snapshot, stale, Keyword.get(opts, :since))
+    window = Keyword.get(opts, :window, :five_hour)
+    base = blank_calibration(observed, snapshot, stale, Keyword.get(opts, :since), window)
     util = base.utilization
 
     cond do
@@ -198,14 +215,14 @@ defmodule Arbiter.Loop.Scarcity do
   # The uncalibrated frame every outcome starts from. A rejected `stale` reading
   # still supplies `captured_at` — the report needs to say *how* blind the window
   # is — but never `utilization`, which is the field that would imply a capacity.
-  defp blank_calibration(observed, snapshot, stale, since) do
+  defp blank_calibration(observed, snapshot, stale, since, window) do
     cited = snapshot || stale
 
     %{
-      window: :five_hour,
+      window: window,
       status: :uncalibrated,
       reason: nil,
-      utilization: snapshot && fetch(snapshot, :utilization_5h),
+      utilization: snapshot && fetch(snapshot, utilization_key(window)),
       utilization_7d: snapshot && fetch(snapshot, :utilization_7d),
       observed_weighted_tokens: observed,
       capacity_weighted_tokens: nil,
@@ -214,8 +231,77 @@ defmodule Arbiter.Loop.Scarcity do
     }
   end
 
+  defp utilization_key(:seven_day), do: :utilization_7d
+  defp utilization_key(_five_hour), do: :utilization_5h
+
   @doc """
-  A run's share of one 5h window: its weighted draw over the calibrated
+  The window the loop denominates its unit in: the provider's **primary** one.
+
+  A snapshot that carries a primary window (Anthropic's 5h, `window_label`
+  non-nil on `Arbiter.Quota.Gate.Snapshot`) calibrates on it. Claude with no
+  primary window — Anthropic retired the 5h (bd-9v8psv) — calibrates on the 7d,
+  as does the absence of any snapshot (7d is the window that remains, and the
+  uncalibrated frame should name it).
+  """
+  @spec primary_window(map() | nil) :: window()
+  def primary_window(snapshot) do
+    case Snapshot.normalize(snapshot) do
+      %Snapshot{window_label: label} when not is_nil(label) -> :five_hour
+      _ -> :seven_day
+    end
+  end
+
+  @doc """
+  The start of the window `snapshot` describes, as of `now`.
+
+  The 5h window delegates to `Arbiter.Quota.Overage.window_start/2`. The 7d
+  window is the same shape: seven days before its (future) reset, else the
+  trailing seven days when the reset is absent or already elapsed.
+  """
+  @spec window_start(map() | nil, window(), DateTime.t()) :: DateTime.t()
+  def window_start(snapshot, window, now \\ DateTime.utc_now())
+
+  def window_start(snapshot, :seven_day, now) do
+    case seven_day_reset(snapshot) do
+      %DateTime{} = reset ->
+        if DateTime.after?(reset, now),
+          do: DateTime.add(reset, -@seven_days_seconds, :second),
+          else: DateTime.add(now, -@seven_days_seconds, :second)
+
+      _ ->
+        DateTime.add(now, -@seven_days_seconds, :second)
+    end
+  end
+
+  def window_start(snapshot, _five_hour, now), do: Overage.window_start(snapshot, now)
+
+  defp seven_day_reset(%Snapshot{secondary_reset_at: reset}), do: reset
+  defp seven_day_reset(%{} = snapshot), do: fetch(snapshot, :reset_7d_at)
+  defp seven_day_reset(_), do: nil
+
+  @doc "The short label a window goes by in report text."
+  @spec window_label(window()) :: String.t()
+  def window_label(:seven_day), do: "7d"
+  def window_label(_five_hour), do: "5h"
+
+  @doc """
+  Read a persisted unit atom (or its string form) back into the current
+  vocabulary. `:window_share_5h` — the name before the rename (bd-c2v31s) — is
+  an alias for `:window_share`; unrecognised values are `nil`, never guessed
+  into an atom.
+  """
+  @spec normalize_unit(term()) :: unit() | nil
+  def normalize_unit(:window_share_5h), do: :window_share
+  def normalize_unit(:window_share), do: :window_share
+  def normalize_unit(:cost_usd), do: :cost_usd
+
+  def normalize_unit("window_share_5h"), do: :window_share
+  def normalize_unit("window_share"), do: :window_share
+  def normalize_unit("cost_usd"), do: :cost_usd
+  def normalize_unit(_), do: nil
+
+  @doc """
+  A run's share of the calibrated window: its weighted draw over the calibrated
   capacity. `nil` when the window is uncalibrated — never a fabricated `0.0`.
   """
   @spec window_share(number() | nil, calibration() | nil) :: float() | nil
@@ -245,13 +331,19 @@ defmodule Arbiter.Loop.Scarcity do
 
   def draw_share(_weighted, _results, _pool, _window, _model), do: nil
 
-  @doc "Render a share for an operator, or say plainly that it is unavailable."
-  @spec format_share(float() | nil) :: String.t()
-  def format_share(share) when is_number(share) do
-    "#{:erlang.float_to_binary(share * 100, decimals: 1)}% of one 5h window"
+  @doc """
+  Render a share for an operator, or say plainly that it is unavailable. Names
+  the window the share is of (`window` defaults to `:five_hour`; pass the
+  calibration's `window` so the text never claims a window it did not use).
+  """
+  @spec format_share(float() | nil, window()) :: String.t()
+  def format_share(share, window \\ :five_hour)
+
+  def format_share(share, window) when is_number(share) do
+    "#{:erlang.float_to_binary(share * 100, decimals: 1)}% of one #{window_label(window)} window"
   end
 
-  def format_share(_), do: "unavailable (5h window uncalibrated)"
+  def format_share(_, window), do: "unavailable (#{window_label(window)} window uncalibrated)"
 
   @doc """
   Which unit binds at this installation, and how we know. See the moduledoc for
@@ -272,16 +364,16 @@ defmodule Arbiter.Loop.Scarcity do
   The metric the report and proposals denominate in, given a `billing_mode/2`
   verdict. The other metric is retained as secondary rather than dropped.
   """
-  @spec primary_metric(billing_mode()) :: :window_share_5h | :cost_usd
-  def primary_metric({:subscription, _source}), do: :window_share_5h
+  @spec primary_metric(billing_mode()) :: unit()
+  def primary_metric({:subscription, _source}), do: :window_share
   def primary_metric({:metered, _source}), do: :cost_usd
 
   @doc "The metric kept alongside the primary one."
-  @spec secondary_metric(billing_mode()) :: :window_share_5h | :cost_usd
+  @spec secondary_metric(billing_mode()) :: unit()
   def secondary_metric(mode) do
     case primary_metric(mode) do
-      :window_share_5h -> :cost_usd
-      :cost_usd -> :window_share_5h
+      :window_share -> :cost_usd
+      :cost_usd -> :window_share
     end
   end
 

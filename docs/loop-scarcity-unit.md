@@ -23,23 +23,45 @@ worse, and it is *indifferent* to a change that materially relieves it. Every
 comparison it makes — including the carefully-constructed cell comparisons — is
 weakened by being expressed in the wrong unit.
 
-## Decision 1 — the unit is `window_share_5h`
+## Decision 1 — the unit is `window_share` (provider-primary window)
 
-**A run's draw on one 5-hour utilization window, as a fraction of that window's
-capacity.**
+**A run's draw on the provider's primary utilization window, as a fraction of
+that window's capacity.** The unit is `window_share`; *which* window it is
+denominated in is a field beside it — `calibration.window`, `:five_hour` or
+`:seven_day` — and every line of report text names it ("12.3% of one 7d
+window", "7d calibration", "mean 7d share").
 
-### Why 5h and not 7d
+> **Rename (bd-c2v31s, C11 of bd-50qt34).** This was `window_share_5h`, with the
+> 5h window baked into the name. Anthropic retired the 5h window for Claude
+> (`Gate.Snapshot` carries `window_label: nil` and 7d binds, bd-9v8psv), which
+> left that unit with no source. The persisted name spans the corpus, analysis,
+> report and proposals, so the old atom is **kept readable**:
+> `Scarcity.normalize_unit/1` maps `:window_share_5h` (and its string form) to
+> `:window_share`, and `Analysis`, `Report` and `Proposals` all read a stored
+> `unit` / `secondary_unit` / row key through it. Nothing writes the old name any
+> more. Free-text fields already persisted on proposals (`target_metric`,
+> `baseline`, `gist`) are strings and are untouched.
 
-The 5h window is the one that actually stalls dispatch here.
-`Arbiter.Quota.Gate.Snapshot` normalizes **only** the primary window onto the
-provider-neutral gate shape, and its moduledoc is explicit that this
-"[matches] the Anthropic gating this generalizes (which keys on the 5h window and
-ignores the 7d one)". A metric denominated in the 7d window would describe a
-constraint that, on this installation's gating path, never binds.
+### Which window: the provider's primary one
 
-The 7d figure is not discarded — `Scarcity.calibrate/3` carries `utilization_7d`
-on the calibration so a window where the *weekly* limit is the live risk is still
-visible to an operator. It is context, not the objective.
+`Scarcity.primary_window/1` asks `Arbiter.Quota.Gate.Snapshot` which window the
+provider actually gates on:
+
+| snapshot | window | staleness predicate | window start |
+|---|---|---|---|
+| carries a primary (5h) window | `:five_hour` | `Gate.stale?/1` | `reset_5h_at − 5h` (else trailing 5h) |
+| Claude, no primary window (5h retired) | `:seven_day` | `Gate.long_window_stale?/1` | `reset_7d_at − 7d` (else trailing 7d) |
+| no snapshot at all | `:seven_day` | — | trailing 7d |
+
+A metric denominated in a window that does not bind would describe a constraint
+that never binds, so the unit follows the window the gate throttles on rather
+than fixing one. The *other* window is not discarded — `Scarcity.calibrate/3`
+carries `utilization_7d` on the calibration so a window where the weekly limit is
+the live risk is still visible. It is context, not the objective.
+
+An uncalibrated frame still names a window — the one it *would* have used — so
+"uncalibrated" in the report reads "every per-run 7d share this window is `nil`",
+never a window that was not the one in play.
 
 ### Why a per-run *share*, not observed utilization
 
@@ -62,11 +84,11 @@ ticket's scope left open, and it is the only one the data supports.
 ### How capacity is estimated
 
 `Scarcity.calibrate/3` divides the fleet's weighted token draw over the
-**current** 5h window by the `utilization_5h` the provider reported for that same
+**current** primary window by the utilization the provider reported for that same
 window:
 
 ```
-capacity_weighted_tokens = observed_weighted_tokens / utilization_5h
+capacity_weighted_tokens = observed_weighted_tokens / utilization   # utilization_5h or utilization_7d, per calibration.window
 ```
 
 Capacity is a plan constant, so the estimate carries across the corpus window
@@ -79,23 +101,24 @@ Two things about that division are load-bearing enough to state separately.
 
 **The interval must match on both sides.** `observed_weighted_tokens` is summed
 over `[window_start, captured_at]` — not up to `now`. `window_start` comes from
-the snapshot's `reset_5h_at`; `captured_at` is when the utilization figure was
+the snapshot's reset for that window (`reset_5h_at` or `reset_7d_at`); `captured_at` is when the utilization figure was
 read. Letting the numerator run past `captured_at` would divide a longer
 interval's draw by a shorter interval's utilization and over-state capacity.
 
 **A stale snapshot cannot calibrate at all.** `anthropic_quotas` is a latest-only
 cache, so `Quota.latest/2` returns whatever was captured last, however old. A
 reading from a window that has already reset places `window_start` in the past
-while its `utilization_5h` describes a window that has since rolled several
+while its utilization describes a window that has since rolled several
 times — capacity would come out inflated by roughly the number of elapsed
 windows, and every share deflated by the same factor, while the frame still
 claimed `:calibrated`. `Arbiter.Loop.Corpus` therefore runs the snapshot through
-`Arbiter.Quota.Gate.stale?/1` — the same predicate the dispatch gate fails open
-on for its **primary** (5h) window (`reset_5h_at` elapsed, or `captured_at`
-older than the staleness threshold) — and treats a stale reading as an absence,
-`reason: :stale_snapshot`. That is the right predicate here because calibration
-divides by `utilization_5h`; the gate's long-window counterpart
-(`long_window_stale?/1`, bd-b7umwj) governs the 7d hold and does not apply. It is still used to infer
+`Arbiter.Quota.Gate.stale?/1` for a 5h calibration — the same predicate the
+dispatch gate fails open on for its **primary** (5h) window (`reset_5h_at`
+elapsed, or `captured_at` older than the staleness threshold) — or through the
+gate's long-window counterpart, `Gate.long_window_stale?/1` (bd-b7umwj), for a
+7d calibration, and treats a stale reading as an absence,
+`reason: :stale_snapshot`. Each is the right predicate for the window the
+calibration divides by. A stale reading is still used to infer
 the *billing mode*: a stale reading is weak evidence about the current window but
 perfectly good evidence that this plan has windows at all.
 
@@ -116,12 +139,12 @@ window.
 
 The part that is *not* fixable from the ledger is traffic that never passes
 through Arbiter at all: an interactive Claude Code session on the same plan
-raises `utilization_5h` without writing a `usage_events` row, and on this
+raises utilization without writing a `usage_events` row, and on this
 installation that is the common case rather than an edge case. So:
 
 * `observed` under-counts the account's true draw,
 * hence `capacity = observed / utilization` is a **lower bound** on true capacity,
-* hence every `window_share_5h` is an **upper bound** on a run's true draw, and a
+* hence every `window_share` is an **upper bound** on a run's true draw, and a
   share above 100% of a window is a known over-estimate, not a measurement.
 
 The report's calibration line says exactly this, in those words, next to the
@@ -158,7 +181,7 @@ snapshot, a snapshot too stale to describe the current window, an idle
 calibration window, or a `0.0` utilization reading each yield
 `status: :uncalibrated` with a machine-readable `reason`
 (`:no_snapshot` / `:stale_snapshot` / `:no_utilization` / `:no_observed_tokens`),
-`window_share_5h` of `nil` on every row, and an explicit "**uncalibrated**" line
+`window_share` of `nil` on every row, and an explicit "**uncalibrated**" line
 in the report naming which absence it was. This is
 the same discipline `Arbiter.Loop.Corpus` already applies to `transcript_reads`:
 a blind window must not read as a clean one.
@@ -175,7 +198,7 @@ assuming, in three steps:
 1. **Configured.** `loop.billing_mode` in workspace config — `"subscription"` or
    `"metered"` → `{mode, :configured}`. An unrecognised value is ignored rather
    than trusted, and falls through to inference.
-2. **Inferred.** A captured `AnthropicQuota` snapshot carrying a unified 5h
+2. **Inferred.** A captured `AnthropicQuota` snapshot carrying a unified 5h or 7d
    utilization figure is direct evidence of a plan with windows →
    `{:subscription, :inferred}`.
 3. **Default.** No window evidence at all → `{:metered, :default}`. Dollars are
@@ -187,24 +210,24 @@ The verdict *and its source* are rendered in the report, so "subscription
 ## What actually changed in the analyser
 
 * **Corpus** (`Arbiter.Loop.Corpus`) — each row gains `weighted_tokens` and
-  `window_share_5h`; `meta.scarcity` carries the unit, the secondary unit, the
+  `window_share`; `meta.scarcity` carries the unit, the secondary unit, the
   billing-mode verdict, and the calibration. Two bounded grouped queries, in
   keeping with the module's read discipline.
 * **Objective function** (`Arbiter.Loop.Analysis`) — the difficulty-misestimate
   cohort test compares on the binding unit. Under subscription billing a task
-  that is *cheaper in dollars* than its cell peers but eats more of the 5h window
+  that is *cheaper in dollars* than its cell peers but eats more of the primary window
   is now flagged; under the old comparison it was invisible. The comparison falls
   back to dollars per-cell when the subject or any peer lacks a share, so units
   are never silently mixed and an uncalibrated install keeps the comparison it
   always had.
-* **Cells** — each `(difficulty, repo)` cell reports `mean_window_share_5h`
+* **Cells** — each `(difficulty, repo)` cell reports `mean_window_share`
   alongside `mean_cost_usd`.
 * **Pre-registered proposal metric** — the `:rework` misestimate is the
   misestimate that becomes a real `:difficulty_override` `PendingWrite`
   (`Arbiter.Loop.Proposals`), carrying the recommendation's `target_metric` /
   `baseline` pair as its pre-registration. Under subscription billing that pair is
-  now quota-denominated: *"5h-window share to converge for `<task>`"*, with a
-  baseline of *"12.3% of one 5h window across 2 attempt(s), vs. a 4.1% cell
+  now quota-denominated: *"<window>-window share to converge for `<task>`"* (e.g. `7d-window share…`), with a
+  baseline of *"12.3% of one 7d window across 2 attempt(s), vs. a 4.1% cell
   median; round-1 approval 0% (first attempt needed 3 rounds)"* — the rounds
   figure retained as the leading indicator it has always been. Under metered
   billing the pair is byte-identical to before.
@@ -235,10 +258,10 @@ payload-authoring work the ticket flags. When that happens the draw lands on the
 very row above, and the note must stop saying "none". The accounting is already
 wired; only the number is currently zero.
 
-## Draw calibration beyond Claude's 5h window (bd-3is1nz, R3)
+## Draw calibration beyond Claude's primary window (bd-3is1nz, R3)
 
 `Scarcity.calibrate/3` reads one utilization figure for the window in force, so
-it answers one question: Claude's 5h capacity. The paced-routing design
+it answers one question: Claude's primary-window capacity. The paced-routing design
 (`docs/design/paced-quota-routing-signals.md`, §2.3 and §11 row R3) needs the
 draw expressed in *each pool's own window units*, and per model. With the
 append-only `quota_snapshots` history (R2, bd-3qfc81) there is a series of

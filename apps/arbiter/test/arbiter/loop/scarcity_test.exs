@@ -125,6 +125,115 @@ defmodule Arbiter.Loop.ScarcityTest do
     end
   end
 
+  describe "calibrate/3 on the 7d window (bd-c2v31s)" do
+    test "window: :seven_day divides by utilization_7d, not utilization_5h" do
+      cal =
+        Scarcity.calibrate(1_200_000.0, %{utilization_5h: 0.9, utilization_7d: 0.1},
+          window: :seven_day
+        )
+
+      assert cal.status == :calibrated
+      assert cal.window == :seven_day
+      assert cal.utilization == 0.1
+      assert_in_delta cal.capacity_weighted_tokens, 12_000_000.0, 0.001
+    end
+
+    test "a 7d calibration with no 7d utilization is uncalibrated even if 5h is present" do
+      cal = Scarcity.calibrate(1_200_000.0, %{utilization_5h: 0.4}, window: :seven_day)
+      assert cal.status == :uncalibrated
+      assert cal.reason == :no_utilization
+      assert cal.window == :seven_day
+    end
+
+    test "an uncalibrated frame still names the window it tried" do
+      assert Scarcity.calibrate(0.0, nil, window: :seven_day).window == :seven_day
+    end
+  end
+
+  describe "primary_window/1" do
+    test "a snapshot with a 5h primary window calibrates on 5h" do
+      q = %Arbiter.Quota.AnthropicQuota{
+        provider: "claude",
+        utilization_5h: 0.3,
+        reset_5h_at: ~U[2026-09-04 12:00:00Z],
+        status_5h: "allowed",
+        utilization_7d: 0.1
+      }
+
+      assert Scarcity.primary_window(q) == :five_hour
+    end
+
+    test "Claude with no primary window (5h retired) calibrates on 7d" do
+      q = %Arbiter.Quota.AnthropicQuota{
+        provider: "claude",
+        utilization_5h: nil,
+        reset_5h_at: nil,
+        status_5h: nil,
+        utilization_7d: 0.1,
+        reset_7d_at: ~U[2026-09-08 12:00:00Z]
+      }
+
+      assert Scarcity.primary_window(q) == :seven_day
+    end
+
+    test "no snapshot at all names the 7d window (Claude's remaining window)" do
+      assert Scarcity.primary_window(nil) == :seven_day
+    end
+  end
+
+  describe "window_start/3" do
+    test "7d window starts seven days before its future reset" do
+      q = %Arbiter.Quota.AnthropicQuota{reset_7d_at: ~U[2026-09-08 12:00:00Z]}
+      now = ~U[2026-09-04 10:00:00Z]
+      assert Scarcity.window_start(q, :seven_day, now) == ~U[2026-09-01 12:00:00Z]
+    end
+
+    test "7d window with no usable reset trails seven days from now" do
+      now = ~U[2026-09-04 10:00:00Z]
+      assert Scarcity.window_start(nil, :seven_day, now) == ~U[2026-08-28 10:00:00Z]
+    end
+
+    test "5h window delegates to the five-hour span" do
+      q = %Arbiter.Quota.AnthropicQuota{reset_5h_at: ~U[2026-09-04 12:00:00Z]}
+      now = ~U[2026-09-04 10:00:00Z]
+      assert Scarcity.window_start(q, :five_hour, now) == ~U[2026-09-04 07:00:00Z]
+    end
+  end
+
+  describe "normalize_unit/1 (stored-atom alias)" do
+    test "the pre-rename :window_share_5h loads as :window_share" do
+      assert Scarcity.normalize_unit(:window_share_5h) == :window_share
+      assert Scarcity.normalize_unit("window_share_5h") == :window_share
+    end
+
+    test "current and dollar units pass through" do
+      assert Scarcity.normalize_unit(:window_share) == :window_share
+      assert Scarcity.normalize_unit("window_share") == :window_share
+      assert Scarcity.normalize_unit(:cost_usd) == :cost_usd
+      assert Scarcity.normalize_unit("cost_usd") == :cost_usd
+    end
+
+    test "anything else is nil rather than a guessed atom" do
+      assert Scarcity.normalize_unit(:bogus) == nil
+      assert Scarcity.normalize_unit("bogus") == nil
+      assert Scarcity.normalize_unit(nil) == nil
+    end
+  end
+
+  describe "window_label/1" do
+    test "names the window" do
+      assert Scarcity.window_label(:five_hour) == "5h"
+      assert Scarcity.window_label(:seven_day) == "7d"
+    end
+  end
+
+  describe "format_share/2" do
+    test "names the window actually used" do
+      assert Scarcity.format_share(0.25, :seven_day) == "25.0% of one 7d window"
+      assert Scarcity.format_share(nil, :seven_day) == "unavailable (7d window uncalibrated)"
+    end
+  end
+
   describe "format_share/1" do
     test "renders a share as a percentage of one 5h window" do
       assert Scarcity.format_share(0.1234) == "12.3% of one 5h window"
@@ -173,7 +282,7 @@ defmodule Arbiter.Loop.ScarcityTest do
 
   describe "primary_metric/1" do
     test "quota denominates the objective under subscription billing" do
-      assert Scarcity.primary_metric({:subscription, :inferred}) == :window_share_5h
+      assert Scarcity.primary_metric({:subscription, :inferred}) == :window_share
     end
 
     test "dollars stay the objective under metered billing" do

@@ -422,7 +422,7 @@ defmodule Arbiter.Loop.Proposals do
   # ---- difficulty misestimates --------------------------------------------
 
   defp misestimate_candidates(report, workspace_id, origin) do
-    unit = report |> Map.get(:scarcity, %{}) |> Map.get(:unit, :cost_usd)
+    unit = gist_unit(report)
 
     report.difficulty_misestimates
     |> Enum.filter(&proposable_misestimate?/1)
@@ -474,10 +474,32 @@ defmodule Arbiter.Loop.Proposals do
   # the condition under which the recommendation itself falls back to dollars
   # (an uncalibrated window leaves the share `nil`), so gist and baseline can
   # never disagree about which unit they are in.
-  defp draw_gist(%{window_share_5h: share}, :window_share_5h) when is_number(share),
-    do: Scarcity.format_share(share)
+  defp draw_gist(%{window_share: share}, {:window_share, window}) when is_number(share),
+    do: Scarcity.format_share(share, window)
 
   defp draw_gist(m, _unit), do: "$#{fmt(Map.get(m, :cost_usd))}"
+
+  # The unit the report's scarcity frame is denominated in. A report persisted
+  # before the `window_share_5h` rename still carries the old atom (bd-c2v31s);
+  # `Scarcity.normalize_unit/1` reads it back. The window the share is of comes
+  # from the calibration, so the gist names the window actually used.
+  defp gist_unit(report) do
+    scarcity = Map.get(report, :scarcity, %{})
+
+    case Scarcity.normalize_unit(Map.get(scarcity, :unit, :cost_usd)) do
+      :window_share ->
+        case scarcity do
+          %{calibration: %{window: window}} when window in [:five_hour, :seven_day] ->
+            {:window_share, window}
+
+          _ ->
+            {:window_share, :five_hour}
+        end
+
+      _ ->
+        :cost_usd
+    end
+  end
 
   # ---- learned competence (bd-d5rdsc, R13; design §3.3, §11) --------------
   #
