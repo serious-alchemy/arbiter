@@ -26,6 +26,8 @@ defmodule Arbiter.Doctor.Scope do
   alias Arbiter.Accounts.ProviderSettings
   alias Arbiter.Agents.GrokRouting
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Nodes.Allowlist
+  alias Arbiter.Nodes.Placement
   alias Arbiter.Providers.Pause
   alias Arbiter.Tasks.Workspace
 
@@ -40,8 +42,37 @@ defmodule Arbiter.Doctor.Scope do
     %{
       providers: Map.new(@providers, &{&1, provider(&1, workspaces)}),
       podman_in_use: Enum.any?(policies, &podman?/1),
-      egress_enforced: Enum.any?(policies, &(SecurityPolicy.egress(&1) != :open))
+      egress_enforced: Enum.any?(policies, &(SecurityPolicy.egress(&1) != :open)),
+      placement_nodes: placement_nodes(workspaces, opts)
     }
+  end
+
+  # bd-d7tb2d: each workspace's effective node set — `worker.placement` and
+  # `worker.placement_nodes` (`Arbiter.Nodes.Allowlist`) applied to the enrolled nodes.
+  defp placement_nodes(workspaces, opts) do
+    rows = Keyword.get_lazy(opts, :nodes, &Arbiter.Nodes.Overview.node_rows/0)
+    rows = Enum.reject(rows, &(Map.get(&1, :kind) == :local or Map.get(&1, :state) == :revoked))
+
+    for ws <- workspaces do
+      mode = Placement.mode(ws)
+      allowed = Allowlist.selectors(ws)
+
+      nodes =
+        if mode == :local_only,
+          do: [],
+          else:
+            rows
+            |> Enum.filter(&Allowlist.allows?(allowed, &1))
+            |> Enum.map(&(Map.get(&1, :name) || &1.id))
+            |> Enum.sort()
+
+      %{
+        workspace: ws.name,
+        mode: to_string(mode),
+        allowlist: allowed && Allowlist.describe(allowed),
+        nodes: nodes
+      }
+    end
   end
 
   defp provider(type, workspaces) do

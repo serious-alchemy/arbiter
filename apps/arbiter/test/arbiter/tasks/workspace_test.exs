@@ -939,6 +939,24 @@ defmodule Arbiter.Tasks.WorkspaceTest do
                })
     end
 
+    test "worker.placement_nodes accepts a list of selector strings, rejects anything else" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "pn-ok-#{System.unique_integer([:positive])}",
+                 config: %{"worker" => %{"placement_nodes" => ["kind:machine", "name:mesaana"]}}
+               })
+
+      for bad <- ["mesaana", [1], [""], %{"a" => 1}, ["kind:gpu"]] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "pn-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => %{"placement_nodes" => bad}}
+                 })
+
+        assert Exception.message(err) =~ "worker.placement_nodes"
+      end
+    end
+
     test "rejects anything else, naming the key" do
       assert {:error, %Ash.Error.Invalid{} = err} =
                Ash.create(Workspace, %{

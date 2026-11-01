@@ -76,3 +76,39 @@ defmodule Arbiter.Doctor.ScopeTest do
     end
   end
 end
+
+defmodule Arbiter.Doctor.ScopePlacementNodesTest do
+  use Arbiter.DataCase, async: false
+
+  alias Arbiter.Doctor.Scope
+  alias Arbiter.Tasks.Workspace
+
+  defp ws!(name, worker) do
+    Ash.create!(Workspace, %{
+      name: "#{name}-#{System.unique_integer([:positive])}",
+      config: %{"worker" => worker}
+    })
+  end
+
+  test "reports each workspace's effective node set" do
+    nodes = [
+      %{id: "n1", name: "mesaana", kind: :machine, labels: [], state: :online},
+      %{id: "n2", name: "vstim-k8s", kind: :cluster, labels: [], state: :online}
+    ]
+
+    open = ws!("open", %{"placement" => "prefer_remote"})
+    pinned = ws!("pinned", %{"placement" => "remote_only", "placement_nodes" => ["kind:machine"]})
+    local = ws!("local", %{})
+
+    r = Scope.report(workspaces: [open, pinned, local], nodes: nodes)
+    by_name = Map.new(r.placement_nodes, &{&1.workspace, &1})
+
+    assert %{mode: "prefer_remote", allowlist: nil, nodes: ["mesaana", "vstim-k8s"]} =
+             by_name[open.name]
+
+    assert %{mode: "remote_only", allowlist: "kind:machine", nodes: ["mesaana"]} =
+             by_name[pinned.name]
+
+    assert %{mode: "local_only", nodes: []} = by_name[local.name]
+  end
+end

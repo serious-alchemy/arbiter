@@ -738,7 +738,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
     # Every check that existed before the cleanup, by id, minus the finished
     # one-shot migration check (`legacy safe_defaults key`).
     @expected_ids ~w(
-      phoenix_reachable workspaces_exist active_workspace repos_resolved version
+      placement_nodes phoenix_reachable workspaces_exist active_workspace repos_resolved version
       last_deploy migrations bind_address anonymous_api dashboard_auth
       erlang_distribution restart_safety safe_default_categories agy_write_jail
       agy_jail_escape agy_jail_reads agy_jail_network agy_jail_keyring egress_jail
