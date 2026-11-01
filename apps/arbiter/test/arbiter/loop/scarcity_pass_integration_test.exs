@@ -91,14 +91,14 @@ defmodule Arbiter.Loop.ScarcityPassIntegrationTest do
     report = envelope.report
 
     # The pass read the installation's billing mode and calibrated the window.
-    assert report.scarcity.unit == :window_share_5h
+    assert report.scarcity.unit == :window_share
     assert report.scarcity.billing_mode == {:subscription, :inferred}
     assert report.scarcity.calibration.status == :calibrated
 
     # The cheap-but-window-hungry task is the flagged misestimate.
     assert [mis] = report.difficulty_misestimates
     assert mis.task_id == subject.id
-    assert is_float(mis.window_share_5h)
+    assert is_float(mis.window_share)
 
     # And it persisted as a proposal carrying the quota-denominated
     # pre-registration.
@@ -121,7 +121,7 @@ defmodule Arbiter.Loop.ScarcityPassIntegrationTest do
     # Dollars are retained, not deleted: the report still carries mean cost.
     assert [cell] = report.cells
     assert is_float(cell.mean_cost_usd)
-    assert is_float(cell.mean_window_share_5h)
+    assert is_float(cell.mean_window_share)
 
     # The operator-facing markdown is the real output surface: it states the
     # unit before any number denominated in it, and reports the subject's draw.
@@ -129,7 +129,7 @@ defmodule Arbiter.Loop.ScarcityPassIntegrationTest do
     if System.get_env("SHOW_LOOP_REPORT"), do: IO.puts(md)
     assert md =~ "## Unit of scarcity"
     assert md =~ "| billing mode | subscription (inferred) |"
-    assert md =~ "| primary unit | `window_share_5h` |"
+    assert md =~ "| primary unit | `window_share` |"
     assert md =~ "mean 5h share"
     assert md =~ "**5h-window share:**"
     assert md =~ "5h-window share to converge"

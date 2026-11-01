@@ -506,7 +506,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
         outcome: outcome,
         cost_usd: 0.0,
         weighted_tokens: 0,
-        window_share_5h: 0.0,
+        window_share: 0.0,
         converged?: outcome == :succeeded,
         difficulty: nil,
         difficulty_source: :issue,

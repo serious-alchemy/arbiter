@@ -15,7 +15,7 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
       })
 
     %{
-      unit: :window_share_5h,
+      unit: :window_share,
       secondary_unit: :cost_usd,
       billing_mode: {:subscription, :inferred},
       calibration: cal
@@ -25,7 +25,7 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
   defp metered do
     %{
       unit: :cost_usd,
-      secondary_unit: :window_share_5h,
+      secondary_unit: :window_share,
       billing_mode: {:metered, :default},
       calibration: Scarcity.calibrate(0.0, nil)
     }
@@ -61,7 +61,7 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
         stop_category: nil,
         cost_usd: 1.0,
         weighted_tokens: 10_000.0,
-        window_share_5h: 0.01,
+        window_share: 0.01,
         max_round: 1,
         rejected?: false,
         converged?: true,
@@ -76,23 +76,23 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
   describe "cells" do
     test "each cell reports mean 5h-window share alongside mean cost" do
       rows = [
-        row(%{task_id: "bd-a", window_share_5h: 0.02, cost_usd: 2.0}),
-        row(%{task_id: "bd-b", window_share_5h: 0.04, cost_usd: 1.0})
+        row(%{task_id: "bd-a", window_share: 0.02, cost_usd: 2.0}),
+        row(%{task_id: "bd-b", window_share: 0.04, cost_usd: 1.0})
       ]
 
       report = Analysis.build_report(rows, meta: meta(calibrated()))
       [cell] = report.cells
 
-      assert_in_delta cell.mean_window_share_5h, 0.03, 0.0001
+      assert_in_delta cell.mean_window_share, 0.03, 0.0001
       assert_in_delta cell.mean_cost_usd, 1.5, 0.0001
     end
 
     test "an uncalibrated window leaves mean window share nil, not zero" do
-      rows = [row(%{task_id: "bd-a", window_share_5h: nil})]
+      rows = [row(%{task_id: "bd-a", window_share: nil})]
       report = Analysis.build_report(rows, meta: meta(metered()))
       [cell] = report.cells
 
-      assert cell.mean_window_share_5h == nil
+      assert cell.mean_window_share == nil
     end
   end
 
@@ -103,9 +103,9 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
     defp cheap_but_window_hungry_rows do
       [
         # Subject: 2 review rounds, below-median dollars, above-median draw.
-        row(%{task_id: "bd-subject", max_round: 2, cost_usd: 0.10, window_share_5h: 0.30}),
-        row(%{task_id: "bd-peer-1", max_round: 1, cost_usd: 5.00, window_share_5h: 0.01}),
-        row(%{task_id: "bd-peer-2", max_round: 1, cost_usd: 5.00, window_share_5h: 0.01})
+        row(%{task_id: "bd-subject", max_round: 2, cost_usd: 0.10, window_share: 0.30}),
+        row(%{task_id: "bd-peer-1", max_round: 1, cost_usd: 5.00, window_share: 0.01}),
+        row(%{task_id: "bd-peer-2", max_round: 1, cost_usd: 5.00, window_share: 0.01})
       ]
     end
 
@@ -114,7 +114,7 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
 
       assert [mis] = report.difficulty_misestimates
       assert mis.task_id == "bd-subject"
-      assert_in_delta mis.window_share_5h, 0.30, 0.0001
+      assert_in_delta mis.window_share, 0.30, 0.0001
     end
 
     test "under metered billing the same rework is dropped — dollars still bind there" do
@@ -140,9 +140,9 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
 
     test "under metered billing the same proposal stays dollar/rounds denominated" do
       rows = [
-        row(%{task_id: "bd-subject", max_round: 2, cost_usd: 9.00, window_share_5h: nil}),
-        row(%{task_id: "bd-peer-1", max_round: 1, cost_usd: 1.00, window_share_5h: nil}),
-        row(%{task_id: "bd-peer-2", max_round: 1, cost_usd: 1.00, window_share_5h: nil})
+        row(%{task_id: "bd-subject", max_round: 2, cost_usd: 9.00, window_share: nil}),
+        row(%{task_id: "bd-peer-1", max_round: 1, cost_usd: 1.00, window_share: nil}),
+        row(%{task_id: "bd-peer-2", max_round: 1, cost_usd: 1.00, window_share: nil})
       ]
 
       report = Analysis.build_report(rows, meta: meta(metered()))
@@ -171,9 +171,9 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
 
     test "under metered billing the gist stays dollar-denominated" do
       rows = [
-        row(%{task_id: "bd-subject", max_round: 2, cost_usd: 9.00, window_share_5h: nil}),
-        row(%{task_id: "bd-peer-1", max_round: 1, cost_usd: 1.00, window_share_5h: nil}),
-        row(%{task_id: "bd-peer-2", max_round: 1, cost_usd: 1.00, window_share_5h: nil})
+        row(%{task_id: "bd-subject", max_round: 2, cost_usd: 9.00, window_share: nil}),
+        row(%{task_id: "bd-peer-1", max_round: 1, cost_usd: 1.00, window_share: nil}),
+        row(%{task_id: "bd-peer-2", max_round: 1, cost_usd: 1.00, window_share: nil})
       ]
 
       report = Analysis.build_report(rows, meta: meta(metered()))
@@ -192,9 +192,9 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
     # back together.
     test "a nil share falls back to dollars even when the fleet unit is the window" do
       rows = [
-        row(%{task_id: "bd-subject", max_round: 2, cost_usd: 9.00, window_share_5h: nil}),
-        row(%{task_id: "bd-peer-1", max_round: 1, cost_usd: 1.00, window_share_5h: nil}),
-        row(%{task_id: "bd-peer-2", max_round: 1, cost_usd: 1.00, window_share_5h: nil})
+        row(%{task_id: "bd-subject", max_round: 2, cost_usd: 9.00, window_share: nil}),
+        row(%{task_id: "bd-peer-1", max_round: 1, cost_usd: 1.00, window_share: nil}),
+        row(%{task_id: "bd-peer-2", max_round: 1, cost_usd: 1.00, window_share: nil})
       ]
 
       report = Analysis.build_report(rows, meta: meta(calibrated()))
@@ -214,7 +214,7 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
     test "the report carries the unit, how billing mode was determined, and the calibration" do
       report = Analysis.build_report([row(%{})], meta: meta(calibrated()))
 
-      assert report.scarcity.unit == :window_share_5h
+      assert report.scarcity.unit == :window_share
       assert report.scarcity.billing_mode == {:subscription, :inferred}
       assert report.scarcity.calibration.status == :calibrated
 
@@ -226,7 +226,7 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
     end
 
     test "an uncalibrated window is disclosed rather than rendered as a zero draw" do
-      report = Analysis.build_report([row(%{window_share_5h: nil})], meta: meta(metered()))
+      report = Analysis.build_report([row(%{window_share: nil})], meta: meta(metered()))
       md = Report.to_markdown(report)
 
       assert md =~ "uncalibrated"
@@ -249,13 +249,13 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
       stale_reading = %{utilization_5h: 0.5, captured_at: ~U[2026-09-01 09:00:00Z]}
 
       scarcity = %{
-        unit: :window_share_5h,
+        unit: :window_share,
         secondary_unit: :cost_usd,
         billing_mode: {:subscription, :inferred},
         calibration: Scarcity.calibrate(1_000.0, nil, stale: stale_reading)
       }
 
-      report = Analysis.build_report([row(%{window_share_5h: nil})], meta: meta(scarcity))
+      report = Analysis.build_report([row(%{window_share: nil})], meta: meta(scarcity))
       md = Report.to_markdown(report)
 
       assert md =~ "stale_snapshot"
@@ -270,6 +270,120 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
 
       assert md =~ "own draw"
       assert md =~ "deterministic"
+    end
+  end
+
+  # bd-c2v31s (C11): Claude has no 5h window any more; the unit is a provider-
+  # primary `window_share` and the report must name the window it used.
+  defp calibrated_7d do
+    %{
+      unit: :window_share,
+      secondary_unit: :cost_usd,
+      billing_mode: {:subscription, :inferred},
+      calibration:
+        Scarcity.calibrate(
+          500_000.0,
+          %{utilization_7d: 0.5, captured_at: ~U[2026-09-04 09:00:00Z]}, window: :seven_day)
+    }
+  end
+
+  describe "7d-primary window (bd-c2v31s)" do
+    test "the report names the 7d window in the calibration line, tables and notes" do
+      report = Analysis.build_report(cheap_but_window_hungry_rows(), meta: meta(calibrated_7d()))
+      md = Report.to_markdown(report)
+
+      assert md =~ "| 7d calibration |"
+      assert md =~ "mean 7d share"
+      assert md =~ "**7d-window share:**"
+      assert md =~ "7d utilization window"
+      refute md =~ "5h"
+    end
+
+    test "the pre-registered metric, baseline and gist name the 7d window" do
+      report = Analysis.build_report(cheap_but_window_hungry_rows(), meta: meta(calibrated_7d()))
+      [mis] = report.difficulty_misestimates
+
+      assert mis.recommendation.target_metric =~ "7d-window share to converge"
+      assert mis.recommendation.baseline =~ "of one 7d window"
+
+      assert [override] =
+               report |> Proposals.candidates() |> Enum.filter(&(&1.kind == :difficulty_override))
+
+      assert override.gist =~ "of one 7d window"
+    end
+
+    test "an uncalibrated 7d window says 7d, not 5h" do
+      scarcity = %{
+        calibrated_7d()
+        | calibration: Scarcity.calibrate(0.0, nil, window: :seven_day)
+      }
+
+      report = Analysis.build_report([row(%{window_share: nil})], meta: meta(scarcity))
+      md = Report.to_markdown(report)
+
+      assert md =~ "every per-run 7d share"
+      refute md =~ "5h"
+    end
+
+    test "a stale 7d reading says it describes a 7d window" do
+      stale = %{utilization_7d: 0.5, captured_at: ~U[2026-09-01 09:00:00Z]}
+
+      scarcity = %{
+        calibrated_7d()
+        | calibration: Scarcity.calibrate(1_000.0, nil, stale: stale, window: :seven_day)
+      }
+
+      md =
+        [row(%{window_share: nil})]
+        |> Analysis.build_report(meta: meta(scarcity))
+        |> Report.to_markdown()
+
+      assert md =~ "describes a 7d window"
+      refute md =~ "5h"
+    end
+  end
+
+  describe "stored :window_share_5h alias (bd-c2v31s)" do
+    defp legacy(scarcity), do: %{scarcity | unit: :window_share_5h, secondary_unit: :cost_usd}
+
+    test "a persisted frame with unit :window_share_5h loads as :window_share" do
+      report =
+        Analysis.build_report(cheap_but_window_hungry_rows(), meta: meta(legacy(calibrated())))
+
+      assert report.scarcity.unit == :window_share
+      assert [mis] = report.difficulty_misestimates
+      assert mis.recommendation.target_metric =~ "5h-window share to converge"
+    end
+
+    test "a persisted secondary_unit :window_share_5h loads as :window_share" do
+      frame = %{metered() | secondary_unit: :window_share_5h}
+      report = Analysis.build_report([row(%{})], meta: meta(frame))
+
+      assert report.scarcity.unit == :cost_usd
+      assert report.scarcity.secondary_unit == :window_share
+    end
+
+    test "rows still keyed window_share_5h are read as window_share" do
+      rows =
+        Enum.map(cheap_but_window_hungry_rows(), fn r ->
+          r |> Map.put(:window_share_5h, r.window_share) |> Map.delete(:window_share)
+        end)
+
+      report = Analysis.build_report(rows, meta: meta(calibrated()))
+      assert [mis] = report.difficulty_misestimates
+      assert_in_delta mis.window_share, 0.30, 0.0001
+    end
+
+    test "Proposals reads a legacy report whose scarcity unit is :window_share_5h" do
+      report = Analysis.build_report(cheap_but_window_hungry_rows(), meta: meta(calibrated()))
+      legacy_report = %{report | scarcity: %{report.scarcity | unit: :window_share_5h}}
+
+      assert [override] =
+               legacy_report
+               |> Proposals.candidates()
+               |> Enum.filter(&(&1.kind == :difficulty_override))
+
+      assert override.gist =~ "of one 5h window"
     end
   end
 end

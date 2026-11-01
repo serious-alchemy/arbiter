@@ -70,20 +70,20 @@ defmodule Arbiter.Loop.Corpus do
 
   ## Quota-window enrichment (#1463, Amendment E)
 
-  Each row also carries `weighted_tokens` — its draw on the binding 5-hour
-  utilization window — and `window_share_5h`, that draw as a fraction of one
+  Each row also carries `weighted_tokens` — its draw on the provider-primary
+  utilization window — and `window_share`, that draw as a fraction of one
   window's calibrated capacity. `meta.scarcity` carries the calibration, the
   installation's billing mode, and which unit the pass is therefore optimising.
   `Arbiter.Loop.Scarcity` owns the unit definition and the reasoning behind it;
   this module only supplies the two bounded reads it needs (per-run token sums
   over the corpus window, and the fleet's total weighted draw between the
-  *current* 5h window's start and the instant the snapshot was captured, which
-  is the interval the provider's `utilization_5h` reading describes). Both reads
+  *current* primary window's start and the instant the snapshot was captured, which
+  is the interval the provider's utilization reading for that window describes). Both reads
   are fleet-wide, so the calibration's numerator and the per-run numerator cover
   the same population — see the "Coverage" section of `Arbiter.Loop.Scarcity`
   for why that matters and what bias survives it.
 
-  A `window_share_5h` of `nil` means the window could not be calibrated —
+  A `window_share` of `nil` means the window could not be calibrated —
   never "this run drew nothing". `meta.scarcity.calibration.reason` says which
   absence it was (`:no_snapshot`, `:stale_snapshot`, `:no_utilization`,
   `:no_observed_tokens`), the same way `transcript_reads` refuses to report a
@@ -130,7 +130,6 @@ defmodule Arbiter.Loop.Corpus do
   alias Arbiter.Loop.{FailureClassifier, FindingBuckets, FixPassClassifier, Scarcity}
   alias Arbiter.Quota
   alias Arbiter.Quota.Gate
-  alias Arbiter.Quota.Overage
   alias Arbiter.Repo
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.OutputLog
@@ -170,8 +169,8 @@ defmodule Arbiter.Loop.Corpus do
   @type ci :: %{tasks: [map()], fix_passes: [map()], flake_events: [map()]}
 
   @type scarcity :: %{
-          unit: :window_share_5h | :cost_usd,
-          secondary_unit: :window_share_5h | :cost_usd,
+          unit: Scarcity.unit(),
+          secondary_unit: Scarcity.unit(),
           billing_mode: Scarcity.billing_mode(),
           calibration: Scarcity.calibration()
         }
@@ -232,7 +231,7 @@ defmodule Arbiter.Loop.Corpus do
           stop_category: r["stop_category"],
           cost_usd: Map.get(cost_by_run, run_id, 0.0),
           weighted_tokens: weighted,
-          window_share_5h: Scarcity.window_share(weighted, scarcity.calibration),
+          window_share: Scarcity.window_share(weighted, scarcity.calibration),
           max_round: Map.get(round_by_task, base, 1),
           rejected?: r["failure_reason"] == ":review_gate_rejected",
           converged?: outcome == :succeeded,
@@ -400,7 +399,7 @@ defmodule Arbiter.Loop.Corpus do
   end
 
   # Per-run weighted token draw over the corpus window — the numerator of
-  # `window_share_5h`. Grouped in SQL like `cost_by_run/2`; the weighting is
+  # `window_share`. Grouped in SQL like `cost_by_run/2`; the weighting is
   # applied in Elixir so `Arbiter.Loop.Scarcity` stays the single place the
   # weight vector is defined.
   defp tokens_by_run(since, until) do
@@ -421,9 +420,10 @@ defmodule Arbiter.Loop.Corpus do
   end
 
   # The scarcity frame for this pass: which unit binds, how we know, and the
-  # 5h-window capacity every per-run share is divided by.
+  # primary-window (5h, or 7d for Claude with no 5h window) capacity every
+  # per-run share is divided by.
   #
-  # Calibration deliberately reads the **current** 5h window, not the corpus
+  # Calibration deliberately reads the **current** primary window, not the corpus
   # window: `anthropic_quotas` is a latest-only cache, so the only utilization
   # figure that exists is `now`'s, and it can only be divided into the draw of
   # the window it was measured over. Capacity is a plan constant, so the
@@ -445,14 +445,17 @@ defmodule Arbiter.Loop.Corpus do
     # while still reporting `:calibrated`. `Gate.stale?/1` is the predicate the
     # dispatch gate already refuses to throttle on; reuse it rather than invent
     # a second notion of "too old".
-    stale = if latest && Gate.stale?(latest), do: latest
+    window = Scarcity.primary_window(latest)
+    stale = if latest && window_stale?(latest, window), do: latest
     snapshot = if stale, do: nil, else: latest
     config = ws_id && workspace_config(ws_id)
 
-    since = Overage.window_start(snapshot)
+    since = Scarcity.window_start(snapshot, window)
     observed = if snapshot, do: weighted_tokens_between(since, captured_at(snapshot)), else: 0.0
 
-    calibration = Scarcity.calibrate(observed, snapshot, since: since, stale: stale)
+    calibration =
+      Scarcity.calibrate(observed, snapshot, since: since, stale: stale, window: window)
+
     # A stale reading is still direct evidence of a plan with windows, so it
     # informs the billing mode even though it cannot calibrate capacity.
     mode = Scarcity.billing_mode(config, latest)
@@ -473,9 +476,14 @@ defmodule Arbiter.Loop.Corpus do
         unit: Scarcity.primary_metric(mode),
         secondary_unit: Scarcity.secondary_metric(mode),
         billing_mode: mode,
-        calibration: Scarcity.calibrate(0.0, nil)
+        calibration: Scarcity.calibrate(0.0, nil, window: Scarcity.primary_window(nil))
       }
   end
+
+  # Staleness is scoped to the window the calibration divides by: the dispatch
+  # gate's primary-window predicate for 5h, its long-window predicate for 7d.
+  defp window_stale?(latest, :seven_day), do: Gate.long_window_stale?(latest)
+  defp window_stale?(latest, _five_hour), do: Gate.stale?(latest)
 
   defp resolve_workspace_id(id) when is_binary(id) and id != "", do: id
 

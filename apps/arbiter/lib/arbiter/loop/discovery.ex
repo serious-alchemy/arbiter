@@ -409,7 +409,13 @@ defmodule Arbiter.Loop.Discovery do
       history: history_span(meta) |> Map.put(:units, 0),
       candidates: [],
       rejected: [],
-      cost: %{usage_event_id: nil, cost_usd: nil, weighted_tokens: nil, window_share_5h: nil}
+      cost: %{
+        usage_event_id: nil,
+        cost_usd: nil,
+        weighted_tokens: nil,
+        window_share: nil,
+        window: nil
+      }
     }
   end
 
@@ -451,12 +457,13 @@ defmodule Arbiter.Loop.Discovery do
   end
 
   # The pass's own draw, through the loop's one cost-accounting path, under
-  # its own step label — and its 5h-window share (#1463) beside the dollars.
+  # its own step label — and its window share (#1463) beside the dollars.
   defp record_cost(usage, elapsed, meta, opts, units) do
     usage = if is_map(usage), do: usage, else: %{}
     weighted = Scarcity.weighted_tokens(usage)
     calibration = meta |> Map.get(:scarcity, %{}) |> Map.get(:calibration)
     share = Scarcity.window_share(weighted, calibration)
+    window = (calibration || %{}) |> Map.get(:window, :five_hour)
 
     id =
       Corpus.record_pass_cost(%{
@@ -473,7 +480,7 @@ defmodule Arbiter.Loop.Discovery do
         rows_scanned: units,
         raw: %{
           kind: "loop_discovery_pass",
-          quota_window_draw: %{weighted_tokens: weighted, window_share_5h: share}
+          quota_window_draw: %{weighted_tokens: weighted, window_share: share, window: window}
         }
       })
 
@@ -481,7 +488,8 @@ defmodule Arbiter.Loop.Discovery do
       usage_event_id: id,
       cost_usd: Map.get(usage, :cost_usd),
       weighted_tokens: weighted,
-      window_share_5h: share
+      window_share: share,
+      window: window
     }
   end
 
@@ -567,7 +575,7 @@ defmodule Arbiter.Loop.Discovery do
         _ -> "unknown"
       end
 
-    "**This pass's own draw:** #{dollars}; #{Scarcity.format_share(cost.window_share_5h)} " <>
+    "**This pass's own draw:** #{dollars}; #{Scarcity.format_share(cost.window_share, cost.window || :five_hour)} " <>
       "(`usage_events` row `#{cost.usage_event_id}`, step `loop_discovery`).\n"
   end
 

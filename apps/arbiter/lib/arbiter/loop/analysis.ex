@@ -26,7 +26,8 @@ defmodule Arbiter.Loop.Analysis do
       difficulty/repo mix does not read as improvement.
     * The **objective function** is denominated in the unit that actually binds
       (#1463, Amendment E). Under subscription billing that is
-      `window_share_5h` — a task's draw on the 5-hour utilization window, the
+      `window_share` — a task's draw on the provider's primary utilization window (5h,
+      or 7d where Claude has no 5h window; named in all report text), the
       window `Arbiter.Quota.Gate` throttles on — with imputed dollars retained
       as a secondary figure. Under metered API billing dollars still bind and
       stay primary. `Arbiter.Loop.Scarcity` owns the decision and its reasoning;
@@ -230,19 +231,36 @@ defmodule Arbiter.Loop.Analysis do
   # calibration.
   defp scarcity(opts) do
     case opts |> Keyword.get(:meta, %{}) |> Map.get(:scarcity) do
-      %{unit: unit, calibration: _} = frame when unit in [:window_share_5h, :cost_usd] ->
-        frame
+      %{unit: unit, calibration: _} = frame ->
+        case Scarcity.normalize_unit(unit) do
+          nil -> default_scarcity()
+          unit -> normalize_frame(frame, unit)
+        end
 
       _ ->
-        mode = {:metered, :default}
-
-        %{
-          unit: Scarcity.primary_metric(mode),
-          secondary_unit: Scarcity.secondary_metric(mode),
-          billing_mode: mode,
-          calibration: Scarcity.calibrate(0.0, nil)
-        }
+        default_scarcity()
     end
+  end
+
+  # A frame persisted before the `window_share_5h` → `window_share` rename
+  # (bd-c2v31s) still carries the old atom, on `unit` and `secondary_unit` alike;
+  # read both back into the current vocabulary.
+  defp normalize_frame(frame, unit) do
+    secondary = Scarcity.normalize_unit(Map.get(frame, :secondary_unit))
+
+    %{frame | unit: unit}
+    |> Map.put(:secondary_unit, secondary || Map.get(frame, :secondary_unit))
+  end
+
+  defp default_scarcity do
+    mode = {:metered, :default}
+
+    %{
+      unit: Scarcity.primary_metric(mode),
+      secondary_unit: Scarcity.secondary_metric(mode),
+      billing_mode: mode,
+      calibration: Scarcity.calibrate(0.0, nil)
+    }
   end
 
   # Amendment E's own footnote: an analyser that measures quota windows must
@@ -290,7 +308,7 @@ defmodule Arbiter.Loop.Analysis do
         do: "$" <> :erlang.float_to_binary(cost.cost_usd * 1.0, decimals: 4),
         else: "an unknown dollar cost"
 
-    "Analyser's own draw on the quota windows it measures: the deterministic pass drew none; the opt-in `--discover` model pass drew #{dollars} and #{Scarcity.format_share(cost.window_share_5h)}, recorded on its own `usage_events` row (step `loop_discovery`)."
+    "Analyser's own draw on the quota windows it measures: the deterministic pass drew none; the opt-in `--discover` model pass drew #{dollars} and #{Scarcity.format_share(cost.window_share, Map.get(cost, :window, :five_hour))}, recorded on its own `usage_events` row (step `loop_discovery`)."
   end
 
   # `Corpus.fetch/1` computes the residue (it owns the raw `review_gate_rounds`
@@ -512,7 +530,7 @@ defmodule Arbiter.Loop.Analysis do
           dispatched_difficulty: t.difficulty,
           rounds: t.rounds,
           cost_usd: t.cost,
-          window_share_5h: t.window_share,
+          window_share: t.window_share,
           reason: reason,
           note: misestimate_note(reason, t, cohort_stats),
           recommendation: misestimate_recommendation(reason, t, cohort_stats)
@@ -520,20 +538,29 @@ defmodule Arbiter.Loop.Analysis do
     end
   end
 
-  # Which unit this particular comparison runs in. `:window_share_5h` only when
-  # the installation's binding unit *is* the window AND the subject and every
-  # peer carries a share — a cell where only some tasks have one would silently
-  # mix units. Otherwise `:cost_usd`, which is what the comparison used before
-  # #1463 and what still binds under metered billing.
-  defp comparison_unit(subject, cohort, %{unit: :window_share_5h}) do
+  # Which unit this particular comparison runs in. `{:window_share, window}`
+  # only when the installation's binding unit *is* the window AND the subject
+  # and every peer carries a share — a cell where only some tasks have one would
+  # silently mix units. The window is the calibration's own (`:five_hour` /
+  # `:seven_day`), so the text a comparison renders names the window actually
+  # used. Otherwise `:cost_usd`, which is what the comparison used before #1463
+  # and what still binds under metered billing.
+  defp comparison_unit(subject, cohort, %{unit: :window_share} = scarcity) do
     if Enum.all?([subject | cohort], &is_number(&1.window_share)),
-      do: :window_share_5h,
+      do: {:window_share, frame_window(scarcity)},
       else: :cost_usd
   end
 
   defp comparison_unit(_subject, _cohort, _scarcity), do: :cost_usd
 
-  defp draw(t, :window_share_5h), do: t.window_share
+  defp frame_window(scarcity) do
+    case scarcity do
+      %{calibration: %{window: window}} when window in [:five_hour, :seven_day] -> window
+      _ -> :five_hour
+    end
+  end
+
+  defp draw(t, {:window_share, _window}), do: t.window_share
   defp draw(t, :cost_usd), do: t.cost
 
   # Render a draw in whichever unit the comparison ran in, so a note and its
@@ -542,10 +569,10 @@ defmodule Arbiter.Loop.Analysis do
   # appearing beside it is compact ("0.3%"), which reads as English rather than
   # repeating the unit inside a noun phrase.
   defp fmt_draw(nil, _unit), do: "n/a"
-  defp fmt_draw(value, :window_share_5h), do: Scarcity.format_share(value)
+  defp fmt_draw(value, {:window_share, window}), do: Scarcity.format_share(value, window)
   defp fmt_draw(value, :cost_usd), do: "$#{fmt(value)}"
 
-  defp fmt_median(value, :window_share_5h),
+  defp fmt_median(value, {:window_share, _window}),
     do: "#{:erlang.float_to_binary(value * 100, decimals: 1)}%"
 
   defp fmt_median(value, :cost_usd), do: "$#{fmt(value)}"
@@ -554,8 +581,17 @@ defmodule Arbiter.Loop.Analysis do
   # carries one — the corpus could not calibrate the window, and summing
   # nothing into `0.0` would claim a measurement that was never taken.
   defp sum_shares(task_rows) do
-    shares = task_rows |> Enum.map(&Map.get(&1, :window_share_5h)) |> Enum.filter(&is_number/1)
+    shares = task_rows |> Enum.map(&row_share/1) |> Enum.filter(&is_number/1)
     if shares == [], do: nil, else: Enum.sum(shares)
+  end
+
+  # A row's share. Rows are built fresh each pass, but a hand-assembled or
+  # pre-rename row may still carry the old `window_share_5h` key (bd-c2v31s).
+  defp row_share(row) do
+    case Map.fetch(row, :window_share) do
+      {:ok, share} -> share
+      :error -> Map.get(row, :window_share_5h)
+    end
   end
 
   defp sum_group_shares(group) do
@@ -652,13 +688,13 @@ defmodule Arbiter.Loop.Analysis do
   # denominated in the binding unit: the metric to move is the task's draw on
   # the 5h window, with round-1 approval retained in the baseline as the
   # leading indicator it has always been.
-  defp misestimate_recommendation(:rework, t, %{unit: :window_share_5h} = cs) do
+  defp misestimate_recommendation(:rework, t, %{unit: {:window_share, window} = unit} = cs) do
     %{
       destination: :per_task_override,
       action: rework_action(t),
-      target_metric: "5h-window share to converge for #{t.task_id}",
+      target_metric: "#{unit_metric(unit)} to converge for #{t.task_id}",
       baseline:
-        "#{Scarcity.format_share(t.window_share)} across #{t.attempts} attempt(s)" <>
+        "#{Scarcity.format_share(t.window_share, window)} across #{t.attempts} attempt(s)" <>
           cohort_clause(cs) <>
           "; round-1 approval 0% (first attempt needed #{t.rounds} rounds)"
     }
@@ -708,10 +744,12 @@ defmodule Arbiter.Loop.Analysis do
   defp cohort_clause(%{draw: cohort_draw, unit: unit}),
     do: ", vs. a #{fmt_median(cohort_draw, unit)} cell median"
 
-  defp unit_word(:window_share_5h), do: "quota-window"
+  defp unit_word({:window_share, _window}), do: "quota-window"
   defp unit_word(:cost_usd), do: "cost"
 
-  defp unit_metric(:window_share_5h), do: "5h-window share"
+  defp unit_metric({:window_share, window}),
+    do: "#{Scarcity.window_label(window)}-window share"
+
   defp unit_metric(:cost_usd), do: "cost"
 
   defp median([]), do: nil
@@ -763,7 +801,7 @@ defmodule Arbiter.Loop.Analysis do
         rework_rate: reworked / n,
         # `nil` — not `0.0` — when no task in the cell carries a share: an
         # uncalibrated window must not read as a cell that draws nothing.
-        mean_window_share_5h: mean_share(tasks),
+        mean_window_share: mean_share(tasks),
         mean_cost_usd: total_cost / n
       }
     end)

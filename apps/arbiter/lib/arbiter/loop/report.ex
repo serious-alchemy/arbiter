@@ -21,9 +21,9 @@ defmodule Arbiter.Loop.Report do
       (skill / repo `CLAUDE.md` / per-task override) and its evidence tier, so
       a single incident visibly **declines** a fleet-wide change.
     * `scarcity` — the **unit the pass optimises against** (#1463, epic #1011
-      Amendment E): which of `window_share_5h` / `cost_usd` binds at this
+      Amendment E): which of `window_share` / `cost_usd` binds at this
       installation, how the billing mode was determined (configured vs
-      inferred), and the 5h-window calibration every per-run share was divided
+      inferred), and the primary-window (5h or 7d, named) calibration every per-run share was divided
       by — including a machine-readable reason when that calibration failed, so
       an uncalibrated window never renders as a cheap one.
     * `finding_residue` (bd-5ja2vb) — the reviewer-finding units
@@ -139,6 +139,11 @@ defmodule Arbiter.Loop.Report do
   defp scarcity(%{scarcity: %{unit: unit} = s} = r) do
     {mode, source} = Map.get(s, :billing_mode, {:metered, :default})
     cal = Map.get(s, :calibration, %{})
+    window = window_label(r)
+    # Frames persisted before the `window_share_5h` rename still carry the old atom.
+    unit = Arbiter.Loop.Scarcity.normalize_unit(unit) || unit
+    secondary = Map.get(s, :secondary_unit)
+    secondary = Arbiter.Loop.Scarcity.normalize_unit(secondary) || secondary
 
     """
     ## Unit of scarcity
@@ -146,14 +151,15 @@ defmodule Arbiter.Loop.Report do
     | field | value |
     |---|---|
     | primary unit | `#{unit}` |
-    | secondary unit | `#{Map.get(s, :secondary_unit)}` |
+    | secondary unit | `#{secondary}` |
     | billing mode | #{mode} (#{source}) |
-    | 5h calibration | #{calibration_line(cal)} |
+    | #{window} calibration | #{calibration_line(cal)} |
     | analyser's own draw | #{own_draw_cell(r)} |
 
     Under **subscription** billing the marginal dollar is not the scarce
-    resource; the 5-hour utilization window is — it is the window
-    `Arbiter.Quota.Gate` throttles dispatch on. Under **metered** API billing
+    resource; the provider's primary utilization window is — here the
+    #{window_name(window)} utilization window, the one `Arbiter.Quota.Gate`
+    throttles dispatch on. Under **metered** API billing
     dollars bind and lead instead. Whichever is secondary is still reported,
     never dropped. See `docs/loop-scarcity-unit.md`.
     """
@@ -170,7 +176,7 @@ defmodule Arbiter.Loop.Report do
         else: "unknown $"
 
     "deterministic pass: none; `--discover` model call: #{dollars}, " <>
-      Arbiter.Loop.Scarcity.format_share(cost.window_share_5h)
+      Arbiter.Loop.Scarcity.format_share(cost.window_share, Map.get(cost, :window, :five_hour))
   end
 
   defp own_draw_cell(%{discovery: %{}}),
@@ -179,7 +185,7 @@ defmodule Arbiter.Loop.Report do
   defp own_draw_cell(_r), do: "none — deterministic pass, no model call"
 
   defp calibration_line(%{status: :calibrated} = c) do
-    "calibrated — #{round_i(Map.get(c, :capacity_weighted_tokens))} weighted tokens per window " <>
+    "calibrated on the #{cal_window(c)} window — #{round_i(Map.get(c, :capacity_weighted_tokens))} weighted tokens per window " <>
       "(from #{round_i(Map.get(c, :observed_weighted_tokens))} observed at " <>
       "#{pct(Map.get(c, :utilization))} utilization, captured #{iso_or(Map.get(c, :captured_at), "unknown")}). " <>
       "Capacity is a **lower bound** — traffic on this plan from outside Arbiter " <>
@@ -192,16 +198,38 @@ defmodule Arbiter.Loop.Report do
   # dangerous one: it is the case that would otherwise calibrate plausibly off a
   # window that has already rolled. Say how old it is.
   defp calibration_line(%{reason: :stale_snapshot} = c) do
+    w = cal_window(c)
+
     "**uncalibrated** (`stale_snapshot`) — the latest quota reading (captured " <>
-      "#{iso_or(Map.get(c, :captured_at), "unknown")}) describes a 5h window that has " <>
-      "already reset, so it cannot size the current one; every per-run 5h share this " <>
+      "#{iso_or(Map.get(c, :captured_at), "unknown")}) describes a #{w} window that has " <>
+      "already reset, so it cannot size the current one; every per-run #{w} share this " <>
       "window is `nil`, not zero"
   end
 
-  defp calibration_line(%{reason: reason}),
-    do: "**uncalibrated** (`#{reason}`) — every per-run 5h share this window is `nil`, not zero"
+  defp calibration_line(%{reason: reason} = c),
+    do:
+      "**uncalibrated** (`#{reason}`) — every per-run #{cal_window(c)} share this window is `nil`, not zero"
 
   defp calibration_line(_), do: "**uncalibrated** (`no_snapshot`)"
+
+  # The window the calibration was taken over, as report text. Reports built
+  # before the window was recorded were all 5h.
+  defp cal_window(%{window: window}), do: Arbiter.Loop.Scarcity.window_label(window)
+  defp cal_window(_), do: "5h"
+
+  # The window the report's scarcity frame is denominated in.
+  defp window_label(%{scarcity: %{calibration: cal}}), do: cal_window(cal)
+  defp window_label(_), do: "5h"
+
+  defp window_name("7d"), do: "7d"
+  defp window_name(_), do: "5-hour"
+
+  defp row_share(m) do
+    case Map.fetch(m, :window_share) do
+      {:ok, share} -> share
+      :error -> Map.get(m, :window_share_5h)
+    end
+  end
 
   defp segmentation(%{segmentation: seg}) do
     grouped = Enum.group_by(seg, & &1.class)
@@ -479,22 +507,24 @@ defmodule Arbiter.Loop.Report do
 
   defp cells(%{cells: []}), do: ""
 
-  defp cells(%{cells: cells}) do
+  defp cells(%{cells: cells} = r) do
+    window = window_label(r)
+
     body =
       cells
       |> Enum.map_join("\n", fn c ->
-        "| #{dlabel(c.difficulty)} | #{c.repo} | #{g(c, :tasks)} | #{pct(Map.get(c, :rework_rate, 0.0))} | #{share(Map.get(c, :mean_window_share_5h))} | $#{money(Map.get(c, :mean_cost_usd))} |"
+        "| #{dlabel(c.difficulty)} | #{c.repo} | #{g(c, :tasks)} | #{pct(Map.get(c, :rework_rate, 0.0))} | #{share(Map.get(c, :mean_window_share, Map.get(c, :mean_window_share_5h)))} | $#{money(Map.get(c, :mean_cost_usd))} |"
       end)
 
     """
     ## Draw & rework by (difficulty, repo) cell
 
     Compare **within** a cell; metrics move with difficulty mix and repo, so
-    cross-cell comparison reads drift as improvement. The **mean 5h share** is
+    cross-cell comparison reads drift as improvement. The **mean #{window} share** is
     the binding unit under subscription billing (#1463); mean cost is retained
     as the secondary figure and is the primary one under metered API billing.
 
-    | difficulty | repo | tasks | rework rate | mean 5h share | mean cost |
+    | difficulty | repo | tasks | rework rate | mean #{window} share | mean cost |
     |---|---|---|---|---|---|
     #{body}
     """
@@ -502,7 +532,9 @@ defmodule Arbiter.Loop.Report do
 
   defp difficulty_misestimates(%{difficulty_misestimates: []}), do: ""
 
-  defp difficulty_misestimates(%{difficulty_misestimates: mis}) do
+  defp difficulty_misestimates(%{difficulty_misestimates: mis} = r) do
+    window = window_label(r)
+
     body =
       mis
       |> Enum.map_join("\n", fn m ->
@@ -514,7 +546,7 @@ defmodule Arbiter.Loop.Report do
 
         - **Dispatched difficulty:** D#{Map.get(m, :dispatched_difficulty)}
         - **Rounds:** #{Map.get(m, :rounds)}
-        - **5h-window share:** #{share(Map.get(m, :window_share_5h))}
+        - **#{window}-window share:** #{share(row_share(m))}
         - **Cost:** $#{money(Map.get(m, :cost_usd))}
         - **Note:** #{Map.get(m, :note, "")}
         - **Recommendation:** #{destination(Map.get(rec, :destination))} — #{Map.get(rec, :action, "")}
