@@ -505,7 +505,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   # KH11 (bd-cexq4j): `worker.image` / `worker.repos.<repo>.image`
   # (`Arbiter.Worker.Image.RepoConfig`). `ref` is per repo: one workspace-wide ref
   # would be a catch-all image again.
-  @image_keys ~w(source ref registry credentials_ref public_ok seed)
+  # SI4: `pull_credentials_ref` is the read credential a machine node is handed for one
+  # pull (`Arbiter.Worker.Image.PullCredential`), never the push credential's secret.
+  @image_keys ~w(source ref registry credentials_ref pull_credentials_ref public_ok seed)
 
   defp validate_image(changeset, nil, _label, _level), do: changeset
 
@@ -515,7 +517,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_image_enum(image, "source", RepoConfig.sources(), label)
     |> validate_image_enum(image, "seed", RepoConfig.seeds(), label)
     |> validate_image_registry(Map.fetch(image, "registry"), label)
-    |> validate_image_credentials_ref(Map.fetch(image, "credentials_ref"), label)
+    |> validate_image_credentials_ref(image, "credentials_ref", label)
+    |> validate_image_credentials_ref(image, "pull_credentials_ref", label)
+    |> validate_pull_not_push(image, label)
     |> validate_image_public_ok(Map.fetch(image, "public_ok"), label)
     |> validate_image_ref(image, label, level)
   end
@@ -568,17 +572,37 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
         )
   end
 
-  defp validate_image_credentials_ref(changeset, :error, _label), do: changeset
+  defp validate_image_credentials_ref(changeset, image, key, label) do
+    case Map.fetch(image, key) do
+      :error ->
+        changeset
 
-  defp validate_image_credentials_ref(changeset, {:ok, "secret:" <> key = ref}, label)
-       when is_binary(ref) do
-    if String.trim(key) != "" and not String.match?(key, ~r/\s/),
-      do: changeset,
-      else: image_credentials_error(changeset, label)
+      {:ok, "secret:" <> name} ->
+        if String.trim(name) != "" and not String.match?(name, ~r/\s/),
+          do: changeset,
+          else: image_credentials_error(changeset, key, label)
+
+      {:ok, _} ->
+        image_credentials_error(changeset, key, label)
+    end
   end
 
-  defp validate_image_credentials_ref(changeset, {:ok, _}, label),
-    do: image_credentials_error(changeset, label)
+  # A node that held the push credential could overwrite the images every node runs.
+  defp validate_pull_not_push(changeset, image, label) do
+    case image do
+      %{"credentials_ref" => ref, "pull_credentials_ref" => ref} ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "#{label}.pull_credentials_ref must name a different secret than " <>
+              "credentials_ref: a node is handed the pull credential and must never hold " <>
+              "the push credential (use a read-only token, e.g. a deploy token with read_registry)"
+        )
+
+      _ ->
+        changeset
+    end
+  end
 
   defp validate_image_public_ok(changeset, :error, _label), do: changeset
 
@@ -592,11 +616,11 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     )
   end
 
-  defp image_credentials_error(changeset, label) do
+  defp image_credentials_error(changeset, key, label) do
     Changeset.add_error(changeset,
       field: :config,
       message:
-        ~s(#{label}.credentials_ref must be "secret:<key>" naming a workspace secret ) <>
+        ~s(#{label}.#{key} must be "secret:<key>" naming a workspace secret ) <>
           "(see `arb workspace secret`); no credential belongs in the config itself"
     )
   end
