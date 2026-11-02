@@ -812,12 +812,30 @@ defmodule Arbiter.Quota do
       # consecutive-401 tracking or the periodic CLI probe) directly here.
       credentials_expired: Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Claude),
       per_model_utilization: q.per_model_utilization || %{},
+      scoped: serialize_scoped(q.scoped_limits),
       extra_usage: q.extra_usage || %{},
       oauth_utilization_5h: q.oauth_utilization_5h,
       oauth_utilization_7d: q.oauth_utilization_7d,
       oauth_captured_at: iso(q.oauth_captured_at),
       capture_source: q.capture_source
     }
+  end
+
+  # The per-model weekly windows (bd-e0b7so) as the quota surfaces show them.
+  # `matched` is whether the scope names a Claude model the gate knows; an
+  # unmatched one is shown, and gated only when `is_active`.
+  defp serialize_scoped(limits) do
+    for w <- Arbiter.Quota.Gate.Snapshot.scoped_windows(limits) do
+      %{
+        scope: w.scope,
+        label: w.label,
+        utilization: w.utilization,
+        status: w.status,
+        reset_at: iso(w.reset_at),
+        is_active: w.active?,
+        matched: Arbiter.Agents.ModelFamily.known_scope?(w.scope)
+      }
+    end
   end
 
   # ---- Google Cloud Code Assist quota (bd-57ukgb) ------------------------

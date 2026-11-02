@@ -429,6 +429,13 @@ defmodule Arbiter.Quota.Budget do
   defp status_note(%Snapshot{secondary_status: status}) when status not in [nil, "allowed"],
     do: " (#{status})"
 
+  defp status_note(%Snapshot{scoped: [_ | _] = scoped}) do
+    case Enum.find(scoped, &(&1.status not in [nil, "allowed"])) do
+      %{label: label, status: status} -> " (#{label} #{status})"
+      nil -> ""
+    end
+  end
+
   defp status_note(_), do: ""
 
   # ---- windows --------------------------------------------------------------

@@ -44,6 +44,33 @@ defmodule Arbiter.Quota.ScopedPollTest do
              Snapshot.normalize(quota, model: "claude-fable-5-1")
   end
 
+  test "serialize_quota/1 shows every scoped window, matched or not (AC5)" do
+    body =
+      Map.update!(OAuthUsageFixtures.scoped_exhausted(), "limits", fn limits ->
+        limits ++
+          [
+            %{
+              "kind" => "weekly_scoped",
+              "group" => "weekly",
+              "percent" => 40,
+              "severity" => "normal",
+              "resets_at" => "2026-11-02T15:59:59.560724+00:00",
+              "scope" => %{"model" => %{"id" => nil, "display_name" => "Mythos"}},
+              "is_active" => false
+            }
+          ]
+      end)
+
+    serialized = body |> then(&poll!(workspace!(), &1)) |> Quota.serialize_quota()
+
+    assert [
+             %{scope: "Fable", label: "7d (Fable)", status: "rejected", matched: true},
+             %{scope: "Mythos", status: "allowed", matched: false, is_active: false}
+           ] = serialized.scoped
+
+    assert is_binary(hd(serialized.scoped).reset_at)
+  end
+
   test "the legacy shape persists none" do
     quota = poll!(workspace!(), OAuthUsageFixtures.legacy())
     assert quota.scoped_limits == []

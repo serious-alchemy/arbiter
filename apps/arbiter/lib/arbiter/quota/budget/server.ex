@@ -428,7 +428,7 @@ defmodule Arbiter.Quota.Budget.Server do
     base = {Map.get(input, :account_id), Map.get(input, :pool), Map.get(input, :policy_workspace)}
 
     case Map.get(input, :scope) do
-      scope when is_binary(scope) -> Tuple.append(base, scope)
+      scope when is_binary(scope) -> Tuple.insert_at(base, 3, scope)
       _ -> base
     end
   end

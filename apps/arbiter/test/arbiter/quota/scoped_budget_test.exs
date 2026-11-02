@@ -123,7 +123,8 @@ defmodule Arbiter.Quota.ScopedBudgetTest do
     test "a rejected scoped window is a hard zero for its model only" do
       s = snapshot([fable(1.0, status: "rejected")])
 
-      assert %{budget: 0, binding: :provider_refusing} = compute(s, @fable, seats: 1)
+      assert %{budget: 0, binding: :provider_refusing} = fable = compute(s, @fable, seats: 1)
+      assert fable.reason =~ "7d (Fable) rejected"
       assert compute(s, @opus, seats: 1).budget >= 1
     end
   end
