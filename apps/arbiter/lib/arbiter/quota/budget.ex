@@ -126,6 +126,7 @@ defmodule Arbiter.Quota.Budget do
   @type t :: %__MODULE__{
           account: String.t() | nil,
           pool: String.t() | nil,
+          scope: String.t() | nil,
           policy_workspace: String.t() | nil,
           budget: non_neg_integer() | :unlimited,
           raw: float() | nil,
@@ -147,6 +148,7 @@ defmodule Arbiter.Quota.Budget do
 
   defstruct account: nil,
             pool: nil,
+            scope: nil,
             policy_workspace: nil,
             budget: 0,
             raw: nil,
@@ -181,6 +183,7 @@ defmodule Arbiter.Quota.Budget do
     %{
       account: b.account,
       pool: b.pool,
+      scope: b.scope,
       policy_workspace: b.policy_workspace,
       budget: json_value(b.budget),
       raw: b.raw,
@@ -229,6 +232,7 @@ defmodule Arbiter.Quota.Budget do
     base = %__MODULE__{
       account: Map.get(opts, :account_id) || account_id(account),
       pool: Map.get(opts, :pool),
+      scope: Map.get(opts, :scope),
       policy_workspace: workspace_id(workspace),
       seats: ctx.seats,
       windows: eval_windows(snapshot, ctx),
@@ -440,18 +444,24 @@ defmodule Arbiter.Quota.Budget do
       stale?: Gate.stale?(s, ctx.now)
     }
 
-    long = %{
-      side: :long,
-      label: s.secondary_window_label,
-      used: s.secondary_utilization,
-      reset_at: s.secondary_reset_at,
-      stale?: Gate.long_window_stale?(s, ctx.now)
-    }
+    # The base long window, then each scoped one the snapshot carries for the
+    # card's model (bd-e0b7so): nested windows of the same pool, sized and
+    # lined like the base one, so the budget is the `min` over them.
+    [base | scoped] =
+      for view <- Snapshot.long_views(s) do
+        %{
+          side: :long,
+          label: view.secondary_window_label,
+          used: view.secondary_utilization,
+          reset_at: view.secondary_reset_at,
+          stale?: Gate.long_window_stale?(view, ctx.now)
+        }
+      end
 
     (if(s.window_label, do: [primary], else: []) ++
-       if(s.secondary_window_label, do: [long], else: []))
+       if(s.secondary_window_label, do: [base], else: []) ++ scoped)
     |> Enum.map(&eval_window(&1, s, ctx))
-    |> Kernel.++(burn_windows(long, s, ctx))
+    |> Kernel.++(burn_windows(base, s, ctx))
   end
 
   # The rolling-24h burn governor (bd-cklotu, `Arbiter.Quota.BurnGovernor`),
@@ -609,7 +619,14 @@ defmodule Arbiter.Quota.Budget do
   defp lag_hours(_snapshot, _now), do: 0.0
 
   defp background(b, _label) when is_number(b), do: max(b * 1.0, 0.0)
-  defp background(%{} = by_window, label), do: background(Map.get(by_window, label, 0.0), label)
+
+  defp background(%{} = by_window, label),
+    do:
+      background(
+        Map.get(by_window, label) || Map.get(by_window, Gate.base_label(label), 0.0),
+        label
+      )
+
   defp background(_, _label), do: 0.0
 
   # ρ for one window: the resolved rung's value, else the prior; never below
@@ -619,7 +636,8 @@ defmodule Arbiter.Quota.Budget do
     seconds = seconds || Map.fetch!(@fallback_seconds, w.side)
     prior = BudgetCalibration.prior(seconds, max_concurrent || nil)
     floor = BudgetCalibration.rho_floor(prior)
-    given = Map.get(ctx.rates, w.label) || %{}
+    # A scoped window ("7d (Fable)") has no fit of its own: the long window's.
+    given = Map.get(ctx.rates, w.label) || Map.get(ctx.rates, Gate.base_label(w.label)) || %{}
     asked = number_or(given[:rho], prior)
     fitted = number_or(given[:raw_rho], asked)
 
@@ -840,6 +858,33 @@ defmodule Arbiter.Quota.Budget do
       [] -> 0
       shares -> shares |> Enum.min() |> floor() |> max(0)
     end
+  end
+
+  @doc """
+  The budgets that hold a card on `model` (bd-e0b7so): the pool's own (`scope`
+  `nil`) and every scoped variant whose scope covers `model` — a `nil` model
+  takes all of them (the worst of all), `:unscoped` none. A scoped variant is
+  the same pool's budget for the card's nested window, not another pool: take
+  the `lowest/1` of what this returns.
+  """
+  @spec applicable([t()], String.t() | atom() | nil) :: [t()]
+  def applicable(budgets, model) do
+    Enum.filter(budgets, fn
+      %__MODULE__{scope: nil} ->
+        true
+
+      %__MODULE__{} when model == :unscoped ->
+        false
+
+      %__MODULE__{} when is_nil(model) ->
+        true
+
+      %__MODULE__{scope: scope} when is_binary(model) ->
+        Arbiter.Agents.ModelFamily.scope_matches?(scope, model)
+
+      _ ->
+        false
+    end)
   end
 
   @doc """

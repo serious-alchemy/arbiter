@@ -122,6 +122,53 @@ defmodule Arbiter.Agents.ModelFamily do
   defp model_family("gpt-" <> _), do: :openai
   defp model_family(_), do: :google
 
+  # The model names a Claude account can report a per-model weekly limit for
+  # (bd-e0b7so): the aliases the CLI takes, and the names in the model ids.
+  # A scope outside this list is "unknown" to the gate (`known_scope?/1`).
+  @claude_scope_names ~w(fable opus sonnet haiku)
+
+  @doc """
+  Whether a Claude `weekly_scoped` limit's `scope.model.display_name` (e.g.
+  `"Fable"`) covers `model` (a model id like `"claude-fable-5-1"` or an alias
+  like `"fable"`). Every word of the display name must be a word of the model
+  (split on anything that is not a letter or digit, case-insensitive), so
+  `"Fab"` does not match `"claude-fable-5-1"`. `nil` matches nothing.
+  """
+  @spec scope_matches?(String.t() | nil, String.t() | nil) :: boolean()
+  def scope_matches?(display_name, model)
+      when is_binary(display_name) and is_binary(model) do
+    case words(display_name) do
+      [] -> false
+      scope_words -> Enum.all?(scope_words, &(&1 in words(model)))
+    end
+  end
+
+  def scope_matches?(_display_name, _model), do: false
+
+  @doc """
+  Whether `display_name` names a Claude model family we know: one of
+  #{inspect(@claude_scope_names)}, or a word of a built-in tier model. A scope
+  that is not known is never gated on a model match (see
+  `Arbiter.Quota.Gate.Snapshot`).
+  """
+  @spec known_scope?(String.t() | nil) :: boolean()
+  def known_scope?(display_name) when is_binary(display_name) do
+    known =
+      @claude_scope_names ++
+        Enum.flat_map(ClaudeConfig.default_tier_models() |> Map.values(), &words/1)
+
+    case words(display_name) do
+      [] -> false
+      scope_words -> Enum.any?(scope_words, &(&1 in known))
+    end
+  end
+
+  def known_scope?(_display_name), do: false
+
+  defp words(string) do
+    string |> String.downcase() |> String.split(~r/[^a-z0-9]+/, trim: true)
+  end
+
   @doc """
   The concrete model `provider` runs for `tier`, resolved as its adapter will:
   `agent_config[<adapter>]["tier_models"]`, then the flat

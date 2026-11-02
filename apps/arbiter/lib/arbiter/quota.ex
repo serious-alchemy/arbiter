@@ -1209,6 +1209,8 @@ defmodule Arbiter.Quota do
     secondary =
       if is_map(usage.spend), do: Map.put(secondary, :spend, usage.spend), else: secondary
 
+    secondary = put_scoped_limits(secondary, usage)
+
     {action, attrs} =
       if is_number(usage.utilization_5h) or is_number(usage.utilization_7d) do
         primary =
@@ -1251,6 +1253,40 @@ defmodule Arbiter.Quota do
 
       broadcast_quota_update(account_id, quota)
       {:ok, quota}
+    end
+  end
+
+  # The per-model weekly windows of `limits[]` (bd-e0b7so). A body that reported
+  # `limits[]` replaces what was stored, so a scoped limit Anthropic stops
+  # reporting stops gating; a body with no `limits[]` at all (a thin or broken
+  # one) leaves the stored windows alone, like every other column.
+  defp put_scoped_limits(attrs, %{limits: []}), do: attrs
+
+  defp put_scoped_limits(attrs, %{scoped: scoped}) do
+    Enum.each(scoped, &log_unmatched_scope/1)
+    Map.put(attrs, :scoped_limits, scoped)
+  end
+
+  # A scope that matches no known Claude model is shown but only gated when
+  # active (`Arbiter.Quota.Gate.Snapshot`); say so once per scope per boot.
+  defp log_unmatched_scope(%{"scope" => scope} = window) do
+    key = {__MODULE__, :unmatched_scope, scope}
+
+    if not Arbiter.Agents.ModelFamily.known_scope?(scope) and
+         :persistent_term.get(key, nil) == nil do
+      :persistent_term.put(key, true)
+
+      treatment =
+        if window["is_active"] == true,
+          do: "active, so it gates every model",
+          else: "not active, shown but not gated"
+
+      require Logger
+
+      Logger.warning(
+        "Arbiter.Quota: weekly_scoped limit for unmatched scope #{inspect(scope)} " <>
+          "(no known Claude model): #{treatment}"
+      )
     end
   end
 

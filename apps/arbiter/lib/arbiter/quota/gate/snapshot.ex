@@ -37,6 +37,27 @@ defmodule Arbiter.Quota.Gate.Snapshot do
   which (if either) binds. Google's Cloud Code Assist API reports a single
   representative model window, so its secondary fields stay `nil`.
 
+  ## Scoped windows (bd-e0b7so, 5H C6)
+
+  Anthropic reports per-model weekly limits (`limits[]` entries of
+  `kind: "weekly_scoped"`, e.g. Fable's). A scoped limit is a **subset** of the
+  weekly one — a Fable run draws on both — so it is a window *nested* in the
+  account's `claude` pool, not a pool of its own: seats stay on the one pool and
+  `scoped` is a list of extra long-class windows, evaluated with the `weekly_*`
+  keys and the account's `pace_curve` exactly like the base long window. Each is
+  `%{scope, label, utilization, status, reset_at, active?}`, `label` being
+  `"7d (Fable)"` so a hold reads "7d (Fable) binds".
+
+  `normalize/2` projects them per model. With no `:model` option the snapshot
+  carries none (the account-level view, which the board and `History` read);
+  with `model: m`, those whose scope matches `m`; with `model: nil`, every
+  matched one (the worst of all — the conservative reading, as for agy);
+  `model: :unscoped` is a card on a model no scoped limit covers. A scope that
+  matches no known Claude model is never gated on a model match: it rides along
+  only when Anthropic marks it `is_active`, and then for every model (the
+  conservative account-level treatment). `long_views/1` is how a consumer
+  evaluates them: one snapshot per long window.
+
   `overage_status` is Anthropic-only (there is no paid-overage passthrough for
   Codex or Google); it stays `nil` for those providers, so `Gate.in_overage?/2`
   falls back to the past-plan `status` signal for them.
@@ -46,6 +67,7 @@ defmodule Arbiter.Quota.Gate.Snapshot do
   dispatch.
   """
 
+  alias Arbiter.Agents.ModelFamily
   alias Arbiter.Extensions
 
   @type t :: %__MODULE__{
@@ -62,7 +84,18 @@ defmodule Arbiter.Quota.Gate.Snapshot do
           secondary_reset_at: DateTime.t() | nil,
           secondary_window_label: String.t() | nil,
           burn_24h: float() | nil,
-          burn_24h_at: DateTime.t() | nil
+          burn_24h_at: DateTime.t() | nil,
+          scoped: [scoped()]
+        }
+
+  @typedoc "One per-model weekly window nested in the long window (see the moduledoc)."
+  @type scoped :: %{
+          scope: String.t(),
+          label: String.t(),
+          utilization: float(),
+          status: String.t() | nil,
+          reset_at: DateTime.t() | nil,
+          active?: boolean()
         }
 
   defstruct provider: nil,
@@ -78,7 +111,8 @@ defmodule Arbiter.Quota.Gate.Snapshot do
             secondary_reset_at: nil,
             secondary_window_label: nil,
             burn_24h: nil,
-            burn_24h_at: nil
+            burn_24h_at: nil,
+            scoped: []
 
   @doc """
   Project a persisted quota row onto the provider-neutral gate shape.
@@ -104,16 +138,103 @@ defmodule Arbiter.Quota.Gate.Snapshot do
 
   def normalize(nil, _opts), do: nil
 
-  def normalize(%__MODULE__{} = snapshot, _opts), do: snapshot
+  def normalize(%__MODULE__{} = snapshot, opts) do
+    if Keyword.has_key?(opts, :model),
+      do: %__MODULE__{
+        snapshot
+        | scoped: select_scoped(snapshot.scoped, Keyword.get(opts, :model))
+      },
+      else: snapshot
+  end
 
   def normalize(%{__struct__: struct} = quota, opts) do
     case Extensions.fetch(:quota_snapshot, struct) do
-      {:ok, source} -> source.normalize(quota, opts)
+      {:ok, source} -> quota |> source.normalize(opts) |> project_scoped(opts)
       :error -> nil
     end
   end
 
   def normalize(_other, _opts), do: nil
+
+  # A source reports every scoped window of its row; the caller's `:model`
+  # decides which ones the snapshot carries (see the moduledoc).
+  defp project_scoped(%__MODULE__{scoped: [_ | _] = all} = snapshot, opts) do
+    scoped =
+      if Keyword.has_key?(opts, :model),
+        do: select_scoped(all, Keyword.get(opts, :model)),
+        else: []
+
+    %__MODULE__{snapshot | scoped: scoped}
+  end
+
+  defp project_scoped(snapshot, _opts), do: snapshot
+
+  defp select_scoped(scoped, model), do: Enum.filter(scoped, &scoped_applies?(&1, model))
+
+  defp scoped_applies?(%{scope: scope, active?: active?}, model) do
+    cond do
+      not ModelFamily.known_scope?(scope) -> active?
+      model == :unscoped -> false
+      is_nil(model) -> true
+      is_binary(model) -> ModelFamily.scope_matches?(scope, model)
+      true -> false
+    end
+  end
+
+  @doc """
+  Parse a row's stored `scoped_limits` (string-keyed maps, see
+  `Arbiter.Quota.OAuthUsage`) into `t:scoped/0` windows. An entry without a
+  scope name or a numeric utilization is dropped.
+  """
+  @spec scoped_windows(term()) :: [scoped()]
+  def scoped_windows(limits) when is_list(limits) do
+    for %{"scope" => scope, "utilization" => used} = l <- limits,
+        is_binary(scope) and scope != "",
+        is_number(used) do
+      %{
+        scope: scope,
+        label: "7d (#{scope})",
+        utilization: used * 1.0,
+        status: l["status"],
+        reset_at: parse_datetime(l["reset_at"]),
+        active?: l["is_active"] == true
+      }
+    end
+  end
+
+  def scoped_windows(_other), do: []
+
+  defp parse_datetime(raw) when is_binary(raw) do
+    case DateTime.from_iso8601(raw) do
+      {:ok, dt, _offset} -> dt
+      _ -> nil
+    end
+  end
+
+  defp parse_datetime(_raw), do: nil
+
+  @doc """
+  The snapshot as each of its long windows sees it: itself first (the base
+  window on the `secondary_*` fields), then one copy per scoped window with
+  those fields replaced by the scoped window's own and `scoped` emptied. A
+  consumer that runs its long-window rules over every view evaluates a scoped
+  window exactly as it does the base one.
+  """
+  @spec long_views(t()) :: [t()]
+  def long_views(%__MODULE__{scoped: scoped} = snapshot) do
+    [snapshot | Enum.map(scoped, &scoped_view(snapshot, &1))]
+  end
+
+  defp scoped_view(%__MODULE__{} = snapshot, window) do
+    %__MODULE__{
+      snapshot
+      | secondary_utilization: window.utilization,
+        secondary_status: window.status,
+        secondary_reset_at: window.reset_at,
+        secondary_window_label: window.label,
+        scoped: []
+    }
+  end
 
   # Label a Codex window from its stored length (bd-7lkvb6) so
   # `Gate.window_seconds/2` can resolve it: Plus's 5h and weekly windows and

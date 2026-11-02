@@ -83,12 +83,60 @@ defmodule Arbiter.Quota.Budget.Server do
     ArgumentError -> nil
   end
 
-  @doc "Every published budget."
+  @doc """
+  Every published pool budget. The scoped variants of a pool (`scoped/4`) are
+  not pools and are left out.
+  """
   @spec all(atom()) :: [Budget.t()]
   def all(table \\ @table) do
-    for {_key, %Budget{} = budget} <- :ets.tab2list(table), do: budget
+    for {_key, %Budget{scope: nil} = budget} <- :ets.tab2list(table), do: budget
   rescue
     ArgumentError -> []
+  end
+
+  @doc """
+  The scoped variants (bd-e0b7so) of `account_id`'s `pool` under
+  `policy_workspace`: one `Budget` per per-model weekly window, each the budget
+  of a card on that model. They are nested windows of the one pool, never
+  seats of their own.
+  """
+  @spec scoped(String.t(), String.t() | nil, String.t() | nil, atom()) :: [Budget.t()]
+  def scoped(account_id, pool, policy_workspace \\ nil, table \\ @table) do
+    for {_key, %Budget{scope: scope} = b} <- :ets.tab2list(table),
+        is_binary(scope),
+        b.account == account_id,
+        pool == nil or b.pool == pool,
+        b.policy_workspace == policy_workspace,
+        do: b
+  rescue
+    ArgumentError -> []
+  end
+
+  @doc """
+  The budget a card on `model` is held to: the lowest of the pool's own budget
+  (`lookup/4`) and the scoped variants that cover `model` (`Budget.applicable/2`).
+  A `nil` model takes the worst of all. `nil` when the pool has no budget.
+  """
+  @spec for_model(
+          String.t(),
+          String.t() | nil,
+          String.t() | nil,
+          String.t() | atom() | nil,
+          atom()
+        ) ::
+          Budget.t() | nil
+  def for_model(account_id, pool, policy_workspace \\ nil, model, table \\ @table) do
+    base = lookup(account_id, pool, policy_workspace, table)
+
+    case base do
+      nil ->
+        nil
+
+      _ ->
+        [base | scoped(account_id, pool, policy_workspace, table)]
+        |> Budget.applicable(model)
+        |> Budget.lowest()
+    end
   end
 
   @doc """
@@ -367,7 +415,7 @@ defmodule Arbiter.Quota.Budget.Server do
   # server must not crash on its own computation; nothing reads it for a
   # decision.
   defp publish_one(state, input) do
-    key = {input.account_id, input.pool, Map.get(input, :policy_workspace)}
+    key = budget_key(input)
     compute_and_publish(state, key, input)
   rescue
     e -> publish_error(state, input, Exception.message(e))
@@ -375,19 +423,30 @@ defmodule Arbiter.Quota.Budget.Server do
     kind, reason -> publish_error(state, input, "#{kind}: #{inspect(reason)}")
   end
 
+  # `{account, pool, policy_workspace}`, plus the scope for a scoped variant.
+  defp budget_key(input) do
+    base = {Map.get(input, :account_id), Map.get(input, :pool), Map.get(input, :policy_workspace)}
+
+    case Map.get(input, :scope) do
+      scope when is_binary(scope) -> Tuple.append(base, scope)
+      _ -> base
+    end
+  end
+
   defp publish_error(state, input, message) do
-    key = {Map.get(input, :account_id), Map.get(input, :pool), Map.get(input, :policy_workspace)}
-    {account, pool, workspace} = key
+    key = budget_key(input)
+    {account, pool, workspace} = {elem(key, 0), elem(key, 1), elem(key, 2)}
 
     Logger.error(
       "Arbiter.Quota.Budget.Server: computing the budget of #{inspect(key)} failed: #{message}"
     )
 
-    old = get(account, pool, workspace, state.table)
+    old = stored(state.table, key)
 
     errored = %Budget{
       account: account,
       pool: pool,
+      scope: Map.get(input, :scope),
       policy_workspace: workspace,
       budget: (old && old.budget) || 0,
       binding: :error,
@@ -396,14 +455,16 @@ defmodule Arbiter.Quota.Budget.Server do
     }
 
     :ets.insert(state.table, {key, errored})
-    if old == nil or old.binding != :error, do: announce(state.table, key, old, errored)
+
+    if tuple_size(key) == 3 and (old == nil or old.binding != :error),
+      do: announce(state.table, key, old, errored)
 
     {key, state}
   end
 
   defp compute_and_publish(state, key, input) do
     previous = Map.get(state.trusted, key)
-    old = get(elem(key, 0), elem(key, 1), elem(key, 2), state.table)
+    old = stored(state.table, key)
 
     computed = Budget.compute(Map.put(input, :previous, previous))
 
@@ -416,7 +477,9 @@ defmodule Arbiter.Quota.Budget.Server do
 
     :ets.insert(state.table, {key, published})
 
-    if old == nil or old.budget != published.budget,
+    # A scoped variant (a 4-tuple key) is not a pool: it is read by
+    # `for_model/5`, and its changes are not announced on the board.
+    if tuple_size(key) == 3 and (old == nil or old.budget != published.budget),
       do: announce(state.table, key, old, published)
 
     trusted =
@@ -437,6 +500,13 @@ defmodule Arbiter.Quota.Budget.Server do
            })
 
     {key, %{state | hysteresis: Map.put(state.hysteresis, key, hyst), trusted: trusted}}
+  end
+
+  defp stored(table, key) do
+    case :ets.lookup(table, key) do
+      [{_key, %Budget{} = budget}] -> budget
+      [] -> nil
+    end
   end
 
   defp announce(table, {account, pool, policy_workspace} = key, old, %Budget{} = published) do
