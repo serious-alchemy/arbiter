@@ -640,11 +640,23 @@ defmodule Arbiter.Worker.WatchdogSpeculativeTrainTest do
       claim = %{task_id: "a", status: :behind_base, priority: 2, last_head_sha: heads["a"]}
       assert :head = MergeTrain.claim(key, claim)
       a = watch("a", ws, heads["a"], initial_delay_ms: 200)
-      :sys.replace_state(a, &%{&1 | train_role: :head})
+
+      evidence = %{
+        head: "old",
+        ref: "arbiter/train/a",
+        car: nil,
+        base: nil,
+        url: nil,
+        reason: "x"
+      }
+
+      :sys.replace_state(a, &%{&1 | train_role: :head, train_eject_evidence: evidence})
 
       wait_until(fn -> car(a) != nil end)
       assert MergeTrain.view(key).head == nil
       assert :sys.get_state(a).train_role == nil
+      # The evidence of an earlier ejection is not this car's to brief a fix pass with.
+      assert :sys.get_state(a).train_eject_evidence == nil
     end
   end
 

@@ -6534,6 +6534,7 @@ defmodule Arbiter.Worker.Watchdog do
       | train_car: car,
         train_car_status: :pending,
         train_car_hold: nil,
+        train_eject_evidence: nil,
         train_car_checked_tip: nil,
         train_car_reruns: 0,
         train_car_no_pipeline_polls: 0,
