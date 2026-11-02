@@ -201,7 +201,16 @@ defmodule Arbiter.Quota.Budget7dOnlyTest do
         bound = (line_end - used) / (rho_used * horizon)
 
         assert b.raw <= bound + 1.0e-9
-        assert b.budget <= max(floor(bound + 1.0e-9), 0)
+
+        # The first-seat rule (§3.10) is the one deliberate exception to the
+        # bound: an idle pool under its line is lifted to one seat, never more.
+        if b.first_seat? do
+          assert seats == 0
+          assert b.budget >= 1
+          assert b.budget <= max(floor(bound + 1.0e-9), 1)
+        else
+          assert b.budget <= max(floor(bound + 1.0e-9), 0)
+        end
       end
     end
   end

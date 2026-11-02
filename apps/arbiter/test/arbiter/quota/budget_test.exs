@@ -181,7 +181,8 @@ defmodule Arbiter.Quota.BudgetTest do
         w = window(budget, "5h")
         assert_in_delta w.n_after, expected_after, 1.0e-6
         assert budget.raw <= expected_after + 1.0e-9
-        assert budget.budget <= max(floor(expected_after), 0)
+        # the first-seat rule (bd-22w64f) lifts an idle pool under its line to 1
+        assert budget.budget <= max(floor(expected_after), if(budget.first_seat?, do: 1, else: 0))
       end
     end
   end
