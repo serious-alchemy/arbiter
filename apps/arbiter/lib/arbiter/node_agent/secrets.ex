@@ -71,7 +71,7 @@ defmodule Arbiter.NodeAgent.Secrets do
   tmpfs, refused (and nothing written) when there is none, the mode set before a
   byte is written. A file left by an earlier open of the run is removed first,
   never written through (a link there is unlinked, not followed). The caller
-  removes it when the pull ends (`remove_authfile/2`); `remove/2` takes it too.
+  removes it when the pull ends; `remove/2` (the run's cleanup, the reaper) takes it too.
   """
   @spec write_authfile(String.t(), String.t(), keyword()) :: {:ok, Path.t()} | {:error, term()}
   def write_authfile(run, body, opts) when is_binary(body) do
@@ -81,15 +81,6 @@ defmodule Arbiter.NodeAgent.Secrets do
       _ = File.rm(file)
       write_private(dir(root, run), file, body)
     end
-  end
-
-  @doc "Remove run `run`'s registry auth file (idempotent)."
-  @spec remove_authfile(Path.t() | nil, String.t()) :: :ok
-  def remove_authfile(nil, _run), do: :ok
-
-  def remove_authfile(runtime_dir, run) do
-    _ = File.rm(authfile(runtime_dir, run))
-    :ok
   end
 
   # `:exclusive` is O_EXCL: it fails on anything already at `file`, a link included,

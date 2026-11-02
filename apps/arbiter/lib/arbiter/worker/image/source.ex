@@ -62,8 +62,10 @@ defmodule Arbiter.Worker.Image.Source do
       {:ok, pull} ->
         {:pull, pull}
 
+      # debug: it is evaluated more than once per placement (preflight, spawn), and SI4a
+      # gives the operator a doctor row for it
       {:error, reason} ->
-        Logger.info(
+        Logger.debug(
           "Image.Source: node #{label(node)} builds #{repo || "the repo"} from a plan: " <>
             inspect(reason)
         )

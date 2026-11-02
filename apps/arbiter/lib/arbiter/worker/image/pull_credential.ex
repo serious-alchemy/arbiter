@@ -35,10 +35,11 @@ defmodule Arbiter.Worker.Image.PullCredential do
 
   ## Never the push credential
 
-  A pull password that equals the push password of the repo's registry or
-  `nodes.registry_password` is refused (`:pull_credential_is_push_credential`), with a
-  warning naming no value: a node holding a push credential could overwrite the images
-  every node and cluster run. `Arbiter.Settings` and `ValidateConfig` refuse the same
+  A pull password that equals the push password of the repo's registry,
+  `nodes.registry_password`, or any `credentials_ref` the workspace configures (for any
+  registry) is refused (`:pull_credential_is_push_credential`), with a warning naming
+  no value: a node holding a push credential could overwrite the images every node and
+  cluster run. `Arbiter.Settings` and `ValidateConfig` refuse the same
   at write time where they can see both.
 
   The credential travels as `Arbiter.NodeAgent.PullAuth`, whose `Inspect` shows only
@@ -73,7 +74,7 @@ defmodule Arbiter.Worker.Image.PullCredential do
     with {:ok, registry} <- registry(workspace, repo, opts),
          {:ok, level, login} <- credential(workspace, repo, registry, opts),
          :ok <- reach(level, node, workspace, opts),
-         :ok <- not_push(login, registry, repo, opts) do
+         :ok <- not_push(login, registry, workspace, repo, opts) do
       {:ok, %{auth: auth(registry, login), level: level, insecure?: registry.insecure? == true}}
     end
   end
@@ -220,10 +221,14 @@ defmodule Arbiter.Worker.Image.PullCredential do
 
   # -- never the push credential --------------------------------------------------------
 
-  defp not_push(nil, _registry, _repo, _opts), do: :ok
+  defp not_push(nil, _registry, _workspace, _repo, _opts), do: :ok
 
-  defp not_push({_user, password}, %Registry{} = registry, repo, opts) do
-    pushes = Enum.filter([registry.password, install(opts).password], &present?/1)
+  defp not_push({_user, password}, %Registry{} = registry, workspace, repo, opts) do
+    pushes =
+      Enum.filter(
+        [registry.password, install(opts).password | workspace_pushes(workspace)],
+        &present?/1
+      )
 
     if password in pushes do
       Logger.warning(
@@ -236,6 +241,32 @@ defmodule Arbiter.Worker.Image.PullCredential do
       :ok
     end
   end
+
+  # Every push token the workspace configures (`worker.image` and each repo's
+  # `credentials_ref`): a pull secret that is any of them never goes to a node, whatever
+  # registry it was meant for.
+  defp workspace_pushes(%{config: %{"worker" => %{} = worker}} = workspace) do
+    repos =
+      case Map.get(worker, "repos") do
+        %{} = repos -> Map.values(repos)
+        _ -> []
+      end
+
+    [Map.get(worker, "image") | Enum.map(repos, &(is_map(&1) && &1["image"]))]
+    |> Enum.flat_map(fn
+      %{"credentials_ref" => ref} when is_binary(ref) -> [ref]
+      _ -> []
+    end)
+    |> Enum.uniq()
+    |> Enum.flat_map(fn ref ->
+      case Registry.login(ref, workspace) do
+        {:ok, {_user, push}} -> [push]
+        _ -> []
+      end
+    end)
+  end
+
+  defp workspace_pushes(_workspace), do: []
 
   defp auth(_registry, nil), do: nil
 

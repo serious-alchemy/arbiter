@@ -259,6 +259,38 @@ defmodule Arbiter.Worker.Image.PullCredentialTest do
       assert result == {:error, :pull_credential_is_push_credential}
     end
 
+    test "a pull token that is any push token the workspace configures is refused" do
+      ws =
+        workspace(
+          %{
+            "image" => %{"credentials_ref" => "secret:WS_PUSH"},
+            "repos" => %{
+              "other" => %{
+                "image" => %{
+                  "registry" => "ghcr.io/other",
+                  "credentials_ref" => "secret:OTHER_PUSH"
+                }
+              },
+              "vstim" => %{
+                "image" => %{
+                  "registry" => "registry.gitlab.com/vstim",
+                  "pull_credentials_ref" => "secret:GL_PULL"
+                }
+              }
+            }
+          },
+          %{
+            "WS_PUSH" => "ws-pusher:ws-PUSH-token",
+            "OTHER_PUSH" => "other-pusher:" <> @push_repo,
+            "GL_PULL" => "reader:" <> @push_repo
+          }
+        )
+
+      result = PullCredential.for_node(ws, "vstim", row(), opts())
+      assert result == {:error, :pull_credential_is_push_credential}
+      refute_leaks(result)
+    end
+
     test "what is handed out holds no push credential, and never prints its password" do
       assert {:ok, result} = PullCredential.for_node(gitlab_ws(), "vstim", row(), opts())
       refute_leaks(result)

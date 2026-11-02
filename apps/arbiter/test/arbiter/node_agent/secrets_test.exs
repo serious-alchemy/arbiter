@@ -105,14 +105,13 @@ defmodule Arbiter.NodeAgent.SecretsTest do
       assert {:ok, %File.Stat{type: :regular}} = File.lstat(file)
     end
 
-    test "remove_authfile/2 deletes it; remove/2 takes it with the run's directory", %{rt: rt} do
+    test "remove/2 takes it with the run's directory, alone or beside the secrets", %{rt: rt} do
       opts = [runtime_dir: rt, require_tmpfs: false]
       {:ok, file} = Secrets.write_authfile("r10", @body, opts)
 
-      assert :ok = Secrets.remove_authfile(rt, "r10")
+      assert :ok = Secrets.remove(rt, "r10")
       refute File.exists?(file)
-      assert :ok = Secrets.remove_authfile(rt, "r10")
-      assert :ok = Secrets.remove_authfile(nil, "r10")
+      refute File.exists?(Secrets.dir(rt, "r10"))
 
       {:ok, _} = Secrets.write_authfile("r11", @body, opts)
       {:ok, _} = Secrets.write("r11", %{"A" => "1"}, opts)
