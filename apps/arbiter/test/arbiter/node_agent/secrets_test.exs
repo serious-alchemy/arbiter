@@ -52,6 +52,75 @@ defmodule Arbiter.NodeAgent.SecretsTest do
              Secrets.write("r5", %{"A" => "2"}, runtime_dir: rt, require_tmpfs: false)
   end
 
+  # SI4: a pull's registry credential is a containers auth file on the run's tmpfs.
+  describe "the pull auth file (SI4)" do
+    @body ~s({"auths":{"registry.example.com":{"auth":"dXNlcjpwdWxsLXB3"}}})
+
+    defp mountinfo(rt, type) do
+      path = Path.join(rt, "mountinfo-#{type}")
+      File.write!(path, "36 35 98:0 / #{rt} rw,noatime - #{type} none rw\n")
+      path
+    end
+
+    test "is a 0600 file in the run's 0700 directory, beside its secrets", %{rt: rt} do
+      opts = [runtime_dir: rt, mountinfo: mountinfo(rt, "tmpfs")]
+
+      assert {:ok, file} = Secrets.write_authfile("r7", @body, opts)
+      assert file == Secrets.authfile(rt, "r7")
+      assert Path.dirname(file) == Secrets.dir(rt, "r7")
+      assert File.read!(file) == @body
+      assert Bitwise.band(File.stat!(file).mode, 0o777) == 0o600
+      assert Bitwise.band(File.stat!(Path.dirname(file)).mode, 0o777) == 0o700
+
+      # the run's secrets file still goes in beside it
+      assert {:ok, _} = Secrets.write("r7", %{"A" => "1"}, opts)
+    end
+
+    test "is refused, and nothing written, when the runtime dir is not a tmpfs", %{rt: rt} do
+      opts = [runtime_dir: rt, mountinfo: mountinfo(rt, "ext4")]
+
+      assert {:error, {:secrets_not_on_tmpfs, ^rt, "ext4"}} =
+               Secrets.write_authfile("r8", @body, opts)
+
+      refute File.exists?(Secrets.dir(rt, "r8"))
+      assert {:error, :no_runtime_dir} = Secrets.write_authfile("r8", @body, runtime_dir: "")
+    end
+
+    test "a stale file from an earlier open of the run is replaced, never written through",
+         %{rt: rt} do
+      opts = [runtime_dir: rt, require_tmpfs: false]
+      {:ok, file} = Secrets.write_authfile("r9", "old", opts)
+
+      assert {:ok, ^file} = Secrets.write_authfile("r9", @body, opts)
+      assert File.read!(file) == @body
+
+      # a link planted where the file goes is removed, not followed
+      target = Path.join(rt, "elsewhere")
+      File.write!(target, "untouched")
+      File.rm!(file)
+      File.ln_s!(target, file)
+
+      assert {:ok, ^file} = Secrets.write_authfile("r9", @body, opts)
+      assert File.read!(target) == "untouched"
+      assert {:ok, %File.Stat{type: :regular}} = File.lstat(file)
+    end
+
+    test "remove_authfile/2 deletes it; remove/2 takes it with the run's directory", %{rt: rt} do
+      opts = [runtime_dir: rt, require_tmpfs: false]
+      {:ok, file} = Secrets.write_authfile("r10", @body, opts)
+
+      assert :ok = Secrets.remove_authfile(rt, "r10")
+      refute File.exists?(file)
+      assert :ok = Secrets.remove_authfile(rt, "r10")
+      assert :ok = Secrets.remove_authfile(nil, "r10")
+
+      {:ok, _} = Secrets.write_authfile("r11", @body, opts)
+      {:ok, _} = Secrets.write("r11", %{"A" => "1"}, opts)
+      assert :ok = Secrets.remove(rt, "r11")
+      refute File.exists?(Secrets.dir(rt, "r11"))
+    end
+  end
+
   test "fails closed with no runtime dir, and when the dir is not a tmpfs", %{rt: rt} do
     prior = System.get_env("XDG_RUNTIME_DIR")
     System.delete_env("XDG_RUNTIME_DIR")

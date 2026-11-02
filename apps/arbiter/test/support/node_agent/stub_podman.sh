@@ -99,12 +99,73 @@ case "$sub" in
         exit 137 ;;
       big) head -c "${STUB_BYTES:-1000000}" /dev/zero | tr '\0' 'x'; echo; exit 0 ;;
     esac ;;
+  # SI4: a stand-in `podman pull <ref>`. It records its argv and, for the auth file it
+  # was handed, the path, mode and sha256 (never the content, which holds the
+  # credential). With `$D/registry_pull` present it really fetches the manifest and
+  # the config blob from the (stand-in) registry over HTTP(S), presenting the auth
+  # file's credential as podman would, and keeps the config's labels for `image
+  # inspect`. `pull_status` makes it fail.
+  pull)
+    shift
+    printf '%s\n' "$@" > "$D/pull.argv"
+    authfile=""; scheme=https; ref=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --authfile) authfile="$2"; shift ;;
+        --tls-verify=false) scheme=http ;;
+        --quiet|-q) ;;
+        *) ref="$1" ;;
+      esac
+      shift
+    done
+    if [ -n "$authfile" ]; then
+      echo "$authfile" > "$D/pull.authfile"
+      stat -c '%a' "$authfile" > "$D/pull.authfile.mode"
+      sha256sum "$authfile" | cut -d' ' -f1 > "$D/pull.authfile.sha256"
+    fi
+    status=$(cat "$D/pull_status" 2>/dev/null || echo 0)
+    if [ "$status" != 0 ]; then
+      echo "Error: initializing source docker://$ref: reading manifest: unauthorized"
+      exit "$status"
+    fi
+    if [ -e "$D/registry_pull" ]; then
+      host="${ref%%/*}"; rest="${ref#*/}"; name="${rest%@*}"; digest="${rest##*@}"
+      auth=""
+      [ -n "$authfile" ] && auth=$(sed -n 's/.*"auth":"\([^"]*\)".*/\1/p' "$authfile")
+      fetch() {
+        if [ -n "$auth" ]; then
+          curl -fsS -H "Authorization: Basic $auth" -H "Accept: $2" -o "$3" "$1"
+        else
+          curl -fsS -H "Accept: $2" -o "$3" "$1"
+        fi
+      }
+      oci=application/vnd.oci.image.manifest.v1+json
+      fetch "$scheme://$host/v2/$name/manifests/$digest" "$oci" "$D/pulled.manifest" \
+        || { echo "Error: reading manifest $ref: unauthorized"; exit 125; }
+      config=$(sed -n 's/.*"config":{[^}]*"digest":"\(sha256:[0-9a-f]*\)".*/\1/p' "$D/pulled.manifest")
+      fetch "$scheme://$host/v2/$name/blobs/$config" '*/*' "$D/pulled.config" \
+        || { echo "Error: reading blob $config: unauthorized"; exit 125; }
+      sed -n 's/.*"Labels":\({[^}]*}\).*/\1/p' "$D/pulled.config" > "$D/labels.json"
+    fi
+    : > "$D/pulled"
+    exit 0 ;;
+  # `image exists` is "present" unless `image_absent` says otherwise and nothing was
+  # pulled; `image inspect` answers the labels in `labels.json` as podman shapes them.
+  image)
+    case "$2" in
+      exists)
+        if [ -e "$D/image_absent" ] && [ ! -e "$D/pulled" ]; then exit 1; fi
+        exit 0 ;;
+      inspect)
+        if [ -e "$D/labels.json" ]; then printf '[{"Labels":%s}]\n' "$(cat "$D/labels.json")"; fi
+        exit 0 ;;
+    esac
+    exit 0 ;;
   inspect) cat "$D/oom" 2>/dev/null || echo false ;;
   rm) : > "$D/removed"; exit 0 ;;
   # RW12: the reaper lists containers (`ps -a ... --format json`) and pods (`pod ps ...`).
   ps) cat "$D/ps.json" 2>/dev/null || echo '[]'; exit 0 ;;
   pod) cat "$D/pods.json" 2>/dev/null || echo '[]'; exit 0 ;;
   kill) exit 0 ;;
-  image) exit 0 ;;
   *) exit 0 ;;
 esac

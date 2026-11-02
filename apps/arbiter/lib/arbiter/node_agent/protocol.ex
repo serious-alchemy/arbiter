@@ -18,6 +18,7 @@ defmodule Arbiter.NodeAgent.Protocol do
 
   alias Arbiter.Machine.Monitor
   alias Arbiter.NodeAgent.Config
+  alias Arbiter.NodeAgent.ImagePull
   alias Arbiter.NodeAgent.Retained
 
   @doc "The topic a node joins: `node:<node_id>`."
@@ -41,6 +42,11 @@ defmodule Arbiter.NodeAgent.Protocol do
       "caps" => %{
         "backend" => "podman",
         "image" => "build",
+        # SI4 (§21.2.1, §21.6): the primary may hand this node a digest-pinned ref of the
+        # published image to pull (`NodeAgent.ImagePull`) instead of a plan to build; it
+        # chooses per run. `image` stays `build` until the plan path is retired.
+        "image_sources" => ["registry", "build"],
+        "runtime_contracts" => ImagePull.runtime_contracts(),
         "upgrade" => "tarball",
         "bridge_streams" => "mux",
         "run_hold" => "quiesce",

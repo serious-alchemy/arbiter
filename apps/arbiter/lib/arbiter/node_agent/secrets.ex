@@ -14,7 +14,12 @@ defmodule Arbiter.NodeAgent.Secrets do
   nowhere safe to put a secret and `write/3` refuses. It never falls back to
   disk. The file is removed when the container exits and by `remove/2` from the
   reaper (a crashed agent leaves it until then, but only on tmpfs).
+
+  The registry credential of a pull (SI4) is the same kind of file in the same
+  directory, `pull-auth.json` (`write_authfile/3`), removed as soon as the pull ends.
   """
+
+  @authfile "pull-auth.json"
 
   @doc """
   The runtime directory secrets live under: `:runtime_dir`, else
@@ -49,36 +54,74 @@ defmodule Arbiter.NodeAgent.Secrets do
   def write(run, secrets, opts) do
     with {:ok, root} <- runtime_dir(opts),
          :ok <- check_tmpfs(root, Keyword.get(opts, :require_tmpfs, true), opts) do
-      dir = dir(root, run)
-      file = file(root, run)
-
-      with :ok <- File.mkdir_p(dir),
-           :ok <- File.chmod(dir, 0o700),
-           {:ok, io} <- File.open(file, [:write, :exclusive]) do
-        # The mode is set before a byte of the value is written.
-        try do
-          with :ok <- File.chmod(file, 0o600),
-               :ok <- IO.binwrite(io, render(secrets)) do
-            {:ok, file}
-          else
-            {:error, reason} -> {:error, {:secrets_write_failed, reason}}
-          end
-        after
-          File.close(io)
-        end
-      else
-        {:error, reason} -> {:error, {:secrets_write_failed, reason}}
-      end
+      write_private(dir(root, run), file(root, run), render(secrets))
     end
   end
 
-  @doc "Remove run `run`'s secrets directory (idempotent)."
+  @doc """
+  Where run `run`'s registry auth file is while its image is pulled (SI4,
+  `docs/design/remote-workers.md` §21.4): in the run's secrets directory.
+  """
+  @spec authfile(Path.t(), String.t()) :: Path.t()
+  def authfile(runtime_dir, run), do: Path.join(dir(runtime_dir, run), @authfile)
+
+  @doc """
+  Write `body`, a containers auth file holding the pull credential, for `run`'s
+  pull, under `write/3`'s rules: a 0600 file in the run's 0700 directory on a
+  tmpfs, refused (and nothing written) when there is none, the mode set before a
+  byte is written. A file left by an earlier open of the run is removed first,
+  never written through (a link there is unlinked, not followed). The caller
+  removes it when the pull ends (`remove_authfile/2`); `remove/2` takes it too.
+  """
+  @spec write_authfile(String.t(), String.t(), keyword()) :: {:ok, Path.t()} | {:error, term()}
+  def write_authfile(run, body, opts) when is_binary(body) do
+    with {:ok, root} <- runtime_dir(opts),
+         :ok <- check_tmpfs(root, Keyword.get(opts, :require_tmpfs, true), opts) do
+      file = authfile(root, run)
+      _ = File.rm(file)
+      write_private(dir(root, run), file, body)
+    end
+  end
+
+  @doc "Remove run `run`'s registry auth file (idempotent)."
+  @spec remove_authfile(Path.t() | nil, String.t()) :: :ok
+  def remove_authfile(nil, _run), do: :ok
+
+  def remove_authfile(runtime_dir, run) do
+    _ = File.rm(authfile(runtime_dir, run))
+    :ok
+  end
+
+  # `:exclusive` is O_EXCL: it fails on anything already at `file`, a link included,
+  # so nothing is ever written through one.
+  defp write_private(dir, file, body) do
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.chmod(dir, 0o700),
+         {:ok, io} <- File.open(file, [:write, :exclusive]) do
+      # The mode is set before a byte of the value is written.
+      try do
+        with :ok <- File.chmod(file, 0o600),
+             :ok <- IO.binwrite(io, body) do
+          {:ok, file}
+        else
+          {:error, reason} -> {:error, {:secrets_write_failed, reason}}
+        end
+      after
+        File.close(io)
+      end
+    else
+      {:error, reason} -> {:error, {:secrets_write_failed, reason}}
+    end
+  end
+
+  @doc "Remove run `run`'s secrets directory, its pull auth file included (idempotent)."
   @spec remove(Path.t() | nil, String.t()) :: :ok
   def remove(nil, _run), do: :ok
 
   def remove(runtime_dir, run) do
     dir = dir(runtime_dir, run)
     _ = File.rm(Path.join(dir, "secrets.env"))
+    _ = File.rm(Path.join(dir, @authfile))
     _ = File.rmdir(dir)
     :ok
   end
