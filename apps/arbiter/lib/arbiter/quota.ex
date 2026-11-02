@@ -491,7 +491,7 @@ defmodule Arbiter.Quota do
     elapsed = elapsed_fractions(account)
 
     %{
-      account_policy: Gate.account_policy_summary(account),
+      account_policy: account |> Gate.account_policy_summary() |> put_burn_24h(account),
       policy_binding: %{
         throttle_threshold:
           Gate.binding_side({account, workspace}, :throttle_threshold,
@@ -524,6 +524,15 @@ defmodule Arbiter.Quota do
   # setting it has stopped using. `nil` for either window when there is no
   # account, no snapshot yet, or that window's length/`reset_at` is unknown —
   # `Gate.binding_side/3` / `effective_threshold/3` fall back gracefully.
+  # The latest poll-time `burn_24h` (bd-cklotu), beside the cap it is read
+  # against; only on a summary that carries a cap.
+  defp put_burn_24h(%{daily_burn_cap: _} = summary, %ProviderAccount{} = account) do
+    snapshot = Snapshot.normalize(latest_for_provider(account.id, account.provider))
+    Map.put(summary, :burn_24h, snapshot && snapshot.burn_24h)
+  end
+
+  defp put_burn_24h(summary, _account), do: summary
+
   defp elapsed_fractions(nil), do: %{throttle_threshold: nil, weekly_threshold: nil}
 
   defp elapsed_fractions(%ProviderAccount{} = account) do
@@ -1230,12 +1239,19 @@ defmodule Arbiter.Quota do
 
     with {:ok, quota} <- result do
       # Only a poll that carried the aggregate figures is a history sample; the
-      # secondary-only write touched no primary column.
-      if action == :record_oauth_snapshot, do: Arbiter.Quota.History.record(account_id, quota)
-      broadcast_quota_update(account_id, quota)
-    end
+      # secondary-only write touched no primary column. The 24h burn
+      # (bd-cklotu) is computed over the history including that sample.
+      quota =
+        if action == :record_oauth_snapshot do
+          Arbiter.Quota.History.record(account_id, quota)
+          Arbiter.Quota.Burn.refresh(account_id, quota)
+        else
+          quota
+        end
 
-    result
+      broadcast_quota_update(account_id, quota)
+      {:ok, quota}
+    end
   end
 
   @doc """

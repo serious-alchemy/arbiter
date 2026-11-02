@@ -316,6 +316,39 @@ defmodule ArbiterCli.Cmd.AccountTest do
     end
   end
 
+  test "--daily-burn-cap / --daily-burn-cap-mode send the burn governor (bd-cklotu)" do
+    stub_routes([
+      patch_body_route(%{
+        "quota_config" => %{"daily_burn_cap" => 0.25, "daily_burn_cap_mode" => "enforce"}
+      })
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn ->
+        Account.run(~w(set personal-max --daily-burn-cap 0.25 --daily-burn-cap-mode enforce))
+      end)
+
+    assert exit_code == 0
+  end
+
+  test "--daily-burn-cap none clears the cap" do
+    stub_routes([patch_body_route(%{"quota_config" => %{"daily_burn_cap" => nil}})])
+
+    {_out, _err, exit_code} =
+      capture(fn -> Account.run(~w(set personal-max --daily-burn-cap none)) end)
+
+    assert exit_code == 0
+  end
+
+  test "a bad --daily-burn-cap or --daily-burn-cap-mode dies client-side naming the flag" do
+    for {flag, bad} <- [{"--daily-burn-cap", "2"}, {"--daily-burn-cap-mode", "maybe"}] do
+      {_out, err, exit_code} = capture(fn -> Account.run(["set", "personal-max", flag, bad]) end)
+
+      assert exit_code != 0
+      assert err =~ flag
+    end
+  end
+
   test "--spend-cap / --spend-window / --spend-mode / --spend-metered send the spend cap" do
     stub_routes([
       patch_body_route(%{

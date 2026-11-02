@@ -1939,6 +1939,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   #     paced window follows: max(floor, elapsed) or floor + (1 - floor) * elapsed
   #   * paced_floor / weekly_paced_floor numbers in (0, 1] — the paced-mode
   #     head start on the primary (5h/session, inert for Claude) and 7d/weekly windows
+  #   * daily_burn_cap a number in (0, 1] and daily_burn_cap_mode ∈ {"shadow",
+  #     "enforce"} (bd-cklotu; default "shadow") — the optional rolling-24h burn
+  #     governor, tighten-only against the account's (Arbiter.Quota.BurnGovernor)
   #   * pace_exempt_threshold / weekly_pace_exempt_threshold numbers in (0, 1] —
   #     the dedicated cap of the P0 pace exemption on the primary (inert for Claude) and 7d windows
   #     (bd-6bxv7h; tighten-only against the account's)
@@ -2020,6 +2023,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> then(fn cs -> validate_fraction(cs, quota, "pace_exempt_threshold") end)
     |> then(fn cs -> validate_fraction(cs, quota, "weekly_pace_exempt_threshold") end)
     |> then(fn cs -> validate_pace_exempt_priority(cs, quota) end)
+    |> then(fn cs -> validate_fraction(cs, quota, "daily_burn_cap") end)
+    |> then(fn cs -> validate_daily_burn_cap_mode(cs, quota) end)
   end
 
   defp validate_quota(changeset, _) do
@@ -2091,6 +2096,29 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
               "#{Enum.join(@valid_weekly_warning_policies, ", ")}; got: #{inspect(other)}"
         )
     end
+  end
+
+  defp validate_daily_burn_cap_mode(changeset, quota) do
+    modes = Arbiter.Quota.BurnGovernor.modes()
+
+    case Map.get(quota, "daily_burn_cap_mode") do
+      nil ->
+        changeset
+
+      mode when is_binary(mode) ->
+        if mode in modes, do: changeset, else: daily_burn_cap_mode_error(changeset, modes, mode)
+
+      other ->
+        daily_burn_cap_mode_error(changeset, modes, other)
+    end
+  end
+
+  defp daily_burn_cap_mode_error(changeset, modes, got) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message:
+        "quota.daily_burn_cap_mode must be one of #{Enum.join(modes, ", ")}; got: #{inspect(got)}"
+    )
   end
 
   defp validate_pace_curve(changeset, quota) do

@@ -24,7 +24,9 @@ defmodule Arbiter.Quota.Gate.Snapshot.Anthropic do
       secondary_utilization: q.utilization_7d,
       secondary_status: q.status_7d,
       secondary_reset_at: q.reset_7d_at,
-      secondary_window_label: "7d"
+      secondary_window_label: "7d",
+      burn_24h: q.burn_24h,
+      burn_24h_at: q.burn_24h_at
     }
     |> put_primary(q)
   end

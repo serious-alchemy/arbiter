@@ -24,6 +24,9 @@ defmodule Arbiter.Board.AdmissionShadowReport do
     * **7d binding and ρ source** — per account, where its 7d ρ came from (own fit,
       a peer's, or the prior) and the share of budget rows where `window:7d`
       binds (bd-9q51ze: Anthropic retired the 5h window).
+    * **Burn governor** — only once an account sets `daily_burn_cap`: its p50 / p90 /
+      p99 24h burn of the 7d window and the readings at which the cap would have held
+      (`Arbiter.Quota.BurnReport`, bd-cklotu).
     * **Gate** — each §10.4 criterion as `:met`, `:unmet` or `:unknown`. An
       operator's review of the disagreement classes is never inferred.
 
@@ -37,6 +40,8 @@ defmodule Arbiter.Board.AdmissionShadowReport do
   alias Arbiter.Board.AdmissionShadowEvent
   alias Arbiter.Board.AdmissionShadowReport.Quota
   alias Arbiter.Quota.BudgetCalibration
+  alias Arbiter.Quota.BurnGovernor
+  alias Arbiter.Quota.BurnReport
   alias Arbiter.Quota.QuotaSnapshot
   alias Arbiter.Workers.Run
 
@@ -149,10 +154,20 @@ defmodule Arbiter.Board.AdmissionShadowReport do
       calibration: calibration,
       window_binding: window_binding(events, calibration),
       stability: stability,
-      near_resets: near_resets
+      near_resets: near_resets,
+      burn: burn(data)
     }
 
     Map.put(report, :gate, gate(report, data, events))
+  end
+
+  # The rolling-24h burn governor's shadow (bd-cklotu): per account the 24h-burn
+  # distribution and, where a `daily_burn_cap` is set, when it would have held.
+  # `nil` unless some account sets a cap, so the report is unchanged without one.
+  defp burn(data) do
+    if Enum.any?(Map.values(data.accounts), &BurnGovernor.cap/1) do
+      data |> Map.take([:since, :until, :snapshots, :accounts]) |> BurnReport.build()
+    end
   end
 
   defp agreement(dispatches, events) do
@@ -402,10 +417,15 @@ defmodule Arbiter.Board.AdmissionShadowReport do
       window_binding_text(report.window_binding),
       stability_text(report.stability),
       near_resets_text(report.near_resets),
+      burn_text(report.burn),
       gate_text(report.gate)
     ]
+    |> Enum.reject(&is_nil/1)
     |> Enum.join("\n\n")
   end
+
+  defp burn_text(nil), do: nil
+  defp burn_text(burn), do: BurnReport.format(burn)
 
   defp agreement_text(a) do
     rate = if a.rate, do: "#{pct(a.rate)} agree", else: "no comparable dispatch"

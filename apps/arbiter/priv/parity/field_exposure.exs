@@ -205,6 +205,16 @@
       cli: :same,
       rest: :same
     },
+    "daily_burn_cap" => %{
+      mcp: {:none, "account create is an operator action, not on MCP"},
+      cli: :same,
+      rest: :same
+    },
+    "daily_burn_cap_mode" => %{
+      mcp: {:none, "account create is an operator action, not on MCP"},
+      cli: :same,
+      rest: :same
+    },
     "weekly_warning_policy" => %{
       mcp: {:none, "account create is an operator action, not on MCP"},
       cli: :same,
@@ -275,6 +285,8 @@
     "paced_floor" => :same,
     "weekly_paced_floor" => :same,
     "pace_curve" => :same,
+    "daily_burn_cap" => :same,
+    "daily_burn_cap_mode" => :same,
     "weekly_warning_policy" => :same,
     "window_seconds" => :same,
     "pace_exempt_priority" => :same,

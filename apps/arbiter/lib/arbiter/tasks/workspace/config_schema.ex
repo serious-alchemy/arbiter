@@ -455,6 +455,15 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                           (default) is max(floor, elapsed); ramp is
                           floor + (1 - floor) * elapsed, rising from the floor
                           to 1.0 at the reset with no flat stretch.
+      daily_burn_cap      number in (0, 1] — optional rolling-24h burn governor:
+                          the most of the 7d window that may be used in any 24
+                          hours. Unset = off. Tighten-only: min(account,
+                          workspace). A P0-exempt dispatch is never held on it.
+      daily_burn_cap_mode one of: shadow, enforce (default shadow). shadow only
+                          measures and reports ("would have held" in the
+                          admission shadow report); enforce holds dispatch at
+                          the cap and shrinks the seat budget to fit it. Either
+                          side saying enforce enforces.
       pace_exempt_priority  0–4 or "none" — narrows the account's P0 pace
                           exemption (the account's `pace_exempt_priority`
                           grants it; a workspace can only narrow it, never

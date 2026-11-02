@@ -49,6 +49,14 @@ defmodule Arbiter.Quota.AnthropicQuota do
   actions do
     defaults [:read, :destroy]
 
+    # The poll-time rolling-24h burn of the 7d window (bd-cklotu,
+    # `Arbiter.Quota.Burn`). Its own narrow write, so storing it never touches
+    # the gate columns or their `captured_at`.
+    update :record_burn_24h do
+      accept [:burn_24h, :burn_24h_at]
+      require_atomic? false
+    end
+
     create :upsert do
       primary? true
       upsert? true
@@ -241,6 +249,17 @@ defmodule Arbiter.Quota.AnthropicQuota do
     attribute :oauth_captured_at, :utc_datetime do
       public? true
       description "When /api/oauth/usage was last successfully fetched."
+    end
+
+    attribute :burn_24h, :float do
+      public? true
+
+      description "Fraction of the 7d window used over the last 24h, computed at poll time from the quota history (`Arbiter.Quota.Burn`). nil = no reading (sparse history)."
+    end
+
+    attribute :burn_24h_at, :utc_datetime do
+      public? true
+      description "When burn_24h was computed."
     end
 
     create_timestamp :inserted_at

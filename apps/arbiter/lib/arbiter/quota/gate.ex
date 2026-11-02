@@ -176,6 +176,7 @@ defmodule Arbiter.Quota.Gate do
   """
 
   alias Arbiter.Accounts.ProviderAccount
+  alias Arbiter.Quota.BurnGovernor
   alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Quota.Pace
   alias Arbiter.Tasks.Issue
@@ -239,7 +240,7 @@ defmodule Arbiter.Quota.Gate do
           optional(:priority) => 0..4,
           provider: String.t() | nil,
           window: String.t(),
-          signal: :status | :utilization | :warning,
+          signal: :status | :utilization | :warning | :burn,
           status: String.t() | nil,
           utilization: float() | nil,
           threshold: float() | nil
@@ -530,9 +531,22 @@ defmodule Arbiter.Quota.Gate do
 
     # `pace_curve` is reported only when the account sets a recognised one, so
     # an account that never opted in keeps exactly the summary it always had.
-    case Map.get(config, "pace_curve") do
-      curve when curve in @pace_curves -> Map.put(summary, :pace_curve, curve)
-      _ -> summary
+    summary =
+      case Map.get(config, "pace_curve") do
+        curve when curve in @pace_curves -> Map.put(summary, :pace_curve, curve)
+        _ -> summary
+      end
+
+    # Likewise the burn governor (bd-cklotu): only on an account that sets a cap.
+    case BurnGovernor.cap(account) do
+      nil ->
+        summary
+
+      cap ->
+        Map.merge(summary, %{
+          daily_burn_cap: cap,
+          daily_burn_cap_mode: Atom.to_string(BurnGovernor.mode(account))
+        })
     end
   end
 
@@ -986,6 +1000,10 @@ defmodule Arbiter.Quota.Gate do
   # else that is not a `ProviderAccount`) still resolves workspace-only, so
   # every pre-P7 call site — the board, `arb quota`, the `Gate` callbacks —
   # keeps working unchanged while their own re-key lands.
+  @doc false
+  @spec policy_pair(policy()) :: {ProviderAccount.t() | nil, Workspace.t() | nil}
+  def policy_pair(policy), do: split_policy(policy)
+
   defp split_policy({account, workspace}), do: {account, workspace}
   defp split_policy(%ProviderAccount{} = account), do: {account, nil}
   defp split_policy(workspace), do: {nil, workspace}
@@ -1351,10 +1369,17 @@ defmodule Arbiter.Quota.Gate do
       {long?, &secondary_status_binding/3},
       {primary? and pace?, &primary_utilization_binding/3},
       {long? and pace?, &secondary_utilization_binding/3},
-      {long?, &secondary_warning_binding/3}
+      {long?, &secondary_warning_binding/3},
+      {long? and pace?, &burn_binding/3}
     ]
     |> Enum.filter(fn {trusted?, _rule} -> trusted? end)
     |> Enum.find_value(fn {_trusted?, rule} -> rule.(s, policy, pace_opts) end)
+  end
+
+  # The rolling-24h burn governor (bd-cklotu): a flat rule, last in the order,
+  # held only under `daily_burn_cap_mode: enforce`, lifted for an exempt priority.
+  defp burn_binding(%Snapshot{} = s, policy, pace_opts) do
+    BurnGovernor.binding(s, policy, Keyword.fetch!(pace_opts, :now), pace_opts[:priority])
   end
 
   defp primary_status_binding(%Snapshot{} = s, _policy, _pace_opts) do
@@ -1538,6 +1563,9 @@ defmodule Arbiter.Quota.Gate do
 
       {%{signal: :utilization}, false, _} ->
         "#{long_head(label, window)} #{long_utilization(binding)}"
+
+      {%{signal: :burn, utilization: u, threshold: t}, _, _} ->
+        prefix(label, "24h burn #{percent(u)} ≥ cap #{percent(t)} (daily_burn_cap)")
     end
   end
 

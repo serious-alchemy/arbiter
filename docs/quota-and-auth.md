@@ -502,3 +502,51 @@ The P0 pace exemption lifts whichever line is in force:
 `exempt ceiling = max(line, min(exempt_cap, flat))`.
 
 Roll back by unsetting the key (`arb account set <ref> --unset pace_curve`).
+
+## The optional rolling-24h burn governor (`daily_burn_cap`, bd-cklotu)
+
+With the 5h window gone, Claude has no short-horizon brake: the 7d line paces a
+week, not a burst. `daily_burn_cap` is an **optional** one, **off unless set**, and
+shadow-first. Decide whether to have it from data, after the 7d budget has run in
+shadow for a couple of weeks.
+
+**`burn_24h`** is the share of the 7d window used in the last 24 hours. Each OAuth
+poll computes it from the `quota_snapshots` 7d samples (`Arbiter.Quota.Burn`) and
+stores it on the account's quota row (`burn_24h`, `burn_24h_at`). A window reset
+inside the 24 hours restarts the baseline at zero (a moved `resets_at`, or a fall in
+utilization when there is none), so a rollover is not read as negative burn. A
+history too sparse to say (it must reach back to within 2 h of the 24 h mark, end
+within 1 h of now, and have no gap over 3 h) gives `nil`, and `nil` or an hour-old
+reading never holds anything.
+
+| Key | Where | Meaning |
+|---|---|---|
+| `daily_burn_cap` | account `quota_config`, workspace `quota` | fraction in (0, 1] of the 7d window allowed per rolling 24 h; unset = off. A workspace can only tighten: `min(account, workspace)` |
+| `daily_burn_cap_mode` | same | `shadow` (default) or `enforce`; either side saying `enforce` enforces |
+
+Set it per account (`arb account set <ref> --daily-burn-cap 0.25 --daily-burn-cap-mode
+enforce`, the Providers page, `account_set` with `quota_config.daily_burn_cap*`) or per
+workspace (`arb config set quota.daily_burn_cap 0.2 --workspace <ws>`, or the workspace
+policy form). `arb account set <ref> --daily-burn-cap none` turns it off.
+
+- **`shadow`** holds nothing. The "would have held" record is the **Burn governor**
+  section of the admission shadow report (`mix arbiter.admission_shadow_report`),
+  which appears once any account sets a cap: how many hourly readings reached it.
+- **`enforce`** adds two things, both honouring the P0 pace exemption (an exempt
+  priority is never held on the burn): a flat **Gate** rule, `burn_24h >= cap` holds the
+  dispatch (`24h burn 30% ≥ cap 25% (daily_burn_cap)`), and, under `scheduler_admission:
+  enforce`, where the Gate leaves utilization rules to the budget, a **Budget** `24h`
+  window whose line is the cap and whose draw is the 7d window's `ρ`, so the seat count
+  shrinks before the cap is reached.
+
+### Picking the cap: `mix arbiter.burn_report`
+
+    mix arbiter.burn_report                 # last 30 days, per account
+    mix arbiter.burn_report --cap 0.25      # replay a cap no account has yet
+    bin/arbiter eval 'Arbiter.Release.burn_report()'   # on a release
+
+prints the p50 / p90 / p99 of the historical rolling-24h burn per account, and, with a
+cap, how many readings it would have held and when the first was. A cap near p99
+trims only the worst bursts; one near p50 would hold on an ordinary day. The report is
+read-only. `arb quota --account <ref>` shows the cap, its mode and the current
+`burn_24h`. Roll back by unsetting the key (`--unset daily_burn_cap`).

@@ -499,6 +499,48 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       refute Map.has_key?(reloaded.config, "conductor")
     end
 
+    test "saves and unsets the daily burn governor (bd-cklotu)", %{conn: conn} do
+      ws = new_workspace()
+      {:ok, view, _html} = live_workspace(conn, ws.id)
+
+      assert has_element?(view, "[name='config[quota_daily_burn_cap]']")
+      assert has_element?(view, "[name='config[quota_daily_burn_cap_mode]']")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static",
+          "quota_daily_burn_cap" => "0.25",
+          "quota_daily_burn_cap_mode" => "enforce"
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["quota"]["daily_burn_cap"] == "0.25"
+      assert reloaded.config["quota"]["daily_burn_cap_mode"] == "enforce"
+
+      {:ok, view, _html} = live_workspace(conn, ws.id)
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static",
+          "quota_daily_burn_cap" => "",
+          "quota_daily_burn_cap_mode" => ""
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      refute Map.has_key?(reloaded.config["quota"] || %{}, "daily_burn_cap")
+      refute Map.has_key?(reloaded.config["quota"] || %{}, "daily_burn_cap_mode")
+    end
+
     test "blank quota fields unset rather than writing empty values", %{conn: conn} do
       ws =
         new_workspace(%{

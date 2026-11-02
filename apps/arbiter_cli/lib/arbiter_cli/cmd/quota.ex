@@ -232,10 +232,22 @@ defmodule ArbiterCli.Cmd.Quota do
       IO.puts("  pace_curve:          #{policy["pace_curve"] || "plateau"}")
     end
 
+    emit_burn_governor(policy)
+
     IO.puts("")
   end
 
   defp emit_policy(_data, _params), do: :ok
+
+  # The optional rolling-24h burn governor (bd-cklotu): shown only on an account
+  # that sets a cap. `burn_24h` is the poll-time reading, absent on sparse history.
+  defp emit_burn_governor(%{"daily_burn_cap" => cap} = policy) when is_number(cap) do
+    mode = policy["daily_burn_cap_mode"] || "shadow"
+    IO.puts("  daily_burn_cap:      #{format_frac(cap)} (#{mode})")
+    IO.puts("  burn_24h:            #{format_frac(policy["burn_24h"])}")
+  end
+
+  defp emit_burn_governor(_policy), do: :ok
 
   defp account_label(data) do
     case data["account"] do

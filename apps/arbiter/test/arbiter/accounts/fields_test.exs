@@ -10,7 +10,8 @@ defmodule Arbiter.Accounts.FieldsTest do
                             weekly_paced_floor weekly_warning_policy window_seconds
                             pace_exempt_priority pace_exempt_threshold
                             weekly_pace_exempt_threshold spend_cap spend_window
-                            spend_mode spend_metered pace_curve))
+                            spend_mode spend_metered pace_curve daily_burn_cap
+                            daily_burn_cap_mode))
     end
 
     test "pace_curve accepts plateau and ramp and rejects anything else" do
@@ -22,6 +23,31 @@ defmodule Arbiter.Accounts.FieldsTest do
       for bad <- ["linear", "RAMP", "", 1, true] do
         assert {:error, {:invalid_quota_config, "pace_curve" <> _}} =
                  Fields.validate_quota_config(%{"pace_curve" => bad})
+      end
+    end
+
+    test "daily_burn_cap is a fraction in (0, 1]" do
+      assert {:ok, %{"daily_burn_cap" => 0.25}} =
+               Fields.validate_quota_config(%{"daily_burn_cap" => "0.25"})
+
+      for bad <- [0, 1.5, -0.1, "lots", true] do
+        assert {:error, {:invalid_quota_config, "daily_burn_cap" <> _}} =
+                 Fields.validate_quota_config(%{"daily_burn_cap" => bad})
+      end
+
+      assert {:ok, %{"daily_burn_cap" => nil}} =
+               Fields.validate_quota_config(%{"daily_burn_cap" => nil}, :patch)
+    end
+
+    test "daily_burn_cap_mode accepts shadow and enforce and rejects anything else" do
+      for mode <- ~w(shadow enforce) do
+        assert {:ok, %{"daily_burn_cap_mode" => ^mode}} =
+                 Fields.validate_quota_config(%{"daily_burn_cap_mode" => mode})
+      end
+
+      for bad <- ["off", "ENFORCE", "", 1, true] do
+        assert {:error, {:invalid_quota_config, "daily_burn_cap_mode" <> _}} =
+                 Fields.validate_quota_config(%{"daily_burn_cap_mode" => bad})
       end
     end
 

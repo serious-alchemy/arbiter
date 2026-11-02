@@ -33,6 +33,7 @@ defmodule Arbiter.Accounts.Fields do
   perform one write or none.
   """
 
+  alias Arbiter.Quota.BurnGovernor
   alias Arbiter.Quota.Gate
 
   @type phase :: :create | :update
@@ -174,6 +175,20 @@ defmodule Arbiter.Accounts.Fields do
       doc:
         "plateau (default: max(floor, elapsed)) or ramp (floor + (1 - floor) * elapsed, " <>
           "reaching 1.0 at the reset): the line a paced window follows. Applies in paced mode."
+    },
+    %{
+      name: "daily_burn_cap",
+      type: :fraction,
+      doc:
+        "Optional rolling-24h burn governor: the most of the 7d window that may be used in any " <>
+          "24 hours, in (0, 1]. Unset = off. See daily_burn_cap_mode."
+    },
+    %{
+      name: "daily_burn_cap_mode",
+      type: :burn_mode,
+      doc:
+        "shadow (default: the cap is measured and reported, nothing is held) or enforce " <>
+          "(a burn at the cap holds dispatch and shrinks the budget; a P0-exempt dispatch is not held)."
     },
     %{
       name: "weekly_warning_policy",
@@ -484,6 +499,16 @@ defmodule Arbiter.Accounts.Fields do
     else
       invalid_quota(
         "pace_curve must be one of #{Enum.join(Gate.pace_curves(), ", ")} (got #{inspect(curve)})"
+      )
+    end
+  end
+
+  defp validate_value("daily_burn_cap_mode", mode, _) do
+    if mode in BurnGovernor.modes() do
+      {:ok, mode}
+    else
+      invalid_quota(
+        "daily_burn_cap_mode must be one of #{Enum.join(BurnGovernor.modes(), ", ")} (got #{inspect(mode)})"
       )
     end
   end
