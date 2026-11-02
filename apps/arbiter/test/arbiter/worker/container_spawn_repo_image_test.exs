@@ -177,6 +177,40 @@ defmodule Arbiter.Worker.ContainerSpawnRepoImageTest do
       refute_received {:published, _}
     end
 
+    # SI4 (docs/design/remote-workers.md §21.5): a prebuilt repo runs on any node that runs
+    # the published image, machines that pull it included.
+    test "a machine node that pulls the published image can run a prebuilt repo", %{tmp_dir: tmp} do
+      repo_path = repo!(tmp, %{"README.md" => "hi\n"})
+      tip = git!(repo_path, ["rev-parse", "HEAD"]) |> String.trim()
+
+      machine = %{
+        id: "n3",
+        name: "oryx",
+        kind: :machine,
+        workspace_ids: [],
+        caps: %{"image" => "build", "image_sources" => ["registry", "build"]}
+      }
+
+      install = %{
+        registry: "registry.example.com/arbiter",
+        pull_username: "reader",
+        pull_password: "pull-only"
+      }
+
+      pulling = [image_source: [machine_image_source: "auto", config: install, workspaces: []]]
+
+      assert :ok =
+               ContainerSpawn.preflight_image(repo_path, machine, prebuilt_opts(tip) ++ pulling)
+
+      assert_received {:published, %{repo: "vstim"}}
+
+      # the same machine under the default (build) builds, so it cannot
+      building = [image_source: [config: install, workspaces: []]]
+
+      assert {:error, {:image_unavailable, {:prebuilt_needs_registry, "vstim"}}} =
+               ContainerSpawn.preflight_image(repo_path, machine, prebuilt_opts(tip) ++ building)
+    end
+
     test "a node that builds its own image cannot run a prebuilt repo", %{tmp_dir: tmp} do
       repo_path = repo!(tmp, %{"README.md" => "hi\n"})
       build_node = %{id: "n2", caps: %{"image" => "build"}}

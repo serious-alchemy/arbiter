@@ -769,6 +769,27 @@ defmodule Arbiter.NodeAgent.RunTest do
       end
     end
 
+    # §21.4: the primary's pull-sized bound cancels the run, but the pull keeps going so the
+    # node's next run finds the image; nothing is started for the cancelled run.
+    test "a pull outlives a cancel: it finishes, and no container starts", %{
+      opts: opts,
+      stub: stub,
+      rt: rt
+    } do
+      File.write!(Path.join(stub, "pull_wait"), "")
+      assert {:ok, "p8"} = Runs.assign(pull_spec("p8"), opts)
+      wait_until(fn -> File.exists?(Path.join(stub, "pull.argv")) end)
+
+      assert :ok = Run.cancel("p8", "prepare_timeout")
+      _ = :sys.get_state(Run.via("p8"))
+      File.rm!(Path.join(stub, "pull_wait"))
+
+      assert %{"cancelled" => true, "reason" => "prepare_timeout"} = wait_event("p8", "exit")
+      assert File.exists?(Path.join(stub, "pulled"))
+      refute File.exists?(Path.join(stub, "run.argv"))
+      refute File.exists?(Path.join([rt, "arbiter-node", "p8"]))
+    end
+
     test "a node that holds the digest does not pull", %{opts: opts, stub: stub} do
       File.rm!(Path.join(stub, "image_absent"))
       assert {:ok, "p2"} = Runs.assign(pull_spec("p2"), opts)

@@ -127,6 +127,8 @@ case "$sub" in
       stat -c '%a' "$authfile" > "$D/pull.authfile.mode"
       sha256sum "$authfile" | cut -d' ' -f1 > "$D/pull.authfile.sha256"
     fi
+    # a slow pull: holds until `pull_wait` is removed
+    while [ -e "$D/pull_wait" ]; do sleep 0.05; done
     status=$(cat "$D/pull_status" 2>/dev/null || echo 0)
     if [ "$status" != 0 ]; then
       echo "Error: initializing source docker://$ref: reading manifest: unauthorized"
