@@ -384,8 +384,11 @@ defmodule Arbiter.Worker.Watchdog do
   # car may go without any pipeline on its commit before CI is asked again;
   # re-runs of a car pipeline that was cancelled by something else; and car
   # builds that may fail in a row (a fetch, a push) before the MR takes the
-  # serial path instead.
-  @car_idle_polls 3
+  # serial path instead; and cars built on one head before it takes the serial
+  # path anyway (a target that keeps moving under its car would otherwise
+  # rebuild it, and spend a pipeline, forever).
+  @car_idle_polls 6
+  @car_builds_per_head 6
   @car_no_pipeline_polls 20
   @car_reruns 1
   @car_build_failures 3
@@ -1479,6 +1482,7 @@ defmodule Arbiter.Worker.Watchdog do
       train_car_reruns: 0,
       train_car_no_pipeline_polls: 0,
       train_car_failures: 0,
+      train_car_builds: nil,
       ci_backpressure: Keyword.get(opts, :ci_backpressure),
       coverage_unknown_head: nil,
       coverage_parked?: false,
@@ -6445,6 +6449,16 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp do_build_car(state, seat, sha) do
+    case builds_on(state, sha) do
+      n when n >= @car_builds_per_head -> eject_car(state, sha, {:car_builds_exhausted, n})
+      n -> build_new_car(state, seat, sha, n)
+    end
+  end
+
+  defp builds_on(%{train_car_builds: {head, n}}, head), do: n
+  defp builds_on(_state, _head), do: 0
+
+  defp build_new_car(state, seat, sha, builds) do
     repo = local_repo(state)
     ref = TrainCar.ref_name(state.task_id, car_ref_prefix(state))
 
@@ -6461,7 +6475,7 @@ defmodule Arbiter.Worker.Watchdog do
           "#{short(base)} + head #{short(sha)}; CI started"
       )
 
-      state = put_train_car(state, car)
+      state = put_train_car(%{state | train_car_builds: {sha, builds + 1}}, car)
       # Reported now, so the cars behind can stand on it this round.
       _ = board_train(state, sha)
       {:wait, held_poll(state)}
@@ -6853,6 +6867,11 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp describe_ejection({:car_unavailable, why}, _state),
     do: "its car could not be built (#{inspect_short(why)})"
+
+  defp describe_ejection({:car_builds_exhausted, n}, _state),
+    do:
+      "its car was built #{n} times on this head without merging (the target or the cars " <>
+        "ahead kept moving under it)"
 
   defp record_train_note(state, evidence) do
     car =

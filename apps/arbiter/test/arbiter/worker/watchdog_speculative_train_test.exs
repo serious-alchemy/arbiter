@@ -528,6 +528,35 @@ defmodule Arbiter.Worker.WatchdogSpeculativeTrainTest do
     end
   end
 
+  describe "the rebuild bound (I1)" do
+    test "a car the target keeps moving under is rebuilt a bounded number of times",
+         %{forge: forge} do
+      heads = stale_mrs(forge, ~w(a))
+      a = watch("a", workspace(forge), heads["a"])
+      wait_until(fn -> car(a) != nil end)
+
+      # Something else lands on main every time the car is rebuilt.
+      Enum.reduce_while(1..10, car(a).sha, fn i, last ->
+        TrainForge.advance_main!(forge, "busy#{i}.txt", "#{i}\n")
+
+        wait_until(fn ->
+          :sys.get_state(a).train_ejected_head == heads["a"] or
+            (car(a) != nil and car(a).sha != last)
+        end)
+
+        case car(a) do
+          %{sha: sha} -> {:cont, sha}
+          nil -> {:halt, :ejected}
+        end
+      end)
+
+      # The first build and five rebuilds; the next one sends it to the serial path.
+      wait_until(fn -> :sys.get_state(a).train_ejected_head == heads["a"] end)
+      assert length(StubMerger.car_runs()) == 6
+      wait_until(fn -> StubMerger.update_branch_count(mr("a")) == 1 end)
+    end
+  end
+
   describe "falling back to the serial train" do
     test "a project whose CI refuses car pipelines syncs the MR instead", %{forge: forge} do
       heads = stale_mrs(forge, ~w(a))
