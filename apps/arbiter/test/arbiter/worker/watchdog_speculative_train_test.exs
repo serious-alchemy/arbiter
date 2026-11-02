@@ -337,6 +337,56 @@ defmodule Arbiter.Worker.WatchdogSpeculativeTrainTest do
     end
   end
 
+  describe "an ejected MR's fix path" do
+    test "a fix pass on its own red CI is briefed with the car's pipeline", %{forge: forge} do
+      heads = stale_mrs(forge, ~w(a))
+      {:ok, red?} = Agent.start_link(fn -> false end)
+
+      # After the ejection the MR is synced and its own CI goes red.
+      StubMerger.queue_get(mr("a"), [
+        fn ->
+          if Agent.get(red?, & &1),
+            do: %{
+              status: :open,
+              approved: true,
+              block_reason: :ci_failed,
+              pipeline: :failed,
+              head_sha: heads["a"],
+              base_ref: "main"
+            },
+            else: %{
+              status: :open,
+              approved: true,
+              ci_clean: true,
+              pipeline: :success,
+              head_sha: heads["a"],
+              base_ref: "main"
+            }
+        end
+      ])
+
+      StubMerger.set_failing_checks(mr("a"), [%{name: "unit", summary: "1 failure in lib/x.ex"}])
+
+      w = board_in_order(~w(a), workspace(forge), heads)
+      StubMerger.set_car_status(car(w["a"]).sha, "failed")
+      wait_until(fn -> :sys.get_state(w["a"]).train_ejected_head == heads["a"] end)
+
+      # Its own pipeline now decides (and is current: the sync landed).
+      Application.put_env(:arbiter, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 0} end)
+      Agent.update(red?, fn _ -> true end)
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      checks = StubFixPassDispatcher.last_args().checks
+      assert Enum.any?(checks, &(&1.name == "unit"))
+
+      assert %{summary: summary} =
+               Enum.find(checks, &(&1.name == "merge-train car arbiter/train/a"))
+
+      assert summary =~ "pipeline"
+      assert summary =~ "failed"
+    end
+  end
+
   describe "hold-on-red-target (bd-5owt7w)" do
     test "no car is built while the target is red, and a red car is held, not ejected",
          %{forge: forge} do
@@ -444,6 +494,29 @@ defmodule Arbiter.Worker.WatchdogSpeculativeTrainTest do
       # C stood on B's car: it is rebuilt without it.
       wait_until(fn -> car(w["c"]).sha != cc.sha end)
       refute TrainForge.contains?(forge, car(w["c"]).sha, heads["b"])
+    end
+  end
+
+  describe "a car that is not a non-authored merge" do
+    test "is never merged on: its proof fails and it is rebuilt", %{forge: forge} do
+      heads = stale_mrs(forge, ~w(a))
+      w = board_in_order(~w(a), workspace(forge), heads)
+      honest = car(w["a"])
+
+      # Its commit swapped for one with the same parents and a smuggled file,
+      # and that commit's pipeline green.
+      {forged, forged_tree} = TrainForge.forge_car!(forge, honest, "smuggled.txt", "unreviewed\n")
+      StubMerger.set_car_status(forged, "success")
+
+      :sys.replace_state(w["a"], fn s ->
+        %{s | train_car: %{honest | sha: forged, tree: forged_tree}, train_car_status: :running}
+      end)
+
+      # Rebuilt as what it should be (cars are deterministic), never merged on.
+      wait_until(fn -> car(w["a"]).sha == honest.sha end)
+      after_polls(w["a"], 3)
+      assert StubMerger.merge_count(mr("a")) == 0
+      refute TrainForge.contains?(forge, TrainForge.head(forge, "main"), forged)
     end
   end
 

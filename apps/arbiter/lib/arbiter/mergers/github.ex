@@ -1569,6 +1569,7 @@ defmodule Arbiter.Mergers.Github do
         "running" in statuses -> "running"
         Enum.any?(statuses, &(&1 in ["pending", "manual"])) -> "pending"
         "canceled" in statuses -> "canceled"
+        Enum.all?(statuses, &(&1 == "skipped")) -> "skipped"
         true -> "success"
       end
 

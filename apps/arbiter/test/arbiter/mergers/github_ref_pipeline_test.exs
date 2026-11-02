@@ -122,6 +122,15 @@ defmodule Arbiter.Mergers.GithubRefPipelineTest do
       stub_runs([run(12, "c1c1c1c1", "completed", "cancelled")])
       assert {:ok, %{status: "canceled"}} = Github.ref_pipeline(@ref, @car, %{})
     end
+
+    test "every run skipped is skipped: nothing tested the car" do
+      stub_runs([
+        run(12, "c1c1c1c1", "completed", "skipped"),
+        run(13, "c1c1c1c1", "completed", "skipped", "e2e")
+      ])
+
+      assert {:ok, %{status: "skipped"}} = Github.ref_pipeline(@ref, @car, %{})
+    end
   end
 
   describe "cancel_ref_pipeline/3" do

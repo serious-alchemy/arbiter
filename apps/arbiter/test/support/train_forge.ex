@@ -82,6 +82,38 @@ defmodule Arbiter.Test.TrainForge do
     git!(forge.seed, ["rev-parse", "HEAD"])
   end
 
+  @doc """
+  A forged car in the `repo` checkout: `car`'s parents, but a tree carrying
+  `file` besides the merge — content no reviewer saw. Returns `{sha, tree}`.
+  """
+  @spec forge_car!(t(), map(), String.t(), String.t()) :: {String.t(), String.t()}
+  def forge_car!(forge, car, file, content) do
+    index = Path.join(forge.repo, ".git/forged-index")
+    env = [{"GIT_INDEX_FILE", index}]
+    blob_path = Path.join(forge.repo, ".git/forged-blob")
+    File.write!(blob_path, content)
+
+    {_, 0} = System.cmd("git", ["-C", forge.repo, "read-tree", car.sha], env: env)
+    blob = git!(forge.repo, ["hash-object", "-w", blob_path])
+
+    {_, 0} =
+      System.cmd(
+        "git",
+        ["-C", forge.repo, "update-index", "--add", "--cacheinfo", "100644,#{blob},#{file}"],
+        env: env
+      )
+
+    {tree, 0} = System.cmd("git", ["-C", forge.repo, "write-tree"], env: env)
+    tree = String.trim(tree)
+    File.rm(index)
+    File.rm(blob_path)
+
+    sha =
+      git!(forge.repo, ["commit-tree", tree, "-p", car.base, "-p", car.mr_head, "-m", "forged"])
+
+    {sha, tree}
+  end
+
   @doc "The sha `ref` (a branch name) points at on `origin`, or nil."
   @spec head(t(), String.t()) :: String.t() | nil
   def head(forge, ref) do

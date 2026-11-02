@@ -9,6 +9,7 @@ defmodule Arbiter.Mergers.TrainCarTest do
   """
   use ExUnit.Case, async: true
 
+  alias Arbiter.Mergers.SyncProof
   alias Arbiter.Mergers.TrainCar
 
   @moduletag :tmp_dir
@@ -198,6 +199,27 @@ defmodule Arbiter.Mergers.TrainCarTest do
 
       merged = forge_merge!(ctx, "feature/a")
       assert {:ok, ^merged} = TrainCar.landed(ctx.repo, "main", c1)
+    end
+  end
+
+  # The stale-reviewed-SHA guard's reconsideration (`Arbiter.Mergers.SyncProof`)
+  # on a car commit, should one ever be reported as an MR head: the train never
+  # pushes one there, but the guard must not take one for something it is not.
+  describe "the reviewed-SHA guard's view of a car commit" do
+    test "a front car proves out as the reviewed head merged with the target, nothing else",
+         ctx do
+      {:ok, car} = TrainCar.build(ctx.repo, remote(ctx.origin, "main"), ctx.a)
+
+      assert {:ok, :merge, proof} = SyncProof.verify(ctx.repo, "main", ctx.a, car.sha)
+      assert proof =~ "adds no resolution hunk"
+    end
+
+    test "a car on another car carries that MR's commits: never this MR's reviewed content",
+         ctx do
+      {:ok, c1} = TrainCar.build(ctx.repo, remote(ctx.origin, "main"), ctx.a)
+      {:ok, c2} = TrainCar.build(ctx.repo, c1.sha, ctx.b)
+
+      assert {:error, _not_proven} = SyncProof.verify(ctx.repo, "main", ctx.b, c2.sha)
     end
   end
 
