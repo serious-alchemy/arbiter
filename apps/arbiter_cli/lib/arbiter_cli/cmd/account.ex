@@ -37,6 +37,8 @@ defmodule ArbiterCli.Cmd.Account do
                                      [--weekly-threshold F] [--paced-floor F]
                                      [--weekly-paced-floor F]
                                      [--pace-curve plateau|ramp]
+                                     [--daily-burn-cap F|none]
+                                     [--daily-burn-cap-mode shadow|enforce]
                                      [--weekly-warning-policy ignore|hold]
                                      [--window-seconds LABEL=SECONDS[,...]]
                                      [--pace-exempt-priority 0..4|none]
@@ -195,6 +197,8 @@ defmodule ArbiterCli.Cmd.Account do
     paced_floor: :string,
     weekly_paced_floor: :string,
     pace_curve: :string,
+    daily_burn_cap: :string,
+    daily_burn_cap_mode: :string,
     weekly_warning_policy: :string,
     window_seconds: [:string, :keep],
     pace_exempt_priority: :string,
@@ -547,6 +551,14 @@ defmodule ArbiterCli.Cmd.Account do
     if value in ~w(plateau ramp),
       do: value,
       else: Output.die("--pace-curve must be plateau or ramp (got #{inspect(value)})")
+  end
+
+  defp quota_value!("daily_burn_cap", value) when value in ~w(none off), do: :clear
+
+  defp quota_value!("daily_burn_cap_mode", value) do
+    if value in ~w(shadow enforce),
+      do: value,
+      else: Output.die("--daily-burn-cap-mode must be shadow or enforce (got #{inspect(value)})")
   end
 
   defp quota_value!("weekly_warning_policy", value) do

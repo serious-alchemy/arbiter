@@ -104,7 +104,7 @@ defmodule ArbiterCli.Main do
                           [--max-concurrent N|none] [--budget-split queue|fair] [--admission legacy|shadow|enforce|inherit] [--threshold-mode flat|paced]
                           [--throttle-threshold F]
                           [--weekly-threshold F] [--paced-floor F] [--weekly-paced-floor F]
-                          [--pace-curve plateau|ramp] [--weekly-warning-policy ignore|hold] [--window-seconds LABEL=SECONDS]
+                          [--pace-curve plateau|ramp] [--daily-burn-cap F|none] [--daily-burn-cap-mode shadow|enforce] [--weekly-warning-policy ignore|hold] [--window-seconds LABEL=SECONDS]
                           [--pace-exempt-priority 0..4|none] [--pace-exempt-threshold F]
                           [--weekly-pace-exempt-threshold F] [--unset QUOTA_KEY]
       arb account attach  <workspace> <provider> <ref> [--share N] [--weight N]

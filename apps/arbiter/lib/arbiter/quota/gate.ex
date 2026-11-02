@@ -531,9 +531,22 @@ defmodule Arbiter.Quota.Gate do
 
     # `pace_curve` is reported only when the account sets a recognised one, so
     # an account that never opted in keeps exactly the summary it always had.
-    case Map.get(config, "pace_curve") do
-      curve when curve in @pace_curves -> Map.put(summary, :pace_curve, curve)
-      _ -> summary
+    summary =
+      case Map.get(config, "pace_curve") do
+        curve when curve in @pace_curves -> Map.put(summary, :pace_curve, curve)
+        _ -> summary
+      end
+
+    # Likewise the burn governor (bd-cklotu): only on an account that sets a cap.
+    case BurnGovernor.cap(account) do
+      nil ->
+        summary
+
+      cap ->
+        Map.merge(summary, %{
+          daily_burn_cap: cap,
+          daily_burn_cap_mode: Atom.to_string(BurnGovernor.mode(account))
+        })
     end
   end
 

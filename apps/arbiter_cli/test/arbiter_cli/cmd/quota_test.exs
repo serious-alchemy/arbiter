@@ -1034,6 +1034,33 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "weekly_threshold:    23.0%"
     end
 
+    test "shows the daily burn governor of an account that sets one (bd-cklotu)" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => nil,
+          "claude" => nil,
+          "account" => %{"slug" => "personal-max", "provider" => "claude"},
+          "account_policy" => %{
+            "threshold_mode" => "flat",
+            "throttle_threshold" => 0.85,
+            "weekly_threshold" => 0.9,
+            "daily_burn_cap" => 0.25,
+            "daily_burn_cap_mode" => "shadow",
+            "burn_24h" => 0.18
+          },
+          "policy_binding" => %{},
+          "effective_policy" => %{}
+        }
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Quota.run(["--account", "personal-max"]) end)
+
+      assert code == 0
+      assert out =~ "daily_burn_cap:      25.0% (shadow)"
+      assert out =~ "burn_24h:            18.0%"
+    end
+
     test "--account is forwarded to the API as a query param, taking priority over --workspace" do
       stub_routes([
         {{"get", "/api/quota"},

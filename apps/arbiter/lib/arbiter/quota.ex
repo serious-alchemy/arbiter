@@ -491,7 +491,7 @@ defmodule Arbiter.Quota do
     elapsed = elapsed_fractions(account)
 
     %{
-      account_policy: Gate.account_policy_summary(account),
+      account_policy: account |> Gate.account_policy_summary() |> put_burn_24h(account),
       policy_binding: %{
         throttle_threshold:
           Gate.binding_side({account, workspace}, :throttle_threshold,
@@ -524,6 +524,15 @@ defmodule Arbiter.Quota do
   # setting it has stopped using. `nil` for either window when there is no
   # account, no snapshot yet, or that window's length/`reset_at` is unknown —
   # `Gate.binding_side/3` / `effective_threshold/3` fall back gracefully.
+  # The latest poll-time `burn_24h` (bd-cklotu), beside the cap it is read
+  # against; only on a summary that carries a cap.
+  defp put_burn_24h(%{daily_burn_cap: _} = summary, %ProviderAccount{} = account) do
+    snapshot = Snapshot.normalize(latest_for_provider(account.id, account.provider))
+    Map.put(summary, :burn_24h, snapshot && snapshot.burn_24h)
+  end
+
+  defp put_burn_24h(summary, _account), do: summary
+
   defp elapsed_fractions(nil), do: %{throttle_threshold: nil, weekly_threshold: nil}
 
   defp elapsed_fractions(%ProviderAccount{} = account) do
