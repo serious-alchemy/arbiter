@@ -881,6 +881,69 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       refute_received {:podman, _}
     end
 
+    # bd-5fpj59: a dispatch that must not park on the publish asks with
+    # `wait: false`: it gets `{:pending, key}` at once, the publish runs on in
+    # the server (single flight) and `on_done` is told when it settles.
+    test "wait: false answers pending at once and calls on_done with the result",
+         %{opts: opts, ctx: ctx} do
+      test = self()
+
+      slow =
+        runner(test, %{
+          "push" => fn args ->
+            send(test, {:push_blocked, self()})
+            receive do: (:release -> :ok)
+            remote = List.last(args)
+            File.write!(flag(args, "--digestfile"), "sha256:" <> digest_for(remote))
+            {"", 0}
+          end
+        })
+
+      nowait =
+        opts
+        |> Keyword.put(:runner, slow)
+        |> Keyword.put(:wait, false)
+        |> Keyword.put(:on_done, fn key, result -> send(test, {:settled, key, result}) end)
+
+      assert {:pending, key} = Publisher.ensure_ready(ctx, nowait)
+      assert_receive {:push_blocked, blocked}
+
+      # A second no-wait caller joins the same flight (no second build).
+      assert {:pending, ^key} = Publisher.ensure_ready(ctx, nowait)
+
+      send(blocked, :release)
+      release_all()
+
+      assert_receive {:settled, ^key, {:ok, %{ref: ref}}}, 5_000
+      assert_receive {:settled, ^key, {:ok, %{ref: ^ref}}}, 5_000
+
+      # Cached: the next no-wait call is the image itself.
+      assert {:ok, %{ref: ^ref}} = Publisher.ensure_ready(ctx, nowait)
+    end
+
+    test "wait: false reports a failed publish once, then publishes again",
+         %{opts: opts, ctx: ctx} do
+      test = self()
+
+      failing =
+        runner(test, %{"push" => fn _ -> {"denied", 1} end})
+
+      nowait =
+        opts
+        |> Keyword.put(:runner, failing)
+        |> Keyword.put(:wait, false)
+        |> Keyword.put(:on_done, fn key, result -> send(test, {:settled, key, result}) end)
+
+      assert {:pending, key} = Publisher.ensure_ready(ctx, nowait)
+      assert_receive {:settled, ^key, {:error, {:push_failed, _, 1, _}}}, 5_000
+
+      # The failure is handed to the next no-wait caller, once...
+      assert {:error, {:push_failed, _, 1, _}} = Publisher.ensure_ready(ctx, nowait)
+      # ...and is never sticky: the call after that starts a new publish.
+      assert {:pending, ^key} = Publisher.ensure_ready(ctx, nowait)
+      assert_receive {:settled, ^key, {:error, {:push_failed, _, 1, _}}}, 5_000
+    end
+
     test "fallback/2 follows worker.placement" do
       assert Publisher.fallback(:prefer_remote, {:timeout, 5}) == {:local, {:timeout, 5}}
       assert Publisher.fallback(:remote_only, {:timeout, 5}) == {:hold, {:timeout, 5}}
