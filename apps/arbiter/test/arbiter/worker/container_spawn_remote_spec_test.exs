@@ -192,6 +192,33 @@ defmodule Arbiter.Worker.ContainerSpawnRemoteSpecTest do
     refute inspect(spec["command"]) =~ "glpat-run-token"
   end
 
+  # bd-8ufzng: the Free-tier bot PAT rides the spec's secrets (tmpfs on the node),
+  # never its env or command, and the bot's own secret is not in `withheld`.
+  test "a gitlab_bot_token run's spec holds the PAT as secrets only", %{request: request} do
+    alias Arbiter.Worker.GitCredential
+    alias Arbiter.Worker.GitCredential.Material
+
+    material = %Material{
+      kind: :gitlab_bot_token,
+      token: "glpat-bot-0123456789",
+      host: "gitlab.com",
+      username: "oauth2",
+      remote: "acme/tonic"
+    }
+
+    {:ok, git} = GitCredential.remote_delivery(material)
+    request = Map.merge(request, %{git_secrets: git.secrets, env: git.env, withheld: []})
+
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    assert spec["secrets"]["ARB_GIT_TOKEN"] == "glpat-bot-0123456789"
+    assert spec["secrets"]["GITLAB_TOKEN"] == "glpat-bot-0123456789"
+    assert spec["secrets"]["GITLAB_HOST"] == "gitlab.com"
+    refute inspect(spec["env"]) =~ "glpat-bot"
+    refute inspect(spec["command"]) =~ "glpat-bot"
+  end
+
   test "no ref, no ref key: a build node's spec is unchanged", %{request: request} do
     assert {:ok, spec} =
              ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
