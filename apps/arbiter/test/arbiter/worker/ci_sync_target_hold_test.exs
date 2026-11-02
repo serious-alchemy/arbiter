@@ -70,4 +70,23 @@ defmodule Arbiter.Worker.CiSyncTargetHoldTest do
     Arbiter.Test.StubMerger.set_branch_pipeline(failed(nil))
     assert hold(workspace(%{})) =~ "target branch red"
   end
+
+  describe "judge_failure/3 (a merge-train car's failed pipeline, bd-6dyva0)" do
+    test "only ignored deploy jobs failing is not a code failure" do
+      ws = workspace(%{"deploy_watch" => %{"jobs" => ["deploy-worker"]}})
+
+      {:ok, pipeline} =
+        failed([job("unit-tests", "test", "success"), job("deploy-worker", "deploy")])
+
+      assert {:ignored, ["deploy-worker"]} = CiSync.judge_failure(pipeline, ws, "vstim")
+    end
+
+    test "a failed test job is red, and no job detail keeps the pipeline verdict" do
+      {:ok, pipeline} = failed([job("unit-tests", "test")])
+      assert {:red, ["unit-tests"]} = CiSync.judge_failure(pipeline, workspace(%{}), "vstim")
+
+      {:ok, bare} = failed(nil)
+      assert {:red, []} = CiSync.judge_failure(bare, workspace(%{}), "vstim")
+    end
+  end
 end

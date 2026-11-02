@@ -86,6 +86,17 @@ defmodule Arbiter.Worker.CiSync do
 
   def target_hold(_adapter, _mr_ref, _base, _workspace, _repo), do: nil
 
+  @doc """
+  Does a *failed* pipeline say the code is broken? `{:red, culprits}` naming the
+  failed jobs that test it (`[]` when the pipeline carries no job detail, so the
+  pipeline-level verdict stands), or `{:ignored, names}` when only deploy and
+  post-merge jobs failed — the same rules as `target_hold/5` (bd-dtbsgx). The
+  speculative merge train judges a failed car pipeline with it (bd-6dyva0).
+  """
+  @spec judge_failure(map(), map() | nil, String.t() | nil) ::
+          {:red, [String.t()]} | {:ignored, [String.t()]}
+  def judge_failure(pipeline, workspace, repo), do: judge(pipeline, workspace, repo)
+
   defp judge(%{jobs: jobs}, workspace, repo) when is_list(jobs) do
     failed = Enum.filter(jobs, &(Map.get(&1, :status) == "failed"))
     {ignore_jobs, ignore_stages} = ignored(workspace, repo)
