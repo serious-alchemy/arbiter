@@ -274,4 +274,47 @@ defmodule Arbiter.Worker.HostCredentialTest do
       assert HostCredential.token(cred) == nil
     end
   end
+
+  # bd-8ufzng: the host's push uses the same dispatch guard as a spawn.
+  describe "for_repo/3 with a gitlab_bot_token" do
+    defp bot_ws do
+      workspace(
+        %{"repos" => %{"tonic" => %{"kind" => "gitlab_bot_token", "secret" => "GL_BOT"}}},
+        %{"GL_BOT" => "glpat-bot-host"}
+      )
+    end
+
+    defp stub_bot(scopes) do
+      Req.Test.stub(@http, fn conn ->
+        case conn.request_path do
+          "/api/v4/personal_access_tokens/self" ->
+            Req.Test.json(conn, %{
+              "active" => true,
+              "scopes" => scopes,
+              "expires_at" => Date.utc_today() |> Date.add(30) |> Date.to_iso8601()
+            })
+
+          "/api/v4/projects" ->
+            Req.Test.json(conn, [%{"path_with_namespace" => "acme/tonic"}])
+        end
+      end)
+    end
+
+    test "pushes with the bot token, served by the path-pinned helper" do
+      stub_bot(["read_api", "write_repository"])
+
+      assert {:ok, %{material: %Material{kind: :gitlab_bot_token}, env: env} = cred} =
+               HostCredential.for_repo(bot_ws(), "tonic", opts())
+
+      assert {"ARB_GIT_TOKEN", "glpat-bot-host"} in env
+      assert HostCredential.token(cred) == "glpat-bot-host"
+    end
+
+    test "a token that has grown an api scope is refused for the push too" do
+      stub_bot(["api", "write_repository"])
+
+      assert {:error, {:git_credential_bot_token_refused, {:scopes, ["api"]}}} =
+               HostCredential.for_repo(bot_ws(), "tonic", opts())
+    end
+  end
 end
