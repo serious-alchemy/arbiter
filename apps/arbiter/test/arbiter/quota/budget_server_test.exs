@@ -18,7 +18,9 @@ defmodule Arbiter.Quota.Budget.ServerTest do
 
   setup do
     {:ok, agent} =
-      Agent.start_link(fn -> %{used: 0.19, now: @now, hard: nil, pools: ["claude"]} end)
+      Agent.start_link(fn ->
+        %{used: 0.19, now: @now, hard: nil, pools: ["claude"], seats: 0, rho: nil}
+      end)
 
     Phoenix.PubSub.subscribe(Arbiter.PubSub, "board")
     test = self()
@@ -36,10 +38,14 @@ defmodule Arbiter.Quota.Budget.ServerTest do
             quota_config: %{"threshold_mode" => "paced"}
           },
           pool: pool,
-          rates: for({{@account, ^pool, w}, r} <- calibration.rates, into: %{}, do: {w, r}),
+          rates:
+            if(state.rho,
+              do: %{"5h" => %{rho: state.rho}},
+              else: for({{@account, ^pool, w}, r} <- calibration.rates, into: %{}, do: {w, r})
+            ),
           quota: snapshot(state.used, state.now),
           now: state.now,
-          seats: 0,
+          seats: state.seats,
           hard: state.hard
         }
       end
@@ -182,6 +188,36 @@ defmodule Arbiter.Quota.Budget.ServerTest do
     :ok = Server.recompute(server)
     assert_receive {:budget_changed, _, ^low, rose, _}
     assert rose > low
+  end
+
+  test "the first-seat rule holds through the server: 1 at once, 1 on later recomputes, 0 once the seat is in use, 1 again when it is free",
+       ctx do
+    {server, table} = start(ctx)
+    # raw ~0.58 at 10% used: floor 0, and nothing here ever clears B + 1.25
+    set(ctx, used: 0.10, rho: 0.6)
+
+    :ok = Server.recompute(server)
+    assert_receive {:budget_changed, _, nil, 1, reason}
+    assert reason =~ "first-seat rule"
+    assert %Budget{budget: 1, raw: raw} = Server.get(@account, "claude", nil, table)
+    assert raw < 1.0
+
+    set(ctx, now: DateTime.add(@now, 90, :second))
+    :ok = Server.recompute(server)
+    refute_receive {:budget_changed, _, _, _, _}, 50
+    assert %Budget{budget: 1, free: 1} = Server.get(@account, "claude", nil, table)
+
+    # the published seat is taken before the next recompute: nothing is stopped,
+    # the next recompute no longer applies the rule, and the pool is full
+    set(ctx, seats: 1, now: DateTime.add(@now, 180, :second))
+    :ok = Server.recompute(server)
+    assert_receive {:budget_changed, _, 1, 0, _}
+    assert %Budget{budget: 0, free: 0, seats: 1} = Server.get(@account, "claude", nil, table)
+
+    # the run ends: the idle pool gets its seat back at once, not after a dwell
+    set(ctx, seats: 0, now: DateTime.add(@now, 181, :second))
+    :ok = Server.recompute(server)
+    assert_receive {:budget_changed, _, 0, 1, _}
   end
 
   test "a hard zero is published at once", ctx do

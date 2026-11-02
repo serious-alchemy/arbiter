@@ -1,7 +1,7 @@
 defmodule Arbiter.Quota.BudgetFirstSeatTest do
   @moduledoc """
   The first-seat rule (bd-22w64f; `docs/design/provider-dynamic-concurrency.md`
-  §3.9): a pool with no seats in use whose usage is below its line on every
+  §3.10): a pool with no seats in use whose usage is below its line on every
   trusted window publishes a budget of at least 1, whatever `raw` says, through
   `compute/1`, `hysteresis/3` and `publish/3`. Hard zeros and a ceiling of 0
   still win; a pool with no trusted reading and a pool with `raw >= 1` are

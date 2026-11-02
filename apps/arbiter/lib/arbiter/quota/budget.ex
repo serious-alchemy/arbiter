@@ -38,6 +38,32 @@ defmodule Arbiter.Quota.Budget do
   directly (I6). `ρ` is never below `ρ_min = prior / 4`, so every `n` is
   finite (I11).
 
+  ## The first-seat rule (§3.10, bd-22w64f)
+
+  `floor(raw)` can be 0 for a small pool that still has headroom below its line:
+  one seat for the whole horizon costs more than the headroom. Worse, an idle
+  window's clock does not start until first use (Codex's 5h session and the agy
+  windows report `reset = capture + window length` while idle), so the line
+  does not climb while there is no seat, and with no seat there is no use. So:
+
+  > A pool with no seats in use whose usage is below its line on every trusted
+  > window gets a budget of at least 1, whatever `raw` says.
+
+  "Below its line" is `used_now < line_now` on each trusted window; a window at
+  or above its line, even when another window has headroom, gives no seat. The
+  rule is applied in `compute/1` (through `finalize/2`, so `exempt_budget`
+  follows and never falls below `budget`) and again through `publish/3`: it
+  skips the hysteresis dwell on a rise and lands a fall on 1, not 0. `raw` and
+  the binding window stay as computed, and `reason` says the rule applied and
+  shows the raw figure. Hard zeros (paused, provider refusing, quota stop,
+  unavailable), a `max_concurrent` or share of 0 and a pool with no trusted
+  reading are untouched, and a pool with a seat in use (`seats > 0`) is
+  computed as before. Once the seat is taken the next recompute no longer
+  applies the rule and the pool is full; the seat is never taken away (I8). The
+  overshoot is accepted: one run can use a large share of a small window, and
+  the provider's own limit still applies. The gate's `used >= line` hold is a
+  separate check and is unchanged.
+
   ## Inputs (`compute/1`)
 
     * `:quota` — a quota row or a `Arbiter.Quota.Gate.Snapshot`; `nil` for no
@@ -271,7 +297,7 @@ defmodule Arbiter.Quota.Budget do
     )
   end
 
-  # The first-seat rule (§3.9): a pool with no seat in use, below its line on
+  # The first-seat rule (§3.10): a pool with no seat in use, below its line on
   # every trusted window, gets at least one seat whatever `raw` says. An idle
   # window's clock does not start until first use, so its line does not climb
   # while the pool has no seat; without this the pool would wait on a rise that
@@ -716,7 +742,9 @@ defmodule Arbiter.Quota.Budget do
   Publish a computed budget through hysteresis: `{published, next_state}`. A
   hard zero, a lost reading and an unmetered pool are not noise and skip
   hysteresis in both directions (§3.5): they publish as computed and reset
-  the state, so recovery takes the first reading's floor.
+  the state, so recovery takes the first reading's floor. The first-seat rule
+  (§3.10) is not swallowed here either: an idle pool under its line publishes
+  at least 1 at once, with no dwell, and the state follows what is published.
   """
   @spec publish(t(), hysteresis(), DateTime.t()) :: {t(), hysteresis()}
   def publish(%__MODULE__{binding: binding} = computed, _state, now)
@@ -726,9 +754,9 @@ defmodule Arbiter.Quota.Budget do
   def publish(%__MODULE__{raw: raw} = computed, state, now) do
     next = hysteresis(state, raw, now)
     published = finalize(computed, next.budget)
+    state = first_seat_state(computed, next)
 
-    {%{published | published_at: now, pending_rise: next.pending},
-     first_seat_state(computed, next)}
+    {%{published | published_at: now, pending_rise: state.pending}, state}
   end
 
   # The first-seat rule is not noise: it skips the dwell on a rise and lands a

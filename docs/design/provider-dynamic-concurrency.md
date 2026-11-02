@@ -622,6 +622,49 @@ limit. The change is at the line. A pool ahead of pace admits proportionally
 less instead of flipping to zero. O1 asks the operator to confirm that, and
 shadow mode measures it first (§10.3).
 
+### 3.10 The first-seat rule
+
+`floor(raw)` can be 0 while a small pool still has headroom under its line:
+`raw = (line(now + H) − u_now − b·H)/(ρ·H)`, and one seat for the whole horizon
+can cost more than the headroom. On 2026-11-02, at the start of a fresh window,
+Codex 5h had `raw` 0.60 (ρ 43 %/seat-h, H 1.19 h) and would have needed a 40 %
+floor to reach 1.0.
+
+That can deadlock. Idle Codex 5h and agy windows report `reset = capture time +
+window length`: the clock doesn't start until first use, so the line doesn't
+climb while the pool is idle. No seat means no use, and no use means no climb.
+
+**The rule.** A pool with no seats in use whose usage is below its line on every
+trusted window gets a budget of at least 1, whatever `raw` says.
+
+- **Below the line** is `used_now < line_now` on each trusted window. A window
+  at or above its line gives no seat, even when another window of the same pool
+  has headroom. The gate's separate `used ≥ line` hold is unchanged.
+- **Hard zeros and ceilings win.** Paused, provider refusing, quota stop,
+  unavailable and a `max_concurrent` or share of 0 all stay at 0 (§3.5).
+- **No trusted reading** keeps the §3.5 rules unchanged.
+- **Through hysteresis.** The rule is applied in `compute/1` and again in
+  `publish/3`, so it takes effect on the first publish and on every later one: it
+  doesn't wait for the §3.7 rise margin and dwell (with `raw` 0.6 a rise would
+  never come), and a fall from a higher published budget lands on 1, not 0.
+  `hysteresis/3` itself is unchanged.
+- **`exempt_budget`** follows the same rule and never falls below `budget`.
+- **Output.** `raw` and the binding window are as computed. `reason` says the
+  first-seat rule applied and shows the raw figure, for example `first-seat rule:
+  no seat in use and under the line on every window, so 1 seat (raw 0.60): 5h
+  binds, …`, so a budget of 1 above `raw` reads correctly in `arb quota`,
+  `quota_get` and the dashboard.
+- **Once the seat is taken** (`seats > 0`) the next recompute computes as before,
+  the pool is full (`free` is 0), and the running seat is never stopped (I8). When
+  it ends and the pool is idle again, the rule gives it a seat at once.
+- **Readers need no change.** `SeatCheck`, `Admission`, `ResumeSlot`, provider and
+  reviewer routing and the walk read the published integer. A pool with no seat in
+  use admits one card however heavy its model weighs, while the budget is at least
+  1.
+
+Overshoot is accepted: one Codex run can use a large share of a small window,
+and the provider's own limit still applies.
+
 ## 4. The scheduler walk
 
 ### 4.1 Capacity sets first

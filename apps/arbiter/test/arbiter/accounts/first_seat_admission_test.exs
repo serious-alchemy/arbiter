@@ -1,7 +1,7 @@
 defmodule Arbiter.Accounts.FirstSeatAdmissionTest do
   @moduledoc """
   The first-seat rule's readers (bd-22w64f; design
-  `provider-dynamic-concurrency.md` §3.9). Every budget here is the real output
+  `provider-dynamic-concurrency.md` §3.10). Every budget here is the real output
   of `Budget.compute/1` + `Budget.publish/3` for an idle pool under its line
   with raw 0.6, never a hand-built integer, and the readers are exercised
   unchanged: `SeatCheck`, `Admission` (the real reservation), `ResumeSlot`,
