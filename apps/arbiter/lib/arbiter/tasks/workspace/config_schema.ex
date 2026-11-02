@@ -196,6 +196,23 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       train_ready_ticks     positive integer (>= 1; 0 is ignored) — polls the merge head may report
                             itself ready to merge without merging before the next MR takes over
                             (default: 10).
+      train                 map — (bd-6dyva0) the auto-merge lane's speculative merge train.
+                            depth: positive integer (default 1 = the serial train above: one MR
+                            per target synced and tested at a time). With depth K > 1, up to K
+                            approved, green MRs that are behind the target are tested at once on
+                            stacked merge commits (target + A, target + A + B, ...) pushed to
+                            Arbiter-owned refs (ref_prefix, default "arbiter/train/"), never to
+                            the MR branches, and merge in order, each only when the forge's merge
+                            would land exactly the tree its car tested. A red car of an MR's own
+                            sends that MR back to the serial path. Per repo via
+                            merge.repos.<repo>.train. Needs a forge that merges a branch that is
+                            behind (GitLab merge_method merge; GitHub without "require branches to
+                            be up to date"), CI that runs on the car refs (GitLab: a pipeline the
+                            train creates with ARBITER_TRAIN_CAR=true, which workflow:rules must
+                            admit; GitHub: on: push for the car branches, or workflow: a workflow
+                            file to dispatch on them) and a repo_paths entry for the repo. While
+                            worker.repos.<repo>.ci_backpressure holds, only the front car is
+                            built. See docs/merge-sync-strategy.md
       repos                 map, repo_paths key -> per-repo override of any key
                             above (strategy, config, auto_merge, …). Deep-merged
                             over the workspace-level merge block, so unset
