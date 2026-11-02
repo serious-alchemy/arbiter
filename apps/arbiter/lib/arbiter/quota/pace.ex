@@ -180,8 +180,8 @@ defmodule Arbiter.Quota.Pace do
   @doc """
   The paced line itself, for `floor` and an `elapsed` fraction in `0.0..1.0`,
   under `curve` (see "The pace curve" in the moduledoc). The one place the two
-  formulas live; `side_ceiling/2` and any caller that draws or reports the line
-  (the quota chart, `Arbiter.Quota.Budget`) go through it.
+  formulas live; `side_ceiling/2` goes through it, and so should anything that
+  needs the line's value outside the gate.
   """
   @spec line(curve(), float(), float()) :: float()
   def line(:ramp, floor, elapsed), do: floor + (1.0 - floor) * elapsed

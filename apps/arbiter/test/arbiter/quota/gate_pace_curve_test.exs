@@ -237,14 +237,16 @@ defmodule Arbiter.Quota.GatePaceCurveTest do
   end
 
   describe "account_policy_summary/1" do
-    test "reports the curve, defaulting to plateau" do
-      assert %{pace_curve: "plateau"} = Gate.account_policy_summary(account(%{}))
+    test "reports the curve only when one is set; an unset or unrecognised one adds no key" do
+      refute Map.has_key?(Gate.account_policy_summary(account(%{})), :pace_curve)
 
       assert %{pace_curve: "ramp"} =
                Gate.account_policy_summary(account(%{"pace_curve" => "ramp"}))
 
-      assert %{pace_curve: "plateau"} =
-               Gate.account_policy_summary(account(%{"pace_curve" => "x"}))
+      refute Map.has_key?(
+               Gate.account_policy_summary(account(%{"pace_curve" => "x"})),
+               :pace_curve
+             )
     end
   end
 end

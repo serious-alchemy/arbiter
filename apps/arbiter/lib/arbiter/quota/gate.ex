@@ -520,14 +520,20 @@ defmodule Arbiter.Quota.Gate do
     config = account_config(account)
     mode = parse_mode(Map.get(config, "threshold_mode"))
 
-    %{
+    summary = %{
       threshold_mode: Atom.to_string(mode),
       throttle_threshold: if(mode == :flat, do: threshold(account)),
       weekly_threshold: if(mode == :flat, do: weekly_threshold(account)),
       paced_floor: paced_floor(config, :primary),
-      weekly_paced_floor: paced_floor(config, :long),
-      pace_curve: config |> Map.get("pace_curve") |> parse_curve() |> Atom.to_string()
+      weekly_paced_floor: paced_floor(config, :long)
     }
+
+    # `pace_curve` is reported only when the account sets a recognised one, so
+    # an account that never opted in keeps exactly the summary it always had.
+    case Map.get(config, "pace_curve") do
+      curve when curve in @pace_curves -> Map.put(summary, :pace_curve, curve)
+      _ -> summary
+    end
   end
 
   @doc """
