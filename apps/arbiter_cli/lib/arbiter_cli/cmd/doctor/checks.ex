@@ -1005,8 +1005,34 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     end
   end
 
-  # "default: claude=privileged, antigravity/gemini-3.8-flash-low=quarantine; emricare: …"
+  # "default: claude=privileged, antigravity/gemini-3.8-flash-low=quarantine; emricare: …",
+  # then each GitLab bot token's expiry (bd-8ufzng): "; default: tonic bot token expires 2027-01-31 (60d)".
   defp guardrail_tiers_detail(workspaces) do
+    tiers = guardrail_subjects_detail(workspaces)
+
+    case guardrail_token_detail(workspaces) do
+      "" -> tiers
+      tokens -> tiers <> "; " <> tokens
+    end
+  end
+
+  defp guardrail_token_detail(workspaces) do
+    workspaces
+    |> Enum.flat_map(fn ws ->
+      for token <- Map.get(ws, "git_credential_tokens") || [] do
+        when_text =
+          case token do
+            %{"expires_at" => nil} -> "has no expiry on record"
+            %{"expires_at" => date, "days_left" => days} -> "expires #{date} (#{days}d)"
+          end
+
+        "#{Map.get(ws, "workspace")}: #{Map.get(token, "repo")} bot token #{when_text}"
+      end
+    end)
+    |> Enum.join("; ")
+  end
+
+  defp guardrail_subjects_detail(workspaces) do
     Enum.map_join(workspaces, "; ", fn ws ->
       subjects =
         ws

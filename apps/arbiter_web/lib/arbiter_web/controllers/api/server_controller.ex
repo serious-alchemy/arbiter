@@ -157,10 +157,23 @@ defmodule ArbiterWeb.Api.ServerController do
   # (`Arbiter.Guardrails.Report`).
   def guardrails(conn, _params) do
     case Ash.read(Arbiter.Tasks.Workspace) do
-      {:ok, workspaces} -> json(conn, Guardrails.Report.build(workspaces))
-      {:error, _} = err -> err
+      {:ok, workspaces} ->
+        json(
+          conn,
+          Guardrails.Report.build(workspaces,
+            probe: true,
+            req_options: git_credential_req_options()
+          )
+        )
+
+      {:error, _} = err ->
+        err
     end
   end
+
+  # The request options the GitLab bot-token expiry probe merges (tests stub with `plug:`).
+  defp git_credential_req_options,
+    do: Application.get_env(:arbiter, :git_credential_req_options, [])
 
   defp jail_diagnosis(nil), do: %{available: true}
 

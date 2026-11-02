@@ -14,13 +14,14 @@ Arbiter cannot create these for you. For each repo workers push to, pick one:
 | `deploy_key` | An SSH keypair (`ssh-keygen -t ed25519 -N '' -f key`), added as a **deploy key with write access** on that one repo (GitHub: Settings → Deploy keys → Allow write access; GitLab: Repository settings → Deploy keys → Grant write permissions). One key per repo: both forges refuse to reuse a key across repos. | The **private** key as a workspace secret |
 | `github_app` | A GitHub App with *Repository permissions*: Contents **read & write**, Pull requests **read & write**, Issues **read & write**, Metadata read (nothing under *Account* permissions, no *Administration*). Install it on the repos only (not "all repositories"). Note the App id, the installation id (the number in the installation's URL) and generate a private key (`.pem`). | The `.pem` as a workspace secret, plus the two ids |
 | `gitlab_project_token` | A **parent** GitLab personal access token (scope `api`) of a Maintainer or Owner of the one project, ideally a dedicated service-account user. Arbiter mints the token a worker holds from it, per run (see "GitLab" below). | The parent token as a workspace secret |
+| `gitlab_bot_token` | **GitLab Free tier** (project access tokens need Premium). A dedicated **bot user**, Developer on the target projects and nothing else, and a personal access token for it (`read_api` + `read_repository` + `write_repository`, with an expiry). Weaker than `gitlab_project_token`: see "GitLab Free tier" below. | The bot's PAT as a workspace secret |
 | `token` | A **fine-grained** GitHub personal access token limited to the one repo (Contents + Pull requests + Issues read/write), or a GitLab **project** access token (role Developer, scopes `api`/`write_repository`). A **classic** GitHub PAT is refused: it reaches every repo its owner does. | The token as a workspace secret |
 
 A GitHub App is the most useful kind on GitHub: Arbiter mints a fresh installation token
 per dispatch, restricted (`repositories`) to the ticket's repo with only the
 permissions a worker needs, and a second, narrower one for `tracker_write`. A
 deploy key has no API access, so the tracker token comes from the `tracker_write`
-binding (below). `gitlab_project_token` is the GitLab counterpart.
+binding (below). `gitlab_project_token` is the GitLab counterpart; `gitlab_bot_token` is its Free-tier fallback.
 
 ## Registering it
 
@@ -56,7 +57,7 @@ loose). Optional per-repo keys: `host` (default `github.com`; `gitlab.com` for
 `group/subgroup/project` on GitLab; default is parsed from the checkout's `origin`),
 `api_url` (GitHub Enterprise; for `gitlab_project_token` the REST base of a self-managed
 instance, `https://git.example.com/api/v4`, default `https://<host>/api/v4`),
-`expires_in_days` (`gitlab_project_token` only: 1 to 7, default 2).
+`expires_in_days` (`gitlab_project_token` only: 1 to 7, default 2). `gitlab_bot_token` takes `secret` (required), `projects` and `expires_at` (below).
 The config is validated on write; a typo is refused rather than read as "unset".
 
 ## When Arbiter refuses to dispatch
@@ -92,7 +93,7 @@ the workspace does not have (`git_credential_secret_missing`).
 | Unsandboxed Claude / Codex | `0600` file in a per-worker dir under `~/.cache/arbiter/scratch/git-key`, named by `GIT_SSH_COMMAND` (`ssh -F /dev/null -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none`) | `ARB_GIT_TOKEN` in the env, served by a git credential helper (below) |
 | bwrap jail (agy) | The same file, bound read-only at its own path over a blanked key dir (a sibling's key is unreachable); with any scoped credential (deploy key, token or App) no `~/.ssh` identity and no `~/.config/gh` login is bound back; the egress `ProxyCommand` is composed onto the command | env, as above |
 | podman | A podman **secret** (`podman run --secret NAME,type=mount,target=arb_git_key,uid=…,mode=0400`), created from a `0600` file that is deleted at once, removed with the container, by an owner-exit reaper and at server boot | A podman secret of `type=env` (`ARB_GIT_TOKEN`); the value is never on argv or in `podman inspect` |
-| podman on a remote node (bd-akp9ae) | **Never carried**: the run stays on the primary | **GitHub App and `gitlab_project_token` only**: the installation (or project) token minted for the run rides in the run spec's `secrets` and reaches the container through the node's per-run tmpfs file (never argv, `-e` or the node's disk), which is removed when the container exits, is cancelled or is reaped; the token is **revoked** when the run's worker exits. A static `token` is never carried: the run stays on the primary |
+| podman on a remote node (bd-akp9ae) | **Never carried**: the run stays on the primary | **GitHub App, `gitlab_project_token` and `gitlab_bot_token` only**: the installation (or project) token minted for the run (or, for `gitlab_bot_token`, the bot's static PAT, which is not revoked) rides in the run spec's `secrets` and reaches the container through the node's per-run tmpfs file (never argv, `-e` or the node's disk), which is removed when the container exits, is cancelled or is reaped; the token is **revoked** when the run's worker exits. A static `token` is never carried: the run stays on the primary |
 
 Under podman only one kind of run takes a credential into its container at all: a
 ReviewGate **fix round** on a repo with a scoped credential, which pushes its own
@@ -196,6 +197,97 @@ project only, and it no longer sees the operator's `glab` login (the bwrap jail 
 changed: the GitLab merger keeps its `credentials_ref` for MR calls, and the Direct and GitLab
 mergers' own branch pushes still run as the operator.
 
+## GitLab Free tier: `gitlab_bot_token` (bd-8ufzng)
+
+`gitlab_project_token` needs project access tokens, which GitLab.com offers only on
+**Premium or Ultimate**. On a **Free** group (checked 2026-10-27: both
+`serious-alchemy` and `emricare` report `plan: free`) there is nothing to mint. The
+Free-tier kind is the operator's own **bot user** with a long-lived personal access
+token, limited to the projects *by membership*, and delivered to a node like the minted
+kinds. It is an explicit opt-in and it is **weaker**; read "Compared with
+`gitlab_project_token`" below before using it.
+
+### Setting it up
+
+1. Create a **dedicated GitLab user** for Arbiter (a normal user account, not your own).
+   Add it as **Developer**, and nothing else, on exactly the projects workers push to
+   (for example `vstim`, `tonic`, `tonic_device`). It must be a member of **no other**
+   project or group: Arbiter refuses the spawn if it is.
+2. Sign in as the bot (or use an admin to impersonate it) and create a **personal access
+   token** with scopes **`read_api`, `read_repository`, `write_repository`** and an
+   **expiry**. Never `api`, never `sudo`.
+3. `arb workspace secret set GITLAB_BOT_PAT --file bot-pat`.
+4. In the workspace `config`, per repo:
+
+   ```json
+   "git_credentials": {
+     "repos": {
+       "vstim":        {"kind": "gitlab_bot_token", "secret": "GITLAB_BOT_PAT",
+                        "remote": "serious-alchemy/vstim",
+                        "projects": ["emricare/tonic", "emricare/tonic_device"],
+                        "expires_at": "2027-05-01"},
+       "tonic":        {"kind": "gitlab_bot_token", "secret": "GITLAB_BOT_PAT"},
+       "tonic_device": {"kind": "gitlab_bot_token", "secret": "GITLAB_BOT_PAT"}
+     }
+   }
+   ```
+
+   `secret` is required. `host` (default `gitlab.com`), `username` (default `oauth2`),
+   `remote` and `api_url` are as for the other GitLab kind. `projects` lists further
+   `owner/repo` paths the bot may be a member of, and `expires_at` (`YYYY-MM-DD`) is your
+   record of the PAT's expiry. Entries that share a `secret` and `host` widen each other's
+   allowed projects (their `remote` and `projects`), so you list a project once.
+5. `arb server doctor` shows the token's expiry and warns once it is 14 days away.
+
+### What Arbiter checks at every dispatch
+
+The PAT is static, so the check runs before **every** delivery (a spawn, and the host's
+push), with the token itself, and fails closed (an unreachable or unreadable answer is a
+refusal, never a delivery):
+
+* `GET /personal_access_tokens/self`: the token must be active, carry **only**
+  `read_api`, `read_repository` and `write_repository` (so `api`, `sudo` or any other scope
+  refuses the spawn), and have an **expiry** that has not passed. A configured `expires_at`
+  in the past refuses without asking GitLab.
+* `GET /projects?membership=true` (all pages): the bot's projects must be a subset of the
+  allowed ones (the spawn's own project, the entry's `projects`, and sibling entries with the
+  same `secret`), and must include the spawn's project. A project beyond that refuses the
+  spawn and the message names it; fix it by removing the bot's membership (or listing the
+  project, if the bot is meant to have it).
+
+Each refusal says why (`the GitLab bot token was refused: it carries scope(s) api; only
+read_api, read_repository, write_repository are allowed ...`) and no worker runs on the
+operator's credential instead.
+
+### Delivery
+
+As `gitlab_project_token`: `ARB_GIT_TOKEN` with the path-pinned git credential helper (ssh
+remotes of the host are rewritten to https), `GITLAB_TOKEN` and `GITLAB_HOST`; under podman
+both tokens are `--secret`s of type env; on a node both are entries of the run spec's
+`secrets` (per-run tmpfs file). It is never written into `.git/config` (the helper reads it
+from the environment) and the output scrubber masks it. Every podman run's container holds
+it (it is the worker's API credential too). A reviewer is given none. There is nothing to
+mint or revoke.
+
+### Compared with `gitlab_project_token`
+
+| | `gitlab_project_token` | `gitlab_bot_token` |
+|---|---|---|
+| GitLab tier | Premium / Ultimate on GitLab.com (any tier self-managed) | Any, including Free |
+| Token a worker holds | Minted per run, revoked when the run ends | The one long-lived PAT |
+| Valid on a node | For the run (and until `expires_at`, default 2 days, if the revoke fails) | **Until the PAT's expiry** (up to a year) |
+| Limited to the project by | Construction: a project access token cannot reach another project | **Membership**, which Arbiter checks but GitLab does not enforce for Arbiter |
+| Parent credential | A Maintainer's `api` PAT, which never leaves the primary | None: the delivered PAT is the credential |
+| A leaked copy | Dead after the run | Usable until you revoke it or it expires |
+
+Choose it only when the minted kind is unavailable. A copy of the PAT taken from a node (or a
+transcript) can read the API and push to the Developer-pushable branches of the bot's projects
+until you revoke it in GitLab (bot user → Access tokens). Keep the bot's membership minimal,
+the expiry short (renew on a schedule: when it lapses, dispatches are refused), and your
+default branches protected as above. Arbiter's guard narrows the bot to the configured
+projects; it cannot stop someone adding the bot to a project *after* a dispatch (the next
+dispatch refuses it).
+
 ## Tracker token
 
 A ticket's `tracker_write` permission projects a token env var (the binding's
@@ -279,6 +371,10 @@ on enrolled nodes like any other:
   so all of them carry it to a node the same way: in the run spec's `secrets` (the tmpfs file,
   removed with the container), revoked when the worker exits or its node is found down. Only
   the minted token goes; the parent credential never does.
+* **`gitlab_bot_token`** (bd-8ufzng, Free tier): carried the same way, but the token is the
+  operator's static bot PAT: it is checked at dispatch (scopes, expiry, membership), is not
+  revoked when the run ends, and a copy taken off the node stays valid until the PAT expires
+  or you revoke it.
 * **Never sent to a node**: the App's private key (it only signs the mint, on the
   primary), a deploy key, a static token. If the operator also exposed one of them to
   workers as a `worker_env` var, that var is held back from a remote run (the
@@ -298,8 +394,8 @@ directory only while a run is live, and `podman secret ls` lists no Arbiter git 
   process outside a jail.
 * A token (App installation tokens last an hour) is in the worker's env for the
   run. A run longer than the token's life must be re-dispatched.
-* On a remote node only a GitHub App's or a GitLab project token (both minted per run; see
-  "Remote nodes" above) is ever carried; a fix round on a deploy-key or static-token repo
+* On a remote node only a GitHub App's, a GitLab project token (both minted per run; see
+  "Remote nodes" above) or the opted-in GitLab bot PAT is ever carried; a fix round on a deploy-key or static-token repo
   stays on the primary.
 * A GitLab project token lives until its `expires_at` date (default two days) when Arbiter
   cannot revoke it: the revoke is armed in the server process, so a server that dies mid-run
@@ -309,6 +405,11 @@ directory only while a run is live, and `podman secret ls` lists no Arbiter git 
   scopes, role, expiry), the refusal of an over-granted token, the revokes, delivery and
   placement, not GitLab itself. The first run on a real project shows that the parent's role
   may mint a Developer token and that the push and the API read work.
+* The `gitlab_bot_token` guard is tested against a stubbed GitLab API (`Req.Test`): the
+  scope, expiry and membership refusals, delivery, placement and the doctor warning are
+  covered, not GitLab's real answers. The first dispatch on a real project shows that
+  `personal_access_tokens/self` and `projects?membership=true` answer as expected (they
+  need a GitLab version that has the `self` endpoint).
 * A fix round on a node can read its own token (it is in the container's
   environment). A copy the agent itself writes into its transcript or work tree stays
   on the node with the run's directory until the node's reaper takes it (24 h). By
