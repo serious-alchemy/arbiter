@@ -448,6 +448,71 @@ defmodule Arbiter.Mergers.Merger do
               {:ok, branch_pipeline() | nil} | {:error, term()}
 
   @typedoc """
+  A speculative merge-train car (bd-6dyva0) as the pipeline callbacks see it:
+  the Arbiter-owned `:ref` it was pushed to, its commit `:sha`, and the
+  `:pipeline` id `run_ref_pipeline/3` returned, when it returned one.
+  """
+  @type car_ref :: %{
+          required(:ref) => String.t(),
+          required(:sha) => String.t(),
+          optional(:pipeline) => term()
+        }
+
+  @typedoc """
+  CI on a car: one pipeline (GitLab), or every workflow run on the car's sha
+  taken together (GitHub). `:status` uses GitLab's words (`created`, `pending`,
+  `running`, `success`, `failed`, `canceled`, `skipped`, `manual`); a `failed`
+  one carries `:jobs` (`[%{name, stage, status}]`, allowed failures dropped) so
+  the train can ignore a failed deploy job the way the target-red hold does
+  (bd-dtbsgx).
+  """
+  @type ref_pipeline :: %{
+          required(:id) => term(),
+          required(:sha) => String.t() | nil,
+          required(:status) => String.t() | nil,
+          required(:url) => String.t() | nil,
+          optional(:jobs) =>
+            [%{name: String.t(), stage: String.t() | nil, status: String.t()}] | nil
+        }
+
+  @doc """
+  Start CI on a car the train has pushed to its Arbiter-owned ref
+  (`Arbiter.Mergers.TrainCar`). GitLab creates a pipeline for the ref (the
+  push itself carried `-o ci.skip`, see `ref_push_options/0`) and returns it;
+  GitHub dispatches `opts.workflow` on the ref when one is configured
+  (`merge.train.workflow`) and otherwise relies on the push having started the
+  branch's `on: push` workflows, returning `{:ok, nil}` (no id to remember).
+  Optional, with `ref_pipeline/3` and `cancel_ref_pipeline/3`: an adapter
+  without them cannot run a speculative train, and the target keeps the serial
+  merge train.
+  """
+  @callback run_ref_pipeline(mr_ref, car :: car_ref(), opts :: map()) ::
+              {:ok, ref_pipeline() | nil} | {:error, term()}
+
+  @doc """
+  The car's CI verdict so far (`t:ref_pipeline/0`), `{:ok, nil}` when nothing
+  has started on its sha yet, or `{:error, reason}`: never a verdict from a read
+  that failed.
+  """
+  @callback ref_pipeline(mr_ref, car :: car_ref(), opts :: map()) ::
+              {:ok, ref_pipeline() | nil} | {:error, term()}
+
+  @doc """
+  Cancel CI still running on a superseded car (an earlier car was ejected, the
+  target moved under it, or its MR left the train). Finished pipelines are left
+  alone.
+  """
+  @callback cancel_ref_pipeline(mr_ref, car :: car_ref(), opts :: map()) ::
+              :ok | {:error, term()}
+
+  @doc """
+  Extra `git push` arguments for a car ref (GitLab: `["-o", "ci.skip"]`, so the
+  push starts no pipeline beside the one `run_ref_pipeline/3` creates).
+  Optional; `[]` when absent.
+  """
+  @callback ref_push_options() :: [String.t()]
+
+  @typedoc """
   The repo's CI queue: how many merge-request pipelines are waiting for a runner
   and when the oldest was created (`nil` when none is).
   """
@@ -698,6 +763,10 @@ defmodule Arbiter.Mergers.Merger do
                       last_green_job_sha: 3,
                       deploy_pipelines: 3,
                       branch_pipeline: 3,
+                      run_ref_pipeline: 3,
+                      ref_pipeline: 3,
+                      cancel_ref_pipeline: 3,
+                      ref_push_options: 0,
                       ref_for_pr: 2,
                       list_open: 0,
                       ci_queue: 0,

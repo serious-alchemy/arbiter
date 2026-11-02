@@ -76,6 +76,9 @@ defmodule Arbiter.Mergers.Gitlab do
   # How much of each failing job's trace to keep in the fix-pass briefing.
   @log_tail_limit 4_000
 
+  # Pipeline statuses a superseded merge-train car's pipeline is cancelled from.
+  @unfinished_pipeline_statuses ~w(created waiting_for_resource preparing pending running scheduled)
+
   # ---- Merger behaviour ----------------------------------------------------
 
   @impl true
@@ -280,6 +283,105 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   defp branch_pipeline_jobs(_cfg, _pipeline), do: nil
+
+  # ---- speculative merge-train cars (bd-6dyva0) ------------------------------
+  #
+  # A car is pushed to its Arbiter-owned ref with `-o ci.skip` and then given
+  # exactly one pipeline here, through the pipelines API, carrying
+  # `ARBITER_TRAIN_CAR=true` so a project's `workflow:rules` can admit it (a
+  # project that only admits merge-request pipelines refuses it, and the train
+  # falls back to the serial sync for that MR).
+
+  @impl true
+  def ref_push_options, do: ["-o", "ci.skip"]
+
+  @impl true
+  def run_ref_pipeline(_mr_ref, %{ref: ref}, _opts) when is_binary(ref) do
+    body = %{
+      ref: ref,
+      variables: [%{key: "ARBITER_TRAIN_CAR", value: "true", variable_type: "env_var"}]
+    }
+
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :post, "/pipeline", json: body) do
+        {:ok, %Req.Response{status: status, body: %{} = pipeline}} when status in 200..299 ->
+          {:ok, car_pipeline(pipeline, nil)}
+
+        {:ok, %Req.Response{status: status, body: body}} when status in [400, 422] ->
+          {:error,
+           %Error{
+             kind: :pipeline_refused,
+             status: status,
+             message: "cannot start CI on merge-train car #{ref}: " <> refusal_message(body),
+             raw: body
+           }}
+
+        other ->
+          {:error, request_error(other)}
+      end
+    end
+  end
+
+  @impl true
+  def ref_pipeline(_mr_ref, %{pipeline: id}, _opts) when is_integer(id) or is_binary(id) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, %{} = pipeline} <- cfg |> request(:get, "/pipelines/#{id}", []) |> handle_json() do
+      {:ok, car_pipeline(pipeline, failed_jobs(cfg, pipeline))}
+    end
+  end
+
+  def ref_pipeline(_mr_ref, %{ref: ref, sha: sha}, _opts) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, pipelines} <- car_pipelines(cfg, ref, sha) do
+      case pipelines do
+        [] -> {:ok, nil}
+        [newest | _] -> {:ok, car_pipeline(newest, failed_jobs(cfg, newest))}
+      end
+    end
+  end
+
+  @impl true
+  def cancel_ref_pipeline(_mr_ref, %{pipeline: id}, _opts) when is_integer(id) or is_binary(id) do
+    with {:ok, cfg} <- Config.resolve() do
+      cfg |> request(:post, "/pipelines/#{id}/cancel", json: %{}) |> handle_ok()
+    end
+  end
+
+  def cancel_ref_pipeline(_mr_ref, %{ref: ref, sha: sha}, _opts) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, pipelines} <- car_pipelines(cfg, ref, sha) do
+      pipelines
+      |> Enum.filter(&(Map.get(&1, "status") in @unfinished_pipeline_statuses))
+      |> Enum.reduce_while(:ok, fn pipeline, :ok ->
+        case cfg
+             |> request(:post, "/pipelines/#{Map.get(pipeline, "id")}/cancel", json: %{})
+             |> handle_ok() do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp car_pipelines(cfg, ref, sha) do
+    params = [ref: ref, per_page: 20] ++ if(is_binary(sha), do: [sha: sha], else: [])
+    cfg |> request(:get, "/pipelines", params: params) |> deploy_pipeline_list()
+  end
+
+  defp car_pipeline(pipeline, jobs) do
+    %{
+      id: Map.get(pipeline, "id"),
+      sha: Map.get(pipeline, "sha"),
+      status: Map.get(pipeline, "status"),
+      url: Map.get(pipeline, "web_url")
+    }
+    |> then(fn map -> if is_list(jobs), do: Map.put(map, :jobs, jobs), else: map end)
+  end
+
+  defp failed_jobs(cfg, %{"status" => "failed"} = pipeline),
+    do: branch_pipeline_jobs(cfg, pipeline)
+
+  defp failed_jobs(_cfg, _pipeline), do: nil
 
   defp deploy_pipeline_list({:ok, %Req.Response{status: status, body: pipelines}})
        when status in 200..299 and is_list(pipelines),
