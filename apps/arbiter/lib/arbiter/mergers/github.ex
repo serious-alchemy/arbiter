@@ -1560,25 +1560,26 @@ defmodule Arbiter.Mergers.Github do
   defp car_verdict([], _sha), do: nil
 
   defp car_verdict(runs, sha) do
-    statuses = Enum.map(runs, &deploy_status/1)
-    newest = Enum.max_by(runs, &(Map.get(&1, "id") || 0))
-
-    status =
-      cond do
-        "failed" in statuses -> "failed"
-        "running" in statuses -> "running"
-        Enum.any?(statuses, &(&1 in ["pending", "manual"])) -> "pending"
-        "canceled" in statuses -> "canceled"
-        Enum.all?(statuses, &(&1 == "skipped")) -> "skipped"
-        true -> "success"
-      end
-
-    case status do
+    case runs |> Enum.map(&deploy_status/1) |> car_status() do
       "failed" ->
         branch_run(sha, runs, "failed")
 
-      _ ->
+      status ->
+        newest = Enum.max_by(runs, &(Map.get(&1, "id") || 0))
         %{id: Map.get(newest, "id"), sha: sha, status: status, url: Map.get(newest, "html_url")}
+    end
+  end
+
+  # One status for every workflow run on the car: any red is red; anything still
+  # going is going; only skipped runs mean nothing tested it.
+  defp car_status(statuses) do
+    cond do
+      "failed" in statuses -> "failed"
+      "running" in statuses -> "running"
+      Enum.any?(statuses, &(&1 in ["pending", "manual"])) -> "pending"
+      "canceled" in statuses -> "canceled"
+      Enum.all?(statuses, &(&1 == "skipped")) -> "skipped"
+      true -> "success"
     end
   end
 
