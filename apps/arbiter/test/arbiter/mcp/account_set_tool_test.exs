@@ -120,6 +120,34 @@ defmodule Arbiter.MCP.AccountSetToolTest do
     refute Map.has_key?(cleared.quota_config, "pace_curve")
   end
 
+  test "sets, rejects and clears the daily burn governor (bd-cklotu)" do
+    account!("mcp-burn")
+
+    assert {:ok, %{account: shown}} =
+             Catalog.call(@coordinator, "account_set", %{
+               "ref" => "claude:mcp-burn",
+               "quota_config" => %{"daily_burn_cap" => 0.25, "daily_burn_cap_mode" => "enforce"}
+             })
+
+    assert shown.quota_config == %{"daily_burn_cap" => 0.25, "daily_burn_cap_mode" => "enforce"}
+
+    assert {:tool_error, message, "validation_error"} =
+             Catalog.call(@coordinator, "account_set", %{
+               "ref" => "claude:mcp-burn",
+               "quota_config" => %{"daily_burn_cap_mode" => "maybe"}
+             })
+
+    assert message =~ "daily_burn_cap_mode"
+
+    assert {:ok, %{account: cleared}} =
+             Catalog.call(@coordinator, "account_set", %{
+               "ref" => "claude:mcp-burn",
+               "quota_config" => %{"daily_burn_cap" => nil}
+             })
+
+    refute Map.has_key?(cleared.quota_config, "daily_burn_cap")
+  end
+
   test "a bad value is an invalid error and writes nothing" do
     account!("mcp-bad", %{label: "Before"})
 

@@ -497,6 +497,28 @@ defmodule Arbiter.Quota.GatePacedTest do
       end
     end
 
+    test "accepts the daily burn governor keys (bd-cklotu)" do
+      assert {:ok, _} =
+               create(%{"daily_burn_cap" => 0.25, "daily_burn_cap_mode" => "enforce"}, "ba")
+
+      assert {:ok, _} =
+               create(%{"daily_burn_cap" => "0.3", "daily_burn_cap_mode" => "shadow"}, "bb")
+    end
+
+    test "rejects a bad daily_burn_cap or daily_burn_cap_mode" do
+      for {value, prefix} <- [{0, "bc"}, {1.5, "bd"}, {"lots", "be"}] do
+        assert {:error, error} = create(%{"daily_burn_cap" => value}, prefix)
+        assert Exception.message(error) =~ "quota.daily_burn_cap must be a number in (0, 1]"
+      end
+
+      for {value, prefix} <- [{"off", "bf"}, {"ENFORCE", "bg"}, {1, "bh"}] do
+        assert {:error, error} = create(%{"daily_burn_cap_mode" => value}, prefix)
+
+        assert Exception.message(error) =~
+                 "quota.daily_burn_cap_mode must be one of shadow, enforce"
+      end
+    end
+
     test "rejects out-of-range floors" do
       for {key, value, prefix} <- [
             {"paced_floor", 0, "pd"},
