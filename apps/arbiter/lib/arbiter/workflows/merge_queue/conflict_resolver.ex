@@ -199,6 +199,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   defp load_task_or_use(task_id, _args), do: load_task(task_id)
 
   defp dispatch(task, context, args) do
+    # bd-4y9dno: a pass for an MR waiting behind the merge head pushes without CI.
+    context = Map.put(context, :ci_skip, Map.get(args, :ci_skip))
+
     case PassAdmission.admit(task, :conflict, args) do
       # bd-842qio: a conflict takes the ticket back to work (merging → active)
       # — bd-741sid: as soon as the pass is admitted into its slot.
@@ -641,6 +644,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       conflict_host_push: host_git?(context, provider)
     }
 
+    meta = if context.ci_skip, do: Map.put(meta, :ci_skip, context.ci_skip), else: meta
+
     meta = Map.merge(meta, ProviderRouting.run_meta(decision))
     # bd-8ikgoc: the node placement chose, so the registry counts the run there.
     meta = if node, do: Map.put(meta, :placed_node_id, node.id), else: meta
@@ -853,6 +858,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   def prompt_for(%{task: %Issue{} = task, branch: branch, target_branch: target} = context) do
     Arbiter.Worker.Dispatch.conflict_resolve_briefing(task, branch, target,
       host_git: Map.get(context, :host_git, false),
+      ci_skip: Map.get(context, :ci_skip),
       workspace: Map.get(context, :workspace)
     )
   end
