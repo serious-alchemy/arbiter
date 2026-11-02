@@ -209,6 +209,30 @@ defmodule Arbiter.Release do
   end
 
   @doc """
+  Print the burn report (bd-cklotu): per account, the p50 / p90 / p99 of the
+  historical rolling-24h burn of the 7d window and, with a `daily_burn_cap` (or
+  `:cap`), how often the cap would have held. Read-only; starts only the repo.
+
+  Options: `:since` / `:until` (`DateTime`s; default the last 30 days), `:cap` (a
+  fraction in (0, 1] to replay on every account) and `:start` (default `true`).
+
+      bin/arbiter eval 'Arbiter.Release.burn_report(cap: 0.25)'
+  """
+  @spec burn_report(keyword()) :: Arbiter.Quota.BurnReport.report()
+  def burn_report(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    report =
+      opts
+      |> Keyword.take([:since, :until])
+      |> Arbiter.Quota.BurnReport.collect()
+      |> Arbiter.Quota.BurnReport.build(Keyword.take(opts, [:cap]))
+
+    IO.puts(Arbiter.Quota.BurnReport.format(report))
+    report
+  end
+
+  @doc """
   Print the routing shadow report (bd-adtnto, R5): under `provider_selection:
   scored` with `scoring.mode: shadow`, how often the scorer's recorded pick
   matches the pick that dispatched, and every disagreement with its reason

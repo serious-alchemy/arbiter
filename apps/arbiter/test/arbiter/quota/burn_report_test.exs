@@ -128,6 +128,35 @@ defmodule Arbiter.Quota.BurnReportTest do
     end
   end
 
+  describe "the report command" do
+    test "Release.burn_report/1 prints the percentiles and returns the report" do
+      acct =
+        Ash.create!(ProviderAccount, %{
+          provider: :claude,
+          slug: "brc-#{System.unique_integer([:positive])}"
+        })
+
+      for r <- samples(acct.id) do
+        QuotaSnapshot |> Ash.Changeset.for_create(:record, r) |> Ash.create!()
+      end
+
+      out =
+        ExUnit.CaptureIO.capture_io(fn ->
+          assert %{accounts: [%{deltas: %{n: n}, cap: 0.3}]} =
+                   Arbiter.Release.burn_report(start: false, since: @t0, until: @until, cap: 0.3)
+
+          assert n > 90
+        end)
+
+      assert out =~ "p50"
+      assert out =~ "would have held"
+    end
+
+    test "the mix task is registered" do
+      assert Mix.Task.get("arbiter.burn_report") == Mix.Tasks.Arbiter.BurnReport
+    end
+  end
+
   describe "collect/1" do
     test "reads the 7d history from quota_snapshots" do
       acct =
