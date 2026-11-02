@@ -83,6 +83,7 @@ defmodule Arbiter.Quota.Budget do
 
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Quota.BudgetCalibration
+  alias Arbiter.Quota.BurnGovernor
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Gate.Snapshot
 
@@ -450,14 +451,67 @@ defmodule Arbiter.Quota.Budget do
     (if(s.window_label, do: [primary], else: []) ++
        if(s.secondary_window_label, do: [long], else: []))
     |> Enum.map(&eval_window(&1, s, ctx))
+    |> Kernel.++(burn_windows(long, s, ctx))
+  end
+
+  # The rolling-24h burn governor (bd-cklotu, `Arbiter.Quota.BurnGovernor`),
+  # under `daily_burn_cap_mode: enforce` only: a `24h` entry whose line is the
+  # flat cap and whose draw is the long window's own `ρ`. There is no reset
+  # (it is a rolling window), so `n = (cap − u_now − b·H) / (ρ·H)`. The exempt
+  # evaluation (`ctx.priority` set) leaves it out: the P0 exemption lifts it.
+  defp burn_windows(_long, _s, %{priority: priority}) when priority != nil, do: []
+
+  defp burn_windows(%{label: label} = long, s, ctx) when is_binary(label) do
+    case BurnGovernor.window(s, ctx.policy, ctx.now) do
+      %{used: burn, cap: cap} -> [burn_entry(long, burn, cap, s, ctx)]
+      nil -> []
+    end
+  end
+
+  defp burn_windows(_long, _s, _ctx), do: []
+
+  defp burn_entry(long, burn, cap, snapshot, ctx) do
+    seconds = Gate.window_seconds(long.label, ctx.account)
+    %{rho: rho, b: b} = entry = base_entry(long, seconds, ctx)
+    h = ctx.horizon
+    u_now = burn + (ctx.seats * rho + b) * lag_hours(snapshot, ctx.now)
+
+    %{
+      entry
+      | window: "24h",
+        used: burn * 1.0,
+        used_now: u_now,
+        line_now: cap,
+        line_at_h: cap,
+        n: (cap - u_now - b * h) / (rho * h)
+    }
   end
 
   defp eval_window(w, snapshot, ctx) do
     seconds = Gate.window_seconds(w.label, ctx.account)
+    entry = base_entry(w, seconds, ctx)
+
+    # `and`, not `&&`: a window with no `reset_at` (an Antigravity bucket, Codex's
+    # `session`) must give `false`, never `nil` — the `cond` below applies `and`.
+    reset_passed? =
+      match?(%DateTime{}, w.reset_at) and DateTime.compare(w.reset_at, ctx.now) != :gt
+
+    cond do
+      not is_number(w.used) -> %{entry | status: :no_reading}
+      reset_passed? and is_integer(seconds) -> fresh_window(entry, w, seconds, ctx)
+      reset_passed? -> %{entry | status: :stale}
+      w.stale? -> %{entry | status: :stale}
+      true -> capacity(entry, w, w.used, w.reset_at, lag_hours(snapshot, ctx.now), ctx)
+    end
+  end
+
+  # The not-yet-evaluated entry of window `w`: its rate (`ρ`, from the window's
+  # own label), background and the empty readings.
+  defp base_entry(w, seconds, ctx) do
     rate = rate(w, seconds, ctx)
     b = background(ctx.background, w.label)
 
-    entry = %{
+    %{
       window: w.label,
       side: w.side,
       status: :ok,
@@ -481,19 +535,6 @@ defmodule Arbiter.Quota.Budget do
       n_after: nil,
       expiring: nil
     }
-
-    # `and`, not `&&`: a window with no `reset_at` (an Antigravity bucket, Codex's
-    # `session`) must give `false`, never `nil` — the `cond` below applies `and`.
-    reset_passed? =
-      match?(%DateTime{}, w.reset_at) and DateTime.compare(w.reset_at, ctx.now) != :gt
-
-    cond do
-      not is_number(w.used) -> %{entry | status: :no_reading}
-      reset_passed? and is_integer(seconds) -> fresh_window(entry, w, seconds, ctx)
-      reset_passed? -> %{entry | status: :stale}
-      w.stale? -> %{entry | status: :stale}
-      true -> capacity(entry, w, w.used, w.reset_at, lag_hours(snapshot, ctx.now), ctx)
-    end
   end
 
   # A window whose reset has passed is the fresh window: u = 0 at the reset
