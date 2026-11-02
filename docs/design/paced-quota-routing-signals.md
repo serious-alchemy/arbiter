@@ -521,7 +521,7 @@ account side, because the weight doesn't loosen any limit.
 **exempt cap**, which is never above that side's *flat* ceiling:
 
 ```
-exempt ceiling = max(max(floor, elapsed), min(exempt_cap, flat))
+exempt ceiling = max(max(floor, elapsed), min(exempt_cap, flat))   # or, with pace_curve "ramp" (bd-bq0gi8), the ramp line floor + (1 - floor) * elapsed in place of max(floor, elapsed)
   exempt_cap = the side's dedicated pace-exempt cap for that window
                (5h and 7d set separately); unset → flat
   flat       = the side's own throttle_threshold or weekly_threshold,

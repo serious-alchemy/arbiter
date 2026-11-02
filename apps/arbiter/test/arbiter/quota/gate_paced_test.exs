@@ -485,6 +485,18 @@ defmodule Arbiter.Quota.GatePacedTest do
       assert Exception.message(error) =~ "quota.threshold_mode must be one of flat, paced"
     end
 
+    test "accepts pace_curve plateau and ramp" do
+      assert {:ok, _} = create(%{"threshold_mode" => "paced", "pace_curve" => "ramp"}, "pr")
+      assert {:ok, _} = create(%{"pace_curve" => "plateau"}, "ps")
+    end
+
+    test "rejects an unknown pace_curve" do
+      for {value, prefix} <- [{"linear", "pt"}, {"RAMP", "pu"}, {1, "pv"}] do
+        assert {:error, error} = create(%{"pace_curve" => value}, prefix)
+        assert Exception.message(error) =~ "quota.pace_curve must be one of plateau, ramp"
+      end
+    end
+
     test "rejects out-of-range floors" do
       for {key, value, prefix} <- [
             {"paced_floor", 0, "pd"},

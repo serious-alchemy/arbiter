@@ -229,6 +229,7 @@ defmodule ArbiterCli.Cmd.Quota do
     if policy["threshold_mode"] == "paced" do
       IO.puts("  paced_floor:         #{format_frac(policy["paced_floor"])}")
       IO.puts("  weekly_paced_floor:  #{format_frac(policy["weekly_paced_floor"])}")
+      IO.puts("  pace_curve:          #{policy["pace_curve"] || "plateau"}")
     end
 
     IO.puts("")

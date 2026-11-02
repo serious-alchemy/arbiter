@@ -242,6 +242,11 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
     {"Flat — a fixed ceiling", "flat"},
     {"Paced — tracks the window", "paced"}
   ]
+  @curve_options [
+    {"Default (plateau)", ""},
+    {"Plateau — max(floor, elapsed)", "plateau"},
+    {"Ramp — floor to 100% at the reset", "ramp"}
+  ]
   @policy_options [
     {"Default (ignore)", ""},
     {"Ignore — a weekly warning does not hold", "ignore"},
@@ -394,8 +399,17 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
           placeholder="0.20"
           inputmode="decimal"
         />
+        <.select_field
+          form={@form}
+          id={@account.id}
+          key="pace_curve"
+          label="Pace curve"
+          hint="pace_curve"
+          options={curve_options()}
+          errors={@errors}
+        />
         <p class="m-0 sm:col-span-2 lg:col-span-4 max-w-3xl text-[12px] text-[var(--arb-text-muted)]">
-          Ceilings are fractions above 0 and up to 1 (0.9 = 90% of the window). The 7-day ceiling applies in flat mode; the paced floors apply in paced mode, where the ceiling rises with the window's elapsed time.
+          Ceilings are fractions above 0 and up to 1 (0.9 = 90% of the window). The 7-day ceiling applies in flat mode; the paced floors apply in paced mode, where the ceiling rises with the window's elapsed time. The pace curve picks how: plateau holds at the floor until elapsed time overtakes it; ramp climbs in a straight line from the floor to 100% at the reset.
         </p>
         <p
           :for={e <- @effective}
@@ -567,6 +581,7 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
   defp field_name(key), do: Map.get(@field_names, key, key)
   defp status_options, do: @status_options
   defp mode_options, do: @mode_options
+  defp curve_options, do: @curve_options
   defp policy_options, do: @policy_options
   defp priority_options, do: @priority_options
   defp spend_window_options, do: @spend_window_options

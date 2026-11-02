@@ -36,6 +36,7 @@ defmodule ArbiterCli.Cmd.Account do
                                      [--throttle-threshold F]
                                      [--weekly-threshold F] [--paced-floor F]
                                      [--weekly-paced-floor F]
+                                     [--pace-curve plateau|ramp]
                                      [--weekly-warning-policy ignore|hold]
                                      [--window-seconds LABEL=SECONDS[,...]]
                                      [--pace-exempt-priority 0..4|none]
@@ -193,6 +194,7 @@ defmodule ArbiterCli.Cmd.Account do
     weekly_threshold: :string,
     paced_floor: :string,
     weekly_paced_floor: :string,
+    pace_curve: :string,
     weekly_warning_policy: :string,
     window_seconds: [:string, :keep],
     pace_exempt_priority: :string,
@@ -540,6 +542,12 @@ defmodule ArbiterCli.Cmd.Account do
   defp quota_value!(_key, nil), do: nil
   defp quota_value!(_key, []), do: nil
   defp quota_value!("threshold_mode", value), do: value
+
+  defp quota_value!("pace_curve", value) do
+    if value in ~w(plateau ramp),
+      do: value,
+      else: Output.die("--pace-curve must be plateau or ramp (got #{inspect(value)})")
+  end
 
   defp quota_value!("weekly_warning_policy", value) do
     if value in ~w(ignore hold) do

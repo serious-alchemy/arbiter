@@ -17,8 +17,10 @@ defmodule Arbiter.Quota.Headroom do
   never re-derived here:
 
     * flat mode: the fixed ceiling (`throttle_threshold` / `weekly_threshold`);
-    * paced mode: `max(floor, elapsed)`, where `elapsed` is the fraction of
-      the window gone;
+    * paced mode: the paced line — `max(floor, elapsed)` (`pace_curve:
+      "plateau"`, the default) or `floor + (1 - floor) * elapsed`
+      (`pace_curve: "ramp"`) — where `elapsed` is the fraction of the window
+      gone;
     * each side (account `quota_config`, workspace `config["quota"]`) turned
       into its number for now and composed `min(account, workspace)`.
 

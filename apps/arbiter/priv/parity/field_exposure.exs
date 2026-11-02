@@ -200,6 +200,11 @@
       cli: :same,
       rest: :same
     },
+    "pace_curve" => %{
+      mcp: {:none, "account create is an operator action, not on MCP"},
+      cli: :same,
+      rest: :same
+    },
     "weekly_warning_policy" => %{
       mcp: {:none, "account create is an operator action, not on MCP"},
       cli: :same,
@@ -269,6 +274,7 @@
     "weekly_threshold" => :same,
     "paced_floor" => :same,
     "weekly_paced_floor" => :same,
+    "pace_curve" => :same,
     "weekly_warning_policy" => :same,
     "window_seconds" => :same,
     "pace_exempt_priority" => :same,

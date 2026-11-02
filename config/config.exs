@@ -110,7 +110,7 @@ config :arbiter, :quota,
 # Quota-bar colours (bd-clzkvp) have no config of their own: each bar is
 # coloured by the dispatch gate's pace verdict for its window
 # (`Arbiter.Quota.Pace`, via `Arbiter.Quota.Gate.pace/6`), so the paced gate's
-# settings — `paced_floor` / `weekly_paced_floor` in an account's
+# settings — `paced_floor` / `weekly_paced_floor` / `pace_curve` in an account's
 # `quota_config` or a workspace's `config["quota"]` — are what move them.
 
 # Direct Gemini CLI + Antigravity quota tracking (bd-57ukgb). Unlike the

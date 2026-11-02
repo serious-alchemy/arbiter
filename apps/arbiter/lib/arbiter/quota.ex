@@ -519,7 +519,8 @@ defmodule Arbiter.Quota do
   # latest quota snapshot (any provider — `Snapshot.normalize/1` projects
   # `reset_at` / `secondary_reset_at` the same way regardless of table) so a
   # paced side of `min(account, workspace)` resolves to its true
-  # `max(floor, elapsed)` ceiling rather than always falling back to a flat
+  # paced-line ceiling (`max(floor, elapsed)`, or the ramp line under
+  # `pace_curve: "ramp"`) rather than always falling back to a flat
   # setting it has stopped using. `nil` for either window when there is no
   # account, no snapshot yet, or that window's length/`reset_at` is unknown —
   # `Gate.binding_side/3` / `effective_threshold/3` fall back gracefully.

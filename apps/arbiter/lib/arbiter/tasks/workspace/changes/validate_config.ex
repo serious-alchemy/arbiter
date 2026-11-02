@@ -1935,6 +1935,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   #   * weekly_warning_policy ∈ {"ignore","hold"} — what a 7d `allowed_warning`
   #     does (default "ignore"; see Arbiter.Quota.Gate.weekly_warning_policy/1)
   #   * threshold_mode ∈ {"flat","paced"} (bd-2daof2; default "flat")
+  #   * pace_curve ∈ {"plateau","ramp"} (bd-bq0gi8; default "plateau") — the line a
+  #     paced window follows: max(floor, elapsed) or floor + (1 - floor) * elapsed
   #   * paced_floor / weekly_paced_floor numbers in (0, 1] — the paced-mode
   #     head start on the primary (5h/session, inert for Claude) and 7d/weekly windows
   #   * pace_exempt_threshold / weekly_pace_exempt_threshold numbers in (0, 1] —
@@ -1946,6 +1948,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   @valid_quota_modes ~w[throttle continue]
   @valid_weekly_warning_policies ~w[ignore hold]
   @valid_threshold_modes ~w[flat paced]
+  @valid_pace_curves Arbiter.Quota.Gate.pace_curves()
 
   @doc "Valid `quota.on_exhaustion` value strings."
   @spec valid_quota_modes() :: [String.t()]
@@ -2011,6 +2014,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> then(fn cs -> validate_fraction(cs, quota, "weekly_threshold") end)
     |> then(fn cs -> validate_weekly_warning_policy(cs, quota) end)
     |> then(fn cs -> validate_threshold_mode(cs, quota) end)
+    |> then(fn cs -> validate_pace_curve(cs, quota) end)
     |> then(fn cs -> validate_fraction(cs, quota, "paced_floor") end)
     |> then(fn cs -> validate_fraction(cs, quota, "weekly_paced_floor") end)
     |> then(fn cs -> validate_fraction(cs, quota, "pace_exempt_threshold") end)
@@ -2085,6 +2089,24 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           message:
             "quota.weekly_warning_policy must be one of " <>
               "#{Enum.join(@valid_weekly_warning_policies, ", ")}; got: #{inspect(other)}"
+        )
+    end
+  end
+
+  defp validate_pace_curve(changeset, quota) do
+    case Map.get(quota, "pace_curve") do
+      nil ->
+        changeset
+
+      c when c in @valid_pace_curves ->
+        changeset
+
+      other ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "quota.pace_curve must be one of " <>
+              "#{Enum.join(@valid_pace_curves, ", ")}; got: #{inspect(other)}"
         )
     end
   end
