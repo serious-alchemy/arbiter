@@ -401,6 +401,27 @@ defmodule Arbiter.Worker.WatchdogMergeTrainPhase2Test do
       assert StubMerger.merge_count("!b") == 0
     end
 
+    test "a forge that reports no pipeline for our own skipped head gets one triggered, not a page",
+         %{ws: ws} do
+      freshness(%{"a0" => 0})
+      diffs("a")
+
+      no_pipeline =
+        skipped("a0") |> Map.put(:pipeline, nil) |> Map.put(:block_reason, :no_pipeline)
+
+      StubMerger.queue_get(mr("a"), [no_pipeline])
+      a = watch("a", ws, ci_skipped_head: "a0")
+
+      wait_until(fn -> length(StubMerger.pipeline_triggers()) == 1 end)
+      after_polls(a, 3)
+
+      assert :sys.get_state(a).park_reason == nil
+      assert StubMerger.merge_count("!a") == 0
+
+      StubMerger.queue_get(mr("a"), [green("a0")])
+      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+    end
+
     test "a head that moved on (a sync, a new push) is no longer skipped", %{ws: ws} do
       freshness(%{"a1" => 0})
       diffs("a")

@@ -3246,14 +3246,7 @@ defmodule Arbiter.Worker.Watchdog do
           # bd-4y9dno: a head our own CI-skipped push left has no pipeline by
           # design; it is triggered (or waits for the head), not paged.
           {:go, state} ->
-            case ci_skip_gate(state, result, Map.get(result, :head_sha)) do
-              {:hold, state} ->
-                reschedule(state)
-
-              :proceed ->
-                state = debounce_escalate_block(state, reason)
-                reschedule(%{state | max_polls: :infinity, park_reason: :no_pipeline})
-            end
+            park_or_trigger_no_pipeline(state, result, reason)
         end
 
       # Not mechanically resolvable here (:conflict → Phase 2b, :needs_approval /
@@ -6041,6 +6034,17 @@ defmodule Arbiter.Worker.Watchdog do
   defp put_ci_skip(args, _state), do: args
 
   # `:proceed` to merge, `{:hold, state}` to wait.
+  defp park_or_trigger_no_pipeline(state, result, reason) do
+    case ci_skip_gate(state, result, Map.get(result, :head_sha)) do
+      {:hold, state} ->
+        reschedule(state)
+
+      :proceed ->
+        state = debounce_escalate_block(state, reason)
+        reschedule(%{state | max_polls: :infinity, park_reason: :no_pipeline})
+    end
+  end
+
   defp ci_skip_gate(%{ci_skipped_head: sha} = state, result, sha) when is_binary(sha) do
     if state.ci_triggered_head == sha,
       do: await_triggered_pipeline(state, result, sha),
