@@ -10,7 +10,24 @@ defmodule Arbiter.Accounts.FieldsTest do
                             weekly_paced_floor weekly_warning_policy window_seconds
                             pace_exempt_priority pace_exempt_threshold
                             weekly_pace_exempt_threshold spend_cap spend_window
-                            spend_mode spend_metered))
+                            spend_mode spend_metered pace_curve))
+    end
+
+    test "pace_curve accepts plateau and ramp and rejects anything else" do
+      for curve <- ~w(plateau ramp) do
+        assert {:ok, %{"pace_curve" => ^curve}} =
+                 Fields.validate_quota_config(%{"pace_curve" => curve})
+      end
+
+      for bad <- ["linear", "RAMP", "", 1, true] do
+        assert {:error, {:invalid_quota_config, "pace_curve" <> _}} =
+                 Fields.validate_quota_config(%{"pace_curve" => bad})
+      end
+    end
+
+    test "pace_curve: null clears the key on a patch" do
+      assert {:ok, %{"pace_curve" => nil}} =
+               Fields.validate_quota_config(%{"pace_curve" => nil}, :patch)
     end
 
     test "identity is create-only, secrets are not in the registry" do

@@ -167,6 +167,39 @@ defmodule Arbiter.Quota.CodexPacingTest do
       assert is_binary(p.gating_reason)
     end
 
+    test "reports the ceiling in force: max(floor, elapsed) by default, the ramp line under pace_curve ramp" do
+      r = row(session_used_percent: 20.0, session_reset_at: reset_after(0.5, @month))
+
+      plateau = Codex.pacing(r, paced_account(%{"paced_floor" => 0.1}), now: @now)
+      assert plateau.ceiling_mode == :paced
+      assert_in_delta plateau.ceiling, 0.5, 0.001
+
+      ramp =
+        Codex.pacing(r, paced_account(%{"paced_floor" => 0.1, "pace_curve" => "ramp"}), now: @now)
+
+      assert ramp.ceiling_mode == :paced
+      assert_in_delta ramp.ceiling, 0.55, 0.001
+    end
+
+    test "the weekly window carries its own ramp ceiling" do
+      r =
+        row(
+          plan: "plus",
+          weekly_used_percent: 10.0,
+          weekly_reset_at: reset_after(0.5, 10_080 * 60)
+        )
+
+      acct = paced_account(%{"weekly_paced_floor" => 0.1, "pace_curve" => "ramp"})
+      p = Codex.pacing(r, acct, now: @now)
+      assert_in_delta p.weekly.ceiling, 0.55, 0.001
+    end
+
+    test "a window with pacing off reports the flat ceiling, not a ramp line" do
+      r = row(plan: "mystery")
+      p = Codex.pacing(r, paced_account(%{"pace_curve" => "ramp"}), now: @now)
+      assert p.ceiling_mode == :flat
+    end
+
     test "unknown plan says pacing is off" do
       r = row(plan: "mystery")
       p = Codex.pacing(r, paced_account(), now: @now)

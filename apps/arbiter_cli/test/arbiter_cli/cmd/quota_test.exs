@@ -1003,6 +1003,37 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       refute out =~ "binds"
     end
 
+    test "shows the pace_curve of a paced account, and the ramp effective ceiling" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => nil,
+          "claude" => nil,
+          "account" => %{"slug" => "personal-max", "provider" => "claude"},
+          "account_policy" => %{
+            "threshold_mode" => "paced",
+            "throttle_threshold" => 0.85,
+            "weekly_threshold" => 0.9,
+            "paced_floor" => 0.1,
+            "weekly_paced_floor" => 0.1,
+            "pace_curve" => "ramp"
+          },
+          "policy_binding" => %{
+            "throttle_threshold" => "account",
+            "weekly_threshold" => "account"
+          },
+          "effective_policy" => %{"throttle_threshold" => 0.55, "weekly_threshold" => 0.23}
+        }
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Quota.run(["--account", "personal-max"]) end)
+
+      assert code == 0
+      assert out =~ "pace_curve:          ramp"
+      assert out =~ "throttle_threshold:  55.0%"
+      assert out =~ "weekly_threshold:    23.0%"
+    end
+
     test "--account is forwarded to the API as a query param, taking priority over --workspace" do
       stub_routes([
         {{"get", "/api/quota"},

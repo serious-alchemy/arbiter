@@ -470,4 +470,35 @@ primary-class key set on a Claude account's `quota_config`, in a workspace's
 | `weekly_paced_floor` | 7d | paced head start | paced head start |
 | `weekly_pace_exempt_threshold` | 7d | P0 exempt cap | P0 exempt cap |
 | `weekly_warning_policy` | 7d | applies | applies |
-| `threshold_mode`, `on_exhaustion`, `overage_alert_usd`, `pace_exempt_priority` | window-agnostic | applies | applies |
+| `threshold_mode`, `pace_curve`, `on_exhaustion`, `overage_alert_usd`, `pace_exempt_priority` | window-agnostic | applies | applies |
+
+## The paced line and `pace_curve` (bd-bq0gi8)
+
+In `threshold_mode: "paced"` a window's ceiling follows the clock. With
+`elapsed` the fraction of the window gone (`0.0` at its reset, `1.0` at the
+next), the **`pace_curve`** setting picks the line:
+
+| `pace_curve` | Line | Behaviour |
+| --- | --- | --- |
+| `plateau` (default; also what an unset or unrecognised value reads as) | `max(floor, elapsed)` | Flat at the floor until `elapsed` overtakes it. A pool that reaches the floor early waits. |
+| `ramp` | `floor + (1 - floor) * elapsed` | A straight line from the floor at the reset to 100% at the next one. No plateau. |
+
+At floor `0.10` the `ramp` line on a 7d window is 10% at the reset, 23% at one
+day, 55% at 3.5 days and 74% at five; on a 5h window 10%, 28% at one hour, 55%
+at 2.5h and 82% at four. It is lower than the plateau line early in the window
+(below the old 20% weekly line for about the first 19h of a week) and higher
+late in it. At floor `0` the two curves are the same line, which is why the
+dollar spend cap (always floor 0) is unaffected.
+
+Set it per account (`arb account set <ref> --pace-curve ramp`, the account form
+on the Providers page, or `account_set` with `quota_config.pace_curve`) or per
+workspace (`arb config set quota.pace_curve ramp --workspace <ws>`). The account
+and the workspace each carry their own curve and floors; the gate takes
+`min(account, workspace)` of the two lines **at the moment of the check**, so
+the side that binds can change through the window. A window with no known length
+or reset still falls back to its flat ceiling under either curve.
+
+The P0 pace exemption lifts whichever line is in force:
+`exempt ceiling = max(line, min(exempt_cap, flat))`.
+
+Roll back by unsetting the key (`arb account set <ref> --unset pace_curve`).

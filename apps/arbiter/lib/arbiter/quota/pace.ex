@@ -32,17 +32,41 @@ defmodule Arbiter.Quota.Pace do
   gate's `min(account, workspace)` composition, already resolved into one
   entry per side that configured anything:
 
-    * `{:paced, floor, flat_fallback}` — `max(floor, elapsed)`, where
-      `elapsed` is the elapsed fraction of the window; without a known
-      `elapsed` (no window length, no reset) it falls back to the side's own
-      flat ceiling, or drops out when it has none.
-    * `{:paced_exempt, floor, flat_fallback, cap}` — a `:paced` side for an
-      exempt dispatch (bd-6bxv7h, design §4.2): `max(max(floor, elapsed), cap)`,
-      where `cap` is `min(exempt_cap, flat)` already resolved by the gate. It
-      only ever raises the paced line, never lowers it, and reports mode
-      `:exempt` only when it actually lifted the line. Without a known
-      `elapsed` it falls back exactly like `:paced`.
+    * `{:paced, floor, flat_fallback, curve}` — the paced line for `curve`
+      (below), where `elapsed` is the elapsed fraction of the window; without
+      a known `elapsed` (no window length, no reset) it falls back to the
+      side's own flat ceiling, or drops out when it has none. The 3-tuple
+      `{:paced, floor, flat_fallback}` is the `:plateau` curve.
+    * `{:paced_exempt, floor, flat_fallback, cap, curve}` — a `:paced` side
+      for an exempt dispatch (bd-6bxv7h, design §4.2): `max(line, cap)`, where
+      `line` is the paced line and `cap` is `min(exempt_cap, flat)` already
+      resolved by the gate. It only ever raises the paced line, never lowers
+      it, and reports mode `:exempt` only when it actually lifted the line.
+      Without a known `elapsed` it falls back exactly like `:paced`. The
+      4-tuple `{:paced_exempt, floor, flat_fallback, cap}` is the `:plateau`
+      curve.
     * `{:flat, ceiling}` — a fixed ceiling.
+
+  ## The pace curve
+
+  Two curves turn `floor` and `elapsed` into the paced line (operator ruling
+  2026-11-02; the account's / workspace's `pace_curve` setting picks one):
+
+    * `:plateau` (the default, `"plateau"`) — `max(floor, elapsed)`: flat at
+      the floor until `elapsed` overtakes it, then equal to `elapsed`. A pool
+      that reaches the floor early waits, and the line only reaches 1.0 at the
+      reset.
+    * `:ramp` (`"ramp"`) — `floor + (1 - floor) * elapsed`: a straight line
+      from `floor` at the reset to 1.0 at the next one, with no plateau. At
+      floor 0.10 a 7d window reads 23% at one day, 55% at 3.5 days and 74% at
+      five days; a 5h window 28% at one hour, 55% at 2.5h, 82% at four.
+
+  With `floor == 0` the two are the same line (`elapsed`), which is why the
+  dollar spend side is unaffected by the choice. `approaching_margin/0` and
+  the sampling floor are fractions of the *window*, not of the line, so they
+  read the same on either curve; on a ramp the line starts at the floor, so a
+  window's first stretch is `:approaching` for any utilization within a tenth
+  of that floor.
 
   Each side is turned into a number for *now* and the smallest wins, ties
   going to the earlier side; with no side left, `default` applies. See
@@ -50,9 +74,12 @@ defmodule Arbiter.Quota.Pace do
   """
 
   @type verdict :: :ok | :approaching | :holding | :sampling
+  @type curve :: :plateau | :ramp
   @type side ::
           {:paced, float(), float() | nil}
+          | {:paced, float(), float() | nil, curve()}
           | {:paced_exempt, float(), float() | nil, float()}
+          | {:paced_exempt, float(), float() | nil, float(), curve()}
           | {:flat, float()}
   @type thresholds :: %{sides: [side()], default: float()}
 
@@ -129,20 +156,36 @@ defmodule Arbiter.Quota.Pace do
   there is deliberately only one place a paced side turns into a number.
   """
   @spec side_ceiling(side(), float() | nil) :: {float(), :paced | :flat | :exempt} | nil
-  def side_ceiling({:paced, floor, _flat}, elapsed) when is_float(elapsed),
-    do: {max(floor, elapsed), :paced}
+  def side_ceiling({:paced, floor, flat}, elapsed),
+    do: side_ceiling({:paced, floor, flat, :plateau}, elapsed)
 
-  def side_ceiling({:paced_exempt, floor, _flat, cap}, elapsed) when is_float(elapsed) do
-    line = max(floor, elapsed)
+  def side_ceiling({:paced, floor, _flat, curve}, elapsed) when is_float(elapsed),
+    do: {line(curve, floor, elapsed), :paced}
+
+  def side_ceiling({:paced_exempt, floor, flat, cap}, elapsed),
+    do: side_ceiling({:paced_exempt, floor, flat, cap, :plateau}, elapsed)
+
+  def side_ceiling({:paced_exempt, floor, _flat, cap, curve}, elapsed) when is_float(elapsed) do
+    line = line(curve, floor, elapsed)
     if cap > line, do: {cap, :exempt}, else: {line, :paced}
   end
 
-  def side_ceiling({:paced_exempt, floor, flat, _cap}, elapsed),
-    do: side_ceiling({:paced, floor, flat}, elapsed)
+  def side_ceiling({:paced_exempt, floor, flat, _cap, curve}, elapsed),
+    do: side_ceiling({:paced, floor, flat, curve}, elapsed)
 
-  def side_ceiling({:paced, _floor, nil}, _elapsed), do: nil
-  def side_ceiling({:paced, _floor, flat}, _elapsed), do: {flat, :flat}
+  def side_ceiling({:paced, _floor, nil, _curve}, _elapsed), do: nil
+  def side_ceiling({:paced, _floor, flat, _curve}, _elapsed), do: {flat, :flat}
   def side_ceiling({:flat, ceiling}, _elapsed), do: {ceiling, :flat}
+
+  @doc """
+  The paced line itself, for `floor` and an `elapsed` fraction in `0.0..1.0`,
+  under `curve` (see "The pace curve" in the moduledoc). The one place the two
+  formulas live; `side_ceiling/2` and any caller that draws or reports the line
+  (the quota chart, `Arbiter.Quota.Budget`) go through it.
+  """
+  @spec line(curve(), float(), float()) :: float()
+  def line(:ramp, floor, elapsed), do: floor + (1.0 - floor) * elapsed
+  def line(_plateau, floor, elapsed), do: max(floor, elapsed)
 
   defp verdict(u, ceiling, elapsed) when is_number(u) do
     cond do

@@ -295,6 +295,27 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert exit_code == 0
   end
 
+  test "--pace-curve sends the paced line's shape (bd-bq0gi8)" do
+    for curve <- ~w(ramp plateau) do
+      stub_routes([patch_body_route(%{"quota_config" => %{"pace_curve" => curve}})])
+
+      {_out, _err, exit_code} =
+        capture(fn -> Account.run(~w(set personal-max --pace-curve #{curve})) end)
+
+      assert exit_code == 0
+    end
+  end
+
+  test "an invalid --pace-curve dies client-side naming the flag" do
+    for bad <- ~w(linear RAMP) do
+      {_out, err, exit_code} =
+        capture(fn -> Account.run(["set", "personal-max", "--pace-curve", bad]) end)
+
+      assert exit_code != 0
+      assert err =~ "--pace-curve"
+    end
+  end
+
   test "--spend-cap / --spend-window / --spend-mode / --spend-metered send the spend cap" do
     stub_routes([
       patch_body_route(%{

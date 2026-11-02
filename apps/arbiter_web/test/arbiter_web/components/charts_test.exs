@@ -118,6 +118,43 @@ defmodule ArbiterWeb.ChartsTest do
     assert attrs(html, "#h rect", "data-count") == ~w(5 1)
   end
 
+  describe "pace_lines/1 (bd-bq0gi8)" do
+    # One point per fifth of the window; the stored ceiling is the gate's line.
+    defp line_points(curve, floor) do
+      for e <- [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] do
+        ceiling = Float.round(Arbiter.Quota.Pace.line(curve, floor, e) * 100, 1)
+        %{key: "k#{e}", label: "#{e}", value: 5.0, ceiling: ceiling}
+      end
+    end
+
+    # The ceiling path's y coordinates, top of the plot being the smallest.
+    defp ceiling_ys(points) do
+      html = render_component(&Charts.pace_lines/1, id: "p", title: "T", points: points)
+      assert [d] = attrs(html, "#p path[data-role=ceiling]", "d")
+
+      "M" <> rest = d
+
+      rest
+      |> String.split(" L")
+      |> Enum.map(fn xy -> xy |> String.split(",") |> List.last() |> String.to_float() end)
+    end
+
+    test "the ramp is drawn as one straight line from the floor to 100% at the reset" do
+      assert [y0, y1, y2, y3, y4, y5] = ys = ceiling_ys(line_points(:ramp, 0.10))
+
+      # the ceiling is 10% at the reset and 100% at the next one
+      assert y0 > y5
+      steps = Enum.chunk_every(ys, 2, 1, :discard) |> Enum.map(fn [a, b] -> a - b end)
+      assert Enum.all?(steps, &(abs(&1 - hd(steps)) < 0.25)), "not straight: #{inspect(steps)}"
+      assert hd(steps) > 0, "no plateau at the start: #{inspect([y0, y1, y2, y3, y4])}"
+    end
+
+    test "the plateau curve, for contrast, is flat at the floor before it rises" do
+      assert [y0, y1 | _] = ceiling_ys(line_points(:plateau, 0.35))
+      assert y0 == y1
+    end
+  end
+
   test "every chart renders an empty placeholder, not an axis, with no points" do
     for {fun, extra} <- [
           {&Charts.bar/1, [points: []]},

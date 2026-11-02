@@ -202,6 +202,30 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
              }
     end
 
+    test "sets and rejects pace_curve", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "curve-acct"})
+
+      body =
+        json_response(
+          patch(conn, ~p"/api/accounts/curve-acct", %{
+            quota_config: %{threshold_mode: "paced", pace_curve: "ramp"}
+          }),
+          200
+        )
+
+      assert body["quota_config"] == %{"threshold_mode" => "paced", "pace_curve" => "ramp"}
+
+      assert %{"error" => %{"type" => "validation_error", "message" => message}} =
+               json_response(
+                 patch(conn, ~p"/api/accounts/curve-acct", %{
+                   quota_config: %{pace_curve: "linear"}
+                 }),
+                 422
+               )
+
+      assert message =~ "pace_curve"
+    end
+
     test "422s on an invalid threshold_mode", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "bad-mode"})
 

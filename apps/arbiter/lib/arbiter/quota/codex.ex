@@ -438,6 +438,10 @@ defmodule Arbiter.Quota.Codex do
       `false` carries a `disabled_reason`; the gate then falls back to its flat
       ceiling rather than guessing a length.
     * `window_source` — `:reported`, `:plan_table` or `nil`.
+    * `ceiling` / `ceiling_mode` — the utilization ceiling the gate holds the
+      window at right now (`:paced`, `:exempt` or `:flat`), from `Gate.pace/6`:
+      under `pace_curve: "ramp"` it is `floor + (1 - floor) * elapsed`, else
+      `max(floor, elapsed)`.
     * `paced_mode` — whether the account opted into `threshold_mode: "paced"`;
       the fractions are reported either way, but only a paced account holds
       on them.
@@ -502,13 +506,23 @@ defmodule Arbiter.Quota.Codex do
         true -> :account_config
       end
 
+    gate_window = if window == :session, do: :primary, else: :long
+
+    # The ceiling the gate holds this window at right now, through the same
+    # `Gate.pace/6` the dispatch path uses, so a `pace_curve: "ramp"` account
+    # reports its ramp line rather than a `max(floor, elapsed)` recomputed here.
+    %{ceiling: ceiling, mode: ceiling_mode} =
+      Gate.pace({account, nil}, gate_window, label, nil, reset_at, now: now)
+
     %{
       enabled: not is_nil(elapsed),
       disabled_reason: disabled_reason(elapsed, plan, window, reset_at),
       window_source: source,
       window_seconds: seconds,
       elapsed_fraction: elapsed,
-      used_fraction: if(is_number(used_percent), do: used_percent / 100.0)
+      used_fraction: if(is_number(used_percent), do: used_percent / 100.0),
+      ceiling: ceiling,
+      ceiling_mode: ceiling_mode
     }
   end
 

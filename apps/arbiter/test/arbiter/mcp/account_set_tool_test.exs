@@ -91,6 +91,35 @@ defmodule Arbiter.MCP.AccountSetToolTest do
     assert message =~ "spend_window"
   end
 
+  test "sets, shows, rejects and clears pace_curve (bd-bq0gi8)" do
+    account!("mcp-curve")
+
+    assert {:ok, %{account: shown}} =
+             Catalog.call(@coordinator, "account_set", %{
+               "ref" => "claude:mcp-curve",
+               "quota_config" => %{"threshold_mode" => "paced", "pace_curve" => "ramp"}
+             })
+
+    assert shown.quota_config == %{"threshold_mode" => "paced", "pace_curve" => "ramp"}
+
+    assert {:tool_error, message, "validation_error"} =
+             Catalog.call(@coordinator, "account_set", %{
+               "ref" => "claude:mcp-curve",
+               "quota_config" => %{"pace_curve" => "linear"}
+             })
+
+    assert message =~ "pace_curve"
+    assert {:ok, %{quota_config: %{"pace_curve" => "ramp"}}} = Accounts.get_account("mcp-curve")
+
+    assert {:ok, %{account: cleared}} =
+             Catalog.call(@coordinator, "account_set", %{
+               "ref" => "claude:mcp-curve",
+               "quota_config" => %{"pace_curve" => nil}
+             })
+
+    refute Map.has_key?(cleared.quota_config, "pace_curve")
+  end
+
   test "a bad value is an invalid error and writes nothing" do
     account!("mcp-bad", %{label: "Before"})
 

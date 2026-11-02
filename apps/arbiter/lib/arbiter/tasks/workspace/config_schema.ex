@@ -444,6 +444,17 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                           `weekly_threshold` is the control. `hold` treats the
                           warning like a reject. A 7d `rejected` always holds
                           either way.
+      threshold_mode      one of: flat, paced — paced makes the ceiling follow the
+                          window (see pace_curve). The workspace side may only
+                          tighten the account's: min(account, workspace) at the
+                          moment of the check.
+      paced_floor, weekly_paced_floor
+                          number in (0, 1] — the paced line's value at the reset
+                          (primary window / 7d window).
+      pace_curve          one of: plateau, ramp — the paced line itself. plateau
+                          (default) is max(floor, elapsed); ramp is
+                          floor + (1 - floor) * elapsed, rising from the floor
+                          to 1.0 at the reset with no flat stretch.
       pace_exempt_priority  0–4 or "none" — narrows the account's P0 pace
                           exemption (the account's `pace_exempt_priority`
                           grants it; a workspace can only narrow it, never

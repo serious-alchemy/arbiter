@@ -305,7 +305,7 @@ workspace) policy, because the line composes `min(account, workspace)`:
 |---|---|---|
 | `u` | Utilization at the capture | `Snapshot.normalize/2`, the trusted reading |
 | `lag` | `now − captured_at` | The snapshot |
-| `line(t)` | The paced line at time `t`: `max(floor, elapsed(t))`, or the flat ceiling | `Gate.pace/6` with a `now: t` what-if (E1). One definition of the line |
+| `line(t)` | The paced line at time `t`: `max(floor, elapsed(t))` (`pace_curve: "plateau"`, the default) or `floor + (1 - floor) * elapsed(t)` (`"ramp"`, bd-bq0gi8), or the flat ceiling | `Gate.pace/6` with a `now: t` what-if (E1). One definition of the line |
 | `line′(x)` | The fresh window's line `x` hours after its reset | The same call, with `reset_at` advanced one window and `used = 0` |
 | `t_r` | `reset_at − now` | The snapshot |
 | `S` | Seats on `π` now | §3.2 |

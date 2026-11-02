@@ -169,6 +169,13 @@ defmodule Arbiter.Accounts.Fields do
       doc: "7-day paced floor in (0, 1]; applies in paced mode."
     },
     %{
+      name: "pace_curve",
+      type: :curve,
+      doc:
+        "plateau (default: max(floor, elapsed)) or ramp (floor + (1 - floor) * elapsed, " <>
+          "reaching 1.0 at the reset): the line a paced window follows. Applies in paced mode."
+    },
+    %{
       name: "weekly_warning_policy",
       type: :policy,
       doc: "ignore | hold: whether a provider weekly warning holds dispatch."
@@ -467,6 +474,16 @@ defmodule Arbiter.Accounts.Fields do
     else
       invalid_quota(
         "threshold_mode must be one of #{Enum.join(Gate.threshold_modes(), ", ")} (got #{inspect(mode)})"
+      )
+    end
+  end
+
+  defp validate_value("pace_curve", curve, _) do
+    if curve in Gate.pace_curves() do
+      {:ok, curve}
+    else
+      invalid_quota(
+        "pace_curve must be one of #{Enum.join(Gate.pace_curves(), ", ")} (got #{inspect(curve)})"
       )
     end
   end

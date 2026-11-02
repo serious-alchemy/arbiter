@@ -58,7 +58,7 @@ defmodule Arbiter.Quota.Gate do
     * `"paced"` — the ceiling tracks time through the window:
 
           elapsed   = clamp(1 - (reset_at - now) / window_seconds, 0.0, 1.0)
-          threshold = max(floor, elapsed)
+          threshold = line(pace_curve, floor, elapsed)
 
       so at any moment the window may be about as used as it is elapsed, plus
       a head start after a reset: `paced_floor` (primary, default
@@ -68,6 +68,19 @@ defmodule Arbiter.Quota.Gate do
       threshold reaches 1.0 as the window ends, so its last quota can be spent
       just before the reset.
 
+      `pace_curve` (bd-bq0gi8) picks the `line` (`Arbiter.Quota.Pace.line/3`):
+
+        * `"plateau"` — the default, and what an unset or unrecognised value
+          reads as: `max(floor, elapsed)`, flat at the floor until `elapsed`
+          overtakes it. A pool that reaches the floor early waits.
+        * `"ramp"` — `floor + (1 - floor) * elapsed`: a straight line from
+          `floor` at the reset to 1.0 at the next one, with no plateau. At
+          floor 0.10 a 7d window reads 23% at one day, 55% at 3.5 days, 74%
+          at five; a 5h window 28% at one hour, 55% at 2.5h, 82% at four.
+
+      The two coincide at floor 0, so the dollar spend window (always floor 0)
+      is the same under either.
+
   A paced window falls back to its **flat** threshold when
   `window_seconds/2` cannot resolve its length (Codex `"session"`, Antigravity's
   collapsed `"used"`, by default) or its `reset_at` is `nil`.
@@ -75,8 +88,10 @@ defmodule Arbiter.Quota.Gate do
   The account's `quota_config` and the workspace's `config["quota"]` each
   carry their own `threshold_mode` and floors. Composition is P7's
   `min(account, workspace)` rule, evaluated **at the moment of the check**:
-  each side turns its own mode into a number for now (a flat value, or
-  `max(floor, elapsed)`) and the smaller one binds, so a workspace can only
+  each side turns its own mode into a number for now (a flat value, or its own
+  curve's line — `pace_curve` is per side too, so an account on `"plateau"`
+  and a workspace on `"ramp"` are each compared on their own line at the
+  moment of the check) and the smaller one binds, so a workspace can only
   ever be stricter than its account. `window_seconds` is account-only.
 
   ## The P0 pace exemption (bd-6bxv7h, design §4.2)
@@ -84,7 +99,7 @@ defmodule Arbiter.Quota.Gate do
   For a dispatch whose own priority is exempt (`pace_exempt_priority/1`), a
   *paced* side's ceiling lifts from the paced line up to a dedicated cap:
 
-      exempt ceiling = max(max(floor, elapsed), min(exempt_cap, flat))
+      exempt ceiling = max(line(pace_curve, floor, elapsed), min(exempt_cap, flat))
 
   `exempt_cap` is the side's `pace_exempt_threshold` (5h) /
   `weekly_pace_exempt_threshold` (7d), composed `min(account, workspace)`;
@@ -175,6 +190,7 @@ defmodule Arbiter.Quota.Gate do
   @default_paced_floor 0.35
   @default_weekly_paced_floor 0.20
   @threshold_modes ~w[flat paced]
+  @pace_curves ~w[plateau ramp]
 
   # Built-in window lengths by snapshot window label — the second step of
   # `window_seconds/2`. Codex "session" (a session reset, not a fixed-length
@@ -289,7 +305,8 @@ defmodule Arbiter.Quota.Gate do
 
   This is the **flat** ceiling. Under `threshold_mode: "paced"` (bd-2daof2)
   the side that asked for pacing ignores its `throttle_threshold` and holds
-  at `max(paced_floor, elapsed)` instead (floor default
+  at the paced line instead (`max(paced_floor, elapsed)`, or under
+  `pace_curve: "ramp"`, `paced_floor + (1 - paced_floor) * elapsed`; floor default
   `#{@default_paced_floor}`), which only `gating_window/3` can evaluate
   because it depends on the window's `reset_at` and the time of the check. A
   paced window whose length `window_seconds/2` cannot resolve, or whose
@@ -324,7 +341,8 @@ defmodule Arbiter.Quota.Gate do
 
   Like `threshold/1`, this is the **flat** ceiling. A side in
   `threshold_mode: "paced"` ignores its `weekly_threshold` and holds at
-  `max(weekly_paced_floor, elapsed)` (floor default
+  the same paced line over `weekly_paced_floor` (`max(weekly_paced_floor,
+  elapsed)`, or the `"ramp"` curve; floor default
   `#{@default_weekly_paced_floor}`) — evaluated by `gating_window/3`, with the
   same flat fallback for a window of unknown length or with no `reset_at`.
   """
@@ -381,6 +399,13 @@ defmodule Arbiter.Quota.Gate do
   def threshold_modes, do: @threshold_modes
 
   @doc """
+  Valid `pace_curve` value strings (bd-bq0gi8). The first is the default, which
+  is also what an absent or unrecognised stored value reads as.
+  """
+  @spec pace_curves() :: [String.t()]
+  def pace_curves, do: @pace_curves
+
+  @doc """
   Validate a `quota_config` update (bd-c7ll4t). The validator itself lives in
   the account field registry, `Arbiter.Accounts.Fields` (bd-1kr3qf), so the
   REST create/PATCH, `arb account`, the Providers form and MCP `account_set`
@@ -421,7 +446,8 @@ defmodule Arbiter.Quota.Gate do
   `opts[:elapsed]` is the window's elapsed fraction (`0.0..1.0`, from
   `Pace.elapsed_seconds/3` + `Pace.elapsed_fraction/2`) at the moment being
   described — pass it when a real reset time is known so a paced side
-  resolves to its true `max(floor, elapsed)` ceiling. With no `elapsed`
+  resolves to its true ceiling on its own `pace_curve` (`max(floor, elapsed)`
+  or the ramp line). With no `elapsed`
   (unknown window length or `reset_at`), a paced side falls back to its own
   flat setting if it has one, exactly like the gate's own dispatch-time
   fallback, or drops out if it does not.
@@ -443,7 +469,7 @@ defmodule Arbiter.Quota.Gate do
   The `min(account, workspace)` ceiling for `key` actually in force right now
   (bd-c7ll4t) — the paced-aware companion to `binding_side/3`. Unlike
   `threshold/1` / `weekly_threshold/1`, which read the flat keys only, this
-  resolves a `threshold_mode: "paced"` side to `max(floor, elapsed)` when
+  resolves a `threshold_mode: "paced"` side to its paced line when
   `opts[:elapsed]` is known, so `arb quota --workspace` can print the number
   that binds instead of a flat figure a paced side has already stopped using.
   """
@@ -499,7 +525,8 @@ defmodule Arbiter.Quota.Gate do
       throttle_threshold: if(mode == :flat, do: threshold(account)),
       weekly_threshold: if(mode == :flat, do: weekly_threshold(account)),
       paced_floor: paced_floor(config, :primary),
-      weekly_paced_floor: paced_floor(config, :long)
+      weekly_paced_floor: paced_floor(config, :long),
+      pace_curve: config |> Map.get("pace_curve") |> parse_curve() |> Atom.to_string()
     }
   end
 
@@ -873,9 +900,9 @@ defmodule Arbiter.Quota.Gate do
     %{sides: sides, default: flat_default(window)}
   end
 
-  defp exempt_side({:paced, floor, flat}, cap, window) do
+  defp exempt_side({:paced, floor, flat, curve}, cap, window) do
     flat_ceiling = flat || flat_default(window)
-    {:paced_exempt, floor, flat, min(cap || flat_ceiling, flat_ceiling)}
+    {:paced_exempt, floor, flat, min(cap || flat_ceiling, flat_ceiling), curve}
   end
 
   defp exempt_side(side, _cap, _window), do: side
@@ -888,7 +915,7 @@ defmodule Arbiter.Quota.Gate do
 
   defp side(config, :spend) do
     case config |> Map.get("spend_mode") |> parse_mode() do
-      :paced -> {:paced, 0.0, 1.0}
+      :paced -> {:paced, 0.0, 1.0, :plateau}
       :flat -> {:flat, 1.0}
     end
   end
@@ -898,7 +925,7 @@ defmodule Arbiter.Quota.Gate do
 
     cond do
       parse_mode(Map.get(config, "threshold_mode")) == :paced ->
-        {:paced, paced_floor(config, window), flat}
+        {:paced, paced_floor(config, window), flat, parse_curve(Map.get(config, "pace_curve"))}
 
       flat ->
         {:flat, flat}
@@ -927,6 +954,12 @@ defmodule Arbiter.Quota.Gate do
   # `:flat`, the same fall-back-don't-raise contract as `parse_fraction/1`.
   defp parse_mode("paced"), do: :paced
   defp parse_mode(_), do: :flat
+
+  # `pace_curve` (bd-bq0gi8): which line a paced window follows. Same contract
+  # as `parse_mode/1` — anything but `"ramp"` reads as the default `:plateau`,
+  # so a typo in an unvalidated account `quota_config` cannot raise.
+  defp parse_curve("ramp"), do: :ramp
+  defp parse_curve(_), do: :plateau
 
   defp ws_quota(%{config: %{"quota" => %{} = quota}}), do: quota
   defp ws_quota(_), do: %{}
@@ -1230,10 +1263,10 @@ defmodule Arbiter.Quota.Gate do
     2. long-window status *rejected* — the provider is refusing on the weekly
        budget (anything other than `nil` / `"allowed"` / `"allowed_warning"`);
     3. primary `utilization >= threshold/1` — our own 5h ceiling (or, in
-       paced mode, `max(paced_floor, elapsed)`; see "Threshold modes" in the
+       paced mode, the paced line over `paced_floor`; see "Threshold modes" in the
        moduledoc);
     4. long-window `utilization >= weekly_threshold/1` — our own weekly ceiling
-       (or its paced equivalent, `max(weekly_paced_floor, elapsed)`);
+       (or its paced equivalent over `weekly_paced_floor`);
     5. long-window `"allowed_warning"`, when `weekly_warning_policy/1` is
        `:hold`.
 
