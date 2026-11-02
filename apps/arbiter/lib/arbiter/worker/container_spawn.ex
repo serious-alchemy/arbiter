@@ -144,6 +144,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.Image.Publisher
   alias Arbiter.Worker.Image.Registry, as: ImageRegistry
   alias Arbiter.Worker.Image.RepoConfig
+  alias Arbiter.Worker.Image.Source, as: ImageSource
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.ResearchGrant
@@ -882,7 +883,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
          {:ok, image} <- remote_image(opts, worktree, node),
-         {:ok, set, cli} <- remote_cli(provider, opts),
+         {:ok, set, cli} <- remote_cli(provider, image, opts),
          {:ok, services} <- remote_services(opts),
          {:ok, home, config_dir} <- remote_dirs(tmp_dir),
          {:ok, checkout} <- remote_checkout(opts, worktree, config_dir),
@@ -890,6 +891,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree) do
       name = container_name(opts)
       :ok = GitCredential.revoke_when_down(Keyword.get(opts, :owner), material, [])
+      image = pulled_set(image, set)
 
       {:ok,
        %{
@@ -899,7 +901,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          provider: provider,
          image: image,
          image_ref: image_ref(image),
-         cli_set: set.set8,
+         cli_set: Map.get(image, :cli_set) || set.set8,
          harness_version: cli_version(set, provider),
          worktree: worktree,
          checkout: checkout,
@@ -921,6 +923,11 @@ defmodule Arbiter.Worker.ContainerSpawn do
        }}
     end
   end
+
+  # SI4: the CLI set a pulled image must carry (`arbiter.cli-set`, checked by the node):
+  # the publish result's, else (a publisher that reported none) the set it was built from.
+  defp pulled_set(%{pull: _} = image, set), do: Map.put_new(image, :cli_set, set.set8)
+  defp pulled_set(image, _set), do: image
 
   # The workspace whose `git_credentials` say what a node must never be sent: the
   # spawn's own, else its task's.
@@ -1007,7 +1014,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
     base = Mergers.base_branch(workspace, repo) || "main"
     image = RepoConfig.resolve(workspace, repo)
 
-    with :ok <- prebuilt_node(image, repo, node),
+    with :ok <- prebuilt_node(image, repo, node, %{workspace: workspace, repo: repo}, opts),
          {:ok, source_opts} <- source_opts(image, workspace, repo),
          {:ok, plan} <- Image.plan(repo_path, base, source_opts ++ Keyword.get(opts, :plan, [])) do
       plan_context(plan, workspace, repo, repo_path, base, node, opts)
@@ -1016,13 +1023,16 @@ defmodule Arbiter.Worker.ContainerSpawn do
     end
   end
 
-  # A prebuilt image is overlaid and pushed by the primary: only a registry node
-  # can run it (a node that builds its own image has no registry to pull from).
-  defp prebuilt_node(%{source: :prebuilt}, repo, node) do
-    if registry_node?(node), do: :ok, else: {:error, {:prebuilt_needs_registry, repo}}
+  # A prebuilt image is overlaid and pushed by the primary: only a node that runs the
+  # published image can run it, a cluster or (SI4) a machine node that pulls it. A
+  # node that builds its own image has nothing to pull it from.
+  defp prebuilt_node(%{source: :prebuilt}, repo, node, ctx, opts) do
+    if node_source(node, ctx, opts) == :build,
+      do: {:error, {:prebuilt_needs_registry, repo}},
+      else: :ok
   end
 
-  defp prebuilt_node(_image, _repo, _node), do: :ok
+  defp prebuilt_node(_image, _repo, _node, _ctx, _opts), do: :ok
 
   # `Image.plan/3`'s source options; `prebuilt` also needs the repo's image
   # settings and the registry login that reads its `ref` (KH14).
@@ -1067,22 +1077,35 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   @doc """
   Publish the run image for a node **before** the run is committed to it
-  (`Worker.Dispatch`). `:ok` for a node that builds its own image (nothing to
-  publish); for a registry node the same `registry_image/4` the spawn will
-  call, so its single-flight cache makes the spawn's own call instant.
-  `{:error, {:image_unavailable, reason}}` is what `Publisher.fallback/2` maps
-  to local or a hold. Options are `prepare_remote/1`'s `:image`, `:workspace`,
-  `:repo`, `:publish` and `:plan` (extra `Image.plan/3` options).
+  (`Worker.Dispatch`). `:ok` for a run whose node builds its own image (nothing to
+  publish); for a run that takes the published image (a cluster, or SI4's machine
+  node that pulls: `Arbiter.Worker.Image.Source.choose/3`) the same
+  `registry_image/4` the spawn will call, so its single-flight cache makes the
+  spawn's own call instant. `{:error, {:image_unavailable, reason}}` is what
+  `Publisher.fallback/2` maps to local or a hold. Options are `prepare_remote/1`'s
+  `:image`, `:workspace`, `:repo`, `:publish`, `:plan` (extra `Image.plan/3`
+  options) and `:image_source` (`Image.Source.choose/3`'s options; tests).
   """
   @spec preflight_image(String.t() | nil, map(), keyword()) :: :ok | {:error, term()}
   def preflight_image(repo_path, node, opts) do
+    explicit = explicit_image(opts)
+
+    source =
+      if is_binary(explicit),
+        do: source_for(%{tag: explicit, plan: nil}, node, %{}, opts),
+        else:
+          node_source(
+            node,
+            %{workspace: Keyword.get(opts, :workspace), repo: Keyword.get(opts, :repo)},
+            opts
+          )
+
     cond do
-      not registry_node?(node) ->
+      source == :build ->
         prebuilt_preflight(opts)
 
-      is_binary(explicit_image(opts)) ->
-        with {:ok, _} <- registry_image(%{tag: explicit_image(opts), plan: nil}, node, %{}, opts),
-             do: :ok
+      is_binary(explicit) ->
+        with {:ok, _} <- registry_image(%{tag: explicit, plan: nil}, node, %{}, opts), do: :ok
 
       is_binary(repo_path) ->
         with {:ok, _} <- plan_image(opts, repo_path, node), do: :ok
@@ -1110,21 +1133,53 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # the image (`Image.Publisher.ensure_ready/2`: bounded wait, single flight) and
   # the spec carries its digest-pinned `ref`. A publish that times out or fails
   # is `image_unavailable`, the same refusal a node would give; `Publisher.fallback/2`
-  # is the placement policy for it. Any other node, and an install with no
-  # `nodes.registry`, keep the plan exactly as before.
+  # is the placement policy for it.
+  #
+  # SI4 (§21.2.1, §21.4): which image a run takes is chosen per run
+  # (`Image.Source.choose/3`), not read off `caps.image` alone. A machine node that
+  # pulls gets the same pinned `ref`, plus the image's CLI set and the read credential
+  # it may hold (`:pull`, `PullCredential`); the spec carries no `cli` mount
+  # (`remote_cli/3`). Any other node, and an install with no registry, keep the plan
+  # exactly as before.
   def registry_image(image, node, ctx, opts) do
-    if registry_node?(node) do
-      case publish_image(image, ctx, Keyword.get(opts, :publish, [])) do
-        {:ok, %{ref: ref}} -> {:ok, image |> Map.put(:plan, nil) |> Map.put(:ref, ref)}
-        :disabled -> {:error, {:image_unavailable, :no_registry}}
-        {:error, reason} -> {:error, {:image_unavailable, reason}}
-      end
-    else
-      {:ok, image}
+    case source_for(image, node, ctx, opts) do
+      :build ->
+        {:ok, image}
+
+      source ->
+        case publish_image(image, ctx, Keyword.get(opts, :publish, [])) do
+          {:ok, %{ref: ref} = published} -> {:ok, published_image(image, ref, published, source)}
+          :disabled -> {:error, {:image_unavailable, :no_registry}}
+          {:error, reason} -> {:error, {:image_unavailable, reason}}
+        end
     end
   end
 
-  defp registry_node?(node), do: get_in(Map.get(node, :caps) || %{}, ["image"]) == "registry"
+  # An explicit `:image` has no plan to publish: a cluster still asks for it (and is
+  # refused for it), a machine node keeps taking it as a tag it holds.
+  defp source_for(%{plan: nil}, node, _ctx, _opts),
+    do: if(ImageSource.registry_only?(node), do: :registry, else: :build)
+
+  defp source_for(_image, node, ctx, opts), do: node_source(node, ctx, opts)
+
+  defp node_source(node, ctx, opts),
+    do: ImageSource.choose(node, ctx, Keyword.get(opts, :image_source, []))
+
+  defp published_image(image, ref, _published, :registry),
+    do: image |> Map.put(:plan, nil) |> Map.put(:ref, ref)
+
+  defp published_image(image, ref, published, {:pull, pull}) do
+    image
+    |> Map.put(:plan, nil)
+    |> Map.put(:ref, ref)
+    |> Map.put(:pull, pull)
+    |> then(fn image ->
+      case Map.get(published, :cli_set) do
+        set when is_binary(set) -> Map.put(image, :cli_set, set)
+        _ -> image
+      end
+    end)
+  end
 
   # `:stub` replaces the publisher in tests.
   defp publish_image(_image, ctx, stub: stub), do: stub.(ctx)
@@ -1133,8 +1188,15 @@ defmodule Arbiter.Worker.ContainerSpawn do
   defp publish_image(%{plan: plan}, ctx, opts),
     do: Publisher.ensure_ready(Map.put(ctx, :plan, plan), opts)
 
+  # SI4 (§21.2.1): a run that takes the published image (a digest-pinned `ref`) has its
+  # CLIs as image layers, so nothing is shelved and the spec carries no `cli` mount. The
+  # set is still resolved, for the run's provenance (SI3).
+  defp remote_cli(provider, %{ref: ref}, opts) when is_binary(ref) do
+    with {:ok, set, _mounts} <- resolve_cli(provider, opts), do: {:ok, set, []}
+  end
+
   # `[{sha256, name, container path}]`: the node fetches by hash.
-  defp remote_cli(provider, opts) do
+  defp remote_cli(provider, _image, opts) do
     with {:ok, set, mounts} <- resolve_cli(provider, opts),
          {:ok, files} <- publish_cli(mounts) do
       {:ok, set, files}
@@ -1392,7 +1454,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          "task" => request.task_id && to_string(request.task_id),
          "name" => request.name,
          "install" => Arbiter.Nodes.InstallId.get(),
-         "image" => image_json(request.image),
+         "image" => image_json(request.image, request),
          "cwd" => request.worktree,
          "mounts" =>
            [
@@ -1423,7 +1485,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
          "services" => request.services,
          "command" => remote_network_command(request, jail, argv)
        }
-       |> put_checkout(request.checkout)}
+       |> put_checkout(request.checkout)
+       |> put_pull_auth(request.image)}
     end
   end
 
@@ -1591,10 +1654,36 @@ defmodule Arbiter.Worker.ContainerSpawn do
   defp remote_network_command(_request, jail, argv), do: Jail.network_command(jail, argv)
 
   # A2: a registry node gets the digest-pinned `ref` the primary pushed.
-  defp image_json(image) do
+  # SI4: a machine node that pulls it also gets what it checks the image's labels
+  # against (the CLI set, the run's provider) and, for a registry the operator marked
+  # insecure, `--tls-verify=false`.
+  defp image_json(image, request) do
     base = %{"tag" => image.tag, "plan" => plan_json(image.plan)}
-    if is_binary(Map.get(image, :ref)), do: Map.put(base, "ref", image.ref), else: base
+    base = if is_binary(Map.get(image, :ref)), do: Map.put(base, "ref", image.ref), else: base
+
+    case Map.get(image, :pull) do
+      %{} = pull ->
+        base
+        |> put_string("cli_set", Map.get(image, :cli_set))
+        |> put_string("provider", Map.get(request, :provider))
+        |> then(
+          &if(Map.get(pull, :insecure?) == true, do: Map.put(&1, "insecure", true), else: &1)
+        )
+
+      _ ->
+        base
+    end
   end
+
+  defp put_string(map, key, value) when is_binary(value), do: Map.put(map, key, value)
+  defp put_string(map, _key, _value), do: map
+
+  # SI4 (§21.4): the read credential for this one pull, allowlisted and never logged
+  # (`Arbiter.NodeAgent.PullAuth` prints only its registry). An anonymous pull has none.
+  defp put_pull_auth(spec, %{pull: %{auth: %Arbiter.NodeAgent.PullAuth{} = auth}}),
+    do: Map.put(spec, "pull_auth", auth)
+
+  defp put_pull_auth(spec, _image), do: spec
 
   defp plan_json(nil), do: nil
 
