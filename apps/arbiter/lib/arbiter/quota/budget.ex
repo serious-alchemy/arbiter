@@ -82,6 +82,7 @@ defmodule Arbiter.Quota.Budget do
   """
 
   alias Arbiter.Accounts.ProviderAccount
+  alias Arbiter.Agents.ModelFamily
   alias Arbiter.Quota.BudgetCalibration
   alias Arbiter.Quota.BurnGovernor
   alias Arbiter.Quota.Gate
@@ -887,7 +888,7 @@ defmodule Arbiter.Quota.Budget do
         true
 
       %__MODULE__{scope: scope} when is_binary(model) ->
-        Arbiter.Agents.ModelFamily.scope_matches?(scope, model)
+        ModelFamily.scope_matches?(scope, model)
 
       _ ->
         false

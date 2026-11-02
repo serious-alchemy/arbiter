@@ -48,6 +48,7 @@ defmodule Arbiter.Quota do
   alias Arbiter.Accounts.Credentials
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
+  alias Arbiter.Agents.ModelFamily
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.CloudCode
   alias Arbiter.Quota.Gate
@@ -825,7 +826,7 @@ defmodule Arbiter.Quota do
   # `matched` is whether the scope names a Claude model the gate knows; an
   # unmatched one is shown, and gated only when `is_active`.
   defp serialize_scoped(limits) do
-    for w <- Arbiter.Quota.Gate.Snapshot.scoped_windows(limits) do
+    for w <- Snapshot.scoped_windows(limits) do
       %{
         scope: w.scope,
         label: w.label,
@@ -833,7 +834,7 @@ defmodule Arbiter.Quota do
         status: w.status,
         reset_at: iso(w.reset_at),
         is_active: w.active?,
-        matched: Arbiter.Agents.ModelFamily.known_scope?(w.scope)
+        matched: ModelFamily.known_scope?(w.scope)
       }
     end
   end
@@ -1290,7 +1291,7 @@ defmodule Arbiter.Quota do
   defp log_unmatched_scope(%{"scope" => scope} = window) do
     key = {__MODULE__, :unmatched_scope, scope}
 
-    if not Arbiter.Agents.ModelFamily.known_scope?(scope) and
+    if not ModelFamily.known_scope?(scope) and
          :persistent_term.get(key, nil) == nil do
       :persistent_term.put(key, true)
 

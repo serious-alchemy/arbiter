@@ -39,6 +39,7 @@ defmodule Arbiter.Quota.Budget.Inputs do
   alias Arbiter.Providers.Pause
   alias Arbiter.Quota
   alias Arbiter.Quota.BudgetCalibration
+  alias Arbiter.Quota.Gate.Snapshot
 
   @agy_pools [
     {"antigravity:gemini_models", "gemini-2.5-pro"},
@@ -153,7 +154,7 @@ defmodule Arbiter.Quota.Budget.Inputs do
 
   defp scopes(%{scoped_limits: limits}) when is_list(limits) do
     limits
-    |> Arbiter.Quota.Gate.Snapshot.scoped_windows()
+    |> Snapshot.scoped_windows()
     |> Enum.map(& &1.scope)
     |> Enum.filter(&ModelFamily.known_scope?/1)
     |> Enum.uniq()
