@@ -117,7 +117,9 @@ arb config set merge.repos.<repo>.train.depth 3       # one repo
 
 up to K approved, green MRs that are behind the target are tested **at once**,
 each in a *car*: `T1 = target + A`, `T2 = T1 + B`, `T3 = T2 + C`. Depth 1 (the
-default) is the serial train above, unchanged.
+default) is the serial train above, unchanged. The train decides freshness, so it
+runs where the merge-time freshness check does (`merge.require_up_to_date`,
+on by default) and needs the repo in `repo_paths`.
 
 **Where cars live.** A car is a merge commit Arbiter builds with git plumbing
 (`merge-tree --write-tree` + `commit-tree`) in the repo's `repo_paths` checkout

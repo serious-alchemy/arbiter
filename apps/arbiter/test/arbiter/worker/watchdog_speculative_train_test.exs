@@ -630,6 +630,24 @@ defmodule Arbiter.Worker.WatchdogSpeculativeTrainTest do
     end
   end
 
+  describe "back on the train" do
+    test "an MR riding a car again gives up the serial sync place it held", %{forge: forge} do
+      heads = stale_mrs(forge, ~w(a))
+      ws = workspace(forge)
+      key = {ws.id, "app", "main"}
+
+      # A holds the serial place (as after an ejection's sync) when it boards.
+      claim = %{task_id: "a", status: :behind_base, priority: 2, last_head_sha: heads["a"]}
+      assert :head = MergeTrain.claim(key, claim)
+      a = watch("a", ws, heads["a"], initial_delay_ms: 200)
+      :sys.replace_state(a, &%{&1 | train_role: :head})
+
+      wait_until(fn -> car(a) != nil end)
+      assert MergeTrain.view(key).head == nil
+      assert :sys.get_state(a).train_role == nil
+    end
+  end
+
   describe "falling back to the serial train" do
     test "a project whose CI refuses car pipelines syncs the MR instead", %{forge: forge} do
       heads = stale_mrs(forge, ~w(a))

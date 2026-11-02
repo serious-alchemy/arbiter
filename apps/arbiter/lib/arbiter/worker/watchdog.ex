@@ -6329,6 +6329,9 @@ defmodule Arbiter.Worker.Watchdog do
   defp car_opts(state), do: %{workflow: train_option(state, "workflow")}
 
   defp car_gate({:merge, sha, state}) do
+    # Riding a car, it needs no serial sync: a place it holds there (from the
+    # sync after an ejection) goes to the next MR.
+    state = release_sync_place(state)
     state = %{ensure_train_identity(state) | train_car_gate_poll: state.poll_count}
 
     case board_train(state, sha) do
