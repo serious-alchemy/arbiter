@@ -19,7 +19,7 @@ defmodule Arbiter.Quota.BurnGovernor do
     * **Gate** — a flat rule: `burn_24h >= cap` holds the dispatch
       (`binding/4`), ranked after the 7d rules. It is a utilization rule, so
       `pace: false` (admission `enforce`) leaves it out and
-    * **Budget** — adds a `24h` window entry (`Arbiter.Quota.Budget`) whose
+    * **Budget** — adds a `24h` window entry (the provider concurrency budget, DC3) whose
       line is the cap and whose draw is the 7d window's `ρ`, so the seat count
       shrinks before the cap is reached (`window/3`).
 
