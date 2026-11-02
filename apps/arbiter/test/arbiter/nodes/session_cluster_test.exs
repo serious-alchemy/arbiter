@@ -253,6 +253,67 @@ defmodule Arbiter.Nodes.SessionClusterTest do
     end
   end
 
+  # SI4 (`docs/design/remote-workers.md` §21.4): a machine node handed the published image
+  # to pull is bounded for a pull, not for the cold toolchain build the 25 minutes are
+  # sized for.
+  describe "the pull-sized prepare bound (SI4)" do
+    @pull_ref "registry.example.com/arbiter/vstim/worker@sha256:" <> String.duplicate("a", 64)
+
+    defp assign_spec(pid, run, spec, opts \\ []) do
+      owner = self()
+
+      task =
+        Task.async(fn -> Session.assign(pid, run, Map.put(spec, "run", run), owner, opts) end)
+
+      assert_receive {:node_session, {:push, "assign", %{"run" => ^run}}}
+      task
+    end
+
+    defp pull_spec,
+      do: %{"image" => %{"tag" => "localhost/x:1", "plan" => nil, "ref" => @pull_ref}}
+
+    test "is ten minutes by default, sized for a pull, under the 25 a build gets" do
+      assert Session.default_pull_prepare_timeout_ms() == 10 * 60_000
+      assert Session.default_pull_prepare_timeout_ms() < 25 * 60_000
+    end
+
+    test "bounds a machine node's pull; its build runs keep the build budget", %{node: node} do
+      {:ok, %{pid: pid}} =
+        attach(node, hello(), prepare_timeout_ms: 60_000, pull_prepare_timeout_ms: 80)
+
+      pulling = assign_spec(pid, "r-pull", pull_spec())
+      assert {:error, :prepare_timeout} = Task.await(pulling)
+
+      assert_receive {:node_session,
+                      {:push, "cancel", %{"run" => "r-pull", "reason" => "prepare_timeout"}}}
+
+      building =
+        assign_spec(pid, "r-build", %{"image" => %{"tag" => "localhost/x:1", "plan" => %{}}})
+
+      refute_receive {:node_session, {:push, "cancel", %{"run" => "r-build"}}}, 300
+      Session.node_event(pid, "run.ready", %{"run" => "r-build"})
+      assert {:ok, _} = Task.await(building)
+    end
+
+    test "a cluster keeps the budget it is told in hello_ok", %{node: node} do
+      {:ok, %{pid: pid}} =
+        attach(node, cluster_hello(), prepare_timeout_ms: 60_000, pull_prepare_timeout_ms: 80)
+
+      task = assign_spec(pid, "r-c", pull_spec())
+      refute_receive {:node_session, {:push, "cancel", %{"run" => "r-c"}}}, 300
+      Session.node_event(pid, "run.ready", %{"run" => "r-c"})
+      assert {:ok, _} = Task.await(task)
+    end
+
+    test "a caller's own budget still wins", %{node: node} do
+      {:ok, %{pid: pid}} =
+        attach(node, hello(), prepare_timeout_ms: 60_000, pull_prepare_timeout_ms: 60_000)
+
+      task = assign_spec(pid, "r-own", pull_spec(), prepare_timeout_ms: 80)
+      assert {:error, :prepare_timeout} = Task.await(task)
+    end
+  end
+
   describe "stages and the startup watchdog (A3, K17)" do
     test "a pending run is not started; it counts as started only at running", %{node: node} do
       {:ok, %{pid: pid}} = attach(node, cluster_hello())
