@@ -5,6 +5,10 @@ echo "$sub $*" >> "$D/calls"
 case "$sub" in
   run)
     printf '%s\n' "$@" > "$D/run.argv"
+    # SI4: whether the auth file a pull was handed still exists when the container starts
+    if [ -e "$D/pull.authfile" ]; then
+      if [ -e "$(cat "$D/pull.authfile")" ]; then echo present; else echo absent; fi > "$D/authfile.at_run"
+    fi
     env > "$D/run.env"
     mkdir -p "$D/graph"
     : > "$D/graph/config.json"

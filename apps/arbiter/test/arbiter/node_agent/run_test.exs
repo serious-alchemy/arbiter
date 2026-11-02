@@ -741,6 +741,8 @@ defmodule Arbiter.NodeAgent.RunTest do
       assert File.read!(Path.join(stub, "pull.authfile.sha256")) |> String.trim() ==
                :crypto.hash(:sha256, authfile_body()) |> Base.encode16(case: :lower)
 
+      # gone before the container started, not only once it exited
+      assert File.read!(Path.join(stub, "authfile.at_run")) == "absent\n"
       refute File.exists?(authfile)
 
       argv = File.read!(Path.join(stub, "run.argv")) |> String.split("\n", trim: true)
