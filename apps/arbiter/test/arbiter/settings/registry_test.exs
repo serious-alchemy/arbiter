@@ -13,6 +13,7 @@ defmodule Arbiter.Settings.RegistryTest do
            nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
            nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.chart_ref nodes.registry_username
            nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.registry.publish_timeout_ms
+           nodes.registry_pull_username nodes.registry_pull_password nodes.machine_image_source
            worker.cli.versions worker.cli.manual worker.cli_set.hold)
 
   test "keys/0 lists every installation setting" do
@@ -124,6 +125,92 @@ defmodule Arbiter.Settings.RegistryTest do
       assert Settings.nodes_registry() == "reg.example.com:5000/arb"
       assert Settings.nodes_registry_username() == "bot"
       assert Settings.nodes_registry_insecure?()
+    end
+  end
+
+  # SI4 (`docs/design/remote-workers.md` §21.4, §21.6): the install-wide read credential a
+  # machine node may be handed for one pull, and the switch that lets machines pull at all.
+  describe "machine-node pull settings (SI4)" do
+    test "nodes.machine_image_source is auto or build, defaults to build, operator-only" do
+      assert %{value: "build", default: "build", overridden: false, allowed: ["auto", "build"]} =
+               Registry.describe("nodes.machine_image_source")
+
+      assert Settings.machine_image_source() == "build"
+
+      for bad <- ["registry", "Auto", "", 1, true] do
+        assert {:error, msg} = Registry.cast("nodes.machine_image_source", bad)
+        assert msg =~ "auto or build"
+      end
+
+      assert "nodes.machine_image_source" in Registry.operator_only_keys()
+
+      assert {:error, {:unauthorized, _}} =
+               Registry.put("nodes.machine_image_source", "auto", authority: :coordinator)
+
+      assert {:ok, "auto"} = Registry.put("nodes.machine_image_source", "auto")
+      assert Settings.machine_image_source() == "auto"
+      assert {:ok, nil} = Registry.put("nodes.machine_image_source", nil)
+      assert Settings.machine_image_source() == "build"
+      assert {:error, :invalid_value} = Settings.set_nodes_machine_image_source("registry")
+    end
+
+    test "the pull login is a registry username, operator-only" do
+      assert {:ok, "deploy-token-1"} =
+               Registry.put("nodes.registry_pull_username", "deploy-token-1")
+
+      assert Settings.nodes_registry_pull_username() == "deploy-token-1"
+
+      for bad <- ["a b", "user:pw", ""] do
+        assert {:error, _} = Registry.cast("nodes.registry_pull_username", bad)
+      end
+
+      for key <- ~w(nodes.registry_pull_username nodes.registry_pull_password) do
+        assert key in Registry.operator_only_keys()
+        assert {:error, {:unauthorized, _}} = Registry.put(key, "x", authority: :coordinator)
+      end
+    end
+
+    test "the pull password is stored encrypted and no read surface ever returns it" do
+      assert {:ok, stored} = Registry.put("nodes.registry_pull_password", "pull-only-s3cret")
+      refute inspect(stored) =~ "pull-only-s3cret"
+      assert Settings.nodes_registry_pull_password() == "pull-only-s3cret"
+      assert Settings.nodes_registry_pull_password_set?()
+
+      raw =
+        Arbiter.Settings.Installation
+        |> Ash.read!()
+        |> hd()
+        |> Map.fetch!(:nodes_registry_pull_password)
+
+      assert is_binary(raw)
+      refute raw =~ "pull-only-s3cret"
+
+      described = Registry.describe("nodes.registry_pull_password")
+      assert described.overridden
+      assert described.type == "secret"
+      refute inspect(described) =~ "pull-only-s3cret"
+      refute inspect(Registry.all()) =~ "pull-only-s3cret"
+      refute inspect(Registry.overrides()) =~ "pull-only-s3cret"
+
+      assert {:ok, nil} = Registry.put("nodes.registry_pull_password", nil)
+      assert Settings.nodes_registry_pull_password() == nil
+    end
+
+    test "the pull password is never the push password, whichever is set first" do
+      assert {:ok, _} = Registry.put("nodes.registry_password", "push-token-abc")
+
+      assert {:error, {:invalid, msg}} =
+               Registry.put("nodes.registry_pull_password", "push-token-abc")
+
+      assert msg =~ "same_as_push_credential"
+      assert Settings.nodes_registry_pull_password() == nil
+
+      assert {:ok, _} = Registry.put("nodes.registry_password", nil)
+      assert {:ok, _} = Registry.put("nodes.registry_pull_password", "token-xyz")
+
+      assert {:error, {:invalid, msg}} = Registry.put("nodes.registry_password", "token-xyz")
+      assert msg =~ "same_as_pull_credential"
+      assert Settings.nodes_registry_password() == nil
     end
   end
 
@@ -381,6 +468,7 @@ defmodule Arbiter.Settings.RegistryTest do
                       nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
                       nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
                       nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.registry.publish_timeout_ms nodes.chart_ref
+                      nodes.registry_pull_username nodes.registry_pull_password nodes.machine_image_source
                       worker.cli.versions worker.cli.manual worker.cli_set.hold)
 
     test "operator_only_keys/0 is the schema's operator-only set" do

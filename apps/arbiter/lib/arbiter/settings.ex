@@ -1005,11 +1005,104 @@ defmodule Arbiter.Settings do
 
   def set_nodes_registry_password(pw)
       when is_binary(pw) and byte_size(pw) > 0 and byte_size(pw) <= @registry_password_max do
-    with {:ok, _} <- write_setting(:nodes_registry_password, Arbiter.Vault.encrypt!(pw)),
-         do: {:ok, :set}
+    # SI4: the push token is never also the token machine nodes are handed to pull with.
+    if pw == nodes_registry_pull_password() do
+      {:error, :same_as_pull_credential}
+    else
+      with {:ok, _} <- write_setting(:nodes_registry_password, Arbiter.Vault.encrypt!(pw)),
+           do: {:ok, :set}
+    end
   end
 
   def set_nodes_registry_password(_), do: {:error, :invalid_value}
+
+  # ---- machine-node pulls (SI4) ----------------------------------------------
+
+  @machine_image_sources ~w(auto build)
+
+  @doc "The `nodes.machine_image_source` values."
+  @spec machine_image_sources() :: [String.t()]
+  def machine_image_sources, do: @machine_image_sources
+
+  @doc """
+  Whether a machine node may be handed the published image to pull (SI4,
+  `docs/design/remote-workers.md` §21.6): `"auto"`, or `"build"` (the default),
+  under which every machine node builds from a plan as before.
+  """
+  @spec machine_image_source() :: String.t()
+  def machine_image_source, do: nodes_machine_image_source() || "build"
+
+  @doc "The persisted `nodes.machine_image_source` override."
+  @spec nodes_machine_image_source() :: String.t() | nil
+  def nodes_machine_image_source, do: read_setting(:nodes_machine_image_source)
+
+  @spec set_nodes_machine_image_source(String.t() | nil) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def set_nodes_machine_image_source(nil), do: write_setting(:nodes_machine_image_source, nil)
+
+  def set_nodes_machine_image_source(source) when source in @machine_image_sources,
+    do: write_setting(:nodes_machine_image_source, source)
+
+  def set_nodes_machine_image_source(_), do: {:error, :invalid_value}
+
+  @doc "The read-only login machine nodes pull from `nodes.registry` with, or `nil`."
+  @spec nodes_registry_pull_username() :: String.t() | nil
+  def nodes_registry_pull_username, do: read_setting(:nodes_registry_pull_username)
+
+  @spec set_nodes_registry_pull_username(String.t() | nil) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def set_nodes_registry_pull_username(nil), do: write_setting(:nodes_registry_pull_username, nil)
+
+  def set_nodes_registry_pull_username(user) when is_binary(user) do
+    if Regex.match?(@registry_user_re, user),
+      do: write_setting(:nodes_registry_pull_username, user),
+      else: {:error, :invalid_value}
+  end
+
+  def set_nodes_registry_pull_username(_), do: {:error, :invalid_value}
+
+  @doc """
+  The decrypted pull password, or `nil`. For `Arbiter.Worker.Image.PullCredential`
+  only: it reaches a machine node in one `assign`'s `pull_auth`, which the node writes
+  to its tmpfs for one pull; no settings surface returns it.
+  """
+  @spec nodes_registry_pull_password() :: String.t() | nil
+  def nodes_registry_pull_password do
+    case read_setting(:nodes_registry_pull_password) do
+      cipher when is_binary(cipher) -> Arbiter.Vault.decrypt!(cipher)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  @doc "Whether a pull password is stored (without decrypting it)."
+  @spec nodes_registry_pull_password_set?() :: boolean()
+  def nodes_registry_pull_password_set?,
+    do: is_binary(read_setting(:nodes_registry_pull_password))
+
+  @doc """
+  Encrypt and persist the pull password; `nil` clears it. Refused when it is the push
+  password (`nodes.registry_password`): a node must never hold the credential that can
+  overwrite the images every node runs. `{:ok, :set | nil}`, as the push password's.
+  """
+  @spec set_nodes_registry_pull_password(String.t() | nil) ::
+          {:ok, :set | nil} | {:error, term()}
+  def set_nodes_registry_pull_password(nil) do
+    with {:ok, _} <- write_setting(:nodes_registry_pull_password, nil), do: {:ok, nil}
+  end
+
+  def set_nodes_registry_pull_password(pw)
+      when is_binary(pw) and byte_size(pw) > 0 and byte_size(pw) <= @registry_password_max do
+    if pw == nodes_registry_password() do
+      {:error, :same_as_push_credential}
+    else
+      with {:ok, _} <- write_setting(:nodes_registry_pull_password, Arbiter.Vault.encrypt!(pw)),
+           do: {:ok, :set}
+    end
+  end
+
+  def set_nodes_registry_pull_password(_), do: {:error, :invalid_value}
 
   # ---- singleton plumbing --------------------------------------------------
 

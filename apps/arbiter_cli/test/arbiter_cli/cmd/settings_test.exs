@@ -271,4 +271,26 @@ defmodule ArbiterCli.Cmd.SettingsSecretTest do
     {_out, _err, 0} = capture(fn -> Settings.run(["set", "nodes.registry_insecure", "true"]) end)
     assert_received {:patched, %{"key" => "nodes.registry_insecure", "value" => true}}
   end
+
+  # SI4: the machine-node pull token is a secret too.
+  test "nodes.registry_pull_password reads from --file and stdin as a string secret", %{
+    tmp_dir: dir
+  } do
+    stub_patch()
+    path = Path.join(dir, "pull-pw")
+    File.write!(path, "424242\n")
+
+    {out, err, 0} =
+      capture(fn -> Settings.run(["set", "nodes.registry_pull_password", "--file", path]) end)
+
+    assert_received {:patched, %{"key" => "nodes.registry_pull_password", "value" => "424242"}}
+    refute out <> err =~ "424242"
+
+    {_out, _err, 0} =
+      capture(fn -> Settings.run(["set", "nodes.registry_pull_password", "-"]) end,
+        input: "pull-from-stdin\n"
+      )
+
+    assert_received {:patched, %{"value" => "pull-from-stdin"}}
+  end
 end
