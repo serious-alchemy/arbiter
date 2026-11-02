@@ -22,6 +22,9 @@ defmodule Arbiter.Quota.Gate.Snapshot do
     * `secondary_utilization` / `secondary_status` / `secondary_reset_at` —
       the same three things for the provider's **long** window (Anthropic 7d,
       Codex weekly), named by `secondary_window_label`.
+    * `burn_24h` / `burn_24h_at` — the fraction of the long window used over the
+      last 24 h and when that was computed (`Arbiter.Quota.Burn`, bd-cklotu).
+      Anthropic only; `nil` for the others and for a sparse history.
 
   ## Both windows are projected (bd-1tuxv8)
 
@@ -57,7 +60,9 @@ defmodule Arbiter.Quota.Gate.Snapshot do
           secondary_utilization: float() | nil,
           secondary_status: String.t() | nil,
           secondary_reset_at: DateTime.t() | nil,
-          secondary_window_label: String.t() | nil
+          secondary_window_label: String.t() | nil,
+          burn_24h: float() | nil,
+          burn_24h_at: DateTime.t() | nil
         }
 
   defstruct provider: nil,
@@ -71,7 +76,9 @@ defmodule Arbiter.Quota.Gate.Snapshot do
             secondary_utilization: nil,
             secondary_status: nil,
             secondary_reset_at: nil,
-            secondary_window_label: nil
+            secondary_window_label: nil,
+            burn_24h: nil,
+            burn_24h_at: nil
 
   @doc """
   Project a persisted quota row onto the provider-neutral gate shape.

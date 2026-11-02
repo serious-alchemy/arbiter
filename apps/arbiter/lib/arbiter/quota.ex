@@ -1230,12 +1230,19 @@ defmodule Arbiter.Quota do
 
     with {:ok, quota} <- result do
       # Only a poll that carried the aggregate figures is a history sample; the
-      # secondary-only write touched no primary column.
-      if action == :record_oauth_snapshot, do: Arbiter.Quota.History.record(account_id, quota)
-      broadcast_quota_update(account_id, quota)
-    end
+      # secondary-only write touched no primary column. The 24h burn
+      # (bd-cklotu) is computed over the history including that sample.
+      quota =
+        if action == :record_oauth_snapshot do
+          Arbiter.Quota.History.record(account_id, quota)
+          Arbiter.Quota.Burn.refresh(account_id, quota)
+        else
+          quota
+        end
 
-    result
+      broadcast_quota_update(account_id, quota)
+      {:ok, quota}
+    end
   end
 
   @doc """

@@ -32,6 +32,11 @@ defmodule Arbiter.Quota.Burn do
     * have no gap longer than 3 h (a poll is every 5 min).
   """
 
+  require Logger
+
+  alias Arbiter.Quota.AnthropicQuota
+  alias Arbiter.Quota.History
+
   @window_seconds 24 * 3600
   @start_slack_seconds 2 * 3600
   @end_slack_seconds 3600
@@ -104,6 +109,47 @@ defmodule Arbiter.Quota.Burn do
     do: abs(DateTime.diff(rb, ra)) > @reset_jitter_seconds
 
   defp reset?(a, b), do: b.utilization < a.utilization
+
+  @doc """
+  `burn_24h/2` for `account_id`, read off the `quota_snapshots` history of its
+  `window` (default the 7d) at `now`.
+  """
+  @spec compute(String.t(), keyword()) :: float() | nil
+  def compute(account_id, opts \\ []) do
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+
+    account_id
+    |> History.list(
+      window: Keyword.get(opts, :window, "7d"),
+      bucket: Keyword.get(opts, :bucket, "claude"),
+      since: DateTime.add(now, -@lookback_seconds, :second),
+      until: now
+    )
+    |> burn_24h(now)
+  end
+
+  @doc """
+  Compute the burn right after a poll appended its sample and store it on the
+  account's quota `row` (`burn_24h` and `burn_24h_at`; both `nil` when the
+  history is too sparse). Best effort: a failure returns `row` untouched, and a
+  poll never fails on it.
+  """
+  @spec refresh(String.t(), AnthropicQuota.t()) :: AnthropicQuota.t()
+  def refresh(account_id, %AnthropicQuota{} = row) do
+    now = DateTime.utc_now()
+    burn = compute(account_id, now: now, bucket: row.provider)
+
+    row
+    |> Ash.Changeset.for_update(:record_burn_24h, %{
+      burn_24h: burn,
+      burn_24h_at: if(burn, do: DateTime.truncate(now, :second))
+    })
+    |> Ash.update!()
+  rescue
+    e ->
+      Logger.warning("Arbiter.Quota.Burn: refresh failed: #{Exception.message(e)}")
+      row
+  end
 
   @doc """
   The rolling 24 h burn over a whole history, on an hourly grid: one
