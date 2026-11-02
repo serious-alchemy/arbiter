@@ -348,13 +348,13 @@ defmodule Arbiter.Worker.MergeTrain do
       state.trains
       |> Map.get(key, new_train())
       |> upsert_rider(entry, pid)
-      |> expire_riders(id)
+      |> expire_riders(id, state.settle)
       |> seat_resuming(id, entry)
       |> fill_seats(depth, state.settle)
 
     reply =
       cond do
-        id in train.seats -> {:seat, seat_info(train, id)}
+        id in train.seats -> {:seat, seat_info(train, id, state.settle)}
         state.settle == :forming -> {:wait, :forming}
         true -> {:wait, {:full, depth}}
       end
@@ -707,11 +707,16 @@ defmodule Arbiter.Worker.MergeTrain do
     end
   end
 
-  defp expire_riders(train, keep) do
+  # A seat kept without a Watchdog (an orphan, a ghost) does not lapse while the
+  # train forms: forming is the time the Watchdogs have to come back.
+  defp expire_riders(train, keep, settle) do
     now = now()
 
     train.riders
-    |> Enum.filter(fn {id, rider} -> id != keep and rider_expired?(rider, now) end)
+    |> Enum.filter(fn {id, rider} ->
+      id != keep and not (settle == :forming and is_nil(rider.pid)) and
+        rider_expired?(rider, now)
+    end)
     |> Enum.reduce(train, fn {id, _rider}, train -> drop_rider(train, id) end)
   end
 
@@ -722,7 +727,7 @@ defmodule Arbiter.Worker.MergeTrain do
     case Map.fetch!(train.riders, id) do
       %{resuming?: true, car: %{} = car} ->
         train = if id in train.seats, do: train, else: insert_by_chain(train, id, car)
-        ghost_for_base(train, id, car)
+        train |> ghost_for_base(id, car) |> reorder_by_chain()
 
       _ ->
         train
@@ -778,6 +783,38 @@ defmodule Arbiter.Worker.MergeTrain do
     end
   end
 
+  # Put every seated car right behind the car it stands on, keeping the order
+  # otherwise. Riders come back in any order after a restart, and a car that
+  # comes back before the car standing on it cannot know where it belongs until
+  # that one says. No seat is ever dropped, whatever the links say.
+  defp reorder_by_chain(%{seats: seats} = train) do
+    parents = Map.new(seats, &{&1, chain_parent(train, &1, seats)})
+    roots = Enum.filter(seats, &is_nil(Map.fetch!(parents, &1)))
+
+    {ordered, _seen} =
+      Enum.reduce(roots, {[], MapSet.new()}, &emit_chain(&1, seats, parents, &2))
+
+    ordered = Enum.reverse(ordered)
+    %{train | seats: ordered ++ Enum.reject(seats, &(&1 in ordered))}
+  end
+
+  defp emit_chain(id, seats, parents, {out, seen} = acc) do
+    if MapSet.member?(seen, id) do
+      acc
+    else
+      seats
+      |> Enum.filter(&(Map.fetch!(parents, &1) == id))
+      |> Enum.reduce({[id | out], MapSet.put(seen, id)}, &emit_chain(&1, seats, parents, &2))
+    end
+  end
+
+  defp chain_parent(train, id, seats) do
+    case base_task(train, id) do
+      parent when is_binary(parent) and parent != id -> if parent in seats, do: parent
+      _ -> nil
+    end
+  end
+
   defp base_task(train, id) do
     case train.riders do
       %{^id => %{car: %{} = car}} -> Map.get(car, :base_task)
@@ -805,7 +842,7 @@ defmodule Arbiter.Worker.MergeTrain do
     end
   end
 
-  defp seat_info(train, id) do
+  defp seat_info(train, id, settle) do
     index = Enum.find_index(train.seats, &(&1 == id))
     ahead = Enum.take(train.seats, index)
 
@@ -826,7 +863,14 @@ defmodule Arbiter.Worker.MergeTrain do
         do: :eject,
         else: :hold
 
-    %{position: index + 1, front?: index == 0, ahead: ahead, base: base, red: red}
+    %{
+      position: index + 1,
+      front?: index == 0,
+      ahead: ahead,
+      base: base,
+      red: red,
+      forming?: settle == :forming
+    }
   end
 
   defp drop_rider(train, id) do

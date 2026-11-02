@@ -213,6 +213,38 @@ defmodule Arbiter.Tasks.PullRequest do
     update_lane(task_id, %{"train_synced_from" => sha})
   end
 
+  @doc """
+  Record the ticket's speculative merge-train car (bd-6dyva0) — its ref, commit,
+  tree, the commit and task it stands on, the MR head it carries and its
+  pipeline — or `nil` once it has none, so a restarted Watchdog resumes the
+  car (and the train its order) instead of building it again.
+  """
+  @spec record_train_car(String.t(), map() | nil) :: :ok | {:error, term()}
+  def record_train_car(task_id, car) when is_binary(task_id) do
+    lane_car =
+      case car do
+        %{} ->
+          car
+          |> Map.take([:ref, :sha, :tree, :base, :base_task, :mr_head, :pipeline])
+          |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+
+        nil ->
+          nil
+      end
+
+    update_lane(task_id, %{"train_car" => lane_car})
+  end
+
+  @doc """
+  Record the head a red merge-train car (or a car the forge could not run) sent
+  back to the serial path (bd-6dyva0), so a restarted Watchdog does not board
+  the train again on that head.
+  """
+  @spec record_train_ejected(String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def record_train_ejected(task_id, head) when is_binary(task_id) do
+    update_lane(task_id, %{"train_ejected_head" => head})
+  end
+
   defp update_lane(task_id, changes) do
     with {:ok, issue} <- Ash.get(Issue, task_id),
          lane = Map.merge(issue.merge_watch || %{}, changes),
@@ -351,7 +383,9 @@ defmodule Arbiter.Tasks.PullRequest do
       reviewed_sha: Map.get(lane, "reviewed_sha"),
       auto_resumes: Map.get(lane, "auto_resumes"),
       train_ready_since: Map.get(lane, "train_ready_since"),
-      train_synced_from: Map.get(lane, "train_synced_from")
+      train_synced_from: Map.get(lane, "train_synced_from"),
+      train_car: Map.get(lane, "train_car"),
+      train_ejected_head: Map.get(lane, "train_ejected_head")
     ]
     |> put_opt(:interval_ms, integer(lane, "interval_ms"))
     |> put_opt(:initial_delay_ms, integer(lane, "initial_delay_ms"))

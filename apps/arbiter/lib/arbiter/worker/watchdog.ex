@@ -306,10 +306,12 @@ defmodule Arbiter.Worker.Watchdog do
 
   require Logger
 
+  alias Arbiter.Board.CiBackpressure
   alias Arbiter.Mergers
   alias Arbiter.Mergers.CILogExcerpt
   alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Mergers.PendingMerge
+  alias Arbiter.Mergers.TrainCar
   alias Arbiter.ReviewGate.BaselineCarry
   alias Arbiter.ReviewGate.MergeAuthorization
   alias Arbiter.ReviewGate.RulingResume
@@ -375,6 +377,18 @@ defmodule Arbiter.Worker.Watchdog do
   # `merge.max_freshness_syncs`, `MergeFreshness.max_syncs/1`), and
   # polls to wait for a synced head to appear before syncing again.
   @freshness_wait_polls 10
+
+  # bd-6dyva0. The speculative merge train (`merge.train.depth` > 1): polls a
+  # car may sit seated without its MR reaching a merge decision (its own CI
+  # re-running, a review round, a block) before it gives its seat up; polls a
+  # car may go without any pipeline on its commit before CI is asked again;
+  # re-runs of a car pipeline that was cancelled by something else; and car
+  # builds that may fail in a row (a fetch, a push) before the MR takes the
+  # serial path instead.
+  @car_idle_polls 3
+  @car_no_pipeline_polls 20
+  @car_reruns 1
+  @car_build_failures 3
 
   # bd-df3zlo / #1736 (P4, AC4). How many consecutive polls a `{:unknown, _}`
   # coverage answer is waited out before the lane parks and pages the
@@ -1254,6 +1268,9 @@ defmodule Arbiter.Worker.Watchdog do
   @impl true
   def terminate(reason, state) when reason in [:normal, :shutdown] do
     _ = clear_train_synced_from(state)
+    # bd-6dyva0: a deliberate stop leaves the merge train. A shutdown does not:
+    # the restarted Watchdog resumes its car from the lane.
+    if reason == :normal, do: safe(fn -> release_car(state) end)
     :ok
   end
 
@@ -1435,6 +1452,34 @@ defmodule Arbiter.Worker.Watchdog do
       merge_slot: false,
       train_rerun_head: nil,
       train_wait_logged: nil,
+      # bd-6dyva0. The speculative merge train (`merge.train.depth` > 1).
+      # `train_server` the MergeTrain asked (an opt, for tests); `train_car` this
+      # MR's car (`Arbiter.Mergers.TrainCar`: `ref`, `sha`, `tree`, `base`,
+      # `base_task`, `mr_head`, `pipeline`), on the lane so a restart resumes it;
+      # `train_car_status` its CI as last read; `train_seat` the last seat the
+      # train gave; `train_car_gate_poll` the poll the car was last driven on (a
+      # car whose MR stops reaching a merge decision gives its seat up);
+      # `train_ejected_head` the head a red car of its own (or a car the forge
+      # cannot run) sent back to the serial path, also on the lane, with
+      # `train_eject_evidence` for the fix pass; `train_car_hold` why a car is
+      # held (the target is red); `train_car_checked_tip` the target tip the
+      # front car's landing tree was last proven against; `train_car_merging`
+      # the car a merge was authorised on (the post-merge check);
+      # `ci_backpressure` an opt replacing `CiBackpressure.verdict/3` (tests).
+      train_server: Keyword.get(opts, :merge_train, MergeTrain),
+      train_car: parse_train_car(Keyword.get(opts, :train_car)),
+      train_car_status: :none,
+      train_seat: nil,
+      train_car_gate_poll: 0,
+      train_ejected_head: normalize_sha(Keyword.get(opts, :train_ejected_head)),
+      train_eject_evidence: nil,
+      train_car_hold: nil,
+      train_car_checked_tip: nil,
+      train_car_merging: nil,
+      train_car_reruns: 0,
+      train_car_no_pipeline_polls: 0,
+      train_car_failures: 0,
+      ci_backpressure: Keyword.get(opts, :ci_backpressure),
       coverage_unknown_head: nil,
       coverage_parked?: false,
       # `poll_count` as it stood when the coverage park lifted `max_polls` to
@@ -2646,6 +2691,7 @@ defmodule Arbiter.Worker.Watchdog do
           "Worker.Watchdog: auto-merged approved MR #{state.mr_ref} for task=#{state.task_id}"
         )
 
+        state = audit_car_landing(state)
         state = clear_own_pending_merge(state)
         sync_tracker_merged(state)
         finish_merged(state)
@@ -4280,7 +4326,7 @@ defmodule Arbiter.Worker.Watchdog do
       task_id: state.task_id,
       workspace_id: workspace_id(state),
       pr_ref: state.mr_ref,
-      checks: checks
+      checks: checks ++ train_evidence_checks(state)
     }
 
     # A failure that reproduced on a re-run in tests the PR never edited: the
@@ -5686,18 +5732,27 @@ defmodule Arbiter.Worker.Watchdog do
       not (is_binary(state.mr_base_ref) and is_binary(state.last_head_sha)) ->
         merge
 
+      # bd-6dyva0: `merge.train.depth` > 1 — a car on the speculative train
+      # instead of a turn at the serial sync.
+      speculative?(state, sha) ->
+        car_gate(merge)
+
       true ->
-        # bd-1754qj: one merge at a time per target, so the freshness check below
-        # sees the target the previous merge produced. Taken before the check,
-        # not after, for that reason.
-        case acquire_merge_slot(reset_freshness_budget(state)) do
-          {:busy, state} -> {:wait, state}
-          {:ok, state} -> locked_freshness_check({:merge, sha, state})
-        end
+        serial_freshness(merge)
     end
   end
 
   defp freshness_gate(other), do: other
+
+  # bd-1754qj: one merge at a time per target, so the freshness check below
+  # sees the target the previous merge produced. Taken before the check, not
+  # after, for that reason.
+  defp serial_freshness({:merge, sha, state}) do
+    case acquire_merge_slot(reset_freshness_budget(state)) do
+      {:busy, state} -> {:wait, state}
+      {:ok, state} -> locked_freshness_check({:merge, sha, state})
+    end
+  end
 
   defp locked_freshness_check({:merge, _sha, state} = merge) do
     case MergeFreshness.check(
@@ -6021,6 +6076,13 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp wait_detail(%{train_role: {:wait, head}}), do: "waiting for merge head #{head}"
+
+  defp wait_detail(%{train_seat: %{position: n}, train_car: car}),
+    do: "on the merge train, car #{n}#{if car, do: " (#{car.ref})", else: ""}"
+
+  defp wait_detail(%{train_seat: nil, train_wait_logged: {:seat, why}}),
+    do: "waiting for a seat on the merge train (#{inspect(why)})"
+
   defp wait_detail(_state), do: nil
 
   # The head's once-per-poll report: where it is (syncing, in CI, red, ready) so
@@ -6199,10 +6261,719 @@ defmodule Arbiter.Worker.Watchdog do
 
   # The end of a poll: its merge attempt, if any, is over, so the target's merge
   # slot is free for the next MR. A Watchdog that stops leaves the train for good.
-  defp end_poll({:noreply, state}), do: {:noreply, release_merge_slot(state)}
+  # bd-6dyva0: and a car whose MR stopped reaching a merge decision gives its
+  # seat up; one whose Watchdog stops leaves the train.
+  defp end_poll({:noreply, state}),
+    do: {:noreply, state |> release_merge_slot() |> release_idle_car()}
 
   defp end_poll({:stop, reason, state}),
-    do: {:stop, reason, state |> release_merge_slot() |> release_sync_place()}
+    do: {:stop, reason, state |> release_merge_slot() |> release_sync_place() |> release_car()}
+
+  # ---- speculative merge train (bd-6dyva0) ---------------------------------
+  #
+  # With `merge.train.depth` K > 1 an approved, covered, green MR that is behind
+  # its target boards the target's speculative train (`MergeTrain.board/3`)
+  # instead of waiting for the one serial sync. Its car — a merge commit of the
+  # car ahead of it (the target, at the front) and its head, on the
+  # Arbiter-owned ref `arbiter/train/<task>` (`Arbiter.Mergers.TrainCar`) — runs
+  # CI beside the others. The MR's own branch never moves, and its merge is the
+  # same guarded forge merge as ever, pinned to the covered head: the car only
+  # answers the freshness half of the decision. It authorises the merge at the
+  # front, green, and only when the forge's merge commit of the target and that
+  # head would carry exactly the car's tested tree; anything that moved the
+  # target under it rebuilds it instead. A red car of the MR's own (every car
+  # ahead green, the target not red) sends it back to the serial path for that
+  # head — a sync and its own CI, where triage, re-runs and fix passes decide as
+  # usual — with the car's pipeline as evidence. A car whose base went away is
+  # rebuilt and its old pipeline cancelled. Every wait here is a held poll: the
+  # car has its own bounds, and never runs into the review-timeout ceiling.
+
+  defp speculative?(state, sha) do
+    state.train_ejected_head != sha and train_depth(state) > 1 and car_adapter?(state.adapter) and
+      is_binary(local_repo(state))
+  end
+
+  defp car_adapter?(adapter) do
+    Code.ensure_loaded?(adapter) and function_exported?(adapter, :run_ref_pipeline, 3) and
+      function_exported?(adapter, :ref_pipeline, 3) and
+      function_exported?(adapter, :cancel_ref_pipeline, 3)
+  end
+
+  # `merge.train.depth` (per repo via `merge.repos.<repo>.train.depth`): how many
+  # of a target's MRs may be tested at once. 1, the default, is the serial train.
+  defp train_depth(state) do
+    case train_option(state, "depth") do
+      n when is_integer(n) and n >= 1 -> n
+      s when is_binary(s) -> s |> parse_int() |> at_least_one()
+      _ -> 1
+    end
+  end
+
+  defp at_least_one(n) when is_integer(n) and n >= 1, do: n
+  defp at_least_one(_), do: 1
+
+  defp train_option(%{workspace: %Workspace{} = workspace, repo: repo}, key) do
+    case workspace |> Mergers.merge_config(repo) |> Map.get("train") do
+      %{} = train -> Map.get(train, key)
+      _ -> nil
+    end
+  end
+
+  defp train_option(_state, _key), do: nil
+
+  defp car_ref_prefix(state), do: train_option(state, "ref_prefix")
+  defp car_opts(state), do: %{workflow: train_option(state, "workflow")}
+
+  defp car_gate({:merge, sha, state}) do
+    state = %{ensure_train_identity(state) | train_car_gate_poll: state.poll_count}
+
+    case board_train(state, sha) do
+      # The train restarted and is still taking its cars back: until it has, a
+      # car only reports — no build, no rebuild, no ejection, no merge.
+      {:seat, %{forming?: true} = seat} ->
+        {:wait, wait_for_seat(%{state | train_seat: seat}, :forming)}
+
+      {:seat, seat} ->
+        car_seated(%{state | train_seat: seat}, seat, sha)
+
+      {:wait, why} ->
+        {:wait, wait_for_seat(%{state | train_seat: nil}, why)}
+
+      :unreachable ->
+        serial_freshness({:merge, sha, state})
+    end
+  end
+
+  # Ask for (or keep) a seat, reporting this MR's car and its CI. The car is
+  # reported on every poll, so the cars behind stand on what it is now.
+  defp board_train(state, sha) do
+    entry = %{
+      task_id: state.task_id,
+      priority: state.train_priority || 2,
+      opened_at: state.train_ready_since,
+      mr_head: sha,
+      depth: if(ci_saturated?(state), do: 1, else: train_depth(state)),
+      car: state.train_car,
+      car_status: state.train_car_status,
+      ttl_ms: state.interval_ms * 3 + 1_000,
+      resume_grace_ms: train_ci_wait_ticks(state) * state.interval_ms,
+      ghost_grace_ms: state.interval_ms * 6 + 1_000
+    }
+
+    case train_key(state) do
+      nil -> :unreachable
+      key -> train_call(fn -> MergeTrain.board(key, entry, state.train_server) end, :unreachable)
+    end
+  end
+
+  # #1126: while the repo's CI queue is saturated the train tests its front car
+  # only. Fails open.
+  defp ci_saturated?(state) do
+    check = state.ci_backpressure || (&CiBackpressure.verdict/2)
+    match?({:hold, _}, check.(state.workspace, state.repo))
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp wait_for_seat(state, why) do
+    if state.train_wait_logged != {:seat, why} do
+      Logger.info(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} waiting for a seat on the " <>
+          "merge train for #{inspect(state.mr_base_ref)} (#{inspect(why)})"
+      )
+    end
+
+    held_poll(%{state | train_wait_logged: {:seat, why}})
+  end
+
+  # A wait on the train is not a stall: like a queued pipeline, it does not count
+  # toward the poll ceiling.
+  defp held_poll(%{max_polls: cap} = state) when is_integer(cap),
+    do: %{state | pass_polls: state.pass_polls + 1}
+
+  defp held_poll(state), do: state
+
+  # The front holds the target's merge slot for the poll, so whatever it decides
+  # (merge on its own pipeline, merge on its car, rebuild) sees the target the
+  # last merge left.
+  defp car_seated(state, %{front?: true} = seat, sha) do
+    case acquire_merge_slot(state) do
+      {:busy, state} ->
+        {:wait, state}
+
+      {:ok, state} ->
+        # Current with the target (within `up_to_date_tolerance`): it merges on
+        # its own pipeline, as it would with no train at all.
+        case MergeFreshness.check(state.workspace, local_repo(state), state.mr_base_ref, sha) do
+          :fresh -> {:merge, sha, state}
+          _ -> drive_car(state, seat, sha)
+        end
+    end
+  end
+
+  defp car_seated(state, seat, sha), do: drive_car(state, seat, sha)
+
+  defp drive_car(state, seat, sha) do
+    if car_stale?(state.train_car, seat, sha),
+      do: build_car(retire_car(state), seat, sha),
+      else: watch_car(state, seat, sha)
+  end
+
+  # Stale: no car; the MR's head moved (new content, the coverage guards' to
+  # judge before any car carries it); or the car it stands on is no longer the
+  # car ahead. At the front a car may stand on a car that has since merged:
+  # whether it still holds is the landing-tree question, asked of the target.
+  defp car_stale?(nil, _seat, _sha), do: true
+  defp car_stale?(%{mr_head: head}, _seat, sha) when head != sha, do: true
+  defp car_stale?(%{base: base}, %{base: {:car, _task, ahead}}, _sha), do: base != ahead
+  defp car_stale?(_car, _seat, _sha), do: false
+
+  defp build_car(state, %{base: :pending}, _sha), do: {:wait, held_poll(state)}
+
+  defp build_car(state, seat, sha) do
+    case car_target_hold(state) do
+      nil ->
+        if not seat.front? and ci_saturated?(state),
+          do: {:wait, held_poll(state)},
+          else: do_build_car(%{state | train_car_hold: nil}, seat, sha)
+
+      why ->
+        {:wait, hold_car(state, why)}
+    end
+  end
+
+  defp do_build_car(state, seat, sha) do
+    repo = local_repo(state)
+    ref = TrainCar.ref_name(state.task_id, car_ref_prefix(state))
+
+    with {:ok, base, base_task} <- car_base(state, repo, seat),
+         {:ok, built} <- TrainCar.build(repo, base, sha, message: car_message(state)),
+         :ok <- TrainCar.push(repo, built.sha, ref, ref_push_options(state.adapter)),
+         {:ok, pipeline} <- run_car_pipeline(state, ref, built.sha) do
+      car = Map.merge(built, %{ref: ref, base_task: base_task, pipeline: pipeline_id(pipeline)})
+
+      Logger.info(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} rides merge-train car " <>
+          "#{seat.position} for #{inspect(state.mr_base_ref)}: #{ref} @ #{short(car.sha)} = " <>
+          "#{if(base_task, do: "car of #{base_task}", else: state.mr_base_ref)} " <>
+          "#{short(base)} + head #{short(sha)}; CI started"
+      )
+
+      state = put_train_car(state, car)
+      # Reported now, so the cars behind can stand on it this round.
+      _ = board_train(state, sha)
+      {:wait, held_poll(state)}
+    else
+      {:error, {:conflict, files}} -> eject_car(state, sha, {:conflict, files})
+      {:error, %{kind: :pipeline_refused} = why} -> eject_car(state, sha, {:car_ci_refused, why})
+      {:error, reason} -> car_build_failed(state, sha, reason)
+    end
+  end
+
+  defp car_base(state, repo, %{base: :target}) do
+    with {:ok, tip} <- TrainCar.target_tip(repo, state.mr_base_ref), do: {:ok, tip, nil}
+  end
+
+  defp car_base(_state, _repo, %{base: {:car, task, sha}}), do: {:ok, sha, task}
+
+  defp car_message(state),
+    do: "Arbiter merge-train car: #{state.task_id} (#{state.mr_ref})\n"
+
+  defp ref_push_options(adapter) do
+    if function_exported?(adapter, :ref_push_options, 0), do: adapter.ref_push_options(), else: []
+  end
+
+  defp run_car_pipeline(state, ref, sha) do
+    state.adapter.run_ref_pipeline(state.mr_ref, %{ref: ref, sha: sha}, car_opts(state))
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp pipeline_id(%{id: id}), do: id
+  defp pipeline_id(_), do: nil
+
+  defp car_build_failed(state, sha, reason) do
+    failures = state.train_car_failures + 1
+
+    Logger.warning(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not build its " <>
+        "merge-train car (#{failures}/#{@car_build_failures}): #{inspect_short(reason)}"
+    )
+
+    if failures >= @car_build_failures,
+      do: eject_car(%{state | train_car_failures: 0}, sha, {:car_unavailable, reason}),
+      else: {:wait, held_poll(%{state | train_car_failures: failures})}
+  end
+
+  defp put_train_car(state, car) do
+    safe(fn -> PullRequest.record_train_car(state.task_id, car) end)
+
+    %{
+      state
+      | train_car: car,
+        train_car_status: :pending,
+        train_car_hold: nil,
+        train_car_checked_tip: nil,
+        train_car_reruns: 0,
+        train_car_no_pipeline_polls: 0,
+        train_car_failures: 0
+    }
+  end
+
+  # The car goes: its pipeline, if it may still be running, is cancelled (a
+  # superseded car tests nothing the train will merge), and the lane forgets it.
+  # The ref stays for a rebuild to replace; leaving for good deletes it.
+  defp retire_car(%{train_car: nil} = state), do: state
+
+  defp retire_car(%{train_car: car} = state) do
+    if state.train_car_status in [:none, :pending, :running] do
+      Logger.info(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} cancelling the pipeline of " <>
+          "superseded merge-train car #{short(car.sha)}"
+      )
+
+      safe(fn -> state.adapter.cancel_ref_pipeline(state.mr_ref, car, car_opts(state)) end)
+    end
+
+    safe(fn -> PullRequest.record_train_car(state.task_id, nil) end)
+    %{state | train_car: nil, train_car_status: :none, train_car_checked_tip: nil}
+  end
+
+  defp watch_car(state, seat, sha) do
+    case car_verdict(state) do
+      :green -> green_car(%{state | train_car_status: :green}, seat, sha)
+      {:red, pipeline} -> red_car(%{state | train_car_status: :red}, seat, sha, pipeline)
+      :canceled -> rerun_car(state, sha)
+      :skipped -> eject_car(state, sha, :car_ci_skipped)
+      :none -> no_car_pipeline(state, seat, sha)
+      :unknown -> {:wait, held_poll(state)}
+      phase -> car_ci_running(%{state | train_car_status: phase}, seat, sha)
+    end
+  end
+
+  # A verdict only from a pipeline on the car's own commit.
+  defp car_verdict(%{train_car: car} = state) do
+    case safe_value(fn -> state.adapter.ref_pipeline(state.mr_ref, car, car_opts(state)) end) do
+      {:ok, nil} -> :none
+      {:ok, %{sha: other}} when is_binary(other) and other != car.sha -> :none
+      {:ok, %{status: status} = pipeline} -> car_phase(state, status, pipeline)
+      _ -> :unknown
+    end
+  end
+
+  defp car_phase(_state, status, _pipeline) when status in ["success", "manual"], do: :green
+
+  # bd-dtbsgx: a car red only on deploy / post-merge jobs is not red.
+  defp car_phase(state, "failed", pipeline) do
+    case CiSync.judge_failure(pipeline, state.workspace, state.repo) do
+      {:ignored, _jobs} -> :green
+      {:red, _jobs} -> {:red, pipeline}
+    end
+  end
+
+  defp car_phase(_state, "canceled", _pipeline), do: :canceled
+  defp car_phase(_state, "skipped", _pipeline), do: :skipped
+  defp car_phase(_state, "running", _pipeline), do: :running
+  defp car_phase(_state, _status, _pipeline), do: :pending
+
+  defp green_car(state, %{front?: true} = seat, sha), do: authorize_car_merge(state, seat, sha)
+  defp green_car(state, _seat, _sha), do: {:wait, held_poll(state)}
+
+  # The car is green and first. It authorises the MR's merge only if the forge's
+  # merge commit of the target as it is now and the covered head would carry
+  # exactly the tree the car tested, and the car is the non-authored merge it
+  # was built as.
+  defp authorize_car_merge(%{train_car: car} = state, seat, sha) do
+    repo = local_repo(state)
+
+    with :ok <- TrainCar.verify(repo, car),
+         {:ok, tip} <- TrainCar.target_tip(repo, state.mr_base_ref),
+         {:ok, tree} <- TrainCar.landing_tree(repo, tip, car.mr_head) do
+      if tree == car.tree do
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} merge-train car " <>
+            "#{short(car.sha)} is green and first: merging #{short(sha)} into " <>
+            "#{state.mr_base_ref} @ #{short(tip)} lands tree #{short(tree)}, the tree it tested"
+        )
+
+        {:merge, sha, %{reroot(state) | train_car_merging: car, train_car_checked_tip: tip}}
+      else
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} #{state.mr_base_ref} moved " <>
+            "under merge-train car #{short(car.sha)} (landing tree #{short(tree)} is not its " <>
+            "tree); rebuilding it on #{short(tip)}"
+        )
+
+        build_car(retire_car(state), seat, sha)
+      end
+    else
+      {:error, {:conflict, files}} ->
+        eject_car(state, sha, {:conflict, files})
+
+      {:error, why}
+      when why in [:parents_differ, :tree_differs_from_merge, :tree_differs_from_record] ->
+        Logger.error(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} merge-train car " <>
+            "#{short(car.sha)} is not the non-authored merge it was built as (#{why}); not " <>
+            "merging on it, rebuilding"
+        )
+
+        build_car(retire_car(state), seat, sha)
+
+      {:error, why} ->
+        Logger.warning(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not check merge-train " <>
+            "car #{short(car.sha)} against #{state.mr_base_ref} (#{inspect_short(why)}); waiting"
+        )
+
+        {:wait, held_poll(state)}
+    end
+  end
+
+  defp red_car(state, seat, sha, pipeline) do
+    case car_target_hold(state) do
+      nil -> red_car_on_green_target(state, seat, sha, pipeline)
+      why -> {:wait, hold_car(state, why)}
+    end
+  end
+
+  defp red_car_on_green_target(state, seat, sha, pipeline) do
+    cond do
+      # It failed while the target was red: try it again on the target as it is.
+      not is_nil(state.train_car_hold) ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} the target is green again; " <>
+            "rebuilding the merge-train car that failed while it was red"
+        )
+
+        build_car(retire_car(%{state | train_car_hold: nil}), seat, sha)
+
+      seat.red == :eject ->
+        eject_car(state, sha, {:car_failed, pipeline})
+
+      # A car ahead has no verdict yet, or is red itself and goes first.
+      true ->
+        {:wait, held_poll(state)}
+    end
+  end
+
+  # bd-5owt7w: while the target's own pipeline is red, no car is built and none
+  # is ejected — a red car proves nothing about its MR then.
+  defp car_target_hold(state),
+    do:
+      CiSync.target_hold(
+        state.adapter,
+        state.mr_ref,
+        state.mr_base_ref,
+        state.workspace,
+        state.repo
+      )
+
+  defp hold_car(state, why) do
+    if state.train_car_hold != why do
+      Logger.warning(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} holding its merge-train car — " <>
+          "#{why}; none built, none ejected until the target is green"
+      )
+    end
+
+    held_poll(%{state | train_car_hold: why})
+  end
+
+  # A pipeline cancelled by something else is not a verdict: start it again, once.
+  defp rerun_car(%{train_car: car} = state, sha) do
+    if state.train_car_reruns < @car_reruns do
+      case run_car_pipeline(state, car.ref, car.sha) do
+        {:ok, pipeline} ->
+          car = %{car | pipeline: pipeline_id(pipeline) || car.pipeline}
+          safe(fn -> PullRequest.record_train_car(state.task_id, car) end)
+
+          {:wait,
+           held_poll(%{
+             state
+             | train_car: car,
+               train_car_status: :pending,
+               train_car_reruns: state.train_car_reruns + 1,
+               train_car_no_pipeline_polls: 0
+           })}
+
+        {:error, reason} ->
+          car_build_failed(state, sha, reason)
+      end
+    else
+      eject_car(state, sha, :car_ci_cancelled)
+    end
+  end
+
+  defp no_car_pipeline(state, seat, sha) do
+    polls = state.train_car_no_pipeline_polls + 1
+
+    cond do
+      polls < @car_no_pipeline_polls ->
+        car_ci_running(%{state | train_car_no_pipeline_polls: polls}, seat, sha)
+
+      state.train_car_reruns < @car_reruns ->
+        rerun_car(state, sha)
+
+      true ->
+        eject_car(state, sha, :car_ci_never_started)
+    end
+  end
+
+  # The car's CI is under way. The front checks, against the target as it is
+  # now, that the car still predicts what its merge would land; a car that does
+  # not is rebuilt now rather than at the end of its pipeline.
+  defp car_ci_running(state, %{front?: true} = seat, sha) do
+    case landing(state) do
+      {:holds, state} -> {:wait, held_poll(state)}
+      {:moved, state} -> build_car(retire_car(state), seat, sha)
+      {:conflict, files} -> eject_car(state, sha, {:conflict, files})
+      :unknown -> {:wait, held_poll(state)}
+    end
+  end
+
+  defp car_ci_running(state, _seat, _sha), do: {:wait, held_poll(state)}
+
+  defp landing(%{train_car: car} = state) do
+    repo = local_repo(state)
+
+    case TrainCar.target_tip(repo, state.mr_base_ref) do
+      {:ok, tip} when tip == state.train_car_checked_tip ->
+        {:holds, state}
+
+      {:ok, tip} ->
+        case TrainCar.landing_tree(repo, tip, car.mr_head) do
+          {:ok, tree} when tree == car.tree ->
+            {:holds, reroot(%{state | train_car_checked_tip: tip})}
+
+          {:ok, _tree} ->
+            {:moved, state}
+
+          {:error, {:conflict, files}} ->
+            {:conflict, files}
+
+          {:error, _why} ->
+            :unknown
+        end
+
+      {:error, _why} ->
+        :unknown
+    end
+  end
+
+  # At the front, a car built on a car that has since merged stands on the target
+  # itself: record that, so a restart keeps no seat for the merged car.
+  defp reroot(%{train_car: %{base_task: nil}} = state), do: state
+
+  defp reroot(%{train_car: car} = state) do
+    car = %{car | base_task: nil}
+    safe(fn -> PullRequest.record_train_car(state.task_id, car) end)
+    %{state | train_car: car}
+  end
+
+  # Off the train for this head, back to the serial path (a sync, then its own
+  # CI), with the car's evidence on the ticket and, should it come to that, in
+  # the fix pass's briefing.
+  defp eject_car(state, sha, why) do
+    evidence = eject_evidence(state, sha, why)
+
+    Logger.warning(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} leaves the speculative merge " <>
+        "train at head #{short(sha)}: #{evidence.reason}; back to the serial path (a sync, " <>
+        "then its own CI)"
+    )
+
+    record_train_note(state, evidence)
+    safe(fn -> PullRequest.record_train_ejected(state.task_id, sha) end)
+
+    state = release_car(state)
+
+    serial_freshness(
+      {:merge, sha, %{state | train_ejected_head: sha, train_eject_evidence: evidence}}
+    )
+  end
+
+  defp eject_evidence(state, sha, why) do
+    car = state.train_car
+
+    pipeline =
+      case why do
+        {:car_failed, pipeline} -> pipeline
+        _ -> nil
+      end
+
+    %{
+      head: sha,
+      ref: (car && car.ref) || TrainCar.ref_name(state.task_id, car_ref_prefix(state)),
+      car: car && car.sha,
+      base: car && car.base,
+      url: pipeline && Map.get(pipeline, :url),
+      reason: describe_ejection(why, state)
+    }
+  end
+
+  defp describe_ejection({:car_failed, pipeline}, _state) do
+    jobs =
+      case Map.get(pipeline, :jobs) do
+        jobs when is_list(jobs) ->
+          case for(%{status: "failed", name: name} <- jobs, do: name) do
+            [] -> ""
+            names -> " (failed: #{Enum.join(names, ", ")})"
+          end
+
+        _ ->
+          ""
+      end
+
+    "its car's pipeline #{Map.get(pipeline, :id)} failed#{jobs}, with every car ahead of it green"
+  end
+
+  defp describe_ejection({:conflict, files}, state),
+    do:
+      "it does not merge cleanly onto #{state.mr_base_ref} and the cars ahead of it " <>
+        "(#{Enum.join(files, ", ")})"
+
+  defp describe_ejection({:car_ci_refused, why}, _state),
+    do:
+      "the forge refused CI on its car ref (#{Map.get(why, :message) || inspect_short(why)}); " <>
+        "admit `arbiter/train/*` refs (GitLab: `$ARBITER_TRAIN_CAR`) in the CI rules"
+
+  defp describe_ejection(:car_ci_skipped, _state),
+    do: "its car's pipeline ran no jobs (skipped), so nothing tested the combination"
+
+  defp describe_ejection(:car_ci_cancelled, _state),
+    do: "its car's pipeline was cancelled again after a re-run"
+
+  defp describe_ejection(:car_ci_never_started, _state),
+    do: "no pipeline ever started on its car"
+
+  defp describe_ejection({:car_unavailable, why}, _state),
+    do: "its car could not be built (#{inspect_short(why)})"
+
+  defp record_train_note(state, evidence) do
+    car =
+      if evidence.car,
+        do: " (car #{evidence.ref} @ #{evidence.car}, on #{evidence.base})",
+        else: ""
+
+    text =
+      "## Merge train (#{DateTime.to_iso8601(DateTime.utc_now())})\n\n" <>
+        "head #{evidence.head}: left the speculative merge train#{car} — #{evidence.reason}" <>
+        if(evidence.url, do: " (#{evidence.url})", else: "") <>
+        ". It goes back to the serial path for this head: synced with " <>
+        "#{state.mr_base_ref}, its own CI decides, with CI triage, re-runs and fix passes as usual.\n"
+
+    safe(fn ->
+      with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, state.task_id),
+           do: Ash.update(task, %{append_notes: text}, action: :update)
+    end)
+  end
+
+  # The car's evidence, for a fix pass dispatched while the MR is off the train.
+  defp train_evidence_checks(%{train_eject_evidence: %{reason: reason} = evidence}) do
+    [
+      %{
+        name: "merge-train car #{evidence.ref}",
+        summary:
+          "This MR left the speculative merge train at head #{evidence.head}: #{reason}. " <>
+            "The car was the target with the MRs ahead of it and this head merged in.",
+        url: evidence.url
+      }
+    ]
+  end
+
+  defp train_evidence_checks(_state), do: []
+
+  # Leaving the train for good: a superseded pipeline is cancelled, the car ref
+  # deleted, the seat given up.
+  defp release_car(%{train_car: nil, train_seat: nil} = state), do: state
+
+  defp release_car(state) do
+    ref =
+      case state.train_car do
+        %{ref: ref} -> ref
+        _ -> TrainCar.ref_name(state.task_id, car_ref_prefix(state))
+      end
+
+    state = retire_car(state)
+    safe(fn -> TrainCar.delete(local_repo(state), ref) end)
+
+    with key when not is_nil(key) <- train_key(state) do
+      train_call(fn -> MergeTrain.leave(key, state.task_id, state.train_server) end, :ok)
+    end
+
+    %{state | train_seat: nil}
+  end
+
+  # A seated MR that has stopped reaching a merge decision (its own CI re-running,
+  # a review round, a block) gives its seat up, and the cars behind it re-base.
+  defp release_idle_car(%{train_car: nil, train_seat: nil} = state), do: state
+
+  defp release_idle_car(state) do
+    if state.poll_count - state.train_car_gate_poll > @car_idle_polls do
+      Logger.info(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} has not reached a merge " <>
+          "decision in #{@car_idle_polls} polls; giving up its merge-train seat"
+      )
+
+      release_car(state)
+    else
+      state
+    end
+  end
+
+  # After a merge a car authorised: the target's history must carry the car's
+  # tree. Said either way; a miss is an incident, not a retry.
+  defp audit_car_landing(%{train_car_merging: %{} = car} = state) do
+    case TrainCar.landed(local_repo(state), state.mr_base_ref, car) do
+      {:ok, landed} ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} landed #{short(landed)} on " <>
+            "#{state.mr_base_ref}: tree #{short(car.tree)}, the tree merge-train car " <>
+            "#{short(car.sha)} tested"
+        )
+
+      {:error, why} ->
+        Logger.error(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} merged on merge-train car " <>
+            "#{short(car.sha)} but #{state.mr_base_ref} does not show its tree " <>
+            "#{short(car.tree)} (#{inspect_short(why)}): check what landed"
+        )
+    end
+
+    state
+  end
+
+  defp audit_car_landing(state), do: state
+
+  defp parse_train_car(%{} = car) do
+    get = fn key -> Map.get(car, key) || Map.get(car, Atom.to_string(key)) end
+
+    parsed = %{
+      ref: get.(:ref),
+      sha: get.(:sha),
+      tree: get.(:tree),
+      base: get.(:base),
+      base_task: get.(:base_task),
+      mr_head: get.(:mr_head),
+      pipeline: get.(:pipeline)
+    }
+
+    if Enum.all?(
+         [parsed.ref, parsed.sha, parsed.tree, parsed.base, parsed.mr_head],
+         &is_binary/1
+       ),
+       do: parsed
+  end
+
+  defp parse_train_car(_), do: nil
+
+  defp short(sha) when is_binary(sha), do: String.slice(sha, 0, 12)
+  defp short(other), do: inspect(other)
 
   defp freshness_budget_detail(state, behind) do
     "freshness syncs (merge.max_freshness_syncs) exhausted: #{state.freshness_syncs}/" <>

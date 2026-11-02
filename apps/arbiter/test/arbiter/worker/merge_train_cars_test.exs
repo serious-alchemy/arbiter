@@ -226,11 +226,35 @@ defmodule Arbiter.Worker.MergeTrainCarsTest do
       assert MergeTrain.seats(@key, t) |> Enum.map(& &1.task_id) == ~w(a b c)
     end
 
-    test "a car whose car ahead never comes back moves up after the resume grace" do
+    test "the order comes out of the chain whichever car comes back first" do
+      t = start_supervised!({MergeTrain, name: nil, settle_ms: :infinity}, id: :any_order)
+
+      # C, then A (which cannot know yet that B stands on it), then B.
+      MergeTrain.board(@key, rider("c", car: car("c", "b"), car_status: :running), t)
+      MergeTrain.board(@key, rider("a", car: car("a"), car_status: :running), t)
+
+      assert {:seat, %{position: 2, base: {:car, "a", "car-a"}, forming?: true}} =
+               MergeTrain.board(@key, rider("b", car: car("b", "a"), car_status: :green), t)
+
+      assert MergeTrain.seats(@key, t) |> Enum.map(& &1.task_id) == ~w(a b c)
+
+      :ok = MergeTrain.settle_now(t)
+
+      assert {:seat, %{position: 1, forming?: false}} =
+               MergeTrain.board(@key, rider("a", car: car("a"), car_status: :running), t)
+    end
+
+    test "a car whose car ahead never comes back moves up after the grace, once formed" do
       t = start_supervised!({MergeTrain, name: nil, settle_ms: :infinity}, id: :ghost)
 
       entry = rider("b", car: car("b", "a"), car_status: :green, ghost_grace_ms: 0)
       assert {:seat, %{position: 2}} = MergeTrain.board(@key, entry, t)
+
+      # While the train forms, the seat kept for A does not lapse: forming is
+      # exactly the time the Watchdogs have to come back.
+      assert {:seat, %{position: 2}} = MergeTrain.board(@key, entry, t)
+
+      :ok = MergeTrain.settle_now(t)
       assert {:seat, %{position: 1, base: :target}} = MergeTrain.board(@key, entry, t)
     end
 
