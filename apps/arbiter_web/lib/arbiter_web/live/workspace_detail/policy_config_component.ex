@@ -206,7 +206,7 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
   defp quota_settings_patch(params) do
     Enum.reduce(
       ~w[on_exhaustion overage_alert_usd throttle_threshold weekly_threshold
-         weekly_warning_policy],
+         weekly_warning_policy daily_burn_cap daily_burn_cap_mode],
       {%{}, []},
       &put_optional_quota_field(&2, params, &1)
     )
@@ -561,6 +561,39 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
                       | Enum.map(@quota_weekly_warning_policies, &{&1, &1})
                     ]}
                     value={cfg(@workspace, ["quota", "weekly_warning_policy"], "")}
+                    size="sm"
+                    class="w-[220px]"
+                  />
+                </:control>
+              </.setting_row>
+
+              <.setting_row
+                name="Daily burn cap"
+                consequence="quota.daily_burn_cap — the most of the 7-day window that may be used in any rolling 24h (a fraction, e.g. 0.25). Blank is off. Can only tighten the account's cap; exempt priorities are never held."
+              >
+                <:control>
+                  <Forms.input
+                    name="config[quota_daily_burn_cap]"
+                    value={cfg(@workspace, ["quota", "daily_burn_cap"], "")}
+                    placeholder="e.g. 0.25"
+                    size="sm"
+                    class="w-[120px]"
+                  />
+                </:control>
+              </.setting_row>
+
+              <.setting_row
+                name="Daily burn cap mode"
+                consequence="quota.daily_burn_cap_mode — shadow (default) only measures and reports what the cap would have held; enforce holds dispatch at it"
+              >
+                <:control>
+                  <Forms.select
+                    name="config[quota_daily_burn_cap_mode]"
+                    options={[
+                      {"(unset — defaults to shadow)", ""}
+                      | Enum.map(@quota_burn_cap_modes, &{&1, &1})
+                    ]}
+                    value={cfg(@workspace, ["quota", "daily_burn_cap_mode"], "")}
                     size="sm"
                     class="w-[220px]"
                   />

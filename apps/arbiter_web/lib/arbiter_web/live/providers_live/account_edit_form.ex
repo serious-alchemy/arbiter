@@ -247,6 +247,11 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
     {"Plateau — max(floor, elapsed)", "plateau"},
     {"Ramp — floor to 100% at the reset", "ramp"}
   ]
+  @burn_mode_options [
+    {"Default (shadow)", ""},
+    {"Shadow — measure and report only", "shadow"},
+    {"Enforce — hold dispatch at the cap", "enforce"}
+  ]
   @policy_options [
     {"Default (ignore)", ""},
     {"Ignore — a weekly warning does not hold", "ignore"},
@@ -427,6 +432,34 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
 
       <fieldset class="m-0 p-0 border-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 items-end gap-3">
         <legend class="mb-2 text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+          Daily burn governor
+        </legend>
+        <.field
+          form={@form}
+          id={@account.id}
+          key="daily_burn_cap"
+          label="24-hour burn cap"
+          hint="daily_burn_cap"
+          errors={@errors}
+          placeholder="off"
+          inputmode="decimal"
+        />
+        <.select_field
+          form={@form}
+          id={@account.id}
+          key="daily_burn_cap_mode"
+          label="Cap mode"
+          hint="daily_burn_cap_mode"
+          options={burn_mode_options()}
+          errors={@errors}
+        />
+        <p class="m-0 sm:col-span-2 lg:col-span-4 max-w-3xl text-[12px] text-[var(--arb-text-muted)]">
+          Optional brake on bursts: the most of the 7-day window (a fraction above 0 and up to 1) that may be used in any rolling 24 hours. Blank is off. In shadow mode it only measures and reports what it would have held; enforce holds dispatch at the cap and shrinks the seat budget to fit it. Exempt priorities are never held. A workspace can only tighten it.
+        </p>
+      </fieldset>
+
+      <fieldset class="m-0 p-0 border-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 items-end gap-3">
+        <legend class="mb-2 text-[11px] uppercase tracking-wide text-[var(--text-label)]">
           Provider windows
         </legend>
         <.select_field
@@ -582,6 +615,7 @@ defmodule ArbiterWeb.ProvidersLive.AccountEditForm do
   defp status_options, do: @status_options
   defp mode_options, do: @mode_options
   defp curve_options, do: @curve_options
+  defp burn_mode_options, do: @burn_mode_options
   defp policy_options, do: @policy_options
   defp priority_options, do: @priority_options
   defp spend_window_options, do: @spend_window_options

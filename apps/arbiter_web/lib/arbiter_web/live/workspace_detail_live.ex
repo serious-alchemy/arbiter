@@ -124,6 +124,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       |> assign(:review_automation_modes, ValidateConfig.valid_review_automation_modes())
       |> assign(:quota_modes, ValidateConfig.valid_quota_modes())
       |> assign(:quota_weekly_warning_policies, Arbiter.Quota.Gate.weekly_warning_policies())
+      |> assign(:quota_burn_cap_modes, Arbiter.Quota.BurnGovernor.modes())
       |> assign(:security_modes, SecurityPolicy.valid_modes())
       |> assign(:security_filesystems, SecurityPolicy.valid_filesystems())
       |> assign(:safe_default_categories, SecurityPolicy.safe_default_categories())
@@ -571,6 +572,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
               review_automation_modes={@review_automation_modes}
               quota_modes={@quota_modes}
               quota_weekly_warning_policies={@quota_weekly_warning_policies}
+              quota_burn_cap_modes={@quota_burn_cap_modes}
             />
 
             <.live_component
