@@ -86,11 +86,17 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
         }
 
   @type result :: %{
-          ref: String.t(),
-          tag_ref: String.t(),
-          tag: String.t(),
-          layers: [layer()],
-          seed: %{status: :pushed | :skipped, reason: String.t() | nil, excluded: [String.t()]}
+          required(:ref) => String.t(),
+          required(:tag_ref) => String.t(),
+          required(:tag) => String.t(),
+          required(:layers) => [layer()],
+          required(:seed) => %{
+            status: :pushed | :skipped,
+            reason: String.t() | nil,
+            excluded: [String.t()]
+          },
+          optional(:providers) => [String.t()],
+          optional(:clis) => [%{name: String.t(), version: String.t()}]
         }
 
   # -- the worker image ---------------------------------------------------------
@@ -140,7 +146,9 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
            tag: plan.tag,
            layers: Enum.map(layers, &Map.drop(&1, [:local, :chain])),
            seed: seed_report,
-           cli_set: set.set8
+           cli_set: set.set8,
+           providers: CliSet.providers(set),
+           clis: Enum.map(set.clis, &%{name: &1.name, version: &1.version})
          }}
       end
     end

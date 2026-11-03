@@ -2197,7 +2197,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
     registry = registry_results(resp["registry"])
 
-    placements = placements_results(resp["placements"])
+    placements = placements_results(resp["placements"]) ++ repo_image_results(resp["registry"])
 
     if nodes == [] and is_nil(url) and registry == [] and placements == [] and
          "local_cap_zero" not in (resp["warnings"] || []) and is_nil(resp["local_cap_advisory"]) do
@@ -2651,6 +2651,51 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   end
 
   defp pull_results(_registry, _nodes), do: []
+
+  # SI11 (§21.9): one `image <repo>` row per repo that has published a run image: its
+  # digest, CLI set with versions, the providers the image can run, and the seed layer's
+  # status. A row warns when the image lists no provider (nothing could run in it).
+  defp repo_image_results(%{"repo_images" => [_ | _] = images}) do
+    for %{"repo" => repo} = image <- images, do: repo_image_result(repo, image)
+  end
+
+  defp repo_image_results(_registry), do: []
+
+  defp repo_image_result(repo, image) do
+    providers = List.wrap(image["providers"])
+
+    clis =
+      case List.wrap(image["clis"]) do
+        [] -> "none"
+        list -> Enum.map_join(list, ", ", &"#{&1["name"]} #{&1["version"]}")
+      end
+
+    detail =
+      "#{short_digest(image["ref"])}; CLIs #{clis}; providers " <>
+        "#{if providers == [], do: "none", else: Enum.join(providers, ", ")}; " <>
+        seed_phrase(image["seed"])
+
+    if providers == [] do
+      nodes_result("image #{repo}", :warn, detail, "Republish it: its CLI set lists no provider.")
+    else
+      nodes_result("image #{repo}", :ok, detail)
+    end
+  end
+
+  defp short_digest(ref) when is_binary(ref) do
+    case String.split(ref, "@", parts: 2) do
+      [_, "sha256:" <> hex] -> "sha256:" <> String.slice(hex, 0, 12)
+      _ -> ref
+    end
+  end
+
+  defp short_digest(_ref), do: "digest unknown"
+
+  defp seed_phrase(%{"status" => status, "reason" => reason}) when is_binary(reason),
+    do: "seed #{status} (#{reason})"
+
+  defp seed_phrase(%{"status" => status}) when is_binary(status), do: "seed #{status}"
+  defp seed_phrase(_), do: "seed unknown"
 
   defp unreachable_from(registry, nodes) do
     host = registry |> to_string() |> String.split("/", parts: 2) |> hd()

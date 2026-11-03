@@ -125,12 +125,29 @@ defmodule Arbiter.Worker.Image.Publisher do
   # announced to the nodes that could take its runs (`Nodes.Prefetch`, in the background).
   defp published({:ok, %{ref: ref} = result}, ctx, opts) when is_binary(ref) do
     previous = PublishLedger.last_ref(Map.get(ctx, :repo), opts)
-    PublishLedger.record(ctx, Keyword.put(opts, :ref, ref))
+
+    PublishLedger.record(
+      ctx,
+      opts |> Keyword.put(:ref, ref) |> Keyword.put(:image, image_facts(result))
+    )
+
     if previous != ref, do: Prefetch.after_publish(ctx, result, opts)
     :ok
   end
 
   defp published(_result, _ctx, _opts), do: :ok
+
+  # What the doctor's `image <repo>` row shows (SI11): the CLI set, the providers it
+  # lists and the seed layer's outcome.
+  defp image_facts(result) do
+    seed = Map.get(result, :seed) || %{}
+
+    %{
+      providers: Map.get(result, :providers),
+      clis: Map.get(result, :clis),
+      seed: %{status: Map.get(seed, :status), reason: Map.get(seed, :reason)}
+    }
+  end
 
   defp ensure_private(%Registry{public_ok: false} = cfg, ctx, opts) do
     repository = Pipeline.worker_repository(ctx)
@@ -273,7 +290,12 @@ defmodule Arbiter.Worker.Image.Publisher do
 
     case Registry.fetch(opts) do
       :unset ->
-        %{configured: false, registries: registries, images: images}
+        %{
+          configured: false,
+          registries: registries,
+          images: images,
+          repo_images: PublishLedger.images(opts)
+        }
 
       {:ok, cfg} ->
         %{reachable: reachable, reachable_detail: detail} =
@@ -293,7 +315,8 @@ defmodule Arbiter.Worker.Image.Publisher do
           last_error: snapshot.last_error,
           seed_excluded: snapshot.seed_excluded,
           registries: registries,
-          images: images
+          images: images,
+          repo_images: PublishLedger.images(opts)
         }
     end
   end

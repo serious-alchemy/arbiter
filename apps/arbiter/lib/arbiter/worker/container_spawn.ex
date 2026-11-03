@@ -134,6 +134,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Mergers
   alias Arbiter.Nodes.Checkout, as: NodeCheckout
   alias Arbiter.Nodes.Files
+  alias Arbiter.Nodes.Placement
   alias Arbiter.Worker.CliSet
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.DepsCache
@@ -1042,9 +1043,12 @@ defmodule Arbiter.Worker.ContainerSpawn do
     end
   end
 
-  # Only Claude has a podman path that is placed remotely (bd-aowisc §5).
-  defp remote_provider("claude"), do: :ok
-  defp remote_provider(provider), do: {:error, {:provider_not_remote, provider}}
+  # The remote-provider set is Placement.remote_providers/0 (SI11).
+  defp remote_provider(provider) do
+    if provider in Placement.remote_providers(),
+      do: :ok,
+      else: {:error, {:provider_not_remote, provider}}
+  end
 
   defp remote_image(opts, worktree, node) do
     case explicit_image(opts) do
@@ -1206,14 +1210,37 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
       source ->
         case publish_image(image, ctx, Keyword.get(opts, :publish, [])) do
-          {:ok, %{ref: ref} = published} -> {:ok, published_image(image, ref, published, source)}
+          {:ok, %{ref: ref} = published} ->
+            with :ok <- provider_in_image(published, Keyword.get(opts, :provider)),
+                 do: {:ok, published_image(image, ref, published, source)}
+
           # bd-5fpj59: `publish: [wait: false]` — the publish is running, not failed.
-          {:pending, key} -> {:error, {:image_pending, key}}
-          :disabled -> {:error, {:image_unavailable, :no_registry}}
-          {:error, reason} -> {:error, {:image_unavailable, reason}}
+          {:pending, key} ->
+            {:error, {:image_pending, key}}
+
+          :disabled ->
+            {:error, {:image_unavailable, :no_registry}}
+
+          {:error, reason} ->
+            {:error, {:image_unavailable, reason}}
         end
     end
   end
+
+  # SI11 (§21.5): the image's `arbiter.cli-providers` label (the published `providers`)
+  # says which providers can run in it. A run whose provider is missing is refused here,
+  # before it is committed to a node. A publish that reports no providers (an older
+  # publisher, a stub) is not judged.
+  defp provider_in_image(%{providers: providers}, provider)
+       when is_list(providers) and not is_nil(provider) do
+    name = provider_name(provider)
+
+    if name in providers,
+      do: :ok,
+      else: {:error, {:image_unavailable, {:provider_not_in_image, name, providers}}}
+  end
+
+  defp provider_in_image(_published, _provider), do: :ok
 
   # An explicit `:image` has no plan to publish: a cluster still asks for it (and is
   # refused for it), a machine node keeps taking it as a tag it holds.
