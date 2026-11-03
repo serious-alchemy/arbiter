@@ -111,6 +111,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
       :degraded,
       :readiness,
       :registry_reach,
+      :images,
       :pull_blocked,
       :allow_unenforced_network,
       :pending,

@@ -51,6 +51,21 @@ defmodule Arbiter.NodeAgent.Exec do
     :exit, _ -> :ok
   end
 
+  @doc """
+  The image references the kept gate contexts would run (SI6): `Arbiter.NodeAgent.ImageGC`
+  never removes one of them.
+  """
+  @spec images() :: [String.t()]
+  def images do
+    Agent.get(@name, fn {contexts, _} ->
+      for {_run, context} <- contexts, image = Keyword.get(context, :image), is_binary(image) do
+        image
+      end
+    end)
+  catch
+    :exit, _ -> []
+  end
+
   @doc "Forget `run`'s context."
   @spec forget(String.t()) :: :ok
   def forget(run) do

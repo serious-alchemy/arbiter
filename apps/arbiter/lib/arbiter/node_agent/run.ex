@@ -72,6 +72,7 @@ defmodule Arbiter.NodeAgent.Run do
     Checkout,
     Exec,
     Files,
+    ImageGC,
     ImagePull,
     Retained,
     RunSpec,
@@ -698,7 +699,9 @@ defmodule Arbiter.NodeAgent.Run do
     install = Keyword.get(opts, :seed_layer_fun, &SeedLayer.install/3)
 
     case install.(shadow, ref, seed_opts) do
-      {:ok, _summary} ->
+      {:ok, summary} ->
+        # SI6: the layer goes when the image does.
+        if is_binary(summary[:layer_dir]), do: ImageGC.seed(ref, summary.layer_dir)
         :installed
 
       {:fallback, reason} ->

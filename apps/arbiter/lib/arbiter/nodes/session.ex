@@ -155,6 +155,7 @@ defmodule Arbiter.Nodes.Session do
       # `hb`), the registry host of each run assigned to pull, and until when (clock ms) a
       # host's pull was refused (`pull_failed` / `contract_mismatch`) so the node is passed over.
       registry_reach: %{},
+      images: nil,
       pull_hosts: %{},
       pull_blocked: %{}
     },
@@ -1550,6 +1551,7 @@ defmodule Arbiter.Nodes.Session do
       |> heartbeat_degraded(payload)
       |> heartbeat_readiness(payload)
       |> heartbeat_registries(payload)
+      |> heartbeat_images(payload)
       |> heartbeat_upgrade(payload)
       |> heartbeat_capacity(payload["capacity"])
       |> heartbeat_stages(payload["runs"])
@@ -1641,6 +1643,32 @@ defmodule Arbiter.Nodes.Session do
   end
 
   defp heartbeat_registries(state, _payload), do: state
+
+  # SI6 (§21.4): the agent's `hb.images` (`count`, `bytes`, `digests`, `pressure`,
+  # `pressure_unrelieved`, `legacy`). Display data for the doctor, so it is bounded and
+  # only well-formed fields are kept.
+  defp heartbeat_images(state, %{"images" => %{} = images}) do
+    legacy =
+      images
+      |> Map.get("legacy", [])
+      |> List.wrap()
+      |> Enum.filter(&is_binary/1)
+      |> Enum.take(50)
+      |> Enum.map(&String.slice(&1, 0, 255))
+
+    put_info(state, :images, %{
+      "count" => nonneg(images["count"]),
+      "bytes" => nonneg(images["bytes"]),
+      "pressure" => images["pressure"] == true,
+      "pressure_unrelieved" => images["pressure_unrelieved"] == true,
+      "legacy" => legacy
+    })
+  end
+
+  defp heartbeat_images(state, _payload), do: state
+
+  defp nonneg(n) when is_integer(n) and n >= 0, do: n
+  defp nonneg(_), do: 0
 
   defp note_pull_host(state, run, %{"image" => %{"ref" => ref}} = spec) when is_binary(ref) do
     if pull_spec?(spec),
@@ -1934,6 +1962,7 @@ defmodule Arbiter.Nodes.Session do
       degraded: state.info.degraded,
       readiness: state.info.readiness,
       registry_reach: state.info.registry_reach,
+      images: state.info.images,
       pull_blocked: pull_blocked_hosts(state),
       node_capacity: state.info.capacity,
       max_workers: max_workers(state),

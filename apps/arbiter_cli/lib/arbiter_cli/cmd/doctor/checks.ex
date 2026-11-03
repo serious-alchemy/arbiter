@@ -2471,7 +2471,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp node_results(%{"kind" => "cluster"} = n),
     do: [node_result(n) | cluster_results(n)]
 
-  defp node_results(n), do: [node_result(n)] ++ List.wrap(image_source_result(n))
+  defp node_results(n),
+    do: [node_result(n)] ++ List.wrap(image_source_result(n)) ++ List.wrap(images_result(n))
 
   defp cluster_results(n) do
     name = n["name"]
@@ -2600,6 +2601,46 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   end
 
   defp image_source_result(_n), do: nil
+
+  # SI6 (§21.4): the worker images the agent pulled and holds (its GC ledger). Warns when
+  # pressure GC could not get the graph root back above the line, and lists legacy
+  # `localhost/arbiter-dev/*` images, which GC never removes: the operator does, on the node.
+  defp images_result(%{"images" => %{} = images} = n) do
+    name = "node #{n["name"]} images"
+    legacy = List.wrap(images["legacy"])
+    held = "#{images["count"] || 0} held, #{format_bytes(images["bytes"] || 0)}"
+
+    cond do
+      images["pressure_unrelieved"] == true ->
+        nodes_result(
+          name,
+          :warn,
+          "#{held}; disk pressure: image GC removed everything it may and the store is still low on space",
+          "Free space on the node's podman graph root (`podman info --format '{{.Store.GraphRoot}}'`); " <>
+            "GC only removes images the agent pulled and no run needs."
+        )
+
+      legacy != [] ->
+        nodes_result(
+          name,
+          :warn,
+          "#{held}; legacy images the agent never removes: #{Enum.join(legacy, ", ")}",
+          "Once no agent on that node builds plans, remove them on the node: " <>
+            "`podman image rm #{Enum.join(legacy, " ")}`."
+        )
+
+      true ->
+        nodes_result(name, :ok, held)
+    end
+  end
+
+  defp images_result(_n), do: nil
+
+  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1_073_741_824,
+    do: "#{Float.round(bytes / 1_073_741_824, 1)} GiB"
+
+  defp format_bytes(bytes) when is_integer(bytes), do: "#{div(bytes, 1_048_576)} MiB"
+  defp format_bytes(_), do: "0 MiB"
 
   # SI4a (§21.4): one row per registry the primary pushes to: is a pull credential
   # configured (never its value), and which nodes report the host unreachable.

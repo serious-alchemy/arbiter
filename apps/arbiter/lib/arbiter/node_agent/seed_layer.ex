@@ -176,8 +176,22 @@ defmodule Arbiter.NodeAgent.SeedLayer do
     install_opts = Keyword.take(opts, [:home, :retarget_to, :cp_hook])
 
     case DepsCache.install_extracted(dir, lock, shadow, install_opts) do
-      {:ok, summary} -> {:ok, summary}
+      {:ok, summary} -> {:ok, Map.put(summary, :layer_dir, Path.basename(dir))}
       {:error, reason} -> {:fallback, {:install_failed, reason}}
+    end
+  end
+
+  @doc """
+  Remove the extracted layer `name` (`layer-<lock12>-<stamp12>`) under the deps cache
+  `root` (SI6: it goes with the image it came from). Refuses anything that is not such a
+  name, so a ledger entry can never point this at another directory.
+  """
+  @spec remove_layer(String.t(), String.t()) :: :ok | {:error, :bad_name}
+  def remove_layer(root, name) when is_binary(root) and is_binary(name) do
+    if Regex.match?(~r/\Alayer-[0-9a-f]{12}-[0-9a-f]{12}\z/, name) do
+      force_rm_rf(Path.join(root, name))
+    else
+      {:error, :bad_name}
     end
   end
 
