@@ -10,6 +10,9 @@ defmodule Arbiter.Worker.Image.RegistryReport do
     * `reachable` — `GET /v2/`,
     * `anonymous` — per repository, `public` / `private` / `unknown`
       (`Registry.anonymous_read/3`), and `public` listing the readable ones,
+    * `pull_credential` — what a machine node pulls with (SI4a): `ref` (a repo or workspace
+      `pull_credentials_ref` names one), `install` (`nodes.registry_pull_*`, for
+      `nodes.registry`'s host), `anonymous` (`public_ok`) or `none`; never the value,
     * `credentials` — `set`, `anonymous` (no `credentials_ref`) or `error: …`
       (the secret is missing or not `user:password`).
 
@@ -20,6 +23,7 @@ defmodule Arbiter.Worker.Image.RegistryReport do
   `:anonymous_probe` (`(Registry.t, repository -> :public | :private | {:unknown, term})`).
   """
 
+  alias Arbiter.Settings
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.Image.Registry
   alias Arbiter.Worker.Image.RepoConfig
@@ -73,7 +77,13 @@ defmodule Arbiter.Worker.Image.RegistryReport do
   defp add_repo(acc, workspace, repo, opts) do
     case Registry.resolve(workspace, repo, opts) do
       {:ok, cfg} ->
-        merge(acc, cfg, RepoConfig.repository_name(repo), credentials(cfg))
+        merge(
+          acc,
+          cfg,
+          RepoConfig.repository_name(repo),
+          credentials(cfg),
+          pull_ref?(workspace, repo)
+        )
 
       {:error, {:registry_credentials, ref, reason}} ->
         %{registry: registry} = RepoConfig.resolve(workspace, repo)
@@ -84,7 +94,13 @@ defmodule Arbiter.Worker.Image.RegistryReport do
           origin: :config
         }
 
-        merge(acc, cfg, RepoConfig.repository_name(repo), "error: #{ref} #{reason}")
+        merge(
+          acc,
+          cfg,
+          RepoConfig.repository_name(repo),
+          "error: #{ref} #{reason}",
+          pull_ref?(workspace, repo)
+        )
 
       :unset ->
         acc
@@ -94,16 +110,21 @@ defmodule Arbiter.Worker.Image.RegistryReport do
   defp credentials(%{username: user, password: pw}),
     do: if(user && pw, do: "set", else: "anonymous")
 
-  defp merge(acc, cfg, repository, credentials) do
+  defp pull_ref?(workspace, repo) do
+    match?(%{pull_credentials_ref: ref} when is_binary(ref), RepoConfig.resolve(workspace, repo))
+  end
+
+  defp merge(acc, cfg, repository, credentials, pull_ref?) do
     Map.update(
       acc,
       cfg.registry,
-      group(cfg, origin_name(cfg), [repository], credentials),
+      %{group(cfg, origin_name(cfg), [repository], credentials) | pull_ref?: pull_ref?},
       fn existing ->
         %{
           existing
           | repositories: Enum.uniq(existing.repositories ++ [repository]),
             public_ok: existing.public_ok or cfg.public_ok,
+            pull_ref?: existing.pull_ref? or pull_ref?,
             credentials: worst(existing.credentials, credentials)
         }
       end
@@ -117,6 +138,7 @@ defmodule Arbiter.Worker.Image.RegistryReport do
       origin: origin,
       repositories: repositories,
       public_ok: cfg.public_ok,
+      pull_ref?: false,
       credentials: credentials
     }
 
@@ -142,12 +164,42 @@ defmodule Arbiter.Worker.Image.RegistryReport do
       repositories: group.repositories,
       credentials: group.credentials,
       public_ok: group.public_ok,
+      pull_credential: pull_credential(group, opts),
       reachable: reachable,
       reachable_detail: detail,
       anonymous: anonymous,
       public: for({repo, "public"} <- anonymous, do: repo) |> Enum.sort()
     }
   end
+
+  defp pull_credential(group, opts) do
+    install = install_pull(opts)
+
+    cond do
+      group.pull_ref? -> "ref"
+      install_pull?(install, group.cfg.host) -> "install"
+      group.public_ok -> "anonymous"
+      true -> "none"
+    end
+  end
+
+  defp install_pull(opts) do
+    case Keyword.get(opts, :config) do
+      %{} = config ->
+        {config[:registry], config[:pull_username], config[:pull_password]}
+
+      _ ->
+        {Settings.nodes_registry(), Settings.nodes_registry_pull_username(),
+         Settings.nodes_registry_pull_password()}
+    end
+  end
+
+  defp install_pull?({registry, user, password}, host) do
+    is_binary(registry) and registry |> String.split("/") |> hd() == host and
+      present?(user) and present?(password)
+  end
+
+  defp present?(value), do: is_binary(value) and value != ""
 
   # Only a reachable registry is asked; an unreachable one would time out per repository.
   defp anonymous(group, opts) do

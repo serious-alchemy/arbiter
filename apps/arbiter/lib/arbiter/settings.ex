@@ -1026,11 +1026,11 @@ defmodule Arbiter.Settings do
 
   @doc """
   Whether a machine node may be handed the published image to pull (SI4,
-  `docs/design/remote-workers.md` §21.6): `"auto"`, or `"build"` (the default),
+  `docs/design/remote-workers.md` §21.6): `"auto"` (the default, SI4a), or `"build"`,
   under which every machine node builds from a plan as before.
   """
   @spec machine_image_source() :: String.t()
-  def machine_image_source, do: nodes_machine_image_source() || "build"
+  def machine_image_source, do: nodes_machine_image_source() || "auto"
 
   @doc "The persisted `nodes.machine_image_source` override."
   @spec nodes_machine_image_source() :: String.t() | nil
