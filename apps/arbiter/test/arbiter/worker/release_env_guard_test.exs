@@ -66,6 +66,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
   @port_open_allowlist %{
     "apps/arbiter/lib/arbiter/worker/claude_session.ex" => 1,
     "apps/arbiter/lib/arbiter/agents/preflight.ex" => 1,
+    # bd-a2zrh0: the Claude control-channel probe (`initialize` / `get_usage`),
+    # env via `SpawnEnv.port_env/2`.
+    "apps/arbiter/lib/arbiter/agents/claude/control_channel.ex" => 1,
     # bd-ld8qde (G14): the per-worker `ssh-agent` wrapper (`sh -c`), scrubbed via
     # `ReleaseEnv.port_env/1`.
     "apps/arbiter/lib/arbiter/worker/ssh_agent.ex" => 1,
@@ -90,6 +93,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     @release_env_source => :helper,
     "apps/arbiter/lib/arbiter/worker/claude_session.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/agents/preflight.ex" => :scrubbed,
+    # bd-a2zrh0: Claude control-channel probe: a port (`SpawnEnv.port_env/2`) and the
+    # `claude --version` floor check via `ReleaseEnv.cmd/3`.
+    "apps/arbiter/lib/arbiter/agents/claude/control_channel.ex" => :scrubbed,
     # bd-ld8qde (G14): `ssh-agent` under an `sh` wrapper (Port, scrubbed) and `ssh-add`
     # via `ReleaseEnv.cmd/3`.
     "apps/arbiter/lib/arbiter/worker/ssh_agent.ex" => :scrubbed,

@@ -63,6 +63,7 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
 
   alias Arbiter.Agents.Preflight
   alias Arbiter.Worker.OsProcess
+  alias Arbiter.Worker.ReleaseEnv
   alias Arbiter.Worker.SpawnEnv
 
   # Conservative floor, not a measured one: the oldest CLI that has been seen to
@@ -178,7 +179,7 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
   # sobelow_skip ["CI.System"]
   defp cli_version_from_binary do
     with exec when is_binary(exec) <- System.find_executable("claude"),
-         task = Task.async(fn -> System.cmd(exec, ["--version"], stderr_to_stdout: true) end),
+         task = Task.async(fn -> ReleaseEnv.cmd(exec, ["--version"], stderr_to_stdout: true) end),
          {:ok, {out, 0}} <- Task.yield(task, @version_timeout_ms) || Task.shutdown(task) do
       parse_version(out)
     else
