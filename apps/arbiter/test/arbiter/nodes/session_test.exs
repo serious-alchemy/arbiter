@@ -496,6 +496,34 @@ defmodule Arbiter.Nodes.SessionTest do
     end
   end
 
+  describe "image.prefetch (SI7)" do
+    @ref "registry.example.com/arbiter/vstim/worker@sha256:" <> String.duplicate("a", 64)
+
+    test "pushes image.prefetch to an agent with the cap, and keeps hb.images digests",
+         %{node: node, clock: c} do
+      params = hello(%{"caps" => %{"backend" => "podman", "image_prefetch" => true}})
+      {:ok, %{pid: pid}} = attach(node, c, self(), params)
+
+      payload = %{"ref" => @ref, "insecure" => false}
+      assert :ok = Session.prefetch(pid, payload)
+      assert_receive {:node_session, {:push, "image.prefetch", ^payload}}
+
+      assert {:ok, _} =
+               Session.heartbeat(pid, %{
+                 "seq" => 1,
+                 "images" => %{"count" => 1, "bytes" => 10, "digests" => [@ref, 5]}
+               })
+
+      assert %{images: %{"digests" => [@ref]}} = Session.snapshot(node.id)
+    end
+
+    test "never sends the frame to an agent without the cap", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      assert {:error, :unsupported} = Session.prefetch(pid, %{"ref" => @ref})
+      refute_received {:node_session, {:push, "image.prefetch", _}}
+    end
+  end
+
   describe "exec in a run's container (bd-9rrrgk)" do
     setup %{node: node, clock: c} do
       params = hello(%{"caps" => %{"backend" => "podman", "exec" => "run"}})

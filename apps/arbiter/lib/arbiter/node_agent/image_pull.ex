@@ -65,21 +65,37 @@ defmodule Arbiter.NodeAgent.ImagePull do
   defp present_or_pull(ref, image, spec, opts) do
     case podman(opts, ["image", "exists", ref], @quick_timeout_ms) do
       {_, 0} -> :ok
-      _ -> pull(ref, image, spec, opts) |> pulled(ref, spec)
+      _ -> ref |> pull(image, spec.pull_auth, spec.run, opts) |> pulled(ref, spec.run)
     end
   end
 
   # Only an image the agent pulled enters the GC ledger (SI6).
-  defp pulled(:ok, ref, spec) do
-    ImageGC.pulled(ref, spec.run)
+  defp pulled(:ok, ref, run) do
+    ImageGC.pulled(ref, run)
     :ok
   end
 
-  defp pulled(error, _ref, _spec), do: error
+  defp pulled(error, _ref, _run), do: error
 
-  defp pull(ref, image, %RunSpec{pull_auth: nil}, opts), do: run_pull(ref, image, [], nil, opts)
+  @doc """
+  SI7 (`image.prefetch`, §21.4): make `ref` present ahead of any run. `podman image
+  exists`, else the same authfile-on-tmpfs pull a run does (`auth` is a `PullAuth`, or
+  `nil` for an anonymous pull; `image` may carry `:insecure?`), recorded in the GC
+  ledger under the pseudo-run `run`. No label check: the run that takes the image
+  checks it. `:ok` or the pull's error.
+  """
+  @spec prefetch(String.t(), map(), PullAuth.t() | nil, String.t(), keyword()) ::
+          :ok | {:error, {atom(), term()}}
+  def prefetch(ref, image, auth, run, opts) when is_binary(ref) do
+    case podman(opts, ["image", "exists", ref], @quick_timeout_ms) do
+      {_, 0} -> :ok
+      _ -> ref |> pull(image, auth, run, opts) |> pulled(ref, run)
+    end
+  end
 
-  defp pull(ref, image, %RunSpec{pull_auth: %PullAuth{} = auth, run: run}, opts) do
+  defp pull(ref, image, nil, _run, opts), do: run_pull(ref, image, [], nil, opts)
+
+  defp pull(ref, image, %PullAuth{} = auth, run, opts) do
     secrets_opts = Keyword.take(opts, [:runtime_dir, :require_tmpfs, :mountinfo])
 
     case Secrets.write_authfile(run, PullAuth.authfile_json(auth), secrets_opts) do

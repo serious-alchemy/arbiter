@@ -69,7 +69,7 @@ defmodule Arbiter.NodeAgent.Supervisor do
           ] ++
             image_builder() ++
             Runs.child_specs() ++
-            [{Arbiter.NodeAgent.ImageGC, config: config}] ++
+            [{Arbiter.NodeAgent.ImageGC, config: config}, prefetch_spec(config)] ++
             [
               {Bridge, node_home: config.node_home},
               monitor_spec(config),
@@ -102,6 +102,21 @@ defmodule Arbiter.NodeAgent.Supervisor do
   # it offers; each heartbeat reports the result (`Protocol.heartbeat/2`). Before `Connection`.
   # Its cap is the node's own (suggestion, bounded by the owner's ceiling); the primary applies
   # the derate level to whatever cap the operator has set.
+  # SI7: the `image.prefetch` queue, one background pull at a time.
+  defp prefetch_spec(config) do
+    pull_opts =
+      Keyword.take(config.run_opts || [], [
+        :podman,
+        :runner,
+        :runtime_dir,
+        :require_tmpfs,
+        :mountinfo,
+        :pull_timeout_ms
+      ])
+
+    {Arbiter.NodeAgent.ImagePrefetch, pull_opts: pull_opts}
+  end
+
   defp monitor_spec(config) do
     {Arbiter.Machine.Monitor,
      name: config.monitor,

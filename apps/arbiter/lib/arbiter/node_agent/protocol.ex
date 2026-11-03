@@ -47,6 +47,8 @@ defmodule Arbiter.NodeAgent.Protocol do
         # chooses per run. `image` stays `build` until the plan path is retired.
         "image_sources" => ["registry", "build"],
         "runtime_contracts" => ImagePull.runtime_contracts(),
+        # SI7: the primary may send `image.prefetch{ref, cli_set, pull_auth}` after a publish.
+        "image_prefetch" => true,
         "upgrade" => "tarball",
         "bridge_streams" => "mux",
         "run_hold" => "quiesce",

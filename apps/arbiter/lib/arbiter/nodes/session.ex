@@ -252,6 +252,15 @@ defmodule Arbiter.Nodes.Session do
   def notify(pid, message), do: GenServer.cast(pid, message)
 
   @doc """
+  SI7 (`docs/design/remote-workers.md` §21.4): push `image.prefetch` with `payload`
+  (`ref`, `cli_set`, `pull_auth`, `insecure`) so the node pulls the digest in the
+  background. `:ok`, `{:error, :not_connected}`, or `{:error, :unsupported}` for an agent
+  without `caps["image_prefetch"]` (it is never sent a frame it does not know).
+  """
+  @spec prefetch(pid(), map()) :: :ok | {:error, :not_connected | :unsupported}
+  def prefetch(pid, payload) when is_map(payload), do: GenServer.call(pid, {:prefetch, payload})
+
+  @doc """
   Place run `run` (a decoded `RunSpec` map) on the node, owned by `owner`.
   Blocks until the node reports the container started (`{:ok, handle}`) or
   refuses (`{:error, {:refused, reason, detail}}`); `{:error, :not_connected}`
@@ -645,6 +654,18 @@ defmodule Arbiter.Nodes.Session do
 
       true ->
         {:reply, {:error, :not_on_node}, state}
+    end
+  end
+
+  def handle_call({:prefetch, _payload}, _from, %{channel: nil} = state),
+    do: {:reply, {:error, :not_connected}, state}
+
+  def handle_call({:prefetch, payload}, _from, state) do
+    if state.caps["image_prefetch"] == true do
+      notify_channel(state, {:push, "image.prefetch", payload})
+      {:reply, :ok, state}
+    else
+      {:reply, {:error, :unsupported}, state}
     end
   end
 
@@ -1648,6 +1669,15 @@ defmodule Arbiter.Nodes.Session do
   # `pressure_unrelieved`, `legacy`). Display data for the doctor, so it is bounded and
   # only well-formed fields are kept.
   defp heartbeat_images(state, %{"images" => %{} = images}) do
+    # SI7: the refs the node holds (newest 32), what warm-first placement ranks on.
+    digests =
+      images
+      |> Map.get("digests", [])
+      |> List.wrap()
+      |> Enum.filter(&is_binary/1)
+      |> Enum.take(32)
+      |> Enum.map(&String.slice(&1, 0, 255))
+
     legacy =
       images
       |> Map.get("legacy", [])
@@ -1658,6 +1688,7 @@ defmodule Arbiter.Nodes.Session do
 
     put_info(state, :images, %{
       "count" => nonneg(images["count"]),
+      "digests" => digests,
       "bytes" => nonneg(images["bytes"]),
       "pressure" => images["pressure"] == true,
       "pressure_unrelieved" => images["pressure_unrelieved"] == true,

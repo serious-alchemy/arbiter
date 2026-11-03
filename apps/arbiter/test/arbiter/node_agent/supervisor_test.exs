@@ -51,6 +51,7 @@ defmodule Arbiter.NodeAgent.SupervisorTest do
              Enum.sort([
                Arbiter.NodeAgent.TaskSupervisor,
                Arbiter.NodeAgent.ImageGC,
+               Arbiter.NodeAgent.ImagePrefetch,
                Arbiter.NodeAgent.Status,
                Arbiter.NodeAgent.Upgrader,
                Arbiter.NodeAgent.RunRegistry,

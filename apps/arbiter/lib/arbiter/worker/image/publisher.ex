@@ -63,6 +63,7 @@ defmodule Arbiter.Worker.Image.Publisher do
 
   use GenServer
 
+  alias Arbiter.Nodes.Prefetch
   alias Arbiter.Settings
   alias Arbiter.Worker.CliSet
   alias Arbiter.Worker.Image.Prebuilt
@@ -116,9 +117,20 @@ defmodule Arbiter.Worker.Image.Publisher do
           end,
           opts
         )
-        |> tap(fn result -> if match?({:ok, _}, result), do: PublishLedger.record(ctx, opts) end)
+        |> tap(&published(&1, ctx, opts))
     end
   end
+
+  # The ledger notes the publish; SI7: a ref the repo had not published before is
+  # announced to the nodes that could take its runs (`Nodes.Prefetch`, in the background).
+  defp published({:ok, %{ref: ref} = result}, ctx, opts) when is_binary(ref) do
+    previous = PublishLedger.last_ref(Map.get(ctx, :repo), opts)
+    PublishLedger.record(ctx, Keyword.put(opts, :ref, ref))
+    if previous != ref, do: Prefetch.after_publish(ctx, result, opts)
+    :ok
+  end
+
+  defp published(_result, _ctx, _opts), do: :ok
 
   defp ensure_private(%Registry{public_ok: false} = cfg, ctx, opts) do
     repository = Pipeline.worker_repository(ctx)

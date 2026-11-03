@@ -12,6 +12,7 @@ defmodule Arbiter.Worker.Image.PublisherTest do
   alias Arbiter.Worker.CliSetFixture
   alias Arbiter.Worker.Image.Builder
   alias Arbiter.Worker.Image.Publisher
+  alias Arbiter.Worker.Image.PublishLedger
 
   @password "hunter2-NEVER-LOGGED"
   @lock String.duplicate("c", 64)
@@ -137,6 +138,29 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       msg -> drain([msg | acc])
     after
       0 -> Enum.reverse(acc)
+    end
+  end
+
+  describe "image.prefetch after a publish (SI7)" do
+    test "announces a new ref once, and records it as the repo's last published digest",
+         %{opts: opts, ctx: ctx, tmp: tmp} do
+      test = self()
+      ledger = Path.join(tmp, "ledger.term")
+
+      opts =
+        opts ++
+          [ledger: ledger, prefetch: fn c, published -> send(test, {:prefetch, c, published}) end]
+
+      assert PublishLedger.last_ref("vstim", ledger: ledger) == nil
+      assert {:ok, result} = Publisher.ensure_ready(ctx, opts)
+
+      assert_received {:prefetch, %{repo: "vstim"}, %{ref: ref, cli_set: _}}
+      assert ref == result.ref
+      assert PublishLedger.last_ref("vstim", ledger: ledger) == result.ref
+
+      # The same ref again is not announced a second time.
+      assert {:ok, _} = Publisher.ensure_ready(ctx, opts)
+      refute_received {:prefetch, _, _}
     end
   end
 

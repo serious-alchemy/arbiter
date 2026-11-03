@@ -15,7 +15,7 @@ defmodule Arbiter.Worker.Image.PublishLedger do
 
   alias Arbiter.Config.Paths
 
-  @type entry :: %{key: term(), ctx: map(), at: DateTime.t()}
+  @type entry :: %{key: term(), ctx: map(), at: DateTime.t(), ref: String.t() | nil}
 
   @doc "The ledger file, or `nil` when recording is off."
   @spec path(keyword()) :: Path.t() | nil
@@ -45,7 +45,8 @@ defmodule Arbiter.Worker.Image.PublishLedger do
         key = {Map.get(ctx, :repo), Map.get(ctx, :repo_path)}
 
         :global.trans({{__MODULE__, file}, self()}, fn ->
-          entries = Map.put(read(file), key, %{key: key, ctx: ctx, at: now})
+          entry = %{key: key, ctx: ctx, at: now, ref: Keyword.get(opts, :ref)}
+          entries = Map.put(read(file), key, entry)
           write(file, entries)
         end)
 
@@ -71,6 +72,34 @@ defmodule Arbiter.Worker.Image.PublishLedger do
         |> Enum.sort_by(& &1.at, {:desc, DateTime})
     end
   end
+
+  @doc """
+  SI7: the digest-pinned ref `repo`'s newest successful publish produced, or `nil` (never
+  published, a publish before refs were recorded, or the ledger off). What warm-first
+  placement looks for in a node's `hb.images`.
+  """
+  @spec last_ref(String.t() | nil, keyword()) :: String.t() | nil
+  def last_ref(repo, opts \\ [])
+
+  def last_ref(repo, opts) when is_binary(repo) do
+    case path(opts) do
+      nil ->
+        nil
+
+      file ->
+        file
+        |> read()
+        |> Map.values()
+        |> Enum.filter(&(elem(&1.key, 0) == repo and is_binary(Map.get(&1, :ref))))
+        |> Enum.max_by(& &1.at, DateTime, fn -> nil end)
+        |> case do
+          nil -> nil
+          entry -> entry.ref
+        end
+    end
+  end
+
+  def last_ref(_repo, _opts), do: nil
 
   defp read(file) do
     with {:ok, bin} <- File.read(file),
