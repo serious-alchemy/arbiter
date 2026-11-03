@@ -72,6 +72,7 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
   # saves the spawn when the answer is already known. See the PR design note.
   @min_cli_version "2.1.0"
   @default_timeout_ms 15_000
+  @exit_settle_ms 500
   @max_line_bytes 1_048_576
   @version_timeout_ms 5_000
   @cli_args ~w(-p --input-format stream-json --output-format stream-json --verbose)
@@ -304,8 +305,24 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
     line =
       Jason.encode!(%{type: "control_request", request_id: id, request: %{subtype: subtype}})
 
-    Port.command(port, line <> "\n")
-    await(port, id, System.monotonic_time(:millisecond) + timeout, "")
+    try do
+      Port.command(port, line <> "\n")
+      await(port, id, System.monotonic_time(:millisecond) + timeout, "")
+    rescue
+      # The CLI already died and the port closed under the write.
+      ArgumentError -> settle_exit(port, :closed)
+    end
+  end
+
+  # A write to a CLI that already exited fails (`:epipe` / closed port) in a
+  # race with its exit status. Give the real status a brief chance to arrive so
+  # the reported reason is deterministic; fall back to the failure reason.
+  defp settle_exit(port, reason) do
+    receive do
+      {^port, {:exit_status, status}} -> {:exit, status}
+    after
+      @exit_settle_ms -> {:exit, reason}
+    end
   end
 
   # Collect lines until the matching control_response, the CLI exits, or the
@@ -329,7 +346,7 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
         {:exit, status}
 
       {:EXIT, ^port, reason} ->
-        {:exit, reason}
+        settle_exit(port, reason)
     after
       remaining -> :timeout
     end
