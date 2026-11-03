@@ -309,6 +309,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Board.CiBackpressure
   alias Arbiter.Mergers
   alias Arbiter.Mergers.CILogExcerpt
+  alias Arbiter.Mergers.CiSkip
   alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Mergers.PendingMerge
   alias Arbiter.Mergers.TrainCar
@@ -324,6 +325,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Worker.CiSync
   alias Arbiter.Worker.CiTriageLog
   alias Arbiter.Worker.MergeFreshness
+  alias Arbiter.Worker.MergeProbe
   alias Arbiter.Worker.MergeTrain
   alias Arbiter.Worker.Registry, as: PRegistry
   alias Arbiter.Worker.ReviewCi
@@ -1041,6 +1043,34 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   @doc """
+  A pass for `task_id`'s MR pushed `sha` with the forge's CI-skip mechanism
+  (bd-4y9dno): that head has no pipeline, so it must not merge until Arbiter has
+  triggered one and it is green. A call, not a cast: the pass reports it before
+  it is finished, so a poll that sees the pass finished has already heard of the
+  skipped head. The lane records it too, for a Watchdog that restarts or is not
+  running (a later one reads it from the lane).
+  """
+  @spec note_ci_skipped_push(String.t(), String.t()) :: :ok
+  def note_ci_skipped_push(task_id, sha) when is_binary(task_id) and is_binary(sha) do
+    case whereis(task_id) do
+      nil ->
+        _ = PullRequest.record_ci_skipped_head(task_id, sha)
+        :ok
+
+      watchdog ->
+        try do
+          GenServer.call(watchdog, {:ci_skipped_push, sha})
+        catch
+          :exit, _ ->
+            _ = PullRequest.record_ci_skipped_head(task_id, sha)
+            :ok
+        end
+    end
+  rescue
+    _ -> :ok
+  end
+
+  @doc """
   Nudge ticket `task_id`'s merge lane to re-check `merge.auto_merge` now rather
   than at its next tick (bd-8a5sts). A live Watchdog polls at once when the flag
   has flipped on; with none running (the lane exited) one is restarted from the
@@ -1484,6 +1514,18 @@ defmodule Arbiter.Worker.Watchdog do
       train_car_failures: 0,
       train_car_builds: nil,
       ci_backpressure: Keyword.get(opts, :ci_backpressure),
+      # bd-4y9dno, merge train phase 2. `conflict_probe` is the waiting-MR probe
+      # (a 1-arity fun, `MergeProbe.check/1` by default); `probe` the last
+      # verdict `%{head:, target_tip:, verdict:}`, so a target that has not moved
+      # is not probed again. `ci_skipped_head` is the head a CI-skipped push left
+      # (no pipeline until `ci_triggered_head` says Arbiter started one);
+      # `ci_triggers` the triggers spent on it.
+      conflict_probe: Keyword.get(opts, :conflict_probe, &MergeProbe.check/1),
+      probe: nil,
+      ci_skipped_head: normalize_sha(Keyword.get(opts, :ci_skipped_head)),
+      ci_triggered_head: normalize_sha(Keyword.get(opts, :ci_triggered_head)),
+      ci_triggers: 0,
+      ci_trigger_polls: 0,
       coverage_unknown_head: nil,
       coverage_parked?: false,
       # `poll_count` as it stood when the coverage park lifted `max_polls` to
@@ -1792,6 +1834,13 @@ defmodule Arbiter.Worker.Watchdog do
   defp parked_reason(%{park_reason: park}), do: park
 
   @impl true
+  # bd-4y9dno. A pass pushed `sha` with CI skipped: that head has no pipeline.
+  # A new skipped head voids a trigger made for an older one.
+  def handle_call({:ci_skipped_push, sha}, _from, state) do
+    safe(fn -> PullRequest.record_ci_skipped_head(state.task_id, sha) end)
+    {:reply, :ok, %{state | ci_skipped_head: sha, ci_triggers: 0}}
+  end
+
   def handle_call(:retry_auto_resolve, _from, %{park_reason: park} = state)
       when park in [:ci_failed, :ci_failed_external] do
     Logger.warning(
@@ -1977,6 +2026,7 @@ defmodule Arbiter.Worker.Watchdog do
       {:ok, result} when is_map(result) ->
         record_status(state, result)
         state = train_tick(state, result)
+        {state, result} = probe_waiting(state, result)
         state = track_reviewed_baseline(state, result)
         state = note_flake_rerun_pending(state, result)
         state = note_triage_rerun_pending(state, result)
@@ -2261,6 +2311,12 @@ defmodule Arbiter.Worker.Watchdog do
 
       {:stale, reviewed, head, state} ->
         give_up_retry(state, {:stale_reviewed_sha, reviewed, head})
+
+      # bd-4y9dno: a head a CI-skipped push left has no pipeline of its own. A
+      # worker-less retry neither triggers one nor reads the result of one, so it
+      # leaves the merge to a live Watchdog.
+      {:merge, expected_sha, %{ci_skipped_head: expected_sha} = state} ->
+        detached_wait(state, "the head's CI was skipped; it merges once its pipeline is green")
 
       {:merge, expected_sha, state} ->
         detached_attempt_merge(state, expected_sha)
@@ -2592,7 +2648,7 @@ defmodule Arbiter.Worker.Watchdog do
         reschedule(%{state | not_started_polls: 0})
 
       true ->
-        do_apply_approved_auto_merge(%{state | not_started_polls: 0})
+        do_apply_approved_auto_merge(%{state | not_started_polls: 0}, result)
     end
   end
 
@@ -2652,7 +2708,7 @@ defmodule Arbiter.Worker.Watchdog do
   @spec ci_failed?(map()) :: boolean()
   def ci_failed?(result), do: Map.get(result, :pipeline) == :failed
 
-  defp do_apply_approved_auto_merge(state) do
+  defp do_apply_approved_auto_merge(state, result) do
     case guarded_merge_decision(state) do
       # bd-a370ak: the approval no longer covers the head, so there is no
       # approved merge pending any more — whatever this or an earlier episode
@@ -2671,7 +2727,12 @@ defmodule Arbiter.Worker.Watchdog do
         reschedule(note_pending_merge(state, :merge_waiting, wait_detail(state)))
 
       {:merge, expected_sha, state} ->
-        apply_guarded_merge(state, expected_sha)
+        # bd-4y9dno: CI only for the head. A head a CI-skipped push left is
+        # triggered, and merged only once that pipeline is green.
+        case ci_skip_gate(state, result, expected_sha) do
+          {:hold, state} -> reschedule(state)
+          :proceed -> apply_guarded_merge(state, expected_sha)
+        end
     end
   end
 
@@ -3232,9 +3293,10 @@ defmodule Arbiter.Worker.Watchdog do
           {:halt, reply} ->
             reply
 
+          # bd-4y9dno: a head our own CI-skipped push left has no pipeline by
+          # design; it is triggered (or waits for the head), not paged.
           {:go, state} ->
-            state = debounce_escalate_block(state, reason)
-            reschedule(%{state | max_polls: :infinity, park_reason: :no_pipeline})
+            park_or_trigger_no_pipeline(state, result, reason)
         end
 
       # Not mechanically resolvable here (:conflict → Phase 2b, :needs_approval /
@@ -4344,6 +4406,7 @@ defmodule Arbiter.Worker.Watchdog do
         _ -> args
       end
 
+    args = put_ci_skip(args, state)
     safe(fn -> state.fix_pass_dispatcher.dispatch(args) end)
   end
 
@@ -4704,6 +4767,7 @@ defmodule Arbiter.Worker.Watchdog do
         pr_ref: state.mr_ref
       }
       |> put_target_branch(state.mr_base_ref)
+      |> put_ci_skip(state)
 
     case safe_resolve(state.conflict_resolver, args) do
       # Phantom conflict (bd-1x4r25): the resolver compared the branch against
@@ -5911,6 +5975,197 @@ defmodule Arbiter.Worker.Watchdog do
                freshness_failed_head: state.last_head_sha
            })}
       end
+    end
+  end
+
+  # ---- merge train phase 2 (bd-4y9dno) -------------------------------------
+  #
+  # Find conflicts early while MRs wait, keep a waiting branch current on the
+  # remote without a pipeline, and spend CI only on the head:
+  #
+  #   * `probe_waiting/2` — an approved MR that waits behind the head is probed
+  #     with an in-memory `git merge-tree` of its branch against the target
+  #     whenever the target (or the branch) moved. No commit, no push. A conflict
+  #     is handled as the forge's own `conflicting` flag would be (the conflict
+  #     pass, bounded and escalated by the existing rules), a clean probe is a
+  #     no-op.
+  #   * `put_ci_skip/2` — a pass dispatched for a waiting MR pushes with the
+  #     forge's CI-skip mechanism.
+  #   * `ci_skip_gate/3` — a head a CI-skipped push left has no pipeline. When
+  #     its turn comes (it is the merge head and current) Arbiter triggers one,
+  #     and the merge waits for it to be green: a skipped or absent pipeline
+  #     never merges.
+
+  @ci_trigger_wait_polls 40
+  @max_ci_triggers 3
+
+  defp probe_waiting(state, result) do
+    state = maybe_probe(state, result)
+    {state, inject_probe_conflict(state, result)}
+  end
+
+  defp maybe_probe(%{train_role: {:wait, _}} = state, result) do
+    with true <- merge_flag?(state, "train_conflict_probe"),
+         :approved <- effective_outcome(state, result),
+         head when is_binary(head) and head != "" <- Map.get(result, :head_sha),
+         branch when is_binary(branch) and branch != "" <- Map.get(result, :head_ref),
+         target when is_binary(target) and target != "" <-
+           Map.get(result, :base_ref) || state.mr_base_ref do
+      args = %{
+        repo_path: local_repo(state),
+        branch: branch,
+        target: target,
+        head_sha: head,
+        since: probe_since(state.probe, head)
+      }
+
+      record_probe(state, head, safe_value(fn -> state.conflict_probe.(args) end))
+    else
+      _ -> state
+    end
+  end
+
+  defp maybe_probe(state, _result), do: state
+
+  defp probe_since(%{head: head, target_tip: tip}, head) when is_binary(tip),
+    do: %{head: head, target_tip: tip}
+
+  defp probe_since(_probe, _head), do: nil
+
+  defp record_probe(state, _head, :error), do: state
+  defp record_probe(state, _head, %{verdict: :unchanged}), do: state
+
+  defp record_probe(state, head, %{verdict: verdict} = answer) do
+    probe = %{head: head, target_tip: Map.get(answer, :target_tip), verdict: verdict}
+
+    with {:conflict, files} <- verdict,
+         false <- match?(%{verdict: {:conflict, _}}, state.probe) and state.probe.head == head do
+      Logger.info(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} waits for the merge head " <>
+          "and its head #{head} conflicts with #{state.mr_base_ref} " <>
+          "(#{Enum.join(Enum.take(files, 5), ", ")}); resolving it now, while it waits"
+      )
+    end
+
+    %{state | probe: probe}
+  end
+
+  # Only while it waits: once the MR is the head the forge's own flag speaks.
+  defp inject_probe_conflict(
+         %{train_role: {:wait, _}, probe: %{head: head, verdict: {:conflict, _}}},
+         %{head_sha: head} = result
+       ),
+       do: Map.put(result, :block_reason, :conflict)
+
+  defp inject_probe_conflict(_state, result), do: result
+
+  defp merge_config(%{workspace: %{config: %{} = config}}, key),
+    do: get_in(config, ["merge", key])
+
+  defp merge_config(_state, _key), do: nil
+
+  defp merge_flag?(state, key), do: merge_config(state, key) not in [false, "false"]
+
+  defp ci_trigger_opts(state) do
+    case merge_config(state, "train_ci_workflow") do
+      workflow when is_binary(workflow) and workflow != "" -> %{workflow: workflow}
+      _ -> %{}
+    end
+  end
+
+  # The CI-skip mechanism for a push that is not the head's, or nil.
+  defp train_ci_skip_mechanism(state) do
+    if merge_flag?(state, "train_ci_skip") do
+      case safe_value(fn -> CiSkip.mechanism(state.adapter, ci_trigger_opts(state)) end) do
+        :error -> nil
+        mechanism -> mechanism
+      end
+    end
+  end
+
+  defp put_ci_skip(args, %{train_role: {:wait, _}} = state) do
+    case train_ci_skip_mechanism(state) do
+      nil -> args
+      mechanism -> Map.put(args, :ci_skip, mechanism)
+    end
+  end
+
+  defp put_ci_skip(args, _state), do: args
+
+  # `:proceed` to merge, `{:hold, state}` to wait.
+  defp park_or_trigger_no_pipeline(state, result, reason) do
+    case ci_skip_gate(state, result, Map.get(result, :head_sha)) do
+      {:hold, state} ->
+        reschedule(state)
+
+      :proceed ->
+        state = debounce_escalate_block(state, reason)
+        reschedule(%{state | max_polls: :infinity, park_reason: :no_pipeline})
+    end
+  end
+
+  defp ci_skip_gate(%{ci_skipped_head: sha} = state, result, sha) when is_binary(sha) do
+    if state.ci_triggered_head == sha,
+      do: await_triggered_pipeline(state, result, sha),
+      else: trigger_skipped_head(state, sha)
+  end
+
+  defp ci_skip_gate(_state, _result, _sha), do: :proceed
+
+  defp await_triggered_pipeline(state, result, sha) do
+    if Map.get(result, :pipeline) == :success do
+      :proceed
+    else
+      polls = state.ci_trigger_polls + 1
+      state = %{state | ci_trigger_polls: polls}
+
+      if polls > @ci_trigger_wait_polls and not ci_pending?(result),
+        do: trigger_skipped_head(%{state | ci_triggered_head: nil}, sha),
+        else: {:hold, state}
+    end
+  end
+
+  defp trigger_skipped_head(%{ci_triggers: n} = state, sha) when n >= @max_ci_triggers do
+    Logger.warning(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head #{sha} has no pipeline " <>
+        "(its push skipped CI) and #{n} trigger(s) produced none; not merging it"
+    )
+
+    state = debounce_escalate_block(state, :no_pipeline)
+    {:hold, %{state | max_polls: :infinity, park_reason: :no_pipeline}}
+  end
+
+  defp trigger_skipped_head(state, sha) do
+    case claim_sync_place(state) do
+      {:wait, state} ->
+        state = wait_for_head(state)
+        {:hold, note_pending_merge(state, :merge_waiting, wait_detail(state))}
+
+      {:head, state} ->
+        trigger_pipeline(state, sha)
+    end
+  end
+
+  defp trigger_pipeline(state, sha) do
+    state = %{state | ci_triggers: state.ci_triggers + 1}
+
+    case safe_value(fn -> CiSkip.trigger(state.adapter, state.mr_ref, ci_trigger_opts(state)) end) do
+      {:ok, info} ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} is the merge head and its " <>
+            "head #{sha} was pushed without CI; triggered its pipeline #{inspect(info)}"
+        )
+
+        safe(fn -> PullRequest.record_ci_triggered_head(state.task_id, sha) end)
+        {:hold, %{state | ci_triggered_head: sha, ci_trigger_polls: 0}}
+
+      other ->
+        Logger.warning(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not trigger the " <>
+            "pipeline of head #{sha} (#{state.ci_triggers}/#{@max_ci_triggers}): #{inspect(other)}"
+        )
+
+        {:hold, state}
     end
   end
 

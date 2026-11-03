@@ -196,6 +196,18 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       train_ready_ticks     positive integer (>= 1; 0 is ignored) — polls the merge head may report
                             itself ready to merge without merging before the next MR takes over
                             (default: 10).
+      train_conflict_probe  boolean — (bd-4y9dno) probe each waiting merge-train MR for a conflict
+                            with its target (an in-memory `git merge-tree`, no commit, no push)
+                            whenever the target moves, and resolve it while it waits (default true).
+      train_ci_skip         boolean — (bd-4y9dno) push the commits of a waiting merge-train MR
+                            (conflict resolutions, fix passes) with the forge's CI-skip mechanism
+                            (GitLab `-o ci.skip`, GitHub `[skip ci]`), and have Arbiter trigger the
+                            pipeline when the MR becomes the merge head and merge only after it is
+                            green (default true; GitHub needs train_ci_workflow).
+      train_ci_workflow     string — (bd-4y9dno) GitHub only: the workflow file (or id) with a
+                            `workflow_dispatch` trigger that runs the PR's CI. Arbiter dispatches it
+                            on the PR's head branch when a CI-skipped MR becomes the merge head.
+                            Unset, GitHub pushes are never CI-skipped.
       train                 map — (bd-6dyva0) the auto-merge lane's speculative merge train.
                             depth: positive integer (default 1 = the serial train above: one MR
                             per target synced and tested at a time). With depth K > 1, up to K
@@ -298,12 +310,15 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
       own credentials: a repo with no entry is refused unless legacy_operator is true.
       legacy_operator   bool — workspace default: allow the operator's ambient credentials
       repos.<repo>      map, one entry per repo; the entry's own legacy_operator wins
-        kind              deploy_key | token | github_app | gitlab_project_token (required unless only legacy_operator)
+        kind              deploy_key | token | github_app | gitlab_project_token | gitlab_bot_token (required unless only legacy_operator)
         key_secret        deploy_key: secret name holding the private key
         token_secret      token: secret name holding the token
         private_key_secret  github_app: secret name holding the App private key
         parent_token_secret  gitlab_project_token: secret name holding the parent personal access token (api scope; primary-only)
         expires_in_days   gitlab_project_token: minted token's expiry in days, 1-7 (default 2)
+        secret            gitlab_bot_token: secret name holding the bot user's personal access token (Free tier; remote-carryable, weaker than gitlab_project_token)
+        projects          gitlab_bot_token: extra owner/repo paths the bot may be a member of (the spawn's own repo is implied)
+        expires_at        gitlab_bot_token: the PAT's expiry (YYYY-MM-DD), for doctor when GitLab cannot be asked
         app_id            github_app: App id
         installation_id   github_app: installation id
         host              git host (e.g. gitlab.com)

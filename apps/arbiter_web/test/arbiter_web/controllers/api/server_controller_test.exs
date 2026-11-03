@@ -581,5 +581,43 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
                &(&1["kind"] == "inert_block" and &1["workspace"] == ws.name)
              )
     end
+
+    test "reports a GitLab bot token's expiry, probing GitLab with the stubbed client", %{
+      conn: conn
+    } do
+      Req.Test.stub(Arbiter.Worker.GitCredential.HTTP, fn conn ->
+        Req.Test.json(conn, %{"expires_at" => "2099-01-01", "scopes" => ["read_api"]})
+      end)
+
+      previous = Application.get_env(:arbiter, :git_credential_req_options)
+
+      Application.put_env(:arbiter, :git_credential_req_options,
+        plug: {Req.Test, Arbiter.Worker.GitCredential.HTTP}
+      )
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:arbiter, :git_credential_req_options, previous),
+          else: Application.delete_env(:arbiter, :git_credential_req_options)
+      end)
+
+      {:ok, _ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "gr-bot",
+          prefix: "grb",
+          config: %{
+            "git_credentials" => %{
+              "repos" => %{"tonic" => %{"kind" => "gitlab_bot_token", "secret" => "GL_BOT"}}
+            }
+          },
+          secrets: %{"GL_BOT" => "glpat-x"}
+        })
+
+      resp = conn |> get("/api/server/guardrails") |> json_response(200)
+      entry = Enum.find(resp["workspaces"], &(&1["workspace"] == "gr-bot"))
+
+      assert [%{"repo" => "tonic", "expires_at" => "2099-01-01", "source" => "live"}] =
+               entry["git_credential_tokens"]
+    end
   end
 end

@@ -4798,7 +4798,8 @@ defmodule Arbiter.Worker do
 
         push_opts =
           [branch: branch] ++
-            if(is_binary(start_head), do: [force_with_lease: start_head], else: [])
+            if(is_binary(start_head), do: [force_with_lease: start_head], else: []) ++
+            ci_skip_opts(meta)
 
         with {:ok, push_opts} <- host_push_opts(state, nil, push_opts),
              {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
@@ -4817,8 +4818,12 @@ defmodule Arbiter.Worker do
 
   defp deliver_pass(%State{} = state) do
     case pass_verdict(state) do
-      :resolved -> finish_delivered_pass(state)
-      {:unresolved, summary} -> fail_unresolved_pass(state, summary)
+      :resolved ->
+        note_ci_skipped_head(state)
+        finish_delivered_pass(state)
+
+      {:unresolved, summary} ->
+        fail_unresolved_pass(state, summary)
     end
   end
 
@@ -5768,7 +5773,7 @@ defmodule Arbiter.Worker do
       push_opts =
         [set_upstream: true] ++
           if(is_binary(branch), do: [branch: branch], else: []) ++
-          fix_pass_lease(meta)
+          fix_pass_lease(meta) ++ ci_skip_opts(meta)
 
       with {:ok, push_opts} <- host_push_opts(state, nil, push_opts),
            {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, push_opts) do
@@ -5793,6 +5798,36 @@ defmodule Arbiter.Worker do
   # pinned to the head it was seeded from: its rewrite lands, and a push by anyone
   # else since makes the lease refuse. Never a bare `--force`; a pass with no seed
   # head pushes as before.
+  # bd-4y9dno: a pass for an MR waiting behind the merge train's head pushes
+  # with the forge's CI-skip mechanism (`Arbiter.Mergers.CiSkip`).
+  defp ci_skip_opts(meta) do
+    case Map.get(meta || %{}, :ci_skip) do
+      {kind, value} = mechanism
+      when kind in [:push_option, :commit_marker] and is_binary(value) ->
+        [ci_skip: mechanism]
+
+      _ ->
+        []
+    end
+  end
+
+  # bd-4y9dno: a delivered pass that pushed without CI leaves a head with no
+  # pipeline. The Watchdog must know, or it could merge that head unverified; it
+  # triggers the pipeline when the MR reaches the front of the merge train.
+  defp note_ci_skipped_head(%State{meta: meta, task_id: task_id}) do
+    with mechanism when not is_nil(mechanism) <- Map.get(meta || %{}, :ci_skip),
+         worktree when is_binary(worktree) <- Map.get(meta, :worktree_path),
+         branch when is_binary(branch) <-
+           Map.get(meta, :conflict_resolver_branch) || Map.get(meta, :fix_pass_branch),
+         head when is_binary(head) <-
+           Arbiter.Worker.Worktree.remote_head(worktree, branch) ||
+             Arbiter.Worker.Worktree.head_sha(worktree) do
+      Arbiter.Worker.Watchdog.note_ci_skipped_push(task_id, head)
+    else
+      _ -> :ok
+    end
+  end
+
   defp fix_pass_lease(meta) do
     case Map.get(meta || %{}, :fix_pass_start_head) do
       head when is_binary(head) -> [force_with_lease: head]

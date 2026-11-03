@@ -37,7 +37,8 @@ defmodule Arbiter.Worker.GitCredential.Material do
             read_only: false
 
   @type t :: %__MODULE__{
-          kind: :deploy_key | :token | :github_app | :gitlab_project_token | nil,
+          kind:
+            :deploy_key | :token | :github_app | :gitlab_project_token | :gitlab_bot_token | nil,
           key: String.t() | nil,
           token: String.t() | nil,
           tracker_token: String.t() | nil,
@@ -95,8 +96,9 @@ defmodule Arbiter.Worker.GitCredential.Material do
 
   # The same run token authenticates the GitLab API (`glab`, `curl`): a worker
   # reads its pipelines, jobs and artifacts without the operator's glab session.
-  defp api_env(%__MODULE__{kind: :gitlab_project_token, token: token, host: host}),
-    do: [{"GITLAB_TOKEN", token}, {"GITLAB_HOST", host}]
+  defp api_env(%__MODULE__{kind: kind, token: token, host: host})
+       when kind in [:gitlab_project_token, :gitlab_bot_token],
+       do: [{"GITLAB_TOKEN", token}, {"GITLAB_HOST", host}]
 
   defp api_env(%__MODULE__{}), do: []
 

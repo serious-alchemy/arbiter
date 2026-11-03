@@ -63,6 +63,43 @@ its synced pipeline runs: no second MR syncs beside it until it settles or the
 CI-wait bound passes. At equal priority a green stale MR is elected ahead of
 one in CI remediation.
 
+## Phase 2: probe while waiting, CI only for the head (bd-4y9dno)
+
+The train's waiting MRs used to find out they conflict only when their turn came,
+and every commit pushed for one of them started a pipeline that was thrown away
+when the head merged and moved the target. Phase 2 spends nothing on the waiters
+until they are the head:
+
+1. **Conflict probe.** A waiting approved MR (not the head) is probed on every
+   poll: its branch and the target are fetched into the repo's own object store
+   and `git merge-tree` judges them in memory (`Arbiter.Worker.MergeProbe`: no
+   commit, no ref, no push). It is judged again only when the target or the
+   branch moved. Clean, or anything git cannot answer, does nothing. A conflict
+   is handled exactly as the forge's own `conflicting` flag would be: the
+   conflict-resolution pass is dispatched now (bounded and escalated by the
+   existing `max_conflict_attempts` rules), the resolution hunks void the
+   approval carry as usual, and the MR is re-reviewed while it waits.
+   `merge.train_conflict_probe=false` turns it off.
+2. **Pushes without CI.** The pass dispatched for a waiting MR pushes with the
+   forge's CI-skip mechanism (`Arbiter.Mergers.CiSkip`, the optional
+   `ci_skip_mechanism/1` and `trigger_pipeline/2` adapter callbacks): GitLab
+   `git push -o ci.skip`; GitHub a `[skip ci]` marker on the unpushed tip commit
+   (only when `merge.train_ci_workflow` names a `workflow_dispatch` workflow, so
+   the head can be started again). The pass reports the head it pushed
+   (`Watchdog.note_ci_skipped_push/2`, recorded on the ticket's lane as
+   `ci_skipped_head`). `merge.train_ci_skip=false` turns it off.
+3. **CI for the head.** When a CI-skipped MR is current and is the merge head,
+   Arbiter triggers its pipeline (GitLab: a merge request pipeline through the
+   API; GitHub: a `workflow_dispatch` of `merge.train_ci_workflow` on the head
+   branch) and merges only once that pipeline reports success. A skipped, neutral
+   or missing pipeline never merges; a trigger the forge refuses is retried up to
+   three times, then the MR is parked and the coordinator paged. "Pipelines must
+   succeed" on the forge is the second line. A head that moves on (a sync, a new
+   push) is no longer skipped.
+
+An MR alone in its queue is the head: it is never probed, never pushed with a
+skip, and merges as before.
+
 ## Merge path details
 
 * The sync runs in the ticket's own worktree (attached if needed) under the

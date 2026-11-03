@@ -245,6 +245,24 @@ defmodule Arbiter.Tasks.PullRequest do
     update_lane(task_id, %{"train_ejected_head" => head})
   end
 
+  @doc """
+  Record the head a CI-skipped push left on the ticket's MR (bd-4y9dno): the
+  merge train pushes a non-head MR's commits without a pipeline, and a restarted
+  Watchdog must still know that head has none, or it could merge it unverified.
+  """
+  @spec record_ci_skipped_head(String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def record_ci_skipped_head(task_id, sha) when is_binary(task_id),
+    do: update_lane(task_id, %{"ci_skipped_head" => sha})
+
+  @doc """
+  Record the head whose pipeline Arbiter triggered after a CI-skipped push
+  (bd-4y9dno), so a restarted Watchdog waits for that pipeline rather than
+  triggering another.
+  """
+  @spec record_ci_triggered_head(String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def record_ci_triggered_head(task_id, sha) when is_binary(task_id),
+    do: update_lane(task_id, %{"ci_triggered_head" => sha})
+
   defp update_lane(task_id, changes) do
     with {:ok, issue} <- Ash.get(Issue, task_id),
          lane = Map.merge(issue.merge_watch || %{}, changes),
@@ -385,7 +403,9 @@ defmodule Arbiter.Tasks.PullRequest do
       train_ready_since: Map.get(lane, "train_ready_since"),
       train_synced_from: Map.get(lane, "train_synced_from"),
       train_car: Map.get(lane, "train_car"),
-      train_ejected_head: Map.get(lane, "train_ejected_head")
+      train_ejected_head: Map.get(lane, "train_ejected_head"),
+      ci_skipped_head: Map.get(lane, "ci_skipped_head"),
+      ci_triggered_head: Map.get(lane, "ci_triggered_head")
     ]
     |> put_opt(:interval_ms, integer(lane, "interval_ms"))
     |> put_opt(:initial_delay_ms, integer(lane, "initial_delay_ms"))

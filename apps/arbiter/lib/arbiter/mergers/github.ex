@@ -1059,6 +1059,55 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
+  # bd-4y9dno. A merge train push for a PR that is not the head carries a
+  # `[skip ci]` marker; the head's pipeline is a `workflow_dispatch` of the
+  # workflow the operator names (`merge.train_ci_workflow`). Without one the
+  # head could not be started again, so the marker is never offered.
+  @impl true
+  def ci_skip_mechanism(opts) when is_map(opts) do
+    if workflow_name(opts), do: {:commit_marker, "[skip ci]"}
+  end
+
+  @impl true
+  def trigger_pipeline(mr_ref, opts) when is_binary(mr_ref) and is_map(opts) do
+    with {:ok, workflow} <- fetch_workflow(opts),
+         {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json(),
+         head_ref when is_binary(head_ref) and head_ref != "" <- get_in(pr, ["head", "ref"]),
+         :ok <-
+           request(
+             cfg,
+             :post,
+             "/repos/#{owner}/#{repo}/actions/workflows/#{URI.encode(workflow)}/dispatches",
+             json: %{ref: head_ref}
+           )
+           |> expect_ok() do
+      {:ok, %{mode: :workflow_dispatch, run_id: nil, workflow: workflow, url: nil}}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, trigger_error("the PR has no head branch to dispatch on")}
+    end
+  end
+
+  defp workflow_name(opts) do
+    case Map.get(opts, :workflow) do
+      name when is_binary(name) and name != "" -> name
+      _ -> nil
+    end
+  end
+
+  defp fetch_workflow(opts) do
+    case workflow_name(opts) do
+      nil -> {:error, trigger_error("no CI workflow is configured (merge.train_ci_workflow)")}
+      name -> {:ok, name}
+    end
+  end
+
+  defp trigger_error(message),
+    do: %Error{kind: :validation_failed, status: nil, message: message, raw: nil}
+
   # Only a fresh `workflow_dispatch` can carry inputs; `rerun`/`rerun-failed-jobs`
   # replay the original run's inputs and would drop these on the floor. The
   # documented contract (`Merger.rerun_ci/2`, the MCP catalog, `arb queue
