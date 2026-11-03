@@ -64,6 +64,7 @@ defmodule Arbiter.NodeAgent.ProtocolTest do
       assert caps["image_sources"] == ["registry", "build"]
       assert caps["runtime_contracts"] == Arbiter.NodeAgent.ImagePull.runtime_contracts()
       assert caps["runtime_contracts"] == [1]
+      assert caps["image_prefetch"] == true
       assert caps["image"] == "build"
     end
   end

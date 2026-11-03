@@ -204,6 +204,34 @@ defmodule Arbiter.NodeAgent.ImagePullTest do
     assert_received {:podman, ["image", "inspect", @ref]}
   end
 
+  describe "prefetch/5 (SI7)" do
+    test "pulls with the same tmpfs auth file, deletes it, and runs no label check", ctx do
+      assert :ok = ImagePull.prefetch(@ref, %{}, @auth, "prefetch-1", opts(ctx))
+
+      assert_received {:podman, ["image", "exists", @ref]}
+      assert_received {:podman, ["pull", "--quiet", "--authfile", path, @ref]}
+      assert_received {:authfile, %{mode: 0o600}}
+      assert path == Secrets.authfile(ctx.rt, "prefetch-1")
+      refute File.exists?(path)
+      refute_received {:podman, ["image", "inspect", _]}
+    end
+
+    test "a node that holds the digest pulls nothing", ctx do
+      opts = opts(ctx, %{present?: true})
+      assert :ok = ImagePull.prefetch(@ref, %{}, @auth, "prefetch-1", opts)
+      refute_received {:podman, ["pull" | _]}
+    end
+
+    test "a failed pull is an error with the credential scrubbed", ctx do
+      opts = opts(ctx, %{pull: {"denied for " <> @password, 125}})
+
+      assert {:error, {:image_unavailable, {:pull_failed, 125, out}}} =
+               ImagePull.prefetch(@ref, %{}, @auth, "prefetch-1", opts)
+
+      refute out =~ @password
+    end
+  end
+
   describe "the label checks (contract_mismatch)" do
     test "the runtime contract must be one this agent supports" do
       assert ImagePull.runtime_contracts() == [1]

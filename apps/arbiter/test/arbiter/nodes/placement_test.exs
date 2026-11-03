@@ -811,4 +811,35 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert Placement.image_registry(ws, "other") == "ghcr.io/ryan"
     end
   end
+
+  describe "warm-first ranking (SI7)" do
+    @digest "registry.example.com/arbiter/vstim/worker@sha256:" <> String.duplicate("b", 64)
+
+    test "among equally loaded nodes, the one holding the repo's last digest ranks first" do
+      rows = [
+        row("alpha"),
+        row("bravo", images: %{"digests" => [@digest]}),
+        row("charlie",
+          images: %{
+            "digests" => ["registry.example.com/other@sha256:" <> String.duplicate("c", 64)]
+          }
+        )
+      ]
+
+      assert {:ok, {:node, %{name: "bravo"}}} = place(%{last_digest: @digest}, rows)
+      # Without a last digest the name breaks the tie, as before.
+      assert {:ok, {:node, %{name: "alpha"}}} = place(%{}, rows)
+    end
+
+    test "load still comes before warmth" do
+      rows = [row("alpha"), row("bravo", live: 1, images: %{"digests" => [@digest]})]
+      assert {:ok, {:node, %{name: "alpha"}}} = place(%{last_digest: @digest}, rows)
+    end
+
+    test "warm?/2 needs a digest and a report" do
+      assert Placement.warm?(row("a", images: %{"digests" => [@digest]}), @digest)
+      refute Placement.warm?(row("a"), @digest)
+      refute Placement.warm?(row("a", images: %{"digests" => [@digest]}), nil)
+    end
+  end
 end

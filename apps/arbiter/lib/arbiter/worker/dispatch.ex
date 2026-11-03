@@ -113,6 +113,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.HeldResume
   alias Arbiter.Worker.Image.Publisher
+  alias Arbiter.Worker.Image.PublishLedger
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.RepoCap
@@ -3141,6 +3142,7 @@ defmodule Arbiter.Worker.Dispatch do
       local_work?: local_work?(task, opts, Placement.mode(workspace)),
       git_credential: Placement.git_credential(workspace, Keyword.get(opts, :repo) || task.repo),
       registry: Placement.image_registry(workspace, Keyword.get(opts, :repo) || task.repo),
+      last_digest: PublishLedger.last_ref(Keyword.get(opts, :repo) || task.repo),
       mode: Placement.mode(workspace),
       allowed_nodes: Arbiter.Nodes.Allowlist.selectors(workspace)
     }

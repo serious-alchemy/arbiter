@@ -69,7 +69,7 @@ defmodule Arbiter.NodeAgent.Supervisor do
           ] ++
             image_builder() ++
             Runs.child_specs() ++
-            [{Arbiter.NodeAgent.ImageGC, config: config}] ++
+            [{Arbiter.NodeAgent.ImageGC, config: config}, prefetch_spec(config)] ++
             [
               {Bridge, node_home: config.node_home},
               monitor_spec(config),
@@ -96,6 +96,21 @@ defmodule Arbiter.NodeAgent.Supervisor do
     run_opts
     |> Keyword.put_new(:bridges_fun, &Bridge.listen/2)
     |> Keyword.put_new(:bridges_release_fun, &Bridge.release/1)
+  end
+
+  # SI7: the `image.prefetch` queue, one background pull at a time.
+  defp prefetch_spec(config) do
+    pull_opts =
+      Keyword.take(config.run_opts, [
+        :podman,
+        :runner,
+        :runtime_dir,
+        :require_tmpfs,
+        :mountinfo,
+        :pull_timeout_ms
+      ])
+
+    {Arbiter.NodeAgent.ImagePrefetch, pull_opts: pull_opts}
   end
 
   # bd-6w7usy: the machine senses its own temperature and memory pressure and derates the slots

@@ -488,7 +488,7 @@ config :arbiter,
        Path.expand("../apps/arbiter/test/support/stub_bin/systemd-run", __DIR__)
 
 # K8: the controller-image boot publish is driven by `Publisher.publish_controller/1` in tests.
-config :arbiter, :image_publisher, boot: false, ledger: nil
+config :arbiter, :image_publisher, boot: false, ledger: nil, prefetch: false
 config :arbiter, :cli_set_watcher, enabled: false
 
 # A merge-permitting ReviewGate ruling resumes the ticket's merge path

@@ -360,6 +360,13 @@ defmodule Arbiter.NodeAgent.Connection do
     state
   end
 
+  # SI7: warm the node with a published digest. Never refused loudly: a prefetch is a
+  # hint, and a payload the agent will not act on is dropped.
+  defp push(state, "image.prefetch", payload) do
+    _ = Arbiter.NodeAgent.ImagePrefetch.enqueue(payload)
+    state
+  end
+
   defp push(state, "cancel", %{"run" => run} = payload) do
     case backend(state).stop({run, payload["reason"] || "cancelled"}) do
       :ok -> :ok

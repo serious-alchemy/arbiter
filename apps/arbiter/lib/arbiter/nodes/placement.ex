@@ -188,7 +188,8 @@ defmodule Arbiter.Nodes.Placement do
           optional(:git_credential) => GitCredential.kind() | atom() | nil,
           optional(:labels) => [String.t()],
           optional(:allowed_nodes) => [Allowlist.selector()] | nil,
-          optional(:registry) => String.t() | nil
+          optional(:registry) => String.t() | nil,
+          optional(:last_digest) => String.t() | nil
         }
   @type info :: %{
           required(:task_id) => String.t(),
@@ -381,7 +382,7 @@ defmodule Arbiter.Nodes.Placement do
         reserved = reserved_counts()
         candidates = Enum.filter(rows, &candidate?(&1, request, reserved))
 
-        case candidates |> rank(reserved) |> prefer(Keyword.get(opts, :prefer)) do
+        case candidates |> rank(reserved, request) |> prefer(Keyword.get(opts, :prefer)) do
           [%{constrained?: true} | _] when request.mode == :prefer_remote ->
             none(request, rows)
 
@@ -628,12 +629,30 @@ defmodule Arbiter.Nodes.Placement do
 
   defp labels_match?(have, want), do: Enum.all?(want, &(&1 in have))
 
-  defp rank(candidates, reserved) do
+  # SI7 (§21.4): among nodes of equal load, one already holding the repo's last published
+  # digest (`hb.images`) ranks before one that must pull. Load still comes first.
+  defp rank(candidates, reserved, request) do
+    last = Map.get(request, :last_digest)
+
     Enum.sort_by(candidates, fn row ->
       {Map.get(row, :constrained?, false), (row.live + Map.get(reserved, row.id, 0)) / row.max,
-       row.name}
+       not warm?(row, last), row.name}
     end)
   end
+
+  @doc """
+  SI7: does `row` hold `digest` (a digest-pinned ref, the repo's last published one) in
+  its `hb.images`? False for no digest or no report.
+  """
+  @spec warm?(map(), String.t() | nil) :: boolean()
+  def warm?(row, digest) when is_binary(digest) do
+    case Map.get(row, :images) do
+      %{"digests" => digests} when is_list(digests) -> digest in digests
+      _ -> false
+    end
+  end
+
+  def warm?(_row, _digest), do: false
 
   # DC8 (`docs/design/provider-dynamic-concurrency.md` §4.4): the node the
   # scheduler walk planned the run on goes first while it is still a candidate.
