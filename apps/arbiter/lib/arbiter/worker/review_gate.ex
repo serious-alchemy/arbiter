@@ -5246,6 +5246,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp handle_reviewer_quota_exhausted(state, %StopReason{} = reason) do
     pool = reviewer_pool(state)
     state = record_reviewer_quota_exhausted(state, reason)
+    fail_quota_refused_reviewer(state, reason)
 
     Logger.warning(
       "ReviewGate: reviewer #{provider_label(reviewer_provider_for(state))} for " <>
@@ -5261,6 +5262,17 @@ defmodule Arbiter.Worker.ReviewGate do
       {nil, _selection} -> {:done, escalate_quota_exhausted(state)}
       {next, selection} -> rotate_reviewer(state, next, pool, selection, :quota_exhausted)
     end
+  end
+
+  # bd-3b3oks: the refused pass did no review, so its run must not be stamped
+  # `:succeeded` (what a `:normal` stop does). Fail it with the typed quota
+  # reason BEFORE rotation stops the worker; no-op if it is already gone.
+  defp fail_quota_refused_reviewer(state, %StopReason{} = reason) do
+    if is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid) do
+      safe(fn -> Worker.fail(state.reviewer_pid, reason) end)
+    end
+
+    :ok
   end
 
   defp record_reviewer_quota_exhausted(state, %StopReason{} = reason) do

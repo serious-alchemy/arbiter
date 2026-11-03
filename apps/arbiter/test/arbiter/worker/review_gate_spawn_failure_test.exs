@@ -428,6 +428,33 @@ defmodule Arbiter.Worker.ReviewGateSpawnFailureTest do
 
       assert calls(log) == ["claude", "agy"]
       assert [%Round{verdict: :approve, reviewer_provider: "gemini"}] = review_rounds(task.id)
+
+      # The refused pass did no review: its run is failed with the quota cause,
+      # never `:succeeded`.
+      refused =
+        Arbiter.Workers.Run
+        |> Ash.read!()
+        |> Enum.filter(&String.starts_with?(&1.task_id, task.id <> "#review"))
+        |> Enum.filter(&(&1.outcome == :failed))
+
+      assert [%{failure_reason: reason}] = refused
+      assert reason =~ "usage limit"
+    end
+
+    test "a normal exit-0 review still records its verdict",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      stub_approve(stub_dir, "claude", log)
+      prepend_path(stub_dir)
+
+      ws = workspace(["claude", "gemini"])
+      task = new_task(ws)
+
+      run_gate(task, repo, "feature/normal-exit0")
+
+      wait_until(fn -> merge_commit_count(repo) == 1 end, 10_000)
+
+      assert calls(log) == ["claude"]
+      assert [%Round{verdict: :approve}] = review_rounds(task.id)
     end
   end
 
