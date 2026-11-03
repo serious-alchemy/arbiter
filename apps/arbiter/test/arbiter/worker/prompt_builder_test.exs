@@ -789,6 +789,37 @@ defmodule Arbiter.Worker.PromptBuilderTest do
     end
   end
 
+  describe "conflict_resolve_briefing/4 CI skip (bd-4y9dno)" do
+    test "a pass for a waiting merge-train MR is told how to push without CI" do
+      push =
+        PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main",
+          ci_skip: {:push_option, "ci.skip"}
+        )
+
+      assert push =~ "git push -o ci.skip"
+
+      marker =
+        PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main",
+          ci_skip: {:commit_marker, "[skip ci]"}
+        )
+
+      assert marker =~ "[skip ci]"
+    end
+
+    test "no mechanism, or a host push (which adds it itself), adds nothing" do
+      plain = PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main")
+      refute plain =~ "SKIP CI"
+
+      host =
+        PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main",
+          host_git: true,
+          ci_skip: {:push_option, "ci.skip"}
+        )
+
+      refute host =~ "SKIP CI"
+    end
+  end
+
   # bd-9so315: the worker is the only party that can see its own diff, so the
   # work prompt has to tell it when to raise the flag.
   describe "post-merge verification doctrine" do

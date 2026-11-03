@@ -2315,20 +2315,69 @@ defmodule Arbiter.Worker.Worktree do
     * `:env` — `{name, value | nil}` pairs for the git process, on top of the
       server's own env (`nil` unsets). The host's scoped credential
       (`Arbiter.Worker.HostCredential`) rides here.
+    * `:ci_skip` — ask the forge not to start a pipeline for this push (a merge
+      train MR that is not the head, bd-4y9dno), by the forge's own mechanism
+      (`Arbiter.Mergers.CiSkip`): `{:push_option, "ci.skip"}` sends `-o ci.skip`
+      (GitLab); `{:commit_marker, "[skip ci]"}` appends the marker to the tip
+      commit's message first (GitHub), but only when that tip is not already on
+      the remote and does not already carry it — a commit the remote has is never
+      rewritten.
   """
   @spec push(path(), keyword()) :: {:ok, String.t()} | {:error, error_reason()}
   def push(path, opts \\ []) when is_binary(path) and is_list(opts) do
     remote = Keyword.get(opts, :remote, "origin")
     set_upstream = Keyword.get(opts, :set_upstream, false)
+    env = Keyword.get(opts, :env, [])
+    ci_skip = Keyword.get(opts, :ci_skip)
 
-    with {:ok, branch} <- resolve_branch(path, opts) do
+    with {:ok, branch} <- resolve_branch(path, opts),
+         :ok <- mark_tip_ci_skip(path, remote, branch, ci_skip, env) do
       args =
         ["push"] ++
           lease_args(Keyword.get(opts, :force_with_lease), branch) ++
+          push_option_args(ci_skip) ++
           if(set_upstream, do: ["-u"], else: []) ++
           [remote, branch]
 
-      run_git(args, cd: path, env: Keyword.get(opts, :env, []))
+      run_git(args, cd: path, env: env)
+    end
+  end
+
+  defp push_option_args({:push_option, option}) when is_binary(option), do: ["-o", option]
+  defp push_option_args(_), do: []
+
+  # GitHub has no push option: a `[skip ci]` marker in the head commit's message
+  # is what suppresses the run. Only the unpushed tip of the checked-out branch
+  # is touched, so nothing the remote holds is rewritten.
+  defp mark_tip_ci_skip(path, remote, branch, {:commit_marker, marker}, env)
+       when is_binary(marker) and marker != "" do
+    with {:ok, ^branch} <- current_branch(path),
+         false <- commit_ancestor?(path, "HEAD", "refs/remotes/#{remote}/#{branch}"),
+         {:ok, message} <- run_git(["log", "-1", "--format=%B"], cd: path),
+         false <- String.contains?(message, marker) do
+      amended = String.trim_trailing(message) <> "\n\n" <> marker <> "\n"
+
+      args = ["-c", "commit.gpgsign=false", "commit", "--amend", "--no-verify", "-m", amended]
+
+      case run_git(args, cd: path, env: env ++ commit_identity_env(path)) do
+        {:ok, _} -> :ok
+        {:error, _} = error -> error
+      end
+    else
+      _already_marked_pushed_or_unreadable -> :ok
+    end
+  end
+
+  defp mark_tip_ci_skip(_path, _remote, _branch, _ci_skip, _env), do: :ok
+
+  # An amend needs a committer; a checkout with none configured gets Arbiter's.
+  defp commit_identity_env(path) do
+    case run_git(["config", "user.email"], cd: path) do
+      {:ok, email} when email not in ["", "\n"] ->
+        []
+
+      _ ->
+        [{"GIT_COMMITTER_NAME", "arbiter"}, {"GIT_COMMITTER_EMAIL", "arbiter@localhost"}]
     end
   end
 

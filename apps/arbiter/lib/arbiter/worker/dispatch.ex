@@ -2796,6 +2796,39 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp maybe_add_gemini_model_hint(_provider, _task, _workspace, opts), do: opts
 
+  # A Claude account with per-model weekly windows (bd-e0b7so) is gated on the
+  # card's own model: exhausting Fable's weekly limit holds a Fable card and
+  # leaves the account serving other models. Same best-effort hint as agy's,
+  # added only when the account reports such a window (so every other dispatch
+  # is untouched). An unresolvable model leaves `model: nil` in the opts: the
+  # gate then reads the worst of all windows, the conservative default.
+  defp maybe_add_claude_model_hint(opts, task, workspace, %{scoped_limits: [_ | _]}) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" ->
+        opts
+
+      _ ->
+        Keyword.put(opts, :model, claude_model_hint(task, workspace, opts))
+    end
+  end
+
+  defp maybe_add_claude_model_hint(opts, _task, _workspace, _quota), do: opts
+
+  defp claude_model_hint(task, workspace, opts) do
+    config = Routing.decide(task, workspace, opts).config
+    agent_config = get_in((workspace && workspace.config) || %{}, ["agent", "config"]) || %{}
+
+    case config["model"] do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        ModelFamily.model_for_tier(:claude, config["model_tier"], agent_config)
+    end
+  rescue
+    _ -> nil
+  end
+
   defp gemini_model_tier_hint(task, workspace, opts) do
     config = Routing.decide(task, workspace, opts).config
 
@@ -3010,11 +3043,23 @@ defmodule Arbiter.Worker.Dispatch do
   # `remote_only` is held. A node that builds its own image skips this.
   defp image_gate(%Issue{} = task, workspace, request, node, opts, gate_opts) do
     repo = Keyword.get(opts, :repo)
-    image_opts = [workspace: workspace, repo: repo] ++ Keyword.take(opts, [:image, :publish])
+
+    image_opts =
+      [workspace: workspace, repo: repo, publish: image_publish_opts(opts)] ++
+        Keyword.take(opts, [:image])
 
     case publish_image(task, repo, node, image_opts) do
       :ok ->
         {:ok, Keyword.put(opts, :node, node)}
+
+      # bd-5fpj59: the publish is running and this dispatch did not wait for it.
+      # Hold the card (its slot and the node's are free, other work dispatches)
+      # until `image_notify` says the image settled.
+      {:error, {:image_pending, key}} ->
+        Placement.release(task.id)
+
+        {:error,
+         {:no_node_capacity, Placement.image_pending(request, key, image_label(task, repo))}}
 
       {:error, reason} ->
         Placement.release(task.id)
@@ -3026,9 +3071,12 @@ defmodule Arbiter.Worker.Dispatch do
   # after a version bump). While it runs the dispatch's `Drain.track` entry — and
   # so the autopilot's `board_promotion` entry in `scheduler_status.in_flight` —
   # says what it is waiting on; its `started_at` gives the elapsed time.
+  #
+  # bd-5fpj59: with `image_notify` (the board's promotion) the publish is not
+  # waited for at all, see `image_publish_opts/1`.
   defp publish_image(%Issue{} = task, repo, node, image_opts) do
     Drain.note_detail(
-      "waiting for registry image for #{repo || task.repo || "repo"} " <>
+      "waiting for registry image for #{image_label(task, repo)} " <>
         "(node #{node_label(node)}); publishing"
     )
 
@@ -3036,6 +3084,20 @@ defmodule Arbiter.Worker.Dispatch do
       ContainerSpawn.preflight_image(resolve_repo_path(task, repo), node, image_opts)
     after
       Drain.note_detail(nil)
+    end
+  end
+
+  defp image_label(%Issue{} = task, repo), do: repo || task.repo || "repo"
+
+  # `image_notify: (key, result -> any)` asks for the non-blocking publish
+  # (`Publisher.ensure_ready/2`'s `wait: false`): a promotion slot must not sit
+  # out a cold publish. Every other caller keeps the bounded wait.
+  defp image_publish_opts(opts) do
+    publish = Keyword.get(opts, :publish, [])
+
+    case Keyword.get(opts, :image_notify) do
+      notify when is_function(notify, 2) -> Keyword.merge(publish, wait: false, on_done: notify)
+      _ -> publish
     end
   end
 
@@ -3315,6 +3377,7 @@ defmodule Arbiter.Worker.Dispatch do
     gate_opts =
       provider
       |> maybe_add_gemini_model_hint(task, workspace, opts)
+      |> maybe_add_claude_model_hint(task, workspace, quota)
       |> Keyword.put(:account, account)
       |> then(&if(enforced?, do: Keyword.put(&1, :pace, false), else: &1))
 

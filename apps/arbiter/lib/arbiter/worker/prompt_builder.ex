@@ -83,7 +83,7 @@ defmodule Arbiter.Worker.PromptBuilder do
       it no longer applies cleanly. Your ONLY job is to rebase it onto the current
       base, resolve the conflicts, and #{if host_git?, do: "commit the result", else: "force-push"} — NOT to re-implement the change
       or open a new PR.
-      #{conflict_host_git_section(host_git?, target_branch)}
+      #{conflict_host_git_section(host_git?, target_branch)}#{ci_skip_section(Keyword.get(opts, :ci_skip), host_git?)}
       ## Original intent — resolve conflicts so the result still satisfies THIS
 
       Title: #{task.title}
@@ -133,6 +133,37 @@ defmodule Arbiter.Worker.PromptBuilder do
     |> indent_block()
     |> Kernel.<>("\n")
   end
+
+  # bd-4y9dno: an MR waiting behind the merge train's head is pushed without a
+  # pipeline (the head is the only one that spends CI). A host push adds the
+  # mechanism itself; a pass that pushes for itself is told how.
+  defp ci_skip_section(nil, _host_git?), do: ""
+  defp ci_skip_section(_ci_skip, true), do: ""
+
+  defp ci_skip_section({:push_option, option}, false) do
+    """
+
+    SKIP CI ON YOUR PUSH — this MR waits behind the merge train's head, which is the
+    only MR that spends CI. Push with the forge's skip option, exactly:
+    `git push -o #{option} --force-with-lease=<branch>:<expected-sha> origin <branch>`.
+    The pipeline is started for you when this MR reaches the front.
+    """
+    |> indent_block()
+    |> Kernel.<>("\n")
+  end
+
+  defp ci_skip_section({:commit_marker, marker}, false) do
+    """
+
+    SKIP CI ON YOUR PUSH — this MR waits behind the merge train's head, which is the
+    only MR that spends CI. End the message of your last commit with the line
+    `#{marker}`. The pipeline is started for you when this MR reaches the front.
+    """
+    |> indent_block()
+    |> Kernel.<>("\n")
+  end
+
+  defp ci_skip_section(_ci_skip, _host_git?), do: ""
 
   defp conflict_steps(true, _branch, target_branch) do
     """

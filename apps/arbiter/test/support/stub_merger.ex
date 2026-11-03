@@ -259,6 +259,42 @@ defmodule Arbiter.Test.StubMerger do
     {:ok, checks}
   end
 
+  # ---- CI-skip / trigger (bd-4y9dno) ---------------------------------------
+
+  @doc "The mechanism `ci_skip_mechanism/1` reports (default `nil`: the stub does not skip CI)."
+  def set_ci_skip_mechanism(mechanism) do
+    ensure_started()
+    Agent.update(@name, &Map.put(&1, :ci_skip_mechanism, mechanism))
+  end
+
+  @doc "All `trigger_pipeline/2` calls, newest first."
+  def pipeline_triggers do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :pipeline_triggers, []) end)
+  end
+
+  @doc "Force `trigger_pipeline/2` to return this result instead of `{:ok, _}`."
+  def set_trigger_result(result) do
+    ensure_started()
+    Agent.update(@name, &Map.put(&1, :trigger_result, result))
+  end
+
+  @impl true
+  def ci_skip_mechanism(_opts) do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :ci_skip_mechanism) end)
+  end
+
+  @impl true
+  def trigger_pipeline(ref, opts) do
+    ensure_started()
+
+    Agent.get_and_update(@name, fn s ->
+      s = Map.update(s, :pipeline_triggers, [{ref, opts}], &[{ref, opts} | &1])
+      {Map.get(s, :trigger_result, {:ok, %{mode: :stub_trigger, run_id: 1}}), s}
+    end)
+  end
+
   @doc "All `rerun_ci/2` calls, newest first (bd-5mzzww)."
   def ci_reruns do
     ensure_started()

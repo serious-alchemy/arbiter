@@ -1479,6 +1479,58 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "default: claude/opus=privileged, antigravity=quarantine"
     end
 
+    # bd-8ufzng: the GitLab bot token's expiry is shown even when nothing is wrong.
+    test "ok, showing a GitLab bot token's expiry" do
+      guardrail_routes(%{
+        "active" => true,
+        "rules" => 1,
+        "issues" => [],
+        "workspaces" => [
+          %{
+            "workspace" => "default",
+            "subjects" => [%{"provider" => "claude", "model" => nil, "tier" => "privileged"}],
+            "git_credential_tokens" => [
+              %{"repo" => "tonic", "expires_at" => "2027-01-31", "days_left" => 60}
+            ]
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] guardrail profiles"
+      assert out =~ "tonic bot token expires 2027-01-31 (60d)"
+    end
+
+    test "warns 14 days ahead of a GitLab bot token's expiry" do
+      guardrail_routes(%{
+        "active" => false,
+        "rules" => 0,
+        "workspaces" => [
+          %{
+            "workspace" => "default",
+            "subjects" => [],
+            "git_credential_tokens" => [
+              %{"repo" => "tonic", "expires_at" => "2027-01-31", "days_left" => 9}
+            ]
+          }
+        ],
+        "issues" => [
+          %{
+            "kind" => "git_credential_token_expiring",
+            "workspace" => "default",
+            "message" =>
+              "git_credentials.repos.tonic bot token (GL_BOT) expires 2027-01-31 (9 days)"
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] guardrail profiles"
+      assert out =~ "bot token (GL_BOT) expires 2027-01-31"
+    end
+
     test "FAILs naming inconsistent config, without blocking readiness" do
       guardrail_routes(%{
         "active" => true,

@@ -35,6 +35,7 @@ defmodule Arbiter.Guardrails.Report do
   alias Arbiter.Guardrails.Rules
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.GitCredential
+  alias Arbiter.Worker.GitCredential.GitlabBot
 
   @tier_ladder ~w(economy standard premium flagship)
 
@@ -47,7 +48,13 @@ defmodule Arbiter.Guardrails.Report do
   @spec build([map()], keyword()) :: map()
   def build(workspaces, opts \\ []) do
     rules = Keyword.get_lazy(opts, :rules, &Rules.all/0)
-    entries = Enum.map(workspaces, &workspace_entry(&1, rules))
+
+    expiry = [
+      probe: Keyword.get(opts, :probe, false),
+      req_options: Keyword.get(opts, :req_options, [])
+    ]
+
+    entries = Enum.map(workspaces, &workspace_entry(&1, rules, expiry))
     inert = if rules == [], do: Enum.filter(entries, & &1.block?), else: []
 
     %{
@@ -74,7 +81,7 @@ defmodule Arbiter.Guardrails.Report do
   @spec posture(map(), keyword()) :: map()
   def posture(ws, opts \\ []) do
     rules = Keyword.get_lazy(opts, :rules, &Rules.all/0)
-    entry = workspace_entry(ws, rules)
+    entry = workspace_entry(ws, rules, nil)
 
     %{
       "active" => rules != [],
@@ -86,10 +93,11 @@ defmodule Arbiter.Guardrails.Report do
   defp stringify_keys(map),
     do: Map.new(map, fn {k, v} -> {Atom.to_string(k), v} end)
 
-  defp workspace_entry(ws, rules) do
+  defp workspace_entry(ws, rules, expiry_opts) do
     name = ws_name(ws)
     block = Config.block(ws)
     subjects = attached_subjects(ws)
+    tokens = token_rows(ws, expiry_opts)
 
     resolved =
       for {type, subject} <- subjects do
@@ -105,11 +113,13 @@ defmodule Arbiter.Guardrails.Report do
       workspace: name,
       block?: map_size(block) > 0,
       subjects: Enum.map(entries, & &1.entry),
+      git_credential_tokens: tokens,
       issues:
         Enum.flat_map(entries, & &1.issues) ++
           cap_issues(ws, block, Enum.map(subjects, &elem(&1, 1))) ++
           binding_issues(name, block, resolved) ++
-          secret_issues(ws, name, block) ++ git_credential_issues(ws, name, rules != [])
+          secret_issues(ws, name, block) ++
+          git_credential_issues(ws, name, rules != []) ++ token_issues(name, tokens)
     }
   end
 
@@ -274,13 +284,57 @@ defmodule Arbiter.Guardrails.Report do
     unconfigured ++ missing
   end
 
+  # bd-8ufzng: each `gitlab_bot_token` PAT's expiry, asked of GitLab when the caller
+  # probes (`arb doctor`'s endpoint), else the entry's recorded `expires_at`. The
+  # workspace posture (`posture/2`) never reaches out and carries no rows.
+  defp token_rows(_ws, nil), do: []
+
+  defp token_rows(ws, opts) do
+    ws
+    |> GitlabBot.expiries(opts)
+    |> Enum.map(fn row ->
+      %{
+        repo: row.repo,
+        secret: row.secret,
+        host: row.host,
+        expires_at: row.expires_at && Date.to_iso8601(row.expires_at),
+        days_left: row.days_left,
+        source: Atom.to_string(row.source)
+      }
+    end)
+  end
+
+  defp token_issues(name, tokens) do
+    for row <- tokens,
+        message = token_warning(row),
+        do: issue(:git_credential_token_expiring, name, message)
+  end
+
+  defp token_warning(%{expires_at: nil} = row),
+    do:
+      "git_credentials.repos.#{row.repo} bot token (#{row.secret}) has no expiry on record: " <>
+        "GitLab did not report one and expires_at is not set"
+
+  defp token_warning(%{days_left: days} = row) when days < 0,
+    do:
+      "git_credentials.repos.#{row.repo} bot token (#{row.secret}) expired on #{row.expires_at}; " <>
+        "issue the bot user a new personal access token"
+
+  defp token_warning(%{days_left: days} = row) do
+    if days <= GitlabBot.warn_days(),
+      do:
+        "git_credentials.repos.#{row.repo} bot token (#{row.secret}) expires #{row.expires_at} " <>
+          "(#{days} days); renew it before then"
+  end
+
   defp git_credential_secrets(entry) do
     Enum.filter(
       [
         entry["key_secret"],
         entry["token_secret"],
         entry["private_key_secret"],
-        entry["parent_token_secret"]
+        entry["parent_token_secret"],
+        entry["secret"]
       ],
       &is_binary/1
     )

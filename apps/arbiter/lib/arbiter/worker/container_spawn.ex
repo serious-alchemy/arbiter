@@ -1149,6 +1149,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
       source ->
         case publish_image(image, ctx, Keyword.get(opts, :publish, [])) do
           {:ok, %{ref: ref} = published} -> {:ok, published_image(image, ref, published, source)}
+          # bd-5fpj59: `publish: [wait: false]` — the publish is running, not failed.
+          {:pending, key} -> {:error, {:image_pending, key}}
           :disabled -> {:error, {:image_unavailable, :no_registry}}
           {:error, reason} -> {:error, {:image_unavailable, reason}}
         end
@@ -1182,10 +1184,16 @@ defmodule Arbiter.Worker.ContainerSpawn do
   end
 
   # `:stub` replaces the publisher in tests.
-  defp publish_image(_image, ctx, stub: stub), do: stub.(ctx)
-  defp publish_image(%{plan: nil}, _ctx, _opts), do: {:error, :no_plan_to_publish}
+  defp publish_image(image, ctx, opts) do
+    case Keyword.fetch(opts, :stub) do
+      {:ok, stub} -> stub.(ctx)
+      :error -> publish_planned(image, ctx, opts)
+    end
+  end
 
-  defp publish_image(%{plan: plan}, ctx, opts),
+  defp publish_planned(%{plan: nil}, _ctx, _opts), do: {:error, :no_plan_to_publish}
+
+  defp publish_planned(%{plan: plan}, ctx, opts),
     do: Publisher.ensure_ready(Map.put(ctx, :plan, plan), opts)
 
   # SI4 (§21.2.1): a run that takes the published image (a digest-pinned `ref`) has its
