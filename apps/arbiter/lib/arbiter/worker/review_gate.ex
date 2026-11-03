@@ -5164,18 +5164,18 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  defp classify_stop(status, lines) when is_integer(status) do
+    StopReason.classify(status, Enum.reverse(lines))
+  end
+
+  defp classify_stop(_status, _lines), do: nil
+
   defp codex_failure_banner?(lines) do
     Enum.any?(lines, fn line ->
       is_binary(line) and
         Regex.match?(~r/^\s*⚠ codex( turn failed)?:/, line)
     end)
   end
-
-  defp classify_stop(status, lines) when is_integer(status) do
-    StopReason.classify(status, Enum.reverse(lines))
-  end
-
-  defp classify_stop(_status, _lines), do: nil
 
   # Human-actionable inconclusive message for a reviewer that died of a known
   # infrastructure failure rather than genuinely finishing without a verdict —
