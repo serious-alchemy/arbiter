@@ -42,6 +42,7 @@ defmodule Arbiter.Quota.Rekey do
     :per_model_utilization,
     :extra_usage,
     :spend,
+    :scoped_limits,
     :oauth_utilization_5h,
     :oauth_utilization_7d,
     :oauth_captured_at

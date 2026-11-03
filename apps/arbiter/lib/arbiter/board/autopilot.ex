@@ -651,7 +651,7 @@ defmodule Arbiter.Board.Autopilot do
       debounce_ms: debounce,
       follow_up?: Keyword.get(opts, :follow_up, true),
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
-      dispatch: Keyword.get(opts, :dispatch, &default_dispatch/2),
+      dispatch: Keyword.get_lazy(opts, :dispatch, fn -> default_dispatch_fun(self()) end),
       # DC6: the `scheduler_admission` mode, read on every pass, and where a
       # hold change under the shadow is written. `shadow_signature` is the last
       # pass's outcome on both sides, so a row is written per change, not per pass.
@@ -919,6 +919,13 @@ defmodule Arbiter.Board.Autopilot do
     if budget_rise?(from, to) and admission_mode(state) == :enforce,
       do: {:noreply, request_plan(state)},
       else: {:noreply, state}
+  end
+
+  # bd-5fpj59: an image publish a held card waits on has settled (published or
+  # failed). Lift the hold of the cards waiting on that image and plan a pass:
+  # the dispatch either finds the image ready or reports the failure as a hold.
+  def handle_info({:image_settled, key}, state) do
+    {:noreply, state |> release_image_holds(key) |> request_plan()}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -1718,6 +1725,16 @@ defmodule Arbiter.Board.Autopilot do
   defp failure_detail({:provider_paused, provider, _}), do: "#{provider} paused"
   defp failure_detail({:provider_constraint, _provider, phrase}), do: phrase
   defp failure_detail({:guardrail_ineligible, _provider, phrase}), do: phrase
+  # bd-5fpj59: a hold that names its own phrase (the registry image is
+  # publishing, or could not be published) shows it as the card's hold_reason.
+  defp failure_detail({:no_node_capacity, %{image_key: _, phrase: phrase}})
+       when is_binary(phrase),
+       do: phrase
+
+  defp failure_detail({:no_node_capacity, %{image_error: _, phrase: phrase}})
+       when is_binary(phrase),
+       do: phrase
+
   defp failure_detail({:no_node_capacity, _}), do: "no node capacity"
   defp failure_detail({:sandbox_backend, _provider, phrase}), do: phrase
 
@@ -1734,6 +1751,21 @@ defmodule Arbiter.Board.Autopilot do
   defp failure_detail(reason), do: "dispatch refused (#{inspect(error_shape(reason))})"
 
   defp clear_failure(state, id), do: %{state | failures: Map.delete(state.failures, id)}
+
+  # bd-5fpj59: the publish a held card waits on, so its completion can lift the
+  # hold of exactly the cards waiting for that image.
+  defp held_image_key({:no_node_capacity, %{image_key: key}}), do: key
+  defp held_image_key(_reason), do: nil
+
+  defp release_image_holds(%{failures: failures} = state, key) do
+    released =
+      Map.new(failures, fn
+        {id, %{image_key: ^key} = entry} -> {id, %{entry | retry_not_before: nil}}
+        other -> other
+      end)
+
+    %{state | failures: released}
+  end
 
   # Update this card's failure entry and, if it just crossed the escalation
   # bar for the first time, fire the escalation and latch it so a card stuck
@@ -1754,6 +1786,8 @@ defmodule Arbiter.Board.Autopilot do
       | retry_not_before: preflight_retry_not_before(reason, entry.count, state.now.()),
         detail: failure_detail(reason)
     }
+
+    entry = Map.put(entry, :image_key, held_image_key(reason))
 
     entry =
       if not entry.escalated? and escalate_dispatch_failure?(shape, entry.count) do
@@ -1874,11 +1908,31 @@ defmodule Arbiter.Board.Autopilot do
   # board dispatch as one (bd-9fgg04), not just as "a dispatch". `extra` is the
   # admission shadow's record (DC6): empty under `legacy`, so the options are
   # exactly today's.
-  defp default_dispatch(id, extra) do
+  defp default_dispatch(id, extra, notify) do
     Arbiter.Worker.Dispatch.dispatch(
       id,
-      Keyword.merge([start_claude: true, dispatched_by: "autopilot"], extra)
+      Keyword.merge(
+        [start_claude: true, dispatched_by: "autopilot", image_notify: notify],
+        extra
+      )
     )
+  end
+
+  # bd-5fpj59: a board dispatch never parks the promotion slot on a registry
+  # image publish. `image_notify` makes `Dispatch` hold the card instead and tell
+  # this process when the publish settles (`{:image_settled, key}`).
+  defp default_dispatch_fun(pid) do
+    notify = image_notifier(pid)
+    fn id, extra -> default_dispatch(id, extra, notify) end
+  end
+
+  @doc false
+  @spec image_notifier(pid()) :: (term(), term() -> :ok)
+  def image_notifier(pid) do
+    fn key, _result ->
+      send(pid, {:image_settled, key})
+      :ok
+    end
   end
 
   # bd-92mx1m: the scheduler has just admitted this resume into a free slot,

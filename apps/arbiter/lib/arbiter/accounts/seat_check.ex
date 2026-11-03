@@ -212,25 +212,34 @@ defmodule Arbiter.Accounts.SeatCheck do
 
   defp find_budget(account, pool, ws_id, opts) do
     budgets = Keyword.get(opts, :budgets)
-    variant = ws_id && lookup(budgets, account.id, pool, ws_id)
-    variant || lookup(budgets, account.id, pool, nil)
+    model = Keyword.get(opts, :model)
+    variant = ws_id && lookup(budgets, account.id, pool, ws_id, model)
+    variant || lookup(budgets, account.id, pool, nil, model)
   end
 
-  defp lookup(nil, account_id, pool, policy_ws),
-    do: BudgetServer.lookup(account_id, pool, policy_ws)
+  defp lookup(nil, account_id, pool, policy_ws, model),
+    do: BudgetServer.for_model(account_id, pool, policy_ws, model)
 
-  defp lookup(budgets, account_id, nil, policy_ws) when is_list(budgets) do
-    budgets
-    |> Enum.filter(&(&1.account == account_id and &1.policy_workspace == policy_ws))
+  # A card on a model with a scoped weekly window (bd-e0b7so) is held to the
+  # lowest of its pool's budget and the scoped variants covering its model:
+  # nested windows of the one pool, whose seats are counted once.
+  defp lookup(budgets, account_id, pool, policy_ws, model) when is_list(budgets) do
+    candidates =
+      Enum.filter(
+        budgets,
+        &(&1.account == account_id and &1.policy_workspace == policy_ws and
+            (pool == nil or &1.pool == pool))
+      )
+
+    candidates
+    |> Enum.group_by(& &1.pool)
+    |> Map.values()
+    |> Enum.map(&pool_budget(&1, model))
     |> Budget.lowest()
   end
 
-  defp lookup(budgets, account_id, pool, policy_ws) when is_list(budgets) do
-    Enum.find(
-      budgets,
-      &(&1.account == account_id and &1.pool == pool and &1.policy_workspace == policy_ws)
-    )
-  end
+  defp pool_budget(candidates, model),
+    do: candidates |> Budget.applicable(model) |> Budget.lowest()
 
   defp pool_of(%Budget{pool: pool}, _account) when is_binary(pool), do: pool
 

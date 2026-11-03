@@ -47,7 +47,7 @@ defmodule Arbiter.Accounts.Merge do
   @anthropic_columns ~w(
     utilization_5h reset_5h_at status_5h utilization_7d reset_7d_at status_7d
     representative_claim overage_status captured_at capture_source
-    per_model_utilization extra_usage spend oauth_utilization_5h oauth_utilization_7d
+    per_model_utilization extra_usage spend scoped_limits oauth_utilization_5h oauth_utilization_7d
     oauth_captured_at inserted_at updated_at
   )a
 

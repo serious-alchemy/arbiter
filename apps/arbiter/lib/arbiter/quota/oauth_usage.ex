@@ -115,6 +115,7 @@ defmodule Arbiter.Quota.OAuthUsage do
           representative_claim: String.t() | nil,
           overage_status: String.t() | nil,
           limits: [limit()],
+          scoped: [map()],
           spend: map() | nil
         }
 
@@ -291,6 +292,7 @@ defmodule Arbiter.Quota.OAuthUsage do
       representative_claim: representative_claim(limits),
       overage_status: overage_status(extra_usage),
       limits: parse_limits(limits),
+      scoped: scoped_windows(limits),
       spend: spend(Map.get(body, "spend"))
     }
   end
@@ -308,6 +310,7 @@ defmodule Arbiter.Quota.OAuthUsage do
       representative_claim: nil,
       overage_status: nil,
       limits: [],
+      scoped: [],
       spend: nil
     }
 
@@ -331,6 +334,48 @@ defmodule Arbiter.Quota.OAuthUsage do
   end
 
   defp parse_limits(_), do: []
+
+  # `kind: weekly_scoped` limits as the string-keyed maps the
+  # `anthropic_quotas.scoped_limits` column stores (bd-e0b7so): the model's
+  # display name, a 0-1 fraction, the window's own status and reset, and
+  # whether Anthropic marks it the active limit. An entry with no display name
+  # or no percent is dropped: a limit we cannot name or read is not invented.
+  defp scoped_windows(limits) when is_list(limits) do
+    for %{"kind" => "weekly_scoped"} = l <- limits,
+        name = scoped_name(l),
+        is_number(Map.get(l, "percent")) do
+      window = %{"utilization" => l["percent"], "resets_at" => Map.get(l, "resets_at")}
+      reset_at = resets_at(window)
+
+      %{
+        "scope" => name,
+        "utilization" => l["percent"] / 100.0,
+        "status" => scoped_status(window, Map.get(l, "severity")),
+        "reset_at" => reset_at && DateTime.to_iso8601(reset_at),
+        "is_active" => Map.get(l, "is_active") == true
+      }
+    end
+  end
+
+  defp scoped_windows(_), do: []
+
+  defp scoped_name(limit) do
+    case get_in(limit, ["scope", "model", "display_name"]) do
+      name when is_binary(name) and name != "" -> name
+      _ -> nil
+    end
+  end
+
+  # The same rule as the 7d status: the window's derived status, raised (never
+  # lowered) by the limit's own severity.
+  defp scoped_status(window, severity) do
+    derived = window_status(window, :seven_day)
+
+    case severity do
+      s when is_binary(s) and s != "" -> worst_status(derived, severity_status(s))
+      _ -> derived
+    end
+  end
 
   defp string_or_nil(v) when is_binary(v), do: v
   defp string_or_nil(_), do: nil

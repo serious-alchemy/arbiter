@@ -667,6 +667,35 @@ defmodule Arbiter.Nodes.Placement do
     }
   end
 
+  @doc """
+  The hold for a run whose node image is still publishing (bd-5fpj59). The same
+  `{:no_node_capacity, info}` shape as `image_hold/2`, so every caller holds the
+  card and retries; `phrase` is what the board shows as the card's `hold_reason`
+  and `image_key` names the publish a completion wakeup is keyed by. Unlike a
+  failed publish, this is independent of `worker.placement`: the image is
+  coming, so the run waits for it rather than falling back to the primary.
+  """
+  @spec image_pending(
+          %{required(:task_id) => String.t(), optional(atom()) => term()},
+          term(),
+          String.t()
+        ) :: info()
+  def image_pending(request, key, label) do
+    phrase = "waiting for registry image for #{label}; publishing"
+
+    %{
+      task_id: request.task_id,
+      node: nil,
+      mode: Map.get(request, :mode, :prefer_remote),
+      nodes_known: 1,
+      image_key: key,
+      phrase: phrase,
+      message:
+        "held — #{phrase}. #{request.task_id} starts when the registry image is published; " <>
+          "other Ready work is not blocked."
+    }
+  end
+
   # ---- reservations ----------------------------------------------------------
 
   @doc """
