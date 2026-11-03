@@ -1061,6 +1061,25 @@ defmodule Arbiter.Worker.GitCredential do
         "(#{Enum.join(extra, ", ")}); remove that membership, or list them under " <>
         "git_credentials.repos.<repo>.projects. Bot membership must be exactly the configured projects"
 
+  defp bot_refusal({:resources, extra}),
+    do:
+      "the fine-grained token reaches project(s) beyond the configured ones " <>
+        "(#{Enum.join(extra, ", ")}); remove them from the token's resources, or list them under " <>
+        "git_credentials.repos.<repo>.projects. The token's resources must be exactly the configured projects"
+
+  defp bot_refusal({:granular_permissions, extra}),
+    do:
+      "the fine-grained token carries permission(s) #{Enum.join(extra, ", ")}; only " <>
+        "#{Enum.join(GitlabBot.allowed_granular_permissions(), ", ")} are allowed"
+
+  defp bot_refusal({:granular_boundary, wide}),
+    do:
+      "the fine-grained token is not limited to a list of projects (#{Enum.join(wide, "; ")}); " <>
+        "select the individual projects as its resources"
+
+  defp bot_refusal(:not_reachable),
+    do: "the fine-grained token's resources do not include this repo's project"
+
   defp bot_refusal(:not_a_member),
     do:
       "the bot user is not a member of this repo's project (membership is what scopes the token)"
