@@ -501,10 +501,14 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       # The worker addressed everything via replies/resolves against the
       # ORIGINAL PR and pushed no commits of its own — write a notes summary
       # (as the notes gate requires for a `:task` completion) and signal done.
+      # The write is made as the run's own `worker:<ticket>` actor: the gate
+      # only counts findings the run itself wrote (bd-48ycdn).
       {:ok, _} =
-        Ash.update(task, %{notes: "Replied to RT_1 and resolved it. No code fix was needed."},
-          action: :update
-        )
+        Arbiter.Actor.with_actor(Arbiter.Actor.worker(task.id), fn ->
+          Ash.update(task, %{notes: "Replied to RT_1 and resolved it. No code fix was needed."},
+            action: :update
+          )
+        end)
 
       send(worker_pid, {:__claude_session_done__, "arb done"})
 

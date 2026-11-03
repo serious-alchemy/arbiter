@@ -1399,10 +1399,47 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(Path.join(repo, "agent-cwd.txt"))
 
       # bd-dlv3no's guarantee still holds: the token-bearing config never lands
-      # in the shared checkout. (It isn't written to the inspect worktree
-      # either — injection is still keyed to a *branch* worktree. Now that this
-      # cwd is isolated, injecting here would be safe; that's a follow-up, not
-      # this fix.)
+      # in the shared checkout.
+      refute File.exists?(Path.join(repo, ".mcp.json"))
+
+      # bd-48ycdn: ... but it DOES land in the isolated inspect checkout. A
+      # no-PR run (task / research) used to get no `.mcp.json` at all, so the
+      # agent had no Arbiter MCP tools (`ticket_update_progress` to write its
+      # findings), locally and on a node alike: a node run is seeded from the
+      # cwd's `.mcp.json` (`ContainerSpawn.worktree_files/1`).
+      assert File.exists?(Path.join(inspect_path, ".mcp.json"))
+    end
+
+    # bd-48ycdn: a research run is the same shape, and it is the one whose
+    # deliverable (the findings in `notes`) is written through those tools.
+    test "research dispatch writes .mcp.json into its inspect checkout, not the repo",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "researchrepo")
+      enable_mcp_injection!()
+
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "researchrepo-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"research/repo" => repo})
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "research: probe", issue_type: :research, workspace_id: ws.id})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "research/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false,
+          claude_command: ["sh", "-c", "sleep 1"]
+        )
+
+      assert is_port(result.claude_port)
+      inspect_path = Worktree.inspect_path(BranchNamer.derive(task))
+
+      config = Path.join(inspect_path, ".mcp.json")
+      assert File.exists?(config)
+      assert %{"mcpServers" => servers} = config |> File.read!() |> Jason.decode!()
+      assert map_size(servers) > 0
       refute File.exists?(Path.join(repo, ".mcp.json"))
     end
 
@@ -1420,6 +1457,10 @@ defmodule Arbiter.Worker.DispatchTest do
       File.write!(Path.join(repo, "README.md"), "x\n")
       {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
       {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+      # With injection on, a no-origin fallback (cwd = the shared checkout) must
+      # still never get the token-bearing config.
+      enable_mcp_injection!()
 
       put_app_env(:arbiter, :worktree_root, Path.join(tmp, "no-origin-wt"))
       put_app_env(:arbiter, :repo_paths, %{"local/repo" => repo})
@@ -1442,6 +1483,7 @@ defmodule Arbiter.Worker.DispatchTest do
       cwd_file = Path.join(repo, "agent-cwd.txt")
       wait_until(fn -> File.exists?(cwd_file) end)
       assert File.read!(cwd_file) |> String.trim() == Path.expand(repo)
+      refute File.exists?(Path.join(repo, ".mcp.json"))
     end
 
     # bd-9r1tta: when the repo HAS an origin but provisioning the isolated
@@ -3530,18 +3572,7 @@ defmodule Arbiter.Worker.DispatchTest do
             issue_type: unquote(type)
           })
 
-        # `research` owes findings, so give the notes gate something to find;
         # `task` is dispatched WITHOUT any notes to prove it needs none.
-        ticket =
-          if unquote(type) == :research do
-            {:ok, t} =
-              Ash.update(ticket, %{notes: "## Findings\n\nNothing odd."}, action: :update)
-
-            t
-          else
-            ticket
-          end
-
         {:ok, result} =
           Dispatch.dispatch(ticket.id,
             force: true,
@@ -3554,6 +3585,15 @@ defmodule Arbiter.Worker.DispatchTest do
           )
 
         assert result.worktree_path == nil
+
+        # `research` owes findings written by the run itself (bd-48ycdn), as its
+        # worker token would: give the notes gate something to find.
+        if unquote(type) == :research do
+          Arbiter.Actor.with_actor(Arbiter.Actor.worker(ticket.id), fn ->
+            {:ok, _} =
+              Ash.update(ticket, %{notes: "## Findings\n\nNothing odd."}, action: :update)
+          end)
+        end
 
         ref = Process.monitor(result.driver_pid)
         send(result.worker_pid, {:__claude_session_done__, "arb done"})

@@ -4673,7 +4673,7 @@ defmodule Arbiter.Worker do
     if findings_type?(meta) do
       case notes_gate(state) do
         :ok -> complete_unless_unperformed(state)
-        {:gate, :blank} -> handle_notes_gate(state)
+        {:gate, kind} -> handle_notes_gate(state, kind)
       end
     else
       complete_now(note_tasks_running_at_done(state), :claude_done)
@@ -6286,13 +6286,17 @@ defmodule Arbiter.Worker do
   # reprompts the worker to write its findings via the `ticket_update_progress`
   # MCP tool.
   #
-  # Returns `:ok` to proceed, or `{:gate, :blank}` to divert. A DB read failure
-  # fails OPEN (mirrors the commit gate's git-failure policy): a transient hiccup
-  # must not strand a real completion behind an unreadable directive.
-  defp notes_gate(%State{task_id: task_id}) do
+  # Returns `:ok` to proceed, or `{:gate, kind}` to divert: `:blank` (nothing in
+  # `notes`) or `:no_findings` (bd-48ycdn: `notes` holds text, but not one word of
+  # it was written by this run — a ticket with coordinator-written notes would
+  # otherwise close `completed` on a run that did no work, see
+  # `Arbiter.Worker.RunFindings`). A DB read failure fails OPEN (mirrors the
+  # commit gate's git-failure policy): a transient hiccup must not strand a real
+  # completion behind an unreadable directive.
+  defp notes_gate(%State{task_id: task_id} = state) do
     case fetch_task_notes(task_id) do
       {:ok, notes} when is_binary(notes) ->
-        if String.trim(notes) == "", do: {:gate, :blank}, else: :ok
+        if String.trim(notes) == "", do: {:gate, :blank}, else: findings_this_run_gate(state)
 
       {:ok, _} ->
         {:gate, :blank}
@@ -6300,6 +6304,26 @@ defmodule Arbiter.Worker do
       {:error, reason} ->
         Logger.warning(
           "Worker: bd-5lc99r notes gate could not read notes for task=#{task_id} " <>
+            "(#{inspect(reason)}); failing open."
+        )
+
+        :ok
+    end
+  end
+
+  defp findings_this_run_gate(%State{task_id: task_id, started_at: started_at, meta: meta}) do
+    since = Arbiter.Worker.RunFindings.window_start(started_at, resumed_from_run_id(meta))
+
+    case Arbiter.Worker.RunFindings.written?(task_id, since) do
+      true ->
+        :ok
+
+      false ->
+        {:gate, :no_findings}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker: bd-48ycdn findings gate could not read the history of task=#{task_id} " <>
             "(#{inspect(reason)}); failing open."
         )
 
@@ -6323,26 +6347,29 @@ defmodule Arbiter.Worker do
   # tests pass `meta[:notes_nudge_cap]` 0 to assert the structural gate without
   # the retry layer). On cap exhaustion or a respawn failure, fail the worker
   # rather than silently close a directive with no deliverable.
-  defp handle_notes_gate(%State{meta: meta} = state) do
+  defp handle_notes_gate(%State{meta: meta} = state, kind) do
     cap = notes_nudge_cap(state)
     attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
 
     if attempts >= cap do
-      park_notes_gate(state, :cap_exhausted)
+      park_notes_gate(state, :cap_exhausted, kind)
     else
-      case respawn_with_notes_nudge(state) do
+      case respawn_with_notes_nudge(state, kind) do
         {:ok, new_state} -> new_state
-        {:error, why} -> park_notes_gate(state, {:respawn_failed, why})
+        {:error, why} -> park_notes_gate(state, {:respawn_failed, why}, kind)
       end
     end
   end
 
-  defp respawn_with_notes_nudge(%State{} = state) do
-    respawn_with_nudge(state, notes_nudge_prompt(state),
+  defp respawn_with_notes_nudge(%State{} = state, kind) do
+    respawn_with_nudge(state, notes_nudge_prompt(state, kind),
       attempts_key: :notes_nudge_attempts,
-      label: "bd-5lc99r notes gate tripped (blank notes)"
+      label: "bd-5lc99r notes gate tripped (#{notes_gate_kind_label(kind)})"
     )
   end
+
+  defp notes_gate_kind_label(:no_findings), do: "no findings written this run"
+  defp notes_gate_kind_label(_), do: "blank notes"
 
   # bd-2da6ay: did the session that just closed exit cleanly (status 0) without
   # signalling `arb done` — i.e. the agent reached the end and quit, as opposed
@@ -6413,7 +6440,30 @@ defmodule Arbiter.Worker do
     _ -> nil
   end
 
-  defp notes_nudge_prompt(%State{task_id: task_id}) do
+  defp notes_nudge_prompt(%State{task_id: task_id}, :no_findings) do
+    """
+    bd-48ycdn findings gate: you printed `arb done` for task #{task_id}, but this is
+    a `research`-type directive whose deliverable is a findings summary written to
+    the directive's `notes` field by THIS run — and this run has not written any.
+    The notes already on the ticket were there before you started; they are not
+    your findings, and completion is blocked until you add your own.
+
+    Do EXACTLY this, then print `arb done` again on its own line:
+
+      1. Call the `ticket_update_progress` MCP tool with its `append_notes`
+         argument set to your findings / results summary for this directive
+         (Markdown is fine). If this session has NO Arbiter MCP tools, run
+         `arb ticket update #{task_id} --append-notes "<findings>"` instead.
+      2. Make it self-contained: what you investigated, what you found, and any
+         recommendation or conclusion the coordinator needs.
+
+    If you genuinely could not do the work (a tool or permission you need is
+    missing), say so in the append, naming exactly what was missing. Then print
+    `arb done`.
+    """
+  end
+
+  defp notes_nudge_prompt(%State{task_id: task_id}, _blank) do
     """
     bd-5lc99r notes gate: you printed `arb done` for task #{task_id}, but this is
     a `research`-type directive whose deliverable is a findings summary written to
@@ -7642,14 +7692,19 @@ defmodule Arbiter.Worker do
   # into `notes` — that field IS what the gate checks, so polluting it would let
   # a re-dispatched worker satisfy the gate without producing real findings. The
   # escalation mail surfaces the trip to the coordinator instead.
-  defp park_notes_gate(%State{} = state, why) do
-    summary = notes_gate_summary(state, why)
-    escalate_notes_gate(state, summary)
+  defp park_notes_gate(%State{} = state, why, kind) do
+    summary = notes_gate_summary(state, why, kind)
+    escalate_notes_gate(state, summary, notes_gate_subject(state, kind))
     if why == :cap_exhausted, do: emit_gate_cap_hit(state, :notes_gate, :notes_nudge_attempts)
 
     meta = Map.put(state.meta || %{}, :notes_gate_detail, why)
-    fail_now(%State{state | meta: meta}, notes_gate_failure_reason(meta))
+    fail_now(%State{state | meta: meta}, notes_gate_failure_reason(meta, kind))
   end
+
+  defp notes_gate_subject(%State{task_id: task_id}, :no_findings),
+    do: "Notes gate: no findings written by this run of research-type directive (#{task_id})"
+
+  defp notes_gate_subject(_state, _blank), do: nil
 
   # bd-25ivqe AC4: blank notes at `arb done` is usually a genuine missing
   # deliverable, but under `:strict` it can also mean the worker never got to
@@ -7666,7 +7721,7 @@ defmodule Arbiter.Worker do
   # worker-protocol bootstrap commands — run fc54ef4a reported "strict policy
   # denied required command `pwd`" for a `pwd && git status` nobody requires.
   # A meta without the full line (pre-bd-7wymls) keeps the old wording.
-  defp notes_gate_failure_reason(meta) do
+  defp notes_gate_failure_reason(meta, kind) do
     case Map.get(meta || %{}, :denied_command) do
       cmd when is_binary(cmd) and cmd != "" ->
         if denied_bootstrap_command?(meta),
@@ -7674,9 +7729,12 @@ defmodule Arbiter.Worker do
           else: "strict policy denied command `#{cmd}`"
 
       _ ->
-        :blank_notes_at_completion
+        notes_gate_blank_reason(kind)
     end
   end
+
+  defp notes_gate_blank_reason(:no_findings), do: :no_findings_written_this_run
+  defp notes_gate_blank_reason(_), do: :blank_notes_at_completion
 
   defp denied_bootstrap_command?(meta) do
     case Map.get(meta, :denied_command_line) do
@@ -7685,7 +7743,41 @@ defmodule Arbiter.Worker do
     end
   end
 
-  defp notes_gate_summary(%State{task_id: task_id, meta: meta} = state, why) do
+  defp notes_gate_summary(%State{task_id: task_id, meta: meta} = state, why, :no_findings) do
+    attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
+    cap = notes_nudge_cap(state)
+
+    detail_blurb =
+      case why do
+        :cap_exhausted ->
+          "Nudge cap reached: tried #{attempts}/#{cap} send-back attempt(s) and " <>
+            "this run still wrote nothing to `notes`."
+
+        {:respawn_failed, sub} ->
+          "Could not relaunch the worker for a send-back nudge: #{inspect(sub)}."
+
+        other ->
+          "Detail: #{inspect(other)}."
+      end
+
+    """
+    bd-48ycdn findings gate tripped for task #{task_id}: this is a `research`-type
+    directive whose deliverable is a findings summary in `notes`. `arb done` was
+    signalled, but no findings were written by this run: `notes` already held text
+    from before the run (or from someone else), and the run's own actor never
+    changed it.
+
+    #{detail_blurb}#{notes_gate_denial_blurb(meta)}
+
+    The ticket is parked, not completed. Typical causes: the run had no Arbiter MCP
+    tools or no `arb` on its PATH, or its token was refused (403, e.g. no
+    `research_read`), so it could not write. Check the run's output, fix what it
+    was missing, and re-dispatch.
+    """
+    |> String.trim()
+  end
+
+  defp notes_gate_summary(%State{task_id: task_id, meta: meta} = state, why, _blank) do
     attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
     cap = notes_nudge_cap(state)
 
@@ -7737,8 +7829,6 @@ defmodule Arbiter.Worker do
         ""
     end
   end
-
-  defp escalate_notes_gate(state, summary, subject \\ nil)
 
   defp escalate_notes_gate(%State{workspace_id: ws_id, task_id: task_id}, summary, subject)
        when is_binary(ws_id) do

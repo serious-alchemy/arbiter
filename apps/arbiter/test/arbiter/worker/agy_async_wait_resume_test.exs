@@ -178,7 +178,12 @@ defmodule Arbiter.Worker.AgyAsyncWaitResumeTest do
     refute prompt =~ "Monitor"
     refute prompt =~ "Bash"
 
-    {:ok, _} = Ash.update(task, %{notes: "## Findings\n\nnarrowed the run."}, action: :update)
+    # bd-48ycdn: the findings gate counts only the run's own worker-actor write.
+    Arbiter.Actor.with_actor(Arbiter.Actor.worker(task.id), fn ->
+      {:ok, _} =
+        Ash.update(task, %{notes: "## Findings\n\nnarrowed the run."}, action: :update)
+    end)
+
     File.write!(Path.join(dir, "go"), "")
     wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
   end

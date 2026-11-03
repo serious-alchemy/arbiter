@@ -4480,18 +4480,23 @@ defmodule Arbiter.Worker.Dispatch do
             # class this fixes. With a nil worktree the helper is a no-op, so
             # reviews never touch the repo's working tree.
             #
-            # bd-9r1tta note: a task-type dispatch's `path` is now an *isolated*
-            # detached worktree, so injecting there would be safe. Left keyed to
-            # `worktree_path` deliberately — enabling MCP tools for audit
-            # dispatches is a behavior change beyond that fix's scope.
+            # bd-48ycdn: a no-PR dispatch (task / research) has no branch
+            # worktree, but its `path` is an *isolated* detached inspect checkout
+            # (bd-9r1tta), so the config can safely go there (`mcp_target/4`).
+            # It used to be skipped, leaving research runs — whose deliverable is
+            # written with `ticket_update_progress` — with no Arbiter MCP tools,
+            # locally and on a node (a node run is seeded from the cwd's
+            # `.mcp.json`, `ContainerSpawn.worktree_files/1`).
             #
             # bd-7e8ezw: the returned `mcp_config:` path is threaded to the
             # adapter so Claude is handed the file explicitly (`--mcp-config`)
             # rather than trusting cwd auto-load — see `inject_mcp_config/3`.
+            mcp_target = mcp_target(task, worktree_path, path, opts)
+
             opts =
               opts
-              |> Keyword.merge(inject_mcp_config(task, worktree_path, opts))
-              |> Keyword.put(:mcp_worktree, worktree_path)
+              |> Keyword.merge(inject_mcp_config(task, mcp_target, opts))
+              |> Keyword.put(:mcp_worktree, mcp_target)
 
             # Resolve the layered effective skill set and materialize ONLY it
             # into the isolated worktree (bd-d5hy7y), under a provider-aware
@@ -4537,6 +4542,20 @@ defmodule Arbiter.Worker.Dispatch do
                 {:error, {:claude_start_failed, reason}}
             end
         end
+    end
+  end
+
+  # Where the token-bearing MCP config may be written: the branch worktree, or —
+  # for a no-PR ticket with none — its isolated inspect checkout. Never the repo's
+  # shared checkout (bd-dlv3no): a review's cwd, and the no-origin fallback where
+  # the inspect "checkout" IS the repo, stay nil.
+  defp mcp_target(_task, worktree_path, _path, _opts) when is_binary(worktree_path),
+    do: worktree_path
+
+  defp mcp_target(task, nil, path, opts) do
+    if Issue.no_pr_type?(task.issue_type) and
+         Path.expand(path) != Path.expand(resolve_repo_path(task, Keyword.get(opts, :repo)) || "") do
+      path
     end
   end
 

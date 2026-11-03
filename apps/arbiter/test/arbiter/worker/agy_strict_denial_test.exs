@@ -254,7 +254,12 @@ defmodule Arbiter.Worker.AgyStrictDenialTest do
       refute Map.has_key?(snap.meta, :notes_gate_detail)
 
       # The resumed agent records its findings, then prints `arb done`.
-      {:ok, _} = Ash.update(task, %{notes: "## Findings\n\nwhoami was denied."}, action: :update)
+      # (bd-48ycdn: the findings gate counts only the run's own worker-actor write.)
+      Arbiter.Actor.with_actor(Arbiter.Actor.worker(task.id), fn ->
+        {:ok, _} =
+          Ash.update(task, %{notes: "## Findings\n\nwhoami was denied."}, action: :update)
+      end)
+
       File.write!(Path.join(dir, "go"), "")
 
       wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
