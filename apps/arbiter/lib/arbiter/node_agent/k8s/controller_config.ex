@@ -9,7 +9,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfig do
   the `Arbiter.NodeAgent.K8s.PodConfig` keys `namespace`, `worker`,
   `services_resources`, `placement`, `image_pull_secrets`, `registries` (KH13: the
   `{prefix, pull_secret}` list, §20.10), `timeouts` and
-  `snapshot_interval_s`. Anything else, including the facts the controller knows
+  `snapshot_interval_s` and `event_feed` (bd-db8ez4: the operator's off switch for the
+  worker's NDJSON event feed; absent means the controller's own default, on). Anything else, including the facts the controller knows
   itself (`registry`, `install_id`, `owner_uid`, …) and everything the builder owns
   (security context, volumes, image), is `{:error, {:bad_config, {:unknown_key,
   key}}}`: a mistaken `securityContext:` is a loud error, not a silent no-op.
@@ -45,7 +46,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfig do
     "image_pull_secrets" => :image_pull_secrets,
     "registries" => :registries,
     "timeouts" => :timeouts,
-    "snapshot_interval_s" => :snapshot_interval_s
+    "snapshot_interval_s" => :snapshot_interval_s,
+    "event_feed" => :event_feed
   }
 
   # Valid stand-ins for the facts only the controller knows, so `PodConfig` can
@@ -93,7 +95,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfig do
          {:ok, max_concurrent} <- max_concurrent(map),
          operator = operator_keys(map),
          {:ok, normal} <- PodConfig.normalize(Map.merge(@placeholder, operator)) do
-      pod = Map.take(normal, Map.values(@pod_keys))
+      pod = normal |> Map.take(Map.values(@pod_keys)) |> keep_event_feed_if_set(map)
 
       {:ok,
        pod
@@ -112,10 +114,16 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfig do
   """
   @spec pod_config(t(), map()) :: map()
   def pod_config(config, facts) do
-    config |> Map.delete(:max_concurrent) |> Map.merge(facts)
+    # The operator's `event_feed`, when the file sets it, wins over the controller's default.
+    Map.merge(facts, Map.delete(config, :max_concurrent))
   end
 
   # -- internals ----------------------------------------------------------------
+
+  # `PodConfig.normalize/1` fills `event_feed: true`; only a file that says so carries it, or
+  # it would override the controller's own default.
+  defp keep_event_feed_if_set(pod, map),
+    do: if(Map.has_key?(map, "event_feed"), do: pod, else: Map.delete(pod, :event_feed))
 
   defp known_keys(map) do
     case Enum.find(Map.keys(map), &(&1 != "max_concurrent" and not is_map_key(@pod_keys, &1))) do

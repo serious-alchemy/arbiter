@@ -97,6 +97,11 @@ workers:
   timeouts: {}
   # 10-3600; unset = 300.
   snapshotIntervalS: null
+  # The worker's NDJSON event feed (bd-1nl506): the entry wrapper ships the agent's stdout to
+  # the controller and the primary reads that, not the kubelet log. null = the controller's own
+  # default (on); false = read the kubelet log as before. Emitted into controller.yaml only when
+  # set, and re-read by the controller within 30 s: a config-only `helm upgrade` is enough.
+  eventFeed: null
 
 placement:
   # Empty by default: workers spread across the whole cluster (§20.2).

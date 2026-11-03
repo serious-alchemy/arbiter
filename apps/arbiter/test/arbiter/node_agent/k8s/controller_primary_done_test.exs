@@ -90,6 +90,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerPrimaryDoneTest do
          tick_ms: nil,
          event_feed: Keyword.get(opts, :event_feed, false),
          event_final_wait_ms: 100,
+         event_silent_ms: Keyword.get(opts, :event_silent_ms, 600_000),
          name: nil},
         id: {:controller, n}
       )
@@ -514,6 +515,40 @@ defmodule Arbiter.NodeAgent.K8s.ControllerPrimaryDoneTest do
       assert run == ctx.run
       assert payload["stdout_truncated"] == 12
       assert is_binary(payload["cursor"])
+    end
+
+    test "a feed that delivers nothing from a live worker falls back to the log, and the run still succeeds",
+         env do
+      controller = start_controller(env, 1, event_feed: true, event_silent_ms: 50)
+      run = running!(env, controller, 1)
+      %{pid: pid, handle: handle} = start_worker()
+      table = RunStreams.open(%RunStreams{}, run, handle, pid, nil)
+      {:ok, _feed} = Controller.event_feed(controller, run)
+
+      # the wrapper never ships; the kubelet's log has the whole stream
+      FakeK8sApi.push_log(env.api, pod_name(1), assistant("working"))
+      FakeK8sApi.push_log(env.api, pod_name(1), assistant("All finished.\n\narb done"))
+      FakeK8sApi.push_log(env.api, pod_name(1), result_event())
+
+      set_status(env, 1, exited_status(:complete))
+      observed(run, :exit)
+      _ = finish_run(controller, run, table)
+
+      assert %{state: :finished, outcome: :succeeded} = Worker.state(pid)
+      assert Worker.state(pid).meta.done_seen == true
+    end
+
+    test "the exit of a run whose feed was silent says so", env do
+      controller = start_controller(env, 1, event_feed: true, event_silent_ms: 50)
+      run = running!(env, controller, 1)
+      {:ok, _feed} = Controller.event_feed(controller, run)
+      FakeK8sApi.push_log(env.api, pod_name(1), assistant("working"))
+
+      assert_receive {:run_push, ^run, "stdout", {:binary, _}}, 5_000
+      set_status(env, 1, exited_status(:complete))
+      observed(run, :exit)
+      assert_receive {:run_push, ^run, "exit", payload}, 5_000
+      assert payload["stdout_feed"] == "silent_log_fallback"
     end
 
     test "a pod that never sends its final chunk still ends the run, from what arrived", env do

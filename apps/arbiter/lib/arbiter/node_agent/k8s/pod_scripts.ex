@@ -114,8 +114,11 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
   code=000
 
   post() {
-    tail -c +$((sent + 1)) "$events" | head -c "$chunk" >"$part"
-    code=$(curl -sS --cacert "$ca_file" \
+    tail -c +$((sent + 1)) "$events" 2>/dev/null | head -c "$chunk" >"$part"
+    # --noproxy '*' (and -q, no curlrc): this script runs with the agent's environment,
+    # whose HTTPS_PROXY names the egress proxy; the controller is not behind it, and a
+    # CONNECT to the proxy is refused, so no chunk would ever arrive (bd-db8ez4).
+    code=$(curl -q -sS --noproxy '*' --cacert "$ca_file" \
       --cert "$run_dir/tls/control.crt" --key "$run_dir/tls/control.key" \
       --max-time 30 -X POST -H "x-arb-offset: $sent" -H "x-arb-final: $1" \
       --data-binary @"$part" -o "$reply" -w '%{http_code}' "$channel" 2>/dev/null) || code=000

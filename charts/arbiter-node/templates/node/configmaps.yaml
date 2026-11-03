@@ -24,6 +24,8 @@ the rest. There is deliberately no checksum annotation on the Deployment: a conf
 {{- end }}
 {{- if $w.timeouts }}{{ $_ := set $config "timeouts" $w.timeouts }}{{ end }}
 {{- if $w.snapshotIntervalS }}{{ $_ := set $config "snapshot_interval_s" (int $w.snapshotIntervalS) }}{{ end }}
+{{- /* bd-db8ez4: the event feed's off switch. A bool, so `false` must be emitted (an `if` would drop it); null leaves the controller's default (on). */ -}}
+{{- if kindIs "bool" $w.eventFeed }}{{ $_ := set $config "event_feed" $w.eventFeed }}{{ end }}
 {{- /* KH13 (§20.10): the registry list the controller scopes pull secrets by: a pod gets only the secret of the longest matching prefix. */ -}}
 {{- $registries := list }}
 {{- range .Values.registries }}

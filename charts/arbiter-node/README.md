@@ -46,6 +46,9 @@ helm install mesaana ./charts/arbiter-node -n arbiter-workers \
   workers'. Set `controller.priorityClassName=""` for no class, `controller.priorityClass.preemptionPolicy=Never`
   to stop it evicting others, `controller.priorityClass.create=false` on every install after the first on a
   cluster. In `mode=node` the class must already exist: upgrade the bootstrap release first.
+- **The worker's event feed has an off switch**: `workers.eventFeed` (`null` = the controller's default, on;
+  `--set workers.eventFeed=false` reads the kubelet log instead). Emitted into `controller.yaml` only when set;
+  it applies to pods created after the controller re-reads the file (within 30 s), with no roll of the controller.
 - **No `Namespace`** is templated: Helm stores its release record in the namespace, so it must exist first.
 - **Helm owns the controller image.** The Role has no write verb on the Deployment and
   `ARB_K8S_SELF_UPGRADE=false`; the Deployment carries `ARB_INSTALL_METHOD=helm`, `ARB_HELM_RELEASE` and
