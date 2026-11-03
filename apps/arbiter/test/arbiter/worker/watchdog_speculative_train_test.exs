@@ -13,6 +13,8 @@ defmodule Arbiter.Worker.WatchdogSpeculativeTrainTest do
   # stubs, the app-env freshness probe and the application's MergeTrain.
   use Arbiter.DataCase, async: false
 
+  import ExUnit.CaptureLog
+
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Test.StubAutoResumeDispatcher
   alias Arbiter.Test.StubFixPassDispatcher
@@ -59,16 +61,17 @@ defmodule Arbiter.Worker.WatchdogSpeculativeTrainTest do
 
   # MRs `ids` off the current main, then main moves on, so every one of them
   # is stale. Returns `%{id => head}`.
-  defp stale_mrs(forge, ids) do
+  defp stale_mrs(forge, ids, pipeline \\ :success) do
     heads = Map.new(ids, &{&1, TrainForge.branch!(forge, branch(&1), "#{&1}.txt", "#{&1}\n")})
     TrainForge.advance_main!(forge, "hotfix.txt", "main moved on\n")
-    Enum.each(ids, &serve(forge, &1))
+    Enum.each(ids, &serve(forge, &1, pipeline))
     heads
   end
 
-  # Approved and green on its own pipeline, at whatever head its branch has on
-  # origin now; merged once the forge merged it.
-  defp serve(forge, id) do
+  # Approved and clean on its own pipeline (green unless `pipeline` says otherwise:
+  # `:neutral` is a CI-skipped head's skipped pipeline), at whatever head its
+  # branch has on origin now; merged once the forge merged it.
+  defp serve(forge, id, pipeline \\ :success) do
     StubMerger.queue_get(mr(id), [
       fn ->
         if StubMerger.merge_count(mr(id)) > 0 do
@@ -78,7 +81,7 @@ defmodule Arbiter.Worker.WatchdogSpeculativeTrainTest do
             status: :open,
             approved: true,
             ci_clean: true,
-            pipeline: :success,
+            pipeline: pipeline,
             head_sha: TrainForge.head(forge, branch(id)),
             base_ref: "main"
           }
@@ -681,6 +684,76 @@ defmodule Arbiter.Worker.WatchdogSpeculativeTrainTest do
 
       assert_receive {:watchdog, "a", {:merged, _}}, 8_000
       assert StubMerger.car_runs() == []
+    end
+  end
+
+  # Merge train phase 2 pushes a waiting MR's commits without CI. A car tests
+  # the MR head merged into the target, but only a pipeline of the head's own
+  # satisfies the forge's "pipelines must succeed": a head whose CI was skipped
+  # takes phase 2's serial way, and boards a car once a sync gives it CI again.
+  describe "a CI-skipped head (merge train phase 2, bd-4y9dno)" do
+    setup do
+      StubMerger.set_ci_skip_mechanism({:push_option, "ci.skip"})
+      :ok
+    end
+
+    test "boards no car while its head has no pipeline of its own: it is synced, with CI",
+         %{forge: forge} do
+      heads = stale_mrs(forge, ~w(a), :neutral)
+      a = watch("a", workspace(forge), heads["a"], ci_skipped_head: heads["a"])
+
+      wait_until(fn ->
+        StubMerger.update_branch_count(mr("a")) > 0 or StubMerger.car_runs() != []
+      end)
+
+      assert StubMerger.car_runs() == []
+      assert StubMerger.update_branch_count(mr("a")) == 1
+      assert car(a) == nil
+      assert TrainForge.head(forge, "arbiter/train/a") == nil
+    end
+
+    test "within up_to_date_tolerance it merges once the pipeline Arbiter triggers is green",
+         %{forge: forge} do
+      heads = stale_mrs(forge, ~w(a), :neutral)
+      ws = workspace(forge, %{"up_to_date_tolerance" => 1})
+      a = watch("a", ws, heads["a"], ci_skipped_head: heads["a"])
+
+      wait_until(fn -> length(StubMerger.pipeline_triggers()) == 1 end)
+      after_polls(a, 4)
+      # the skipped pipeline reads neutral: it never merges on that
+      assert StubMerger.merge_count(mr("a")) == 0
+
+      serve(forge, "a")
+      assert_receive {:watchdog, "a", {:merged, _}}, 8_000
+      assert [{"!a", _}] = StubMerger.pipeline_triggers()
+      assert StubMerger.car_runs() == []
+    end
+  end
+
+  describe "a car's authorisation" do
+    test "is good for the merge decision it was given in, not a later one", %{forge: forge} do
+      heads = stale_mrs(forge, ~w(a))
+      ws = workspace(forge, %{"up_to_date_tolerance" => 1})
+      a = watch("a", ws, heads["a"], initial_delay_ms: 200)
+
+      # A car authorised an earlier merge attempt that the forge refused. This
+      # merge is on the MR's own pipeline (within tolerance at the front).
+      refused = %{
+        ref: "arbiter/train/a",
+        sha: String.duplicate("c", 40),
+        tree: String.duplicate("d", 40),
+        base: String.duplicate("b", 40),
+        base_task: nil,
+        mr_head: heads["a"],
+        pipeline: 7
+      }
+
+      :sys.replace_state(a, &%{&1 | train_car_merging: refused})
+
+      log = capture_log(fn -> assert_receive {:watchdog, "a", {:merged, _}}, 8_000 end)
+
+      assert StubMerger.car_runs() == []
+      refute log =~ "merge-train car"
     end
   end
 end

@@ -5748,6 +5748,11 @@ defmodule Arbiter.Worker.Watchdog do
   # what the disagreement log compares against, and because it is the fallback
   # when the coverage table itself cannot be read.
   defp guarded_merge_decision(state) do
+    # bd-6dyva0: a car's authorisation is good for the decision it was given in.
+    # One whose merge the forge refused vouches for no later merge, nor for the
+    # post-merge landing audit of one that merged on another path.
+    state = %{state | train_car_merging: nil}
+
     if coverage_parked_on?(state, state.last_head_sha) do
       # Terminal for this head (AC4): the coverage answer was waited out and
       # the coordinator has been paged. Keep watching — a new head, or an
@@ -6546,10 +6551,17 @@ defmodule Arbiter.Worker.Watchdog do
   # usual — with the car's pipeline as evidence. A car whose base went away is
   # rebuilt and its old pipeline cancelled. Every wait here is a held poll: the
   # car has its own bounds, and never runs into the review-timeout ceiling.
+  #
+  # A head merge train phase 2 pushed without CI (bd-4y9dno, `ci_skipped_head`)
+  # boards no car: only a pipeline of the head's own satisfies the forge's
+  # "pipelines must succeed", and triggering one while the car waits at the
+  # front would idle the car out of its seat and rebuild every car behind it. It
+  # takes phase 2's serial way (a sync, or its pipeline triggered as the merge
+  # head) and boards once a head of its own has CI again.
 
   defp speculative?(state, sha) do
-    state.train_ejected_head != sha and train_depth(state) > 1 and car_adapter?(state.adapter) and
-      is_binary(local_repo(state))
+    state.train_ejected_head != sha and state.ci_skipped_head != sha and train_depth(state) > 1 and
+      car_adapter?(state.adapter) and is_binary(local_repo(state))
   end
 
   defp car_adapter?(adapter) do
