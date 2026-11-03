@@ -108,6 +108,87 @@ defmodule Arbiter.Worker.ContainerSpawnRemoteSpecTest do
              ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
 
     assert spec["image"] == %{"tag" => "localhost/x:1", "plan" => nil, "ref" => ref}
+    refute Map.has_key?(spec, "pull_auth")
+  end
+
+  # SI4: a machine node that pulls is told what to check the image against and given
+  # the read credential for that one pull, and nothing it would have to fetch.
+  test "a pull request's spec carries the ref and its CLI set and provider and pull_auth and no CLI mount",
+       %{
+         request: request
+       } do
+    ref = "registry.example.com/arbiter/vstim/worker@sha256:" <> String.duplicate("c", 64)
+
+    auth = %Arbiter.NodeAgent.PullAuth{
+      registry: "registry.example.com",
+      username: "reader",
+      password: "PULL-pw-MARKER"
+    }
+
+    request =
+      request
+      |> Map.put(:provider, "claude")
+      |> Map.put(:image, %{
+        tag: "localhost/x:1",
+        plan: nil,
+        ref: ref,
+        cli_set: "0a1b2c3d",
+        pull: %{auth: auth, level: :install, insecure?: true}
+      })
+
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    assert spec["image"] == %{
+             "tag" => "localhost/x:1",
+             "plan" => nil,
+             "ref" => ref,
+             "cli_set" => "0a1b2c3d",
+             "provider" => "claude",
+             "insecure" => true
+           }
+
+    assert spec["pull_auth"] == auth
+    refute Enum.any?(spec["mounts"], &(&1["kind"] == "cli"))
+
+    # the wire form carries the credential; nothing that prints the spec does
+    wire = spec |> Jason.encode!() |> Jason.decode!()
+
+    assert wire["pull_auth"] == %{
+             "registry" => "registry.example.com",
+             "username" => "reader",
+             "password" => "PULL-pw-MARKER"
+           }
+
+    refute inspect(spec, limit: :infinity, printable_limit: :infinity) =~ "PULL-pw-MARKER"
+
+    # and the agent accepts exactly what the primary sends
+    assert {:ok, %Arbiter.NodeAgent.RunSpec{pull_auth: ^auth, image: image}} =
+             Arbiter.NodeAgent.RunSpec.validate(wire)
+
+    assert %{ref: ^ref, cli_set: "0a1b2c3d", provider: "claude", insecure?: true} = image
+  end
+
+  test "an anonymous pull (public_ok) sends no pull_auth", %{request: request} do
+    ref = "ghcr.io/acme/vstim/worker@sha256:" <> String.duplicate("c", 64)
+
+    request =
+      request
+      |> Map.put(:provider, "claude")
+      |> Map.put(:image, %{
+        tag: "localhost/x:1",
+        plan: nil,
+        ref: ref,
+        cli_set: "0a1b2c3d",
+        pull: %{auth: nil, level: :anonymous, insecure?: false}
+      })
+
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    refute Map.has_key?(spec, "pull_auth")
+    refute Map.has_key?(spec["image"], "insecure")
+    assert spec["image"]["cli_set"] == "0a1b2c3d"
   end
 
   # bd-akp9ae: a GitHub App token carried to the node rides in the spec's secrets
@@ -422,5 +503,109 @@ defmodule Arbiter.Worker.ContainerSpawnRegistryImageTest do
 
   test "Publisher is the default publisher" do
     assert Code.ensure_loaded?(Publisher)
+  end
+
+  # SI4 (`docs/design/remote-workers.md` §21.2.1, §21.4): the per-run choice of source
+  # replaces `registry_node?/1`; a machine node that lists `registry` in
+  # `caps.image_sources` pulls under `nodes.machine_image_source: auto`.
+  describe "a machine node that can pull (SI4)" do
+    @push_pw "PUSH-pw-NEVER-ON-A-NODE"
+    @install %{
+      registry: "registry.example.com/arbiter",
+      username: "pusher",
+      password: @push_pw,
+      pull_username: "reader",
+      pull_password: "PULL-pw"
+    }
+
+    defp machine_node,
+      do: %{
+        id: "n3",
+        name: "oryx",
+        kind: :machine,
+        workspace_ids: [],
+        caps: %{"image" => "build", "image_sources" => ["registry", "build"]}
+      }
+
+    defp source(extra),
+      do: [image_source: Keyword.merge([config: @install, workspaces: []], extra)]
+
+    test "under auto it gets the ref, the image's CLI set and a pull credential, no plan" do
+      opts =
+        publish_opts({:ok, %{ref: @ref, cli_set: "0a1b2c3d"}}) ++
+          source(machine_image_source: "auto")
+
+      assert {:ok, image} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
+
+      assert %{tag: "localhost/arbiter-dev/x:abc", plan: nil, ref: @ref, cli_set: "0a1b2c3d"} =
+               image
+
+      assert %{
+               auth: %Arbiter.NodeAgent.PullAuth{
+                 registry: "registry.example.com",
+                 username: "reader",
+                 password: "PULL-pw"
+               },
+               level: :install,
+               insecure?: false
+             } = image.pull
+
+      refute inspect(image, limit: :infinity, printable_limit: :infinity) =~ @push_pw
+    end
+
+    test "the default stays build: the same node keeps the plan, nothing is published" do
+      opts = [publish: [stub: fn _ -> flunk("published") end]] ++ source([])
+      assert {:ok, @plan} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
+    end
+
+    test "under auto with no pull credential it keeps the plan; the push credential is not used" do
+      no_pull = Map.drop(@install, [:pull_username, :pull_password])
+
+      opts =
+        [publish: [stub: fn _ -> flunk("published") end]] ++
+          source(machine_image_source: "auto", config: no_pull)
+
+      assert {:ok, image} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
+      assert image == @plan
+    end
+
+    test "an explicit image (no plan) on a machine node stays a tag it holds" do
+      opts =
+        [publish: [stub: fn _ -> flunk("published") end]] ++ source(machine_image_source: "auto")
+
+      image = %{tag: "localhost/x:1", plan: nil}
+      assert {:ok, ^image} = ContainerSpawn.registry_image(image, machine_node(), %{}, opts)
+    end
+
+    test "a publish that fails is image_unavailable, as for a cluster" do
+      opts = publish_opts({:error, {:timeout, 5}}) ++ source(machine_image_source: "auto")
+
+      assert {:error, {:image_unavailable, {:timeout, 5}}} =
+               ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
+    end
+
+    # bd-5fpj59 meets SI4: the board's promotion publishes without waiting
+    # (`publish: [wait: false, on_done: _]`, the stub among them). A machine node that
+    # pulls needs the published image as a cluster does, so a publish still running is
+    # `image_pending` (Dispatch holds the card), not a failure and not a plan.
+    test "a publish still running is image_pending, as for a cluster" do
+      publish = [
+        stub: fn _ctx -> {:pending, :image_key_1} end,
+        wait: false,
+        on_done: fn _key, _result -> :ok end
+      ]
+
+      opts = [publish: publish] ++ source(machine_image_source: "auto")
+
+      assert {:error, {:image_pending, :image_key_1}} =
+               ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
+
+      assert {:error, {:image_pending, :image_key_1}} =
+               ContainerSpawn.registry_image(@plan, registry_node(), @ctx, publish: publish)
+
+      # under the default (build) the same node builds: nothing is published or held
+      build = [publish: [stub: fn _ -> flunk("published") end, wait: false]] ++ source([])
+      assert {:ok, @plan} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, build)
+    end
   end
 end

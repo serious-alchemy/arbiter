@@ -150,6 +150,154 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
   end
 
+  # SI4 (`docs/design/remote-workers.md` §21.2.1, §21.4): a run that takes the published
+  # image is sent no CLI files, and a machine node that pulls it gets a read credential
+  # for that pull, never a push credential.
+  describe "prepare_remote/1 for a run that takes the published image (SI4)" do
+    @digest String.duplicate("d", 64)
+    @push_install "PUSH-install-NEVER-ON-A-NODE"
+    @push_repo "PUSH-repo-NEVER-ON-A-NODE"
+    @pull_repo "PULL-repo-read-only"
+
+    defp pull_node,
+      do: %{
+        id: Ecto.UUID.generate(),
+        name: "oryx",
+        kind: :machine,
+        workspace_ids: [],
+        labels: [],
+        caps: %{"image" => "build", "image_sources" => ["registry", "build"]}
+      }
+
+    defp install,
+      do: %{
+        registry: "registry.example.com/arbiter",
+        username: "pusher",
+        password: @push_install,
+        pull_username: "reader",
+        pull_password: "PULL-install-read-only"
+      }
+
+    defp gitlab_workspace do
+      %Arbiter.Tasks.Workspace{
+        id: "ws-si4",
+        config: %{
+          "worker" => %{
+            "repos" => %{
+              "vstim" => %{
+                "image" => %{
+                  "registry" => "registry.gitlab.com/vstim",
+                  "credentials_ref" => "secret:GL_PUSH",
+                  "pull_credentials_ref" => "secret:GL_PULL"
+                }
+              }
+            }
+          }
+        },
+        encrypted_secrets:
+          %{"GL_PUSH" => "deployer:" <> @push_repo, "GL_PULL" => "reader:" <> @pull_repo}
+          |> :erlang.term_to_binary()
+          |> Arbiter.Vault.encrypt!()
+          |> Base.encode64()
+      }
+    end
+
+    # The plan path, offline: the private clone's own repo planned with a stubbed
+    # digest resolver; the publisher stubbed to what it would push to vstim's registry.
+    defp plan_opts(ctx, extra) do
+      test = self()
+      ref = "registry.gitlab.com/vstim/vstim/worker@sha256:" <> @digest
+
+      ctx.opts
+      |> Keyword.delete(:image)
+      |> Keyword.merge(
+        workspace: gitlab_workspace(),
+        repo: "vstim",
+        plan: [resolver: fn _ref -> {:ok, "sha256:" <> @digest} end, arb_otp: "27.0"],
+        publish: [
+          stub: fn pctx ->
+            send(test, {:published, pctx.repo})
+            {:ok, %{ref: ref, cli_set: "0a1b2c3d"}}
+          end
+        ],
+        image_source: [machine_image_source: "auto", config: install(), workspaces: []]
+      )
+      |> Keyword.merge(extra)
+    end
+
+    defp wire(spec), do: spec |> Jason.encode!() |> Jason.decode!()
+
+    test "a cluster run is sent no CLI files: the CLIs are image layers", ctx do
+      ref = "registry.example/arbiter/x@sha256:" <> @digest
+      node = %{id: Ecto.UUID.generate(), kind: :cluster, caps: %{"image" => "registry"}}
+
+      opts = Keyword.merge(ctx.opts, node: node, publish: [stub: fn _ -> {:ok, %{ref: ref}} end])
+      assert {:ok, request} = ContainerSpawn.prepare_remote(opts)
+
+      assert request.cli == []
+      assert request.image.ref == ref
+      refute Map.has_key?(request.image, :pull)
+    end
+
+    test "a machine node that pulls gets the ref, its CLI set and the pull credential, no CLI file",
+         ctx do
+      assert {:ok, request} =
+               ContainerSpawn.prepare_remote(plan_opts(ctx, node: pull_node()))
+
+      assert_received {:published, "vstim"}
+      assert request.cli == []
+      assert request.image.plan == nil
+      assert request.image.cli_set == "0a1b2c3d"
+      assert request.cli_set == "0a1b2c3d"
+
+      assert {:ok, spec} =
+               ContainerSpawn.remote_spec(request, port_args(ctx, request), "run-si4")
+
+      sent = wire(spec)
+
+      assert sent["image"]["ref"] =~ "registry.gitlab.com/vstim/vstim/worker@sha256:"
+      assert sent["image"]["cli_set"] == "0a1b2c3d"
+      assert sent["image"]["provider"] == "claude"
+      refute Enum.any?(sent["mounts"], &(&1["kind"] == "cli"))
+
+      assert sent["pull_auth"] == %{
+               "registry" => "registry.gitlab.com",
+               "username" => "reader",
+               "password" => @pull_repo
+             }
+
+      # the push credentials (the repo's and the install's) reach no node
+      body = Jason.encode!(spec)
+      refute body =~ @push_repo
+      refute body =~ @push_install
+      refute body =~ Base.encode64("deployer:" <> @push_repo)
+      refute body =~ Base.encode64("pusher:" <> @push_install)
+    end
+
+    test "the default (build) sends the plan and CLI files, and no credential at all", ctx do
+      opts =
+        plan_opts(ctx,
+          node: pull_node(),
+          image_source: [config: install(), workspaces: []],
+          publish: [stub: fn _ -> flunk("published") end]
+        )
+
+      assert {:ok, request} = ContainerSpawn.prepare_remote(opts)
+      assert request.image.plan != nil
+      refute Map.has_key?(request.image, :ref)
+      assert [_ | _] = request.cli
+
+      assert {:ok, spec} =
+               ContainerSpawn.remote_spec(request, port_args(ctx, request), "run-si4b")
+
+      body = Jason.encode!(spec)
+      refute Map.has_key?(spec, "pull_auth")
+
+      for secret <- [@push_repo, @push_install, @pull_repo, "PULL-install-read-only"],
+          do: refute(body =~ secret)
+    end
+  end
+
   describe "run_command/3 (bd-8wdrql: the pre-push recipe in the run's own container)" do
     setup do
       test = self()

@@ -671,6 +671,227 @@ defmodule Arbiter.NodeAgent.RunTest do
   # bd-4uom27: the shadow clone has no deps; the node seeds them (every compiled NIF
   # included) from its own cache before the container starts, so the offline pre-push
   # gate never downloads one.
+  # SI4 (`docs/design/remote-workers.md` §21.2.1, §21.4): a spec with a digest-pinned ref is
+  # pulled (no plan is built, no CLI file fetched) and the container runs that digest.
+  describe "a pulled image (SI4)" do
+    @pull_ref "registry.example.com/arbiter/vstim/worker@sha256:" <> String.duplicate("f", 64)
+    @pull_password "glpat-READ-ONLY-PULLMARKER-42"
+    @labels ~s({"arbiter.runtime-contract":"1","arbiter.cli-set":"0a1b2c3d",) <>
+              ~s("arbiter.cli-providers":"claude","arbiter.cli.claude.version":"2.1.310",) <>
+              ~s("arbiter.cli.claude.sha256":"cccc"})
+
+    defp pull_spec(run, overrides \\ %{}) do
+      base = spec(run)
+
+      Map.merge(
+        base,
+        Map.merge(
+          %{
+            "image" => %{
+              "tag" => "localhost/arbiter-dev/beam:abc123",
+              "plan" => nil,
+              "ref" => @pull_ref,
+              "cli_set" => "0a1b2c3d",
+              "provider" => "claude"
+            },
+            # a registry run is sent no CLI files: the CLIs are image layers
+            "mounts" => Enum.reject(base["mounts"], &(&1["kind"] == "cli")),
+            "pull_auth" => %{
+              "registry" => "registry.example.com",
+              "username" => "deploy-token-9",
+              "password" => @pull_password
+            }
+          },
+          overrides
+        )
+      )
+    end
+
+    setup %{opts: opts, stub: stub} do
+      File.write!(Path.join(stub, "image_absent"), "")
+      File.write!(Path.join(stub, "labels.json"), @labels)
+      %{opts: Keyword.delete(opts, :image_fun)}
+    end
+
+    defp authfile_body do
+      Jason.encode!(%{
+        "auths" => %{
+          "registry.example.com" => %{
+            "auth" => Base.encode64("deploy-token-9:" <> @pull_password)
+          }
+        }
+      })
+    end
+
+    test "the digest is pulled with a tmpfs auth file, gone before the container starts, " <>
+           "and the container runs that digest with no CLI mount",
+         %{opts: opts, stub: stub, rt: rt, home: home} do
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          assert {:ok, "p1"} = Runs.assign(pull_spec("p1"), opts)
+          wait_event("p1", "run.ready")
+          wait_event("p1", "exit")
+        end)
+
+      authfile = Path.join([rt, "arbiter-node", "p1", "pull-auth.json"])
+      pull_argv = File.read!(Path.join(stub, "pull.argv")) |> String.split("\n", trim: true)
+      assert pull_argv == ["--quiet", "--authfile", authfile, @pull_ref]
+      assert File.read!(Path.join(stub, "pull.authfile.mode")) |> String.trim() == "600"
+
+      assert File.read!(Path.join(stub, "pull.authfile.sha256")) |> String.trim() ==
+               :crypto.hash(:sha256, authfile_body()) |> Base.encode16(case: :lower)
+
+      # gone before the container started, not only once it exited
+      assert File.read!(Path.join(stub, "authfile.at_run")) == "absent\n"
+      refute File.exists?(authfile)
+
+      argv = File.read!(Path.join(stub, "run.argv")) |> String.split("\n", trim: true)
+      assert @pull_ref in argv
+      refute "localhost/arbiter-dev/beam:abc123" in argv
+      assert "--pull=never" in argv
+      refute Enum.any?(argv, &String.contains?(&1, "/opt/arbiter/cli"))
+
+      # the credential reached no log line, no argv, no file under the node's home, and
+      # nothing the stand-in podman recorded
+      for marker <- [@pull_password, Base.encode64("deploy-token-9:" <> @pull_password)] do
+        refute log =~ marker
+        refute Enum.any?(argv ++ pull_argv, &String.contains?(&1, marker))
+        refute StubPodman.recorded(stub) =~ marker
+
+        persistent =
+          home
+          |> Path.join("**")
+          |> Path.wildcard(match_dot: true)
+          |> Enum.filter(&File.regular?/1)
+          |> Enum.map_join("\n", &File.read!/1)
+
+        refute persistent =~ marker
+      end
+    end
+
+    # §21.4: the primary's pull-sized bound cancels the run, but the pull keeps going so the
+    # node's next run finds the image; nothing is started for the cancelled run.
+    test "a pull outlives a cancel: it finishes, and no container starts", %{
+      opts: opts,
+      stub: stub,
+      rt: rt
+    } do
+      File.write!(Path.join(stub, "pull_wait"), "")
+      assert {:ok, "p8"} = Runs.assign(pull_spec("p8"), opts)
+      wait_until(fn -> File.exists?(Path.join(stub, "pull.argv")) end)
+
+      assert :ok = Run.cancel("p8", "prepare_timeout")
+      _ = :sys.get_state(Run.via("p8"))
+      File.rm!(Path.join(stub, "pull_wait"))
+
+      assert %{"cancelled" => true, "reason" => "prepare_timeout"} = wait_event("p8", "exit")
+      assert File.exists?(Path.join(stub, "pulled"))
+      refute File.exists?(Path.join(stub, "run.argv"))
+      refute File.exists?(Path.join([rt, "arbiter-node", "p8"]))
+    end
+
+    test "a node that holds the digest does not pull", %{opts: opts, stub: stub} do
+      File.rm!(Path.join(stub, "image_absent"))
+      assert {:ok, "p2"} = Runs.assign(pull_spec("p2"), opts)
+      assert %{"status" => 0} = wait_event("p2", "exit")
+      refute File.exists?(Path.join(stub, "pull.argv"))
+      assert File.read!(Path.join(stub, "run.argv")) =~ @pull_ref
+    end
+
+    test "an image whose labels do not match the spec refuses the run: nothing starts",
+         %{opts: opts, stub: stub} do
+      File.write!(
+        Path.join(stub, "labels.json"),
+        String.replace(@labels, "0a1b2c3d", "ffffffff")
+      )
+
+      assert {:ok, "p3"} = Runs.assign(pull_spec("p3"), opts)
+
+      assert %{"reason" => "image_unavailable", "detail" => detail} =
+               wait_event("p3", "run.refused")
+
+      assert detail =~ "contract_mismatch"
+      assert detail =~ "arbiter.cli-set"
+      assert_gone("p3")
+      refute File.exists?(Path.join(stub, "run.argv"))
+    end
+
+    test "a failed pull refuses the run as image_unavailable; the auth file is gone",
+         %{opts: opts, stub: stub, rt: rt} do
+      File.write!(Path.join(stub, "pull_status"), "125")
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          assert {:ok, "p4"} = Runs.assign(pull_spec("p4"), opts)
+
+          assert %{"reason" => "image_unavailable", "detail" => detail} =
+                   wait_event("p4", "run.refused")
+
+          assert detail =~ "pull_failed"
+          refute detail =~ @pull_password
+          assert_gone("p4")
+        end)
+
+      refute log =~ @pull_password
+      refute File.exists?(Path.join([rt, "arbiter-node", "p4"]))
+      refute File.exists?(Path.join(stub, "run.argv"))
+    end
+
+    test "the run's own state stops holding the credential once its prepare has it",
+         %{opts: opts, stub: stub} do
+      StubPodman.write_mode(stub, "hang")
+      assert {:ok, "p5"} = Runs.assign(pull_spec("p5"), opts)
+      wait_event("p5", "run.ready")
+
+      state = :sys.get_state(Run.via("p5"))
+      assert state.spec.pull_auth == nil
+      refute inspect(state, limit: :infinity, printable_limit: :infinity) =~ @pull_password
+
+      File.write!(Path.join(stub, "removed"), "")
+      wait_event("p5", "exit")
+    end
+
+    test "with no tmpfs runtime dir a pull run is refused before anything is pulled",
+         %{opts: opts, stub: stub, root: root, rt: rt} do
+      on_disk = Path.join(root, "mountinfo-disk")
+      File.write!(on_disk, "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n")
+      opts = opts |> Keyword.put(:require_tmpfs, true) |> Keyword.put(:mountinfo, on_disk)
+
+      assert {:ok, "p6"} = Runs.assign(pull_spec("p6"), opts)
+      assert %{"reason" => "unschedulable", "detail" => detail} = wait_event("p6", "run.refused")
+      assert detail =~ "secrets_not_on_tmpfs"
+      refute File.exists?(Path.join(stub, "pull.argv"))
+      refute File.exists?(Path.join(rt, "arbiter-node"))
+    end
+
+    test "the node's deps seed job runs in the pulled digest", %{opts: opts, home: home} do
+      test = self()
+
+      deps_fun = fn shadow, image, _seed_opts ->
+        send(test, {:deps, shadow, image})
+        {:ok, %{}}
+      end
+
+      opts =
+        Keyword.merge(opts,
+          deps_cache: true,
+          deps_fun: deps_fun,
+          checkout_fun: fn config, _co, shadow ->
+            File.mkdir_p!(Path.join(shadow, ".git/info"))
+            File.mkdir_p!(Arbiter.NodeAgent.Checkout.store_objects(config))
+            {:ok, %{known: []}}
+          end
+        )
+
+      spec = pull_spec("p7", %{"checkout" => %{"branch" => "feature/x", "read_only" => true}})
+      assert {:ok, "p7"} = Runs.assign(spec, opts)
+      wait_event("p7", "exit")
+
+      shadow = Path.join([home, "runs", "p7", "worktree"])
+      assert_received {:deps, ^shadow, @pull_ref}
+    end
+  end
+
   describe "deps for a checkout run (bd-4uom27)" do
     defp checkout_spec(run) do
       spec(run, %{"checkout" => %{"branch" => "feature/x", "read_only" => true}})

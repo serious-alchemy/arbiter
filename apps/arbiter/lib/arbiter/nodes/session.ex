@@ -94,6 +94,10 @@ defmodule Arbiter.Nodes.Session do
   @default_tick_ms 5_000
   @default_reap_interval_ms 10 * 60_000
   @default_prepare_timeout_ms 25 * 60_000
+  # SI4 (§21.4): a machine node that pulls the published image (about 1.3 GB unpacked when
+  # cold) instead of building a toolchain is bounded for a pull. A pull that outlives it
+  # keeps going on the node, so its next run finds the image.
+  @default_pull_prepare_timeout_ms 10 * 60_000
   @default_hold_ms 150_000
   @default_adopt_timeout_ms 30_000
   # bd-bmecet: a cluster node must show a placed run (`hb.runs`) within this long, and a run
@@ -134,6 +138,7 @@ defmodule Arbiter.Nodes.Session do
       readiness: [],
       capacity: nil,
       prepare_timeout_ms: @default_prepare_timeout_ms,
+      pull_prepare_timeout_ms: @default_pull_prepare_timeout_ms,
       hold_ms: @default_hold_ms,
       adopt_timeout_ms: @default_adopt_timeout_ms,
       ack_timeout_ms: @default_ack_timeout_ms,
@@ -248,6 +253,14 @@ defmodule Arbiter.Nodes.Session do
           {:ok, term()} | {:error, term()}
   def assign(pid, run, spec, owner, opts \\ []),
     do: GenServer.call(pid, {:assign, run, spec, owner, opts}, :infinity)
+
+  @doc """
+  The prepare budget of a run a machine node pulls the published image for (SI4,
+  `docs/design/remote-workers.md` §21.4): 10 minutes, in place of the 25 a cold
+  toolchain build on the node is given. Session option `:pull_prepare_timeout_ms`.
+  """
+  @spec default_pull_prepare_timeout_ms() :: pos_integer()
+  def default_pull_prepare_timeout_ms, do: @default_pull_prepare_timeout_ms
 
   @doc """
   The stage the node last reported for `run` (A3): `:assigned` (pushed, nothing heard),
@@ -477,6 +490,10 @@ defmodule Arbiter.Nodes.Session do
         :prepare_timeout_ms,
         Keyword.get(opts, :prepare_timeout_ms, @default_prepare_timeout_ms)
       )
+      |> put_info(
+        :pull_prepare_timeout_ms,
+        Keyword.get(opts, :pull_prepare_timeout_ms, @default_pull_prepare_timeout_ms)
+      )
       |> put_info(:hold_ms, Keyword.get(opts, :hold_ms, @default_hold_ms))
       |> put_info(
         :adopt_timeout_ms,
@@ -548,7 +565,7 @@ defmodule Arbiter.Nodes.Session do
         Process.monitor(owner)
         # What `Arbiter.Worker.Executor.Node` calls `stop/1` and `signal/2` with.
         handle = {:remote, {state.node_id, run, make_ref()}}
-        ms = Keyword.get(opts, :prepare_timeout_ms, state.info.prepare_timeout_ms)
+        ms = Keyword.get(opts, :prepare_timeout_ms) || prepare_budget(spec, state.info)
         Process.send_after(self(), {:prepare_timeout, run}, ms)
 
         bridges = bridge_map(spec)
@@ -1424,6 +1441,22 @@ defmodule Arbiter.Nodes.Session do
       cursors -> Map.put(ok, "stdout_cursors", cursors)
     end
   end
+
+  # SI4 (§21.4): a machine node that pulls the published image (a digest-pinned ref and
+  # no plan) is bounded for a pull, never longer than a build. A cluster keeps the budget
+  # it is told in `hello_ok`, and a node that builds keeps the build-sized one.
+  defp prepare_budget(spec, %{kind: "machine"} = info) do
+    if pull_spec?(spec),
+      do: min(info.pull_prepare_timeout_ms, info.prepare_timeout_ms),
+      else: info.prepare_timeout_ms
+  end
+
+  defp prepare_budget(_spec, info), do: info.prepare_timeout_ms
+
+  defp pull_spec?(%{"image" => %{"ref" => ref} = image}) when is_binary(ref),
+    do: is_nil(Map.get(image, "plan"))
+
+  defp pull_spec?(_spec), do: false
 
   # A3: a cluster node bounds its own pending/starting time by this budget; the primary's
   # prepare watchdog (`:prepare_timeout`) is the only clock on a run until it is `running`.

@@ -19,7 +19,8 @@ defmodule Arbiter.NodeAgent.RunSpec do
   | `version` | `1` |
   | `run`, `task`, `name` | the run id, the ticket id and the container name (`arb-…`) |
   | `install` | the primary's install id (label `arbiter.install`; reaping, RW12) |
-  | `image` | `%{"tag" => tag, "plan" => plan \| nil}`; a plan is built on the node. A registry node (A2) gets `"ref"`, a digest-pinned reference the primary pushed, and no plan |
+  | `image` | `%{"tag" => tag, "plan" => plan \| nil}`; a plan is built on the node. A registry node (A2) gets `"ref"`, a digest-pinned reference the primary pushed, and no plan. A machine node that pulls it (SI4) also gets `"cli_set"` (the image's `arbiter.cli-set`), `"provider"` (whose `arbiter.cli.<provider>.*` labels it must carry) and, for a registry the operator marked insecure, `"insecure": true` |
+  | `pull_auth` | optional (SI4): `%{"registry", "username", "password"}`, the read credential for one pull of `image.ref` from its own registry host (`Arbiter.NodeAgent.PullAuth`); written only to a 0600 auth file on the run's tmpfs and deleted after the pull. Absent: an anonymous pull |
   | `cwd` | the container-side working directory (the primary's own path: path transparency) |
   | `mounts` | `[%{"kind" => k, "path" => container path, …}]`; kinds below |
   | `bridges` | `[%{"name" => n, "path" => container path}]`: the per-run sockets (RW10) |
@@ -47,8 +48,15 @@ defmodule Arbiter.NodeAgent.RunSpec do
   carry; the agent writes them into the shadow clone after seeding it. The
   host side of every mount is **resolved by the agent**; the spec never names a
   host path.
+
+  A validated spec never prints its `secrets` or `pull_auth` (`Inspect` leaves them
+  out): it lives in the run's process state and in the supervisor's child spec,
+  which a crash report prints.
   """
 
+  alias Arbiter.NodeAgent.PullAuth
+
+  @derive {Inspect, except: [:secrets, :pull_auth]}
   defstruct [
     :run,
     :task,
@@ -59,6 +67,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
     :command,
     :network,
     :checkout,
+    :pull_auth,
     mounts: [],
     bridges: [],
     env: %{},
@@ -70,7 +79,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
 
   @type t :: %__MODULE__{}
 
-  @allowed_keys ~w(version run task name install image cwd mounts bridges env secrets limits network services command extra_args checkout)
+  @allowed_keys ~w(version run task name install image cwd mounts bridges env secrets limits network services command extra_args checkout pull_auth)
   @mount_kinds ~w(worktree home config_dir tmp cli prompt)
   @dir_kinds ~w(worktree home config_dir tmp)
   @config_files ~w(settings.json CLAUDE.md)
@@ -119,6 +128,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
          {:ok, task} <- optional_string(spec, "task"),
          {:ok, install} <- optional_string(spec, "install"),
          {:ok, image} <- image(spec["image"]),
+         {:ok, pull_auth} <- pull_auth(spec["pull_auth"], image),
          {:ok, cwd} <- path(spec["cwd"], "cwd"),
          {:ok, mounts} <- mounts(spec["mounts"] || []),
          {:ok, bridges} <- bridges(spec["bridges"] || []),
@@ -138,6 +148,7 @@ defmodule Arbiter.NodeAgent.RunSpec do
          name: name,
          install: install,
          image: image,
+         pull_auth: pull_auth,
          cwd: cwd,
          mounts: mounts,
          bridges: bridges,
@@ -163,7 +174,15 @@ defmodule Arbiter.NodeAgent.RunSpec do
       Map.new(Map.get(spec, "secrets") || %{}, fn {k, _} -> {k, "[redacted]"} end)
     )
     |> Map.replace("mounts", Enum.map(Map.get(spec, "mounts") || [], &redact_mount/1))
+    |> Map.replace_lazy("pull_auth", &redact_pull_auth/1)
   end
+
+  defp redact_pull_auth(%{} = auth) do
+    registry = Map.get(auth, "registry") || Map.get(auth, :registry)
+    %{"registry" => registry, "username" => "[redacted]", "password" => "[redacted]"}
+  end
+
+  defp redact_pull_auth(_other), do: "[redacted]"
 
   defp redact_mount(%{"content" => _} = mount), do: Map.put(mount, "content", "[redacted]")
   defp redact_mount(mount), do: mount
@@ -224,13 +243,98 @@ defmodule Arbiter.NodeAgent.RunSpec do
       refuse({:bad_value, "image.tag"})
     else
       with {:ok, plan} <- plan(image["plan"]),
-           {:ok, ref} <- image_ref(image) do
-        {:ok, Map.merge(%{tag: tag, plan: plan}, ref)}
+           {:ok, ref} <- image_ref(image),
+           {:ok, pulled} <- pulled_image(image) do
+        {:ok, %{tag: tag, plan: plan} |> Map.merge(ref) |> Map.merge(pulled)}
       end
     end
   end
 
   defp image(_), do: refuse({:missing, "image"})
+
+  # SI4: what a machine node checks the image it pulled against (its labels).
+  @cli_set_re ~r/\A[0-9a-f]{8,64}\z/
+  @provider_re ~r/\A[a-z][a-z0-9_-]{0,31}\z/
+
+  defp pulled_image(image) do
+    with {:ok, cli_set} <- optional_match(image, "cli_set", @cli_set_re),
+         {:ok, provider} <- optional_match(image, "provider", @provider_re) do
+      case Map.get(image, "insecure", false) do
+        flag when is_boolean(flag) ->
+          {:ok,
+           %{insecure?: flag}
+           |> put_present(:cli_set, cli_set)
+           |> put_present(:provider, provider)}
+
+        _ ->
+          refuse({:bad_value, "image.insecure"})
+      end
+    end
+  end
+
+  defp optional_match(map, key, re) do
+    case Map.get(map, key) do
+      nil -> {:ok, nil}
+      value when is_binary(value) -> if Regex.match?(re, value), do: {:ok, value}, else: bad(key)
+      _ -> bad(key)
+    end
+  end
+
+  defp bad(key), do: refuse({:bad_value, "image." <> key})
+
+  # SI4 (§21.4): the read credential for one pull of `image.ref`, for that ref's own
+  # registry host only. A refusal names the field, never its value.
+  @pull_auth_keys ~w(registry username password)
+  @registry_host_re ~r/\A[a-z0-9][a-z0-9.-]{0,252}(:\d{1,5})?\z/
+  @registry_user_re ~r/\A[^\s\x00-\x1f\x7f:]{1,256}\z/
+  @max_pull_password_bytes 4096
+
+  defp pull_auth(nil, _image), do: {:ok, nil}
+
+  defp pull_auth(%{} = auth, %{ref: ref}) do
+    with :ok <- pull_auth_keys(auth),
+         {:ok, registry} <-
+           pull_auth_field(auth, "registry", &Regex.match?(@registry_host_re, &1)),
+         {:ok, username} <-
+           pull_auth_field(auth, "username", &Regex.match?(@registry_user_re, &1)),
+         {:ok, password} <- pull_auth_field(auth, "password", &pull_password?/1) do
+      if registry == ref_host(ref),
+        do: {:ok, %PullAuth{registry: registry, username: username, password: password}},
+        else: refuse({:bad_value, "pull_auth.registry"})
+    end
+  end
+
+  # A credential with nothing to pull, or not a map at all.
+  defp pull_auth(_auth, _image), do: refuse({:bad_value, "pull_auth"})
+
+  defp pull_auth_keys(auth) do
+    if Enum.sort(Map.keys(auth)) == Enum.sort(@pull_auth_keys),
+      do: :ok,
+      else: refuse({:bad_value, "pull_auth"})
+  end
+
+  defp pull_auth_field(auth, key, valid?) do
+    case Map.get(auth, key) do
+      value when is_binary(value) ->
+        if valid?.(value), do: {:ok, value}, else: refuse({:bad_value, "pull_auth." <> key})
+
+      _ ->
+        refuse({:bad_value, "pull_auth." <> key})
+    end
+  end
+
+  defp pull_password?(password),
+    do:
+      password != "" and byte_size(password) <= @max_pull_password_bytes and
+        not String.contains?(password, ["\0", "\n", "\r"])
+
+  # `host[:port]/path…@sha256:…` → `host[:port]`; a ref with no host part has none.
+  defp ref_host(ref) do
+    case String.split(ref, "/", parts: 2) do
+      [host, _rest] -> host
+      _ -> nil
+    end
+  end
 
   # A2: a registry node pulls the digest-pinned `ref` the primary pushed; the
   # tag stays for the labels. Absent for a build node.

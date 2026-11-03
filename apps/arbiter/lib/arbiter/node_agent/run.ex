@@ -72,6 +72,7 @@ defmodule Arbiter.NodeAgent.Run do
     Checkout,
     Exec,
     Files,
+    ImagePull,
     Retained,
     RunSpec,
     Secrets,
@@ -352,13 +353,17 @@ defmodule Arbiter.NodeAgent.Run do
   # ---- prepare ---------------------------------------------------------------------
 
   defp start_prepare(state) do
+    spec = state.spec
+
     task =
       Task.Supervisor.async_nolink(
         Keyword.get(state.opts, :task_supervisor, Arbiter.NodeAgent.TaskSupervisor),
-        fn -> prepare(state.spec, state.opts) end
+        fn -> prepare(spec, state.opts) end
       )
 
-    %{state | task: task}
+    # SI4: only the prepare task holds the pull credential; the run's own state, kept
+    # for its whole life (and printed by a crash report), never does.
+    %{state | task: task, spec: %{spec | pull_auth: nil}}
   end
 
   defp prepared({:ok, prepared}, state) do
@@ -672,7 +677,11 @@ defmodule Arbiter.NodeAgent.Run do
           scratch: Path.join(config.node_home, "deps-seed")
         ]
 
-        case seed.(shadow, spec.image.tag, seed_opts ++ Keyword.take(opts, [:podman, :runner])) do
+        case seed.(
+               shadow,
+               run_image(spec.image),
+               seed_opts ++ Keyword.take(opts, [:podman, :runner])
+             ) do
           {:ok, _summary} ->
             exclude_deps(shadow)
 
@@ -712,19 +721,29 @@ defmodule Arbiter.NodeAgent.Run do
   end
 
   defp ensure_image(spec, opts) do
-    result =
-      case Keyword.get(opts, :image_fun) do
-        fun when is_function(fun, 2) -> fun.(spec.image, opts)
-        nil -> default_image(spec.image, opts)
-      end
-
-    case result do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:image_unavailable, reason}}
+    case Keyword.get(opts, :image_fun) do
+      fun when is_function(fun, 2) -> image_result(fun.(spec.image, opts))
+      nil -> default_image(spec, opts)
     end
   end
 
-  defp default_image(%{tag: tag, plan: nil}, opts) do
+  defp image_result(:ok), do: :ok
+  defp image_result({:error, reason}), do: {:error, {:image_unavailable, reason}}
+
+  # SI4 (§21.2.1): a digest-pinned ref is the image the primary published. It is found
+  # or pulled (`ImagePull`: the credential only ever on this run's tmpfs) and its labels
+  # are checked; nothing is built. Its errors are already refusal-coded.
+  defp default_image(%RunSpec{image: %{ref: ref, plan: nil}} = spec, opts) when is_binary(ref),
+    do: ImagePull.ensure(spec, opts)
+
+  defp default_image(%RunSpec{image: image}, opts), do: image_result(built_image(image, opts))
+
+  # The image the container (and the deps seed job) runs: the pulled digest for a pull
+  # spec, else the tag this node built or already holds.
+  defp run_image(%{ref: ref, plan: nil}) when is_binary(ref), do: ref
+  defp run_image(%{tag: tag}), do: tag
+
+  defp built_image(%{tag: tag, plan: nil}, opts) do
     case Container.cmd(runner_opts(opts), podman_path(opts), ["image", "exists", tag],
            timeout: 30_000
          ) do
@@ -733,14 +752,14 @@ defmodule Arbiter.NodeAgent.Run do
     end
   end
 
-  defp default_image(%{tag: tag, plan: %{tag: tag} = plan}, opts) do
+  defp built_image(%{tag: tag, plan: %{tag: tag} = plan}, opts) do
     case Image.Builder.ensure(Image.Builder, plan, runner_opts(opts)) do
       {:ok, _} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp default_image(_image, _opts), do: {:error, :plan_tag_mismatch}
+  defp built_image(_image, _opts), do: {:error, :plan_tag_mismatch}
 
   defp cli_files(spec, config, opts) do
     fetch = Keyword.get(opts, :files_fun, &Files.ensure(config, &1, &2))
@@ -924,7 +943,7 @@ defmodule Arbiter.NodeAgent.Run do
       [
         worktree: dirs["worktree"].host,
         name: spec.name,
-        image: spec.image.tag,
+        image: run_image(spec.image),
         podman: podman_path(opts),
         home: dirs["home"] && dirs["home"].host,
         writable_paths: for(kind <- ~w(config_dir tmp), d = dirs[kind], do: d.host),

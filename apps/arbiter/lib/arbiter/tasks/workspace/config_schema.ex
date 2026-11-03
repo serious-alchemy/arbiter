@@ -585,6 +585,17 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                                          push. Belongs to the registry it is set
                                          beside: a repo with its own registry does
                                          not inherit the workspace's.
+                        pull_credentials_ref
+                                         "secret:<key>" — a READ-ONLY token as
+                                         "user:password" (e.g. a deploy token with
+                                         read_registry) that a machine node is handed
+                                         for one pull of the published image under
+                                         nodes.machine_image_source auto (SI4); never
+                                         the credentials_ref secret. Per repo it goes
+                                         to any node; workspace-wide only to a node
+                                         whose pin admits the workspace. Unset (and
+                                         no nodes.registry_pull_* for nodes.registry)
+                                         = machine nodes build from a plan.
                         public_ok        true to push to a registry that answers
                                          anonymous reads (default false: the
                                          publisher refuses it, images carry the

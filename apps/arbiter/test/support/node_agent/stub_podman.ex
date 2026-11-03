@@ -29,6 +29,14 @@ defmodule Arbiter.NodeAgent.StubPodman do
   a run that keeps going across a primary restart, bd-4p1vui) and `big` (print
   `STUB_BYTES` bytes, exit 0). `ps` and `pod ps` answer `<dir>/ps.json` and `<dir>/pods.json` (RW12, the reaper). The script itself is
   `stub_podman.sh`, shared with `apps/arbiter_web`.
+
+  A pull (SI4): `image exists` is "present" unless `<dir>/image_absent` exists and
+  nothing was pulled yet; `pull` records `pull.argv` and, for its `--authfile`, the
+  path, mode and sha256 of that file (`pull.authfile`, `.mode`, `.sha256`: never its
+  content; `run` then records in `authfile.at_run` whether that file still exists), holds while `<dir>/pull_wait` exists, fails with `<dir>/pull_status`, and with `<dir>/registry_pull` really
+  fetches the manifest and config blob from the registry the ref names (`curl`, the
+  auth file's credential presented as Basic auth), keeping the config's labels in
+  `labels.json`, which `image inspect` answers.
   """
 
   @script_path Path.join(__DIR__, "stub_podman.sh")

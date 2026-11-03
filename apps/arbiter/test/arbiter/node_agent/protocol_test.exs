@@ -55,6 +55,17 @@ defmodule Arbiter.NodeAgent.ProtocolTest do
       assert caps["run_hold"] == "quiesce"
       assert caps["run_adopt"] == "attach"
     end
+
+    # SI4 (`docs/design/remote-workers.md` §21.2.1, §21.6): the sources the node can take
+    # (the primary chooses per run) and the image runtime contracts it runs. `image`
+    # stays `build` until the plan path is retired (SI13).
+    test "advertises pulling the published image beside building, and its runtime contracts" do
+      caps = Protocol.hello(config([]), %{})["caps"]
+      assert caps["image_sources"] == ["registry", "build"]
+      assert caps["runtime_contracts"] == Arbiter.NodeAgent.ImagePull.runtime_contracts()
+      assert caps["runtime_contracts"] == [1]
+      assert caps["image"] == "build"
+    end
   end
 
   describe "Config max_workers" do

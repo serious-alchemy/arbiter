@@ -182,6 +182,16 @@ defmodule Arbiter.Worker.Image.Registry do
 
   defp credentials(ref, workspace, _host, _opts), do: credentials(ref, workspace)
 
+  @doc """
+  The `{user, password}` a `"secret:KEY"` reference names in `workspace` (the value
+  is `user:password`), or `{:error, {:registry_credentials, ref, :secret_not_found |
+  :malformed}}`. The push login (`credentials_ref`) and SI4's pull login
+  (`pull_credentials_ref`, `Arbiter.Worker.Image.PullCredential`) both read this way.
+  """
+  @spec login(String.t(), term()) ::
+          {:ok, {String.t(), String.t()}} | {:error, {:registry_credentials, String.t(), atom()}}
+  def login(ref, workspace), do: credentials(ref, workspace)
+
   defp credentials(ref, workspace) do
     secrets = CredentialsRef.embed_secrets(%{}, workspace_secrets(workspace))
 

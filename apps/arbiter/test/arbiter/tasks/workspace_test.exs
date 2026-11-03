@@ -920,6 +920,46 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       end
     end
 
+    # SI4 (docs/design/remote-workers.md §21.4): the read credential a machine node is
+    # handed for one pull, next to the push credential and never the same secret.
+    test "pull_credentials_ref is a secret: reference, per repo or workspace-wide" do
+      assert {:ok, ws} = image_ws(%{"pull_credentials_ref" => "secret:VSTIM_PULL"})
+
+      assert get_in(ws.config, ["worker", "repos", "vstim", "image", "pull_credentials_ref"]) ==
+               "secret:VSTIM_PULL"
+
+      assert {:ok, _} = image_ws(%{"pull_credentials_ref" => "secret:WS_PULL"}, :workspace)
+
+      for bad <- ["env:TOKEN", "literal-token", "secret:", "secret:a b", 3] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 image_ws(%{"pull_credentials_ref" => bad})
+
+        assert Exception.message(err) =~
+                 ~s(worker.repos.vstim.image.pull_credentials_ref must be "secret:<key>")
+      end
+    end
+
+    test "pull_credentials_ref may not name the push credential's secret" do
+      for level <- [:repo, :workspace] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 image_ws(
+                   %{
+                     "credentials_ref" => "secret:REGISTRY",
+                     "pull_credentials_ref" => "secret:REGISTRY"
+                   },
+                   level
+                 )
+
+        assert Exception.message(err) =~ "pull_credentials_ref must name a different secret"
+      end
+
+      assert {:ok, _} =
+               image_ws(%{
+                 "credentials_ref" => "secret:REGISTRY_PUSH",
+                 "pull_credentials_ref" => "secret:REGISTRY_PULL"
+               })
+    end
+
     test "public_ok is a boolean" do
       assert {:ok, _} = image_ws(%{"public_ok" => true})
 

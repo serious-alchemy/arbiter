@@ -10,6 +10,7 @@ defmodule Arbiter.Worker.Image.RepoConfig do
         "ref": "…",                  // prebuilt only; per repo only
         "registry": "registry.example.com/vstim",
         "credentials_ref": "secret:KEY",
+        "pull_credentials_ref": "secret:READ_KEY", // SI4: what a machine node pulls with
         "public_ok": false,          // allow a registry that answers anonymous reads
         "seed": "primary"            // primary (default) | image | none
       }}}}}
@@ -30,6 +31,13 @@ defmodule Arbiter.Worker.Image.RepoConfig do
   to: a repo that names its own `registry` without its own `credentials_ref`
   pushes anonymously, and without its own `public_ok` is not exempt. The
   workspace's token never goes to a different host.
+
+  `pull_credentials_ref` (SI4, `docs/design/remote-workers.md` §21.4) is the
+  read-only credential a machine node is handed for one pull of the published
+  image (`Arbiter.Worker.Image.PullCredential`), bound to its registry the same way.
+  `pull_credentials_level` says where it was written, which decides which nodes may
+  hold it: `:repo` (the repo's own block: it reads that repo's repository only) or
+  `:workspace` (`worker.image`).
 
   Every source pushes to `<registry>/<repo-slug>/worker` (`repository_name/1`):
   a repo never shares an image repository with another, so the catch-all
@@ -53,6 +61,8 @@ defmodule Arbiter.Worker.Image.RepoConfig do
           ref: String.t() | nil,
           registry: String.t() | nil,
           credentials_ref: String.t() | nil,
+          pull_credentials_ref: String.t() | nil,
+          pull_credentials_level: :repo | :workspace | nil,
           public_ok: boolean(),
           seed: :primary | :image | :none
         }
@@ -69,26 +79,51 @@ defmodule Arbiter.Worker.Image.RepoConfig do
   @spec resolve(term(), String.t() | nil) :: t()
   def resolve(%{config: %{"worker" => %{} = worker}}, repo) do
     case SeedPaths.effective(worker, repo) do
-      %{"image" => %{} = image} -> image |> own_registry_keys(worker, repo) |> build()
-      _ -> build(%{})
+      %{"image" => %{} = image} ->
+        image
+        |> own_registry_keys(worker, repo)
+        |> build()
+        |> Map.put(:pull_credentials_level, pull_level(image, worker, repo))
+
+      _ ->
+        build(%{})
     end
   end
 
   def resolve(_workspace, _repo), do: build(%{})
 
-  # The deep merge keeps the workspace's `credentials_ref`/`public_ok` under a repo
-  # that overrides `registry`; those two describe the workspace's registry only.
-  defp own_registry_keys(image, worker, repo) do
-    own = RepoSettings.find_entry(Map.get(worker, "repos"), repo)
+  # The deep merge keeps the workspace's `credentials_ref`, `pull_credentials_ref` and
+  # `public_ok` under a repo that overrides `registry`; those describe the workspace's
+  # registry only.
+  @registry_bound ["credentials_ref", "pull_credentials_ref", "public_ok"]
 
-    case is_map(own) && own["image"] do
+  defp own_registry_keys(image, worker, repo) do
+    case own_image(worker, repo) do
       %{"registry" => _} = own_image ->
         image
-        |> Map.drop(["credentials_ref", "public_ok"])
-        |> Map.merge(Map.take(own_image, ["credentials_ref", "public_ok"]))
+        |> Map.drop(@registry_bound)
+        |> Map.merge(Map.take(own_image, @registry_bound))
 
       _ ->
         image
+    end
+  end
+
+  defp own_image(worker, repo) do
+    own = RepoSettings.find_entry(Map.get(worker, "repos"), repo)
+    if is_map(own), do: own["image"]
+  end
+
+  # SI4 (§21.4): a pull credential the repo's own block names is `:repo` (it reads that
+  # repo's repository only); one inherited from `worker.image` is `:workspace`.
+  defp pull_level(image, worker, repo) do
+    own = own_image(worker, repo)
+
+    cond do
+      is_map(own) and is_binary(string(own["pull_credentials_ref"])) -> :repo
+      is_map(own) and Map.has_key?(own, "registry") -> nil
+      is_binary(string(image["pull_credentials_ref"])) -> :workspace
+      true -> nil
     end
   end
 
@@ -98,6 +133,8 @@ defmodule Arbiter.Worker.Image.RepoConfig do
       ref: string(image["ref"]),
       registry: string(image["registry"]),
       credentials_ref: string(image["credentials_ref"]),
+      pull_credentials_ref: string(image["pull_credentials_ref"]),
+      pull_credentials_level: nil,
       public_ok: image["public_ok"] == true,
       seed: enum(image["seed"], @seeds, :primary)
     }

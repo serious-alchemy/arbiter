@@ -55,6 +55,11 @@ defmodule Arbiter.Settings.Installation do
       `:nodes_registry_insecure` — the registry the primary publishes images to
       (`Arbiter.Worker.Image.Publisher`, K8). The password is a Cloak ciphertext;
       `nil` registry = nothing is published.
+    * `:nodes_registry_pull_username` / `:nodes_registry_pull_password` /
+      `:nodes_machine_image_source` — SI4: the install-wide read credential a machine
+      node may be handed for one pull (the password a Cloak ciphertext, never the push
+      password), and whether machine nodes pull the published image (`auto`) or keep
+      building from a plan (`build`, also what `nil` means).
 
   Every field is nullable and `nil` always means "no override" — a fresh
   install that never writes here behaves exactly as it did before the setting
@@ -105,6 +110,9 @@ defmodule Arbiter.Settings.Installation do
     :nodes_registry_insecure,
     :nodes_registry_public_ok,
     :nodes_registry_publish_timeout_ms,
+    :nodes_registry_pull_username,
+    :nodes_registry_pull_password,
+    :nodes_machine_image_source,
     :machine_derate,
     :worker_cli_versions,
     :worker_cli_manual,
@@ -386,6 +394,29 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description "nodes.registry.publish_timeout_ms: how long a dispatch or republish waits on an image publish; nil = 30 minutes."
+    end
+
+    attribute :nodes_registry_pull_username, :string do
+      public? true
+      allow_nil? true
+
+      description "nodes.registry_pull_username: the read-only login a machine node is handed for one pull from nodes.registry (SI4)."
+    end
+
+    # A `Arbiter.Vault` (Cloak) ciphertext, never the plaintext, as `nodes_registry_password`.
+    attribute :nodes_registry_pull_password, :binary do
+      public? false
+      allow_nil? true
+      sensitive? true
+
+      description "nodes.registry_pull_password: Cloak-encrypted read-only registry token for machine-node pulls (SI4); write-only, never the push password."
+    end
+
+    attribute :nodes_machine_image_source, :string do
+      public? true
+      allow_nil? true
+
+      description "nodes.machine_image_source: auto (a machine node that can pull, with a pull credential it may hold, runs the published image) or build (SI4); nil = build."
     end
 
     attribute :machine_derate, :map do
