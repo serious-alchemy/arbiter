@@ -159,7 +159,7 @@ defmodule Arbiter.Nodes.Bridge.Stream do
   end
 
   def handle_info({tag, sock}, %{sock: sock} = state) when tag in [:tcp_closed, :ssl_closed] do
-    Logger.debug("bridge stream: #{tag} (peer closed)")
+    Logger.log(close_log_level(), "bridge stream: #{tag} (peer closed)")
     notify(state, :eof)
     state = %{state | eof_in?: true}
     if state.eof_out?, do: {:stop, :normal, state}, else: {:noreply, state}
@@ -167,7 +167,7 @@ defmodule Arbiter.Nodes.Bridge.Stream do
 
   def handle_info({tag, sock, reason}, %{sock: sock} = state)
       when tag in [:tcp_error, :ssl_error] do
-    Logger.debug("bridge stream: #{tag} #{inspect(reason)}")
+    Logger.log(close_log_level(), "bridge stream: #{tag} #{inspect(reason)}")
     fail(state, {:read, reason})
   end
 
@@ -178,6 +178,10 @@ defmodule Arbiter.Nodes.Bridge.Stream do
     do: close(transport, sock)
 
   def terminate(_reason, _state), do: :ok
+
+  # Close reasons log at debug unless `ARBITER_BRIDGE_STREAM_LOG_LEVEL` (see
+  # config/runtime.exs) raises them, so they are reachable at prod log level.
+  defp close_log_level, do: Application.get_env(:arbiter, :bridge_stream_close_log_level, :debug)
 
   defp activate(%{transport: :tcp, sock: sock}), do: :inet.setopts(sock, active: :once)
   defp activate(%{transport: :ssl, sock: sock}), do: :ssl.setopts(sock, active: :once)

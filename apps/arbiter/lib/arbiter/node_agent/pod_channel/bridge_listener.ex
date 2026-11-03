@@ -50,9 +50,23 @@ defmodule Arbiter.NodeAgent.PodChannel.BridgeListener do
   def init(opts) do
     Process.flag(:trap_exit, true)
 
+    # `:tls12_only` comes from the caller, else the `ARBITER_BRIDGE_TLS12_ONLY`
+    # setting (config/runtime.exs); off by default.
+    tls12_only? =
+      Keyword.get_lazy(opts, :tls12_only, fn ->
+        Application.get_env(:arbiter, :bridge_tls12_only, false)
+      end)
+
+    Logger.info(
+      "pod channel: bridge listener TLS versions: " <>
+        if(tls12_only?, do: "1.2 only", else: "1.3, 1.2")
+    )
+
     listen_opts =
       Tls.socket_options(opts) ++
-        Tls.server_options(Keyword.fetch!(opts, :identity), Keyword.fetch!(opts, :ca)) ++
+        Tls.server_options(Keyword.fetch!(opts, :identity), Keyword.fetch!(opts, :ca),
+          tls12_only: tls12_only?
+        ) ++
         [ip: Keyword.get(opts, :ip, {0, 0, 0, 0})]
 
     case :ssl.listen(Keyword.get(opts, :port, 9443), listen_opts) do
@@ -133,10 +147,23 @@ defmodule Arbiter.NodeAgent.PodChannel.BridgeListener do
   defp decide(tls, config) do
     with {:ok, der} <- :ssl.peercert(tls),
          {:ok, {ip, _port}} <- :ssl.peername(tls),
+         _ = log_protocol(tls, ip),
          {:ok, who} <- Runs.authorize(Map.get(config, :runs, Runs), :bridge, der, ip) do
       {:ok, who, tls}
     else
       {:error, reason} -> {:refuse, reason, tls}
+    end
+  end
+
+  # Which TLS version each bridge connection negotiated, so decode_error alerts
+  # can be correlated with TLS 1.3 (bd-5uhdrs).
+  defp log_protocol(tls, ip) do
+    case :ssl.connection_information(tls, [:protocol, :selected_cipher_suite]) do
+      {:ok, info} ->
+        Logger.info("pod channel: bridge connection from #{:inet.ntoa(ip)}: #{inspect(info)}")
+
+      _ ->
+        :ok
     end
   end
 

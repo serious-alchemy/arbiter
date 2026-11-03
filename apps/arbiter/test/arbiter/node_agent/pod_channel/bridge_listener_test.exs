@@ -72,6 +72,43 @@ defmodule Arbiter.NodeAgent.PodChannel.BridgeListenerTest do
     refute_received {:pushed, "bridge.open", _}
   end
 
+  describe "TLS version" do
+    test "negotiates TLS 1.3 by default", ctx do
+      %{files: files} = boot(ctx)
+      {:ok, sock} = connect(ctx, Kit.client_opts(files, "proxy", ctx.ca))
+      assert {:ok, [protocol: :"tlsv1.3"]} = :ssl.connection_information(sock, [:protocol])
+    end
+
+    test "tls12_only pins the listener to TLS 1.2", ctx do
+      listener =
+        start_supervised!(
+          {BridgeListener,
+           identity: Kit.server_identity(ctx.ca),
+           ca: ctx.ca,
+           runs: ctx.runs,
+           bridge: ctx.bridge,
+           ip: @loopback,
+           port: 0,
+           notify: self(),
+           tls12_only: true,
+           handshake_timeout_ms: 1_000},
+          id: :pinned_listener
+        )
+
+      %{files: files} = boot(ctx)
+
+      {:ok, sock} =
+        :ssl.connect(
+          @loopback,
+          BridgeListener.port(listener),
+          [:binary, active: false] ++ Kit.client_opts(files, "proxy", ctx.ca),
+          5_000
+        )
+
+      assert {:ok, [protocol: :"tlsv1.2"]} = :ssl.connection_information(sock, [:protocol])
+    end
+  end
+
   describe "a valid leaf" do
     test "opens a stream as the named bridge of its run", ctx do
       %{files: files} = boot(ctx)
