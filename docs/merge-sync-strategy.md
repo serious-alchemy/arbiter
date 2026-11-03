@@ -230,6 +230,18 @@ re-running, a review round, a block) gives its seat up after a few polls.
 * CI backpressure (#1126) — while `worker.repos.<repo>.ci_backpressure` holds,
   only the front car is built (the train behaves like depth 1); cars already
   running are left to finish.
+* Merge train phase 2 (bd-4y9dno, above) — the conflict probe and CI-skipped
+  pushes are for an MR waiting on the *serial* train (an ejected MR waiting for
+  the serial head, say). A car's MR, and an MR waiting for a seat, is neither
+  probed nor pushed without CI: a conflict with the target or the cars ahead
+  shows when its car is built, and ejects it to the serial path, where both
+  apply. A head a CI-skipped push left boards no car. A car tests that head
+  merged into the target, but only a pipeline of the head's own satisfies the
+  forge's "pipelines must succeed", and triggering one while the car waited at
+  the front would idle the car out of its seat and rebuild every car behind
+  it. So it takes phase 2's way — synced if it is behind (a push with CI), its
+  pipeline triggered as the serial merge head if it is current — and boards
+  once a head of its own has CI again.
 * Restarts — each car is recorded on its ticket's lane (`train_car`: ref,
   commit, tree, base, the task whose car it stands on, MR head, pipeline). A
   restarted train forms for `merge_train_settle_ms` and puts each car that comes
