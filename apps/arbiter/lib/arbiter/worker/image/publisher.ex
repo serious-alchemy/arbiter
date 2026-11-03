@@ -34,10 +34,23 @@ defmodule Arbiter.Worker.Image.Publisher do
   for a caller that did not get an image: `prefer_remote` runs locally,
   `remote_only` holds the card (§7.3).
 
+  ### `wait: false`: do not park the caller (bd-5fpj59)
+
+  A dispatch that holds a board-promotion slot must not sit out a 14-minute cold
+  publish. With `wait: false` the call answers at once: `{:ok, result}` when the
+  image is cached, `{:pending, key}` when a publish is (now) running, or
+  `{:error, reason}` once when the last publish for this image failed (the
+  failure is handed over a single time, never sticky, so the call after that
+  starts a new publish). `on_done: (key, result -> any)` is called when the
+  flight settles, success or failure, so the caller can wake whatever is
+  holding work for that image. Single flight is unchanged: a second caller,
+  waiting or not, joins the running publish.
+
   Credentials: see `Arbiter.Worker.Image.Registry`.
 
   ## Options
 
+  `:wait` (`false` for the non-blocking form above) and `:on_done`,
   `:server`, `:timeout_ms`, `:config` (install registry map, see `Registry.fetch/1`),
   `:anonymous_probe` (`(Registry.t, repository -> :public | :private | {:unknown, _})`,
   the private-registry check, see `ensure_ready/2`),
@@ -83,7 +96,7 @@ defmodule Arbiter.Worker.Image.Publisher do
   An answer the probe could not give is not a refusal.
   """
   @spec ensure_ready(map(), keyword()) ::
-          {:ok, Pipeline.result()} | :disabled | {:error, term()}
+          {:ok, Pipeline.result()} | {:pending, term()} | :disabled | {:error, term()}
   def ensure_ready(%{plan: _} = ctx, opts \\ []) do
     case Registry.resolve(Map.get(ctx, :workspace), Map.get(ctx, :repo), opts) do
       :unset ->
@@ -200,6 +213,19 @@ defmodule Arbiter.Worker.Image.Publisher do
   defp flight(key, kind, fun, opts) do
     server = Keyword.get(opts, :server, __MODULE__)
 
+    if Keyword.get(opts, :wait, true) == false,
+      do: flight_nowait(server, key, kind, fun, Keyword.get(opts, :on_done)),
+      else: flight_wait(server, key, kind, fun, opts)
+  end
+
+  defp flight_nowait(server, key, kind, fun, on_done) do
+    GenServer.call(server, {:ensure_nowait, key, kind, fun, on_done}, 5_000)
+  catch
+    :exit, {:noproc, _} -> {:error, :publisher_not_running}
+    :exit, {:timeout, _} -> {:error, :publisher_busy}
+  end
+
+  defp flight_wait(server, key, kind, fun, opts) do
     timeout =
       Keyword.get_lazy(opts, :timeout_ms, fn ->
         config(:timeout_ms, Settings.publish_timeout_ms())
@@ -295,6 +321,7 @@ defmodule Arbiter.Worker.Image.Publisher do
        cache: %{},
        inflight: %{},
        tasks: %{},
+       failed: %{},
        published: %{},
        last_error: nil,
        seed_excluded: []
@@ -306,6 +333,21 @@ defmodule Arbiter.Worker.Image.Publisher do
     case state.cache do
       %{^key => result} -> {:reply, {:ok, result}, state}
       _ -> {:noreply, join_or_start(state, key, kind, fun, from)}
+    end
+  end
+
+  # bd-5fpj59: the caller does not wait. Its `on_done` rides in the waiter list
+  # as `{:notify, fun}` and runs when the flight settles.
+  def handle_call({:ensure_nowait, key, kind, fun, on_done}, _from, state) do
+    case state do
+      %{cache: %{^key => result}} ->
+        {:reply, {:ok, result}, state}
+
+      %{failed: %{^key => reason}} ->
+        {:reply, {:error, reason}, %{state | failed: Map.delete(state.failed, key)}}
+
+      _ ->
+        {:reply, {:pending, key}, join_or_start(state, key, kind, fun, {:notify, on_done})}
     end
   end
 
@@ -386,9 +428,34 @@ defmodule Arbiter.Worker.Image.Publisher do
           %{state | last_error: "#{kind}: #{inspect(reason)}"}
       end
 
-    Enum.each(waiters, &GenServer.reply(&1, result))
+    state = remember_failure(state, key, waiters, result)
+    Enum.each(waiters, &reply_waiter(&1, key, result))
     state
   end
+
+  # A failure is remembered (until a no-wait caller collects it) only when
+  # someone who did not wait was told to expect the result.
+  defp remember_failure(state, key, waiters, {:error, reason}) do
+    if Enum.any?(waiters, &match?({:notify, _}, &1)),
+      do: %{state | failed: Map.put(state.failed, key, reason)},
+      else: state
+  end
+
+  defp remember_failure(state, key, _waiters, _result),
+    do: %{state | failed: Map.delete(state.failed, key)}
+
+  defp reply_waiter({:notify, nil}, _key, _result), do: :ok
+
+  defp reply_waiter({:notify, fun}, key, result) when is_function(fun, 2) do
+    fun.(key, result)
+  rescue
+    e -> Logger.warning("Image.Publisher: on_done callback failed: #{Exception.message(e)}")
+  catch
+    kind, reason ->
+      Logger.warning("Image.Publisher: on_done callback #{kind}: #{inspect(reason)}")
+  end
+
+  defp reply_waiter(from, _key, result), do: GenServer.reply(from, result)
 
   # An image entry is superseded by the same image under a newer fingerprint.
   defp drop_superseded(cache, {:image, _, _, _, _, _, _, _} = key) do

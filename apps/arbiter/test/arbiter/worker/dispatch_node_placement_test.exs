@@ -520,6 +520,49 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
              )
     end
 
+    # bd-5fpj59: a dispatch that was given `image_notify` (Autopilot's board
+    # promotion) never parks on the publish: a pending image is a hold that
+    # names the image, whatever `worker.placement` says, and gives the slot back.
+    for mode <- ["prefer_remote", "remote_only"] do
+      test "#{mode}: a pending image holds the card with its key and does not wait" do
+        ws = workspace!(%{"worker" => %{"placement" => unquote(mode)}})
+        issue = ready!(ws, "#{unquote(mode)}, image pending")
+
+        opts =
+          Keyword.merge(timed_out(),
+            publish: [stub: fn _ctx -> {:pending, :image_key_1} end],
+            image_notify: fn _key, _result -> :ok end
+          )
+
+        assert {:error, {:no_node_capacity, info}} = dispatch(issue, opts)
+        assert info.image_key == :image_key_1
+        assert info.phrase =~ "waiting for registry image"
+        assert info.message =~ "registry image"
+        assert info.task_id == issue.id
+
+        assert Worker.whereis(issue.id) == nil
+        assert Ash.get!(Issue, issue.id).state == :queued
+        assert Placement.reservations() == []
+        refute issue.id in Arbiter.Nodes.LocalCapacity.holders()
+      end
+    end
+
+    test "an async dispatch whose publish already failed falls back by placement" do
+      ws = workspace!(%{"worker" => %{"placement" => "remote_only"}})
+      issue = ready!(ws, "remote only, publish failed")
+
+      opts =
+        Keyword.merge(timed_out(),
+          publish: [stub: fn _ctx -> {:error, {:push_failed, "r", 1, "denied"}} end],
+          image_notify: fn _key, _result -> :ok end
+        )
+
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, opts)
+      assert info.image_error == {:image_unavailable, {:push_failed, "r", 1, "denied"}}
+      assert info.message =~ "push_failed"
+      refute Map.has_key?(info, :image_key)
+    end
+
     test "remote_only holds the card with the image error, and reserves nothing" do
       ws = workspace!(%{"worker" => %{"placement" => "remote_only"}})
       issue = ready!(ws, "remote only, image timed out")
