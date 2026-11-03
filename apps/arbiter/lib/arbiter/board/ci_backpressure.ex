@@ -203,6 +203,35 @@ defmodule Arbiter.Board.CiBackpressure do
   end
 
   @doc """
+  `repo`'s gate in `workspace` right now: `:ok`, or `{:hold, detail}` when its
+  CI queue is over the configured limits. The speculative merge train
+  (bd-6dyva0) asks it before testing more than its front car, so a saturated
+  runner pool is not handed K pipelines at once. Reads the same cached poll as
+  `holds/3` (same options), and fails open: an ungated repo, a poll not read
+  yet or a failed one is `:ok`.
+  """
+  @spec verdict(Workspace.t() | nil, String.t() | nil, keyword()) :: :ok | {:hold, String.t()}
+  def verdict(workspace, repo, opts \\ [])
+
+  def verdict(%Workspace{} = workspace, repo, opts) when is_binary(repo) do
+    case Map.get(limits(workspace), repo) do
+      nil ->
+        :ok
+
+      limits ->
+        case read(workspace, repo, opts) do
+          {:ok, signal, _at} ->
+            evaluate(limits, signal, Keyword.get(opts, :now) || DateTime.utc_now())
+
+          :unknown ->
+            :ok
+        end
+    end
+  end
+
+  def verdict(_workspace, _repo, _opts), do: :ok
+
+  @doc """
   The per-repo status behind `scheduler_status` and `arb prime`: one map per
   gated repo with the cached `pending` count and `oldest_pending_min`, the
   thresholds and the hold `state` — `held`, `clear`, or `unknown` (not read

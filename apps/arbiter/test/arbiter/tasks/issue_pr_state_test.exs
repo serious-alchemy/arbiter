@@ -189,4 +189,48 @@ defmodule Arbiter.Tasks.IssuePrStateTest do
       assert opts[:via_review_gate] == false
     end
   end
+
+  # bd-6dyva0: a Watchdog restarted from the row resumes its merge-train car
+  # (the train rebuilds its order from the cars) and does not board again on a
+  # head a red car of its own sent back to the serial path.
+  describe "the speculative merge train's lane" do
+    test "the car and the ejected head survive into a restarted Watchdog's options", %{
+      task: task
+    } do
+      {:ok, _} = Issue.pr_opened(task.id, "#52")
+
+      car = %{
+        ref: "arbiter/train/#{task.id}",
+        sha: String.duplicate("c", 40),
+        tree: String.duplicate("e", 40),
+        base: String.duplicate("b", 40),
+        base_task: "bd-ahead",
+        mr_head: String.duplicate("a", 40),
+        pipeline: 77,
+        scratch: "not persisted"
+      }
+
+      assert :ok = PullRequest.record_train_car(task.id, car)
+      assert :ok = PullRequest.record_train_ejected(task.id, String.duplicate("d", 40))
+
+      assert {:ok, opts} = PullRequest.watch_opts(task.id)
+
+      assert opts[:train_car] == %{
+               "ref" => "arbiter/train/#{task.id}",
+               "sha" => String.duplicate("c", 40),
+               "tree" => String.duplicate("e", 40),
+               "base" => String.duplicate("b", 40),
+               "base_task" => "bd-ahead",
+               "mr_head" => String.duplicate("a", 40),
+               "pipeline" => 77
+             }
+
+      assert opts[:train_ejected_head] == String.duplicate("d", 40)
+
+      # A car that is gone is gone from the lane too.
+      assert :ok = PullRequest.record_train_car(task.id, nil)
+      assert {:ok, opts} = PullRequest.watch_opts(task.id)
+      refute Keyword.has_key?(opts, :train_car)
+    end
+  end
 end

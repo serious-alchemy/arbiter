@@ -64,6 +64,27 @@ defmodule Arbiter.Worker.MergeTrain do
 
   Callers fail open (`Watchdog` treats an unreachable train as "you are the
   head"): the train only ever saves syncs, never gates a merge.
+
+  ## Speculative seats (bd-6dyva0)
+
+  With `merge.train.depth` K > 1 a target's approved MRs ride a speculative
+  train instead of waiting for one serial head: up to K of them are *seated*
+  (`board/3`), and each tests a car — a merge commit on an Arbiter-owned ref
+  (`Arbiter.Mergers.TrainCar`) of the car ahead of it (the target, for the front
+  seat) and its own head. The train holds only the seats and what each car
+  stands on; the Watchdogs build, test, merge, and leave (`leave/2`). A red car
+  is its MR's own fault only when every car ahead of it is green (`red:
+  :eject`); behind a car still running or red it holds. When a seat goes, every
+  car behind it re-bases, and its Watchdog rebuilds it.
+
+  Seats are kept across a Watchdog crash (the seat and its car, for
+  `resume_grace_ms`) and rebuilt after a server restart from the cars
+  themselves: each car names the task whose car it was built on, so a car that
+  comes back is put back after it, and a seat is held for a car still missing
+  (`ghost_grace_ms`). While the train forms only MRs riding a car are seated.
+  Nothing here can make a wrong merge: the Watchdog merges a car's MR only when
+  the forge's merge would land the car's tested tree on the target, whatever the
+  seats say.
   """
 
   use GenServer
@@ -139,6 +160,40 @@ defmodule Arbiter.Worker.MergeTrain do
   @spec release_merge(key(), String.t(), GenServer.server()) :: :ok
   def release_merge(key, task_id, server \\ __MODULE__),
     do: GenServer.call(server, {:release_merge, key, task_id})
+
+  @doc """
+  Board the speculative train (bd-6dyva0, `merge.train.depth` > 1): ask for a
+  seat, and report the car this MR rides in. `entry` carries `task_id`,
+  `priority`, `opened_at`, `depth` (the target's effective depth; `1` while CI
+  backpressure holds), `car` (`nil`, or the MR's car: `sha`, `base_task` — the
+  task whose car it was built on, `nil` when built on the target — and whatever
+  else the Watchdog keeps), `car_status` (`:none`, `:building`, `:pending`,
+  `:running`, `:green`, `:red`), and optionally `ttl_ms`, `resume_grace_ms`
+  (how long a crashed Watchdog's seat is kept for its restart) and
+  `ghost_grace_ms` (how long a seat is kept for a car another car stands on
+  that has not boarded since the train restarted).
+
+  `{:seat, seat}` — `position` (1 = the front), `front?`, `ahead` (task ids),
+  `base` (`:target` at the front, `{:car, task_id, sha}` behind a built car,
+  `:pending` behind a car not built or not seen yet) and `red` (`:eject` when
+  every car ahead is green, so a red car is this MR's own; `:hold` otherwise).
+  `{:wait, {:full, depth}}` — every seat is taken. `{:wait, :forming}` — the
+  train restarted and is still collecting its cars; only an MR that already has
+  a car is seated meanwhile, in the order the cars stand on each other.
+  """
+  @spec board(key(), map(), GenServer.server()) ::
+          {:seat, map()} | {:wait, :forming | {:full, pos_integer()}}
+  def board(key, entry, server \\ __MODULE__),
+    do: GenServer.call(server, {:board, key, entry, self()})
+
+  @doc "Leave the speculative train: the seat goes, and every car behind it re-bases."
+  @spec leave(key(), String.t(), GenServer.server()) :: :ok
+  def leave(key, task_id, server \\ __MODULE__),
+    do: GenServer.call(server, {:leave, key, task_id})
+
+  @doc "The speculative train's seats, front first (observability; tests)."
+  @spec seats(key(), GenServer.server()) :: [map()]
+  def seats(key, server \\ __MODULE__), do: GenServer.call(server, {:seats, key})
 
   @doc "End the forming period now (tests; operators)."
   @spec settle_now(GenServer.server()) :: :ok
@@ -285,6 +340,51 @@ defmodule Arbiter.Worker.MergeTrain do
     {:reply, :ok, update_train(state, key, &drop_merge(&1, id))}
   end
 
+  def handle_call({:board, key, entry, pid}, _from, state) do
+    id = entry.task_id
+    depth = max(Map.get(entry, :depth) || 1, 1)
+
+    train =
+      state.trains
+      |> Map.get(key, new_train())
+      |> upsert_rider(entry, pid)
+      |> expire_riders(id, state.settle)
+      |> seat_resuming(id, entry)
+      |> fill_seats(depth, state.settle)
+
+    reply =
+      cond do
+        id in train.seats -> {:seat, seat_info(train, id, state.settle)}
+        state.settle == :forming -> {:wait, :forming}
+        true -> {:wait, {:full, depth}}
+      end
+
+    {:reply, reply, put_train(state, key, train)}
+  end
+
+  def handle_call({:leave, key, id}, _from, state) do
+    {:reply, :ok, update_train(state, key, &drop_rider(&1, id))}
+  end
+
+  def handle_call({:seats, key}, _from, state) do
+    train = Map.get(state.trains, key, new_train())
+
+    seats =
+      Enum.map(train.seats, fn id ->
+        rider = Map.fetch!(train.riders, id)
+
+        %{
+          task_id: id,
+          car: rider.car,
+          status: rider.status,
+          ghost?: rider.ghost?,
+          orphan?: is_nil(rider.pid) and not rider.ghost?
+        }
+      end)
+
+    {:reply, seats, state}
+  end
+
   def handle_call(:settle_now, _from, state), do: {:reply, :ok, %{state | settle: :settled}}
 
   def handle_call({:view, key}, _from, state) do
@@ -307,7 +407,9 @@ defmodule Arbiter.Worker.MergeTrain do
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     trains =
       state.trains
-      |> Enum.map(fn {key, train} -> {key, drop_ref(train, ref, reason)} end)
+      |> Enum.map(fn {key, train} ->
+        {key, train |> drop_ref(ref, reason) |> drop_rider_ref(ref, reason)}
+      end)
       |> Enum.reject(fn {_key, train} -> empty?(train) end)
       |> Map.new()
 
@@ -383,9 +485,10 @@ defmodule Arbiter.Worker.MergeTrain do
 
   # ---- bookkeeping --------------------------------------------------------
 
-  defp new_train, do: %{entries: %{}, head: nil, merge: nil}
+  defp new_train, do: %{entries: %{}, head: nil, merge: nil, riders: %{}, seats: []}
 
-  defp empty?(train), do: train.entries == %{} and is_nil(train.merge)
+  defp empty?(train),
+    do: train.entries == %{} and is_nil(train.merge) and train.riders == %{} and train.seats == []
 
   defp items(train), do: train.entries |> Map.values() |> Enum.map(& &1.item) |> MergeHead.sort()
 
@@ -538,6 +641,259 @@ defmodule Arbiter.Worker.MergeTrain do
     case Map.fetch(state.trains, key) do
       {:ok, train} -> put_train(state, key, fun.(train))
       :error -> state
+    end
+  end
+
+  # ---- speculative seats (bd-6dyva0) ----------------------------------------
+  #
+  # `riders` is every MR that asked for a seat, plus the seats kept without a
+  # Watchdog: an *orphan* (its Watchdog crashed; its car is still known and may
+  # still be running) and a *ghost* (a car another car stands on that has not
+  # boarded since this train started). Both carry `expires_at`. `seats` is the
+  # order, front first. A seat is kept until its MR leaves; a free seat goes to
+  # the best-ordered waiting MR (`MergeHead.sort/1`), and only once the train
+  # has formed. An MR that comes back already riding a car (a restart, a
+  # crash) is put back where its car stands — after the car it was built on,
+  # before the car built on it — whether the train has formed or not, so the
+  # order survives and nobody new takes its place.
+
+  @default_resume_grace_ms 120_000
+
+  # `{train, resuming?}`: resuming when this train has not had a live Watchdog
+  # for the MR until now (first sight, a ghost or an orphan).
+  defp upsert_rider(train, entry, pid) do
+    id = entry.task_id
+    old = Map.get(train.riders, id)
+
+    ref =
+      case old do
+        %{pid: ^pid, ref: ref} when not is_nil(ref) ->
+          ref
+
+        %{ref: ref} ->
+          demonitor(ref)
+          Process.monitor(pid)
+
+        nil ->
+          Process.monitor(pid)
+      end
+
+    rider = %{
+      item: %{
+        task_id: id,
+        priority: Map.get(entry, :priority),
+        opened_at: Map.get(entry, :opened_at)
+      },
+      pid: pid,
+      ref: ref,
+      seen_at: now(),
+      ttl_ms: Map.get(entry, :ttl_ms, @default_ttl_ms),
+      grace_ms: grace(entry, :resume_grace_ms),
+      ghost_grace_ms: grace(entry, :ghost_grace_ms),
+      car: Map.get(entry, :car),
+      status: Map.get(entry, :car_status, :none),
+      expires_at: nil,
+      ghost?: false,
+      resuming?: is_nil(old) or old.ghost? or is_nil(old.pid)
+    }
+
+    %{train | riders: Map.put(train.riders, id, rider)}
+  end
+
+  defp grace(entry, key) do
+    case Map.get(entry, key) do
+      ms when is_integer(ms) and ms >= 0 -> ms
+      _ -> @default_resume_grace_ms
+    end
+  end
+
+  # A seat kept without a Watchdog (an orphan, a ghost) does not lapse while the
+  # train forms: forming is the time the Watchdogs have to come back.
+  defp expire_riders(train, keep, settle) do
+    now = now()
+
+    train.riders
+    |> Enum.filter(fn {id, rider} ->
+      id != keep and not (settle == :forming and is_nil(rider.pid)) and
+        rider_expired?(rider, now)
+    end)
+    |> Enum.reduce(train, fn {id, _rider}, train -> drop_rider(train, id) end)
+  end
+
+  defp rider_expired?(%{expires_at: at}, now) when is_integer(at), do: now >= at
+  defp rider_expired?(rider, now), do: now - rider.seen_at >= rider.ttl_ms
+
+  defp seat_resuming(train, id, _entry) do
+    case Map.fetch!(train.riders, id) do
+      %{resuming?: true, car: %{} = car} ->
+        train = if id in train.seats, do: train, else: insert_by_chain(train, id, car)
+        train |> ghost_for_base(id, car) |> reorder_by_chain()
+
+      _ ->
+        train
+    end
+  end
+
+  defp insert_by_chain(train, id, car) do
+    parent = Map.get(car, :base_task)
+    child_at = Enum.find_index(train.seats, &(base_task(train, &1) == id))
+    parent_at = if parent, do: Enum.find_index(train.seats, &(&1 == parent))
+
+    seats =
+      cond do
+        is_integer(child_at) -> List.insert_at(train.seats, child_at, id)
+        is_integer(parent_at) -> List.insert_at(train.seats, parent_at + 1, id)
+        true -> train.seats ++ [id]
+      end
+
+    %{train | seats: seats}
+  end
+
+  # The car a resuming rider stands on has not boarded (yet): keep a seat for it,
+  # just ahead, for `ghost_grace_ms`, so the rider is not taken for the front
+  # while that car may still come back.
+  defp ghost_for_base(train, id, car) do
+    parent = Map.get(car, :base_task)
+
+    if is_nil(parent) or Map.has_key?(train.riders, parent) do
+      train
+    else
+      at = Enum.find_index(train.seats, &(&1 == id))
+
+      ghost = %{
+        item: %{task_id: parent, priority: nil, opened_at: nil},
+        pid: nil,
+        ref: nil,
+        seen_at: now(),
+        ttl_ms: 0,
+        grace_ms: 0,
+        ghost_grace_ms: 0,
+        car: nil,
+        status: :unknown,
+        expires_at: now() + Map.fetch!(train.riders, id).ghost_grace_ms,
+        ghost?: true,
+        resuming?: false
+      }
+
+      %{
+        train
+        | riders: Map.put(train.riders, parent, ghost),
+          seats: List.insert_at(train.seats, at, parent)
+      }
+    end
+  end
+
+  # Put every seated car right behind the car it stands on, keeping the order
+  # otherwise. Riders come back in any order after a restart, and a car that
+  # comes back before the car standing on it cannot know where it belongs until
+  # that one says. No seat is ever dropped, whatever the links say.
+  defp reorder_by_chain(%{seats: seats} = train) do
+    parents = Map.new(seats, &{&1, chain_parent(train, &1, seats)})
+    roots = Enum.filter(seats, &is_nil(Map.fetch!(parents, &1)))
+
+    {ordered, _seen} =
+      Enum.reduce(roots, {[], MapSet.new()}, &emit_chain(&1, seats, parents, &2))
+
+    ordered = Enum.reverse(ordered)
+    %{train | seats: ordered ++ Enum.reject(seats, &(&1 in ordered))}
+  end
+
+  defp emit_chain(id, seats, parents, {out, seen} = acc) do
+    if MapSet.member?(seen, id) do
+      acc
+    else
+      seats
+      |> Enum.filter(&(Map.fetch!(parents, &1) == id))
+      |> Enum.reduce({[id | out], MapSet.put(seen, id)}, &emit_chain(&1, seats, parents, &2))
+    end
+  end
+
+  defp chain_parent(train, id, seats) do
+    case base_task(train, id) do
+      parent when is_binary(parent) and parent != id -> if parent in seats, do: parent
+      _ -> nil
+    end
+  end
+
+  defp base_task(train, id) do
+    case train.riders do
+      %{^id => %{car: %{} = car}} -> Map.get(car, :base_task)
+      _ -> nil
+    end
+  end
+
+  defp fill_seats(train, _depth, :forming), do: train
+
+  defp fill_seats(train, depth, _settled) do
+    case depth - length(train.seats) do
+      free when free > 0 ->
+        boarding =
+          train.riders
+          |> Enum.reject(fn {id, rider} -> id in train.seats or is_nil(rider.pid) end)
+          |> Enum.map(fn {_id, rider} -> rider.item end)
+          |> MergeHead.sort()
+          |> Enum.take(free)
+          |> Enum.map(& &1.task_id)
+
+        %{train | seats: train.seats ++ boarding}
+
+      _ ->
+        train
+    end
+  end
+
+  defp seat_info(train, id, settle) do
+    index = Enum.find_index(train.seats, &(&1 == id))
+    ahead = Enum.take(train.seats, index)
+
+    base =
+      case List.last(ahead) do
+        nil ->
+          :target
+
+        prev ->
+          case Map.fetch!(train.riders, prev) do
+            %{ghost?: false, car: %{sha: sha}} when is_binary(sha) -> {:car, prev, sha}
+            _ -> :pending
+          end
+      end
+
+    red =
+      if Enum.all?(ahead, &(Map.fetch!(train.riders, &1).status == :green)),
+        do: :eject,
+        else: :hold
+
+    %{
+      position: index + 1,
+      front?: index == 0,
+      ahead: ahead,
+      base: base,
+      red: red,
+      forming?: settle == :forming
+    }
+  end
+
+  defp drop_rider(train, id) do
+    {rider, riders} = Map.pop(train.riders, id)
+    if rider, do: demonitor(rider.ref)
+    %{train | riders: riders, seats: List.delete(train.seats, id)}
+  end
+
+  # A seated rider whose Watchdog crashed keeps its seat (and its car) for
+  # `resume_grace_ms`: the cars behind stand on it, and its restarted Watchdog
+  # takes the seat back. Any other exit leaves the train.
+  defp drop_rider_ref(train, ref, reason) do
+    case Enum.find(train.riders, fn {_id, rider} -> rider.ref == ref end) do
+      nil ->
+        train
+
+      {id, rider} ->
+        if crashed?(reason) and id in train.seats do
+          orphan = %{rider | pid: nil, ref: nil, expires_at: now() + rider.grace_ms}
+          %{train | riders: Map.put(train.riders, id, orphan)}
+        else
+          drop_rider(train, id)
+        end
     end
   end
 
