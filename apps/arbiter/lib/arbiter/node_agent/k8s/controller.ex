@@ -49,7 +49,10 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
       kubelet's log, is the source of the done signal and the outcome: the log keeps the same
       bytes for a human and is never read for such a pod, so a line it drops, reorders or
       re-stamps changes nothing. Only complete lines are forwarded; a last line with no
-      newline is dropped and the exit says `stdout_truncated: <bytes>`. A pod that never
+      newline is dropped and the exit says `stdout_truncated: <bytes>`. A feed that delivers
+      nothing at all (`:event_silent_ms`, 30 s after the worker starts, or `:event_final_wait_ms`
+      after it ends) is replaced by the pod's log, read from the start, and the exit says
+      `stdout_feed: "silent_log_fallback"` (bd-db8ez4). A pod that never
       sends its final chunk (killed) ends the stream `:event_final_wait_ms` (10 s) after the
       worker ends. A pod without the annotation (made before this, or with `event_feed:
       false`) is read from its log as below.
@@ -278,6 +281,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
       protect_s: Keyword.get(opts, :protect_s, @default_protect_s),
       event_feed: Keyword.get(opts, :event_feed, true),
       event_final_wait_ms: opts[:event_final_wait_ms],
+      event_silent_ms: opts[:event_silent_ms],
       runs: %{},
       logs: %{},
       acked: %{},
@@ -425,6 +429,20 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     logs =
       case state.logs do
         %{^run => log} -> Map.put(state.logs, run, %{log | truncated: bytes})
+        logs -> logs
+      end
+
+    {:noreply, %{state | logs: logs}}
+  end
+
+  # bd-db8ez4: the pod's wrapper never delivered a chunk, so the follower reads the kubelet's
+  # log instead; the exit says so (`stdout_feed`).
+  def handle_info({:event_feed_silent, run}, state) do
+    Logger.warning("k8s run #{run}: its pod's event feed is silent; reading its log instead")
+
+    logs =
+      case state.logs do
+        %{^run => log} -> Map.put(state.logs, run, %{log | feed_silent?: true})
         logs -> logs
       end
 
@@ -966,7 +984,8 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
       drained?: false,
       position: cursor,
       source: source,
-      truncated: nil
+      truncated: nil,
+      feed_silent?: false
     }
 
     %{state | logs: Map.put(state.logs, entry.run, log)}
@@ -979,8 +998,11 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
 
   defp events_pod?(_entry), do: false
 
-  defp final_wait(%{event_final_wait_ms: ms}) when is_integer(ms), do: [final_wait_ms: ms]
-  defp final_wait(_state), do: []
+  defp final_wait(state) do
+    for {key, opt} <- [event_final_wait_ms: :final_wait_ms, event_silent_ms: :silent_ms],
+        is_integer(Map.get(state, key)),
+        do: {opt, Map.fetch!(state, key)}
+  end
 
   defp stop_follower(state, run) do
     case Map.pop(state.logs, run) do
@@ -1057,10 +1079,17 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
 
     case state.logs do
       %{} = logs when is_map_key(logs, entry.run) ->
-        case logs[entry.run].truncated do
-          bytes when is_integer(bytes) -> Map.put(end_of, "stdout_truncated", bytes)
-          _ -> end_of
-        end
+        log = logs[entry.run]
+
+        end_of =
+          case log.truncated do
+            bytes when is_integer(bytes) -> Map.put(end_of, "stdout_truncated", bytes)
+            _ -> end_of
+          end
+
+        if log.feed_silent?,
+          do: Map.put(end_of, "stdout_feed", "silent_log_fallback"),
+          else: end_of
 
       _ ->
         end_of

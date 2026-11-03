@@ -32,11 +32,19 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
   `finish/1` without one; a last line with no newline is dropped and reported first as
   `{:log_truncated, run, bytes}`.
 
+  A feed that **never speaks** (bd-db8ez4: no chunk, not even an empty final one, reached the
+  follower `:silent_ms` after it started, or `:final_wait_ms` after the worker ended) is not
+  a run with no output: the pod's wrapper cannot reach the pod channel, or never ran. The
+  follower then switches to `source: :log`, reads the kubelet's copy of the same bytes from
+  the start (nothing was emitted, so there is no position to resume), tells its owner
+  `{:event_feed_silent, run}`, and answers a late chunk as taken-and-ignored so the wrapper
+  does not retry it forever.
+
   Started unlinked and monitoring `:owner` (the controller), which it follows to the grave.
 
   Options: `:run`, `:pod`, `:client`, `:owner` (required), `:emit` (`fn frame -> any`),
   `:cursor` (resume after it), `:container` ("worker"), `:frame_bytes` (16 KiB),
-  `:window_bytes` (256 KiB), `:retry_ms` (500), `:source` (`:log` or `:events`), `:final_wait_ms` (10 s, events).
+  `:window_bytes` (256 KiB), `:retry_ms` (500), `:source` (`:log` or `:events`), `:final_wait_ms` (10 s, events), `:silent_ms` (30 s, events).
   """
 
   use GenServer
@@ -52,6 +60,7 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
   @window_bytes 256 * 1024
   @retry_ms 500
   @final_wait_ms 10_000
+  @silent_ms 30_000
 
   # -- API ----------------------------------------------------------------------
 
@@ -120,8 +129,12 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
       source: Keyword.get(opts, :source, :log),
       events: EventLines.new(Keyword.get(opts, :cursor)),
       feed_final?: false,
-      final_wait_ms: Keyword.get(opts, :final_wait_ms, @final_wait_ms)
+      final_wait_ms: Keyword.get(opts, :final_wait_ms, @final_wait_ms),
+      feed_seen?: false
     }
+
+    if state.source == :events,
+      do: Process.send_after(self(), :feed_silent, Keyword.get(opts, :silent_ms, @silent_ms))
 
     {:ok, start_source(state)}
   end
@@ -141,6 +154,10 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
 
   # Event mode: a chunk the pod shipped. The EventLines reader refuses a gap, trims a retry
   # and keeps a partial last line; the HTTP caller is answered when its frames are taken.
+  # The feed was found silent and the log is the source now: a chunk is taken and dropped.
+  def handle_call({:events, at, bytes, _final?}, _from, %{source: :log} = state),
+    do: {:reply, {:ok, at + byte_size(bytes)}, state}
+
   def handle_call({:events, _at, _bytes, _final?}, _from, %{drained?: true} = state),
     do: {:reply, {:ok, EventLines.next(state.events)}, state}
 
@@ -151,10 +168,16 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
   def handle_call({:events, at, bytes, final?}, from, state) do
     case EventLines.feed(state.events, at, bytes) do
       {_events, {:gap, next}} ->
-        {:reply, {:gap, next}, state}
+        {:reply, {:gap, next}, %{state | feed_seen?: true}}
 
       {events, {:ok, lines}} ->
-        state = %{state | events: events, feed_final?: state.feed_final? or final?}
+        state = %{
+          state
+          | events: events,
+            feed_final?: state.feed_final? or final?,
+            feed_seen?: true
+        }
+
         reply = {:ok, EventLines.next(events)}
         state = %{state | waiting: {from, pack(lines, state.frame_bytes), reply}}
         {:noreply, state |> release_reader() |> maybe_drain()}
@@ -209,8 +232,18 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
 
   # Event mode: the pod never said it was done; take what arrived (a partial last line is
   # dropped and reported).
-  def handle_info(:final_wait_over, state),
+  def handle_info(
+        :final_wait_over,
+        %{source: :events, feed_seen?: false, drained?: false} = state
+      ),
+      do: {:noreply, fall_back_to_log(state)}
+
+  def handle_info(:final_wait_over, %{source: :events} = state),
     do: {:noreply, maybe_drain(%{state | feed_final?: true})}
+
+  # Event mode, the worker still running: nothing has come from the pod's wrapper yet.
+  def handle_info(:feed_silent, %{source: :events, feed_seen?: false, drained?: false} = state),
+    do: {:noreply, fall_back_to_log(state)}
 
   def handle_info(:restart_reader, %{reader: nil, drained?: false} = state),
     do: {:noreply, %{state | reader: start_reader(state)}}
@@ -243,6 +276,18 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
   end
 
   defp maybe_drain(state), do: state
+
+  # The feed never spoke: read the kubelet's copy of the output from the start. `final?` (the
+  # worker already ended) makes the reader take the tail to EOF and drain, as in log mode.
+  defp fall_back_to_log(state) do
+    Logger.warning(
+      "k8s log follower #{state.run}: no event feed chunk from the pod; reading its log instead"
+    )
+
+    send(state.owner, {:event_feed_silent, state.run})
+    state = %{state | source: :log, waiting: nil}
+    %{state | reader: start_reader(state)}
+  end
 
   # -- frames ---------------------------------------------------------------------
 

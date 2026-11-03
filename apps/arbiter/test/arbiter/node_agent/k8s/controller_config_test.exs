@@ -108,6 +108,41 @@ defmodule Arbiter.NodeAgent.K8s.ControllerConfigTest do
     end
   end
 
+  describe "event_feed (bd-db8ez4: the operator's off switch)" do
+    @facts %{
+      registry: "registry.example.test/arbiter",
+      install_id: "inst-1",
+      node_id: "node-1",
+      owner_uid: "0b6c1d7e",
+      bridge_addr: "10.43.98.199",
+      gate_addr: "10.43.0.1:443",
+      boot_nonce: String.duplicate("n", 43),
+      max_wall_s: 3600,
+      event_feed: true
+    }
+
+    test "controller.yaml accepts it, and `false` reaches the pod config over the controller default" do
+      assert {:ok, cfg} = ControllerConfig.parse("event_feed: false")
+      assert cfg.event_feed == false
+      assert ControllerConfig.pod_config(cfg, @facts).event_feed == false
+    end
+
+    test "`true` is accepted too" do
+      assert {:ok, %{event_feed: true}} = ControllerConfig.parse("event_feed: true")
+    end
+
+    test "absent, the controller's own default stands" do
+      assert {:ok, cfg} = ControllerConfig.parse("{}")
+      refute Map.has_key?(cfg, :event_feed)
+      assert ControllerConfig.pod_config(cfg, @facts).event_feed == true
+      assert ControllerConfig.pod_config(cfg, %{@facts | event_feed: false}).event_feed == false
+    end
+
+    test "a non-boolean is refused" do
+      assert {:error, {:bad_config, _}} = ControllerConfig.parse("event_feed: maybe")
+    end
+  end
+
   describe "pod_config/2" do
     test "merges the controller's own facts into the operator keys for PodSpec" do
       {:ok, cfg} = ControllerConfig.parse(@full)

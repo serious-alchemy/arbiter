@@ -47,7 +47,27 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartTest do
       assert text =~ ~s("runtime_handler" (.Values.runtimeClass.handler)
     end
 
+    # bd-db8ez4: the event feed had a ConfigMap key but no chart value, so an operator could
+    # not turn it off without a hand edit the next `helm upgrade` overwrote.
+    test "workers.eventFeed is a value, a schema property and a controller.yaml key" do
+      values = YamlElixir.read_from_file!(Path.join(@chart, "values.yaml"))
+      assert Map.has_key?(values["workers"], "eventFeed")
+      assert values["workers"]["eventFeed"] == nil, "the default must stay the controller's"
+
+      schema = @chart |> Path.join("values.schema.json") |> File.read!() |> Jason.decode!()
+
+      assert schema["properties"]["workers"]["properties"]["eventFeed"]["type"] == [
+               "boolean",
+               "null"
+             ]
+
+      text = File.read!(Path.join(@chart, "templates/node/configmaps.yaml"))
+      assert text =~ ~s(kindIs "bool" $w.eventFeed)
+      assert text =~ ~s("event_feed")
+    end
+
     # bd-bmecet: the controller must not share the workers' -100 class.
+
     test "the controller defaults to its own PriorityClass, above the workers'" do
       values = YamlElixir.read_from_file!(Path.join(@chart, "values.yaml"))
 
@@ -119,6 +139,40 @@ defmodule Arbiter.NodeAgent.K8s.HelmChartTest do
       assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
       assert parsed.placement["runtime_class"] == "gvisor"
       assert parsed.placement["runtime_handler"] == "runsc"
+    end
+
+    test "workers.eventFeed=false reaches controller.yaml, and the default leaves the key out" do
+      config =
+        find!(
+          render!(@direct ++ ["workers.eventFeed=false"]),
+          "ConfigMap",
+          "arbiter-controller-config"
+        )
+
+      assert config["data"]["controller.yaml"] =~ ~r/^event_feed: false$/m
+
+      assert {:ok, %{event_feed: false}} =
+               ControllerConfig.parse(config["data"]["controller.yaml"])
+
+      config =
+        find!(
+          render!(@direct ++ ["workers.eventFeed=true"]),
+          "ConfigMap",
+          "arbiter-controller-config"
+        )
+
+      assert {:ok, %{event_feed: true}} =
+               ControllerConfig.parse(config["data"]["controller.yaml"])
+
+      config = find!(render!(@direct), "ConfigMap", "arbiter-controller-config")
+      refute config["data"]["controller.yaml"] =~ "event_feed"
+      assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
+      refute Map.has_key?(parsed, :event_feed)
+    end
+
+    test "workers.eventFeed refuses a non-boolean" do
+      assert {:error, out} = helm_template(@direct ++ ["workers.eventFeed=maybe"])
+      assert out =~ "eventFeed"
     end
 
     test "the controller gets its own PriorityClass by default, the Deployment uses it" do
