@@ -1966,6 +1966,42 @@ defmodule Arbiter.Worker.StopReason do
     end
   end
 
+  # bd-2z3ogf: Codex's plain-text limit message ends `... or try again at Nov
+  # 4th, 2026 7:04 AM.` -- a local wall clock with no zone name, so the host's
+  # own offset applies (same equivalence as the forms above). The Codex stream
+  # normalizer calls this to put the date on its `usage limit reached|<epoch>`
+  # line; without it the date was dropped and every weekly stop lost its reset.
+  @codex_try_again_signature ~r/try[ ]again[ ]at[ ]+(?<month>[a-z]{3,9})\.?[ \t]+(?<day>\d{1,2})(?:st|nd|rd|th)?(?:,?[ \t]+(?<year>\d{4}))?,?[ \t]*(?:at[ \t]+)?(?<hour>\d{1,2})(?::(?<minute>\d{2}))?[ \t]*(?<meridiem>am|pm)/i
+
+  @doc false
+  @spec codex_try_again_epoch(String.t()) :: integer() | nil
+  def codex_try_again_epoch(message) when is_binary(message) do
+    with %{"month" => mon, "day" => day, "hour" => raw_hour, "meridiem" => mer} = caps <-
+           Regex.named_captures(@codex_try_again_signature, message),
+         month when is_integer(month) <- month_number(mon),
+         {day, ""} <- Integer.parse(day),
+         {hour12, ""} when hour12 in 0..12 <- Integer.parse(raw_hour),
+         minute when minute in 0..59 <- parse_minute(caps["minute"]),
+         {:ok, naive} <-
+           dated_candidate(
+             NaiveDateTime.local_now(),
+             caps["year"],
+             month,
+             day,
+             to_24h(hour12, String.downcase(mer)),
+             minute
+           ) do
+      naive
+      |> NaiveDateTime.add(-local_utc_offset_seconds(), :second)
+      |> DateTime.from_naive!("Etc/UTC")
+      |> DateTime.to_unix()
+    else
+      _ -> nil
+    end
+  end
+
+  def codex_try_again_epoch(_), do: nil
+
   defp month_number(name) do
     key = name |> String.downcase() |> String.slice(0, 3)
     idx = Enum.find_index(@months, &(&1 == key))
