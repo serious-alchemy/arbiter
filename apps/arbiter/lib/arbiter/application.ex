@@ -7,6 +7,8 @@ defmodule Arbiter.Application do
 
   alias Arbiter.Accounts.LoginRunner.Sweep, as: LoginSweep
   alias Arbiter.Agents.Gemini.ModelCheck
+  alias Arbiter.Worker.Image.LocalPublished
+  alias Arbiter.Worker.Image.LocalRuns
   alias Arbiter.Workflows.DispatchQueueSupervisor
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
   alias Arbiter.Workflows.MergeQueueSupervisor
@@ -257,8 +259,8 @@ defmodule Arbiter.Application do
         Arbiter.Worker.Image.Publisher,
         # SI-L (bd-4cq0qt): local runs take the published image from the local podman
         # store; the live local runs it must not lose, and the GC of what it pulled.
-        Arbiter.Worker.Image.LocalRuns,
-        Arbiter.Worker.Image.LocalPublished.gc_spec(),
+        LocalRuns,
+        LocalPublished.gc_spec(),
         # SI2 (OD13): republishes recently published repos when the CLI set moves.
         Arbiter.Worker.CliSet.Watcher,
         # bd-50d5j6: persists a podman Codex run's rotated auth.json when its
