@@ -5141,15 +5141,34 @@ defmodule Arbiter.Worker.ReviewGate do
   # wording, which agy reports alongside a clean exit and a "SUCCESS" result
   # event). A non-zero exit means the subprocess genuinely failed, so the
   # full classification applies there.
+  #
+  # bd-3b3oks: Codex exits 0 after a `turn.failed` carrying its usage-limit
+  # refusal, so the pass looked like a clean exit with no verdict. The stream
+  # formatter writes that refusal as a `⚠ codex turn failed:` / `⚠ codex:` line
+  # followed by the normalized `usage limit reached` signal; `:quota_exhausted`
+  # is trusted on a clean exit only when that harness-emitted banner is present
+  # (the model's own prose never starts with it).
   defp classify_stop(0, lines) do
-    case StopReason.classify(0, Enum.reverse(lines)) do
+    ordered = Enum.reverse(lines)
+
+    case StopReason.classify(0, ordered) do
       %StopReason{category: category} = reason
       when category in [:stream_schema_drift, :agent_print_timeout] ->
         reason
 
+      %StopReason{category: :quota_exhausted} = reason ->
+        if codex_failure_banner?(ordered), do: reason
+
       _ ->
         nil
     end
+  end
+
+  defp codex_failure_banner?(lines) do
+    Enum.any?(lines, fn line ->
+      is_binary(line) and
+        Regex.match?(~r/^\s*⚠ codex( turn failed)?:/, line)
+    end)
   end
 
   defp classify_stop(status, lines) when is_integer(status) do

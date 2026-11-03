@@ -383,6 +383,54 @@ defmodule Arbiter.Worker.ReviewGateSpawnFailureTest do
     """)
   end
 
+  # bd-3b3oks: what a Codex reviewer's transcript holds after the provider's
+  # usage-limit refusal. The lines come from the real stream formatter fed the
+  # error shape Codex emits (`turn.failed` / `usage_limit_reached`); the process
+  # still exits 0, which is how the run got recorded `succeeded`.
+  defp stub_codex_limit_exit0(dir, name, log) do
+    message =
+      Jason.encode!(%{
+        "type" => "error",
+        "status" => 429,
+        "error" => %{
+          "type" => "usage_limit_reached",
+          "message" => "The usage limit has been reached",
+          "plan_type" => "plus",
+          "resets_at" => 1_793_000_000
+        }
+      })
+
+    echoes =
+      %{"type" => "turn.failed", "error" => %{"message" => message}}
+      |> Arbiter.Agents.Codex.Stream.format_event()
+      |> Enum.map_join("\n", fn {line, _} -> "echo '#{String.replace(line, "'", "")}'" end)
+
+    write_stub(dir, name, """
+    echo "#{name}" >> #{log}
+    #{echoes}
+    exit 0
+    """)
+  end
+
+  describe "a reviewer that exits 0 after a Codex usage-limit refusal (bd-3b3oks)" do
+    test "rotates to the next provider at once, without a re-prompt",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      stub_codex_limit_exit0(stub_dir, "claude", log)
+      stub_approve(stub_dir, "agy", log)
+      prepend_path(stub_dir)
+
+      ws = workspace(["claude", "gemini"])
+      task = new_task(ws)
+
+      run_gate(task, repo, "feature/codex-limit-exit0")
+
+      wait_until(fn -> merge_commit_count(repo) == 1 end, 10_000)
+
+      assert calls(log) == ["claude", "agy"]
+      assert [%Round{verdict: :approve, reviewer_provider: "gemini"}] = review_rounds(task.id)
+    end
+  end
+
   describe "a reviewer that dies of quota_exhausted (bd-44qs5l)" do
     test "is re-routed to the next provider instead of parking the ticket",
          %{repo: repo, stub_dir: stub_dir, log: log} do
