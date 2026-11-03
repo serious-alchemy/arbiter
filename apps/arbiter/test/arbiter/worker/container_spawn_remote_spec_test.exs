@@ -583,5 +583,29 @@ defmodule Arbiter.Worker.ContainerSpawnRegistryImageTest do
       assert {:error, {:image_unavailable, {:timeout, 5}}} =
                ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
     end
+
+    # bd-5fpj59 meets SI4: the board's promotion publishes without waiting
+    # (`publish: [wait: false, on_done: _]`, the stub among them). A machine node that
+    # pulls needs the published image as a cluster does, so a publish still running is
+    # `image_pending` (Dispatch holds the card), not a failure and not a plan.
+    test "a publish still running is image_pending, as for a cluster" do
+      publish = [
+        stub: fn _ctx -> {:pending, :image_key_1} end,
+        wait: false,
+        on_done: fn _key, _result -> :ok end
+      ]
+
+      opts = [publish: publish] ++ source(machine_image_source: "auto")
+
+      assert {:error, {:image_pending, :image_key_1}} =
+               ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
+
+      assert {:error, {:image_pending, :image_key_1}} =
+               ContainerSpawn.registry_image(@plan, registry_node(), @ctx, publish: publish)
+
+      # under the default (build) the same node builds: nothing is published or held
+      build = [publish: [stub: fn _ -> flunk("published") end, wait: false]] ++ source([])
+      assert {:ok, @plan} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, build)
+    end
   end
 end

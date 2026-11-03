@@ -109,6 +109,45 @@ defmodule Arbiter.Worker.ContainerSpawnRepoImageTest do
     refute_received {:published, _}
   end
 
+  # bd-5fpj59 meets SI4: Dispatch's image gate publishes without waiting for the board's
+  # promotion. For a machine that pulls, a publish still running is `image_pending` (the
+  # card is held and woken when it settles), exactly as for a cluster.
+  test "a pulling machine whose image is still publishing is image_pending", %{tmp_dir: tmp} do
+    repo_path = repo!(tmp, %{"README.md" => "hi\n"})
+    test = self()
+
+    machine = %{
+      id: "n3",
+      name: "oryx",
+      kind: :machine,
+      workspace_ids: [],
+      caps: %{"image" => "build", "image_sources" => ["registry", "build"]}
+    }
+
+    install = %{
+      registry: "registry.example.com/arbiter",
+      pull_username: "reader",
+      pull_password: "pull-only"
+    }
+
+    nowait = [
+      stub: fn ctx ->
+        send(test, {:published, ctx})
+        {:pending, :image_key_1}
+      end,
+      wait: false,
+      on_done: fn _key, _result -> :ok end
+    ]
+
+    pulling = [image_source: [machine_image_source: "auto", config: install, workspaces: []]]
+    opts = Keyword.put(opts(nil, "vstim"), :publish, nowait) ++ pulling
+
+    assert {:error, {:image_pending, :image_key_1}} =
+             ContainerSpawn.preflight_image(repo_path, machine, opts)
+
+    assert_received {:published, %{repo: "vstim"}}
+  end
+
   describe "source: prebuilt (KH14)" do
     @ci_digest "sha256:" <> String.duplicate("c", 64)
 
