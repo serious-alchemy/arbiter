@@ -233,6 +233,54 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictPassRemoteTest do
     end
   end
 
+  describe "a pass for a waiting merge-train MR (bd-4y9dno)" do
+    # The remote advertises push options and logs the ones it receives.
+    defp log_push_options!(ctx) do
+      {_, 0} = git(ctx.tmp <> "/remote.git", ["config", "receive.advertisePushOptions", "true"])
+      log = Path.join(ctx.tmp, "push-options.log")
+      hook = Path.join([ctx.tmp, "remote.git", "hooks", "pre-receive"])
+
+      File.write!(
+        hook,
+        "#!/bin/sh\necho \"opts=${GIT_PUSH_OPTION_COUNT:-0} ${GIT_PUSH_OPTION_0}\" >> #{log}\n"
+      )
+
+      File.chmod!(hook, 0o755)
+      log
+    end
+
+    defp received(log), do: if(File.exists?(log), do: String.trim(File.read!(log)), else: "")
+
+    defp lane_skipped_head(issue), do: Ash.get!(Issue, issue.id).merge_watch["ci_skipped_head"]
+
+    test "the host pushes with the forge's skip option and tells the lane the head has no CI",
+         ctx do
+      log = log_push_options!(ctx)
+
+      %{worker_pid: pid, worktree_path: wt} =
+        pass!(ctx, nodes: [node_row()], ci_skip: {:push_option, "ci.skip"})
+
+      :ok = resolve_in!(wt)
+      done!(pid)
+
+      assert conflict_run!(ctx.issue.id).outcome == :succeeded
+      assert received(log) =~ "ci.skip"
+      assert lane_skipped_head(ctx.issue) == remote_head(ctx.repo, ctx.branch)
+    end
+
+    test "an ordinary pass pushes plainly and leaves the lane alone", ctx do
+      log = log_push_options!(ctx)
+      %{worker_pid: pid, worktree_path: wt} = pass!(ctx, nodes: [node_row()])
+
+      :ok = resolve_in!(wt)
+      done!(pid)
+
+      assert conflict_run!(ctx.issue.id).outcome == :succeeded
+      refute received(log) =~ "ci.skip"
+      assert lane_skipped_head(ctx.issue) == nil
+    end
+  end
+
   # ---- fixtures -------------------------------------------------------------
 
   defp workspace(placement) do
@@ -277,6 +325,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictPassRemoteTest do
     placement = [remote_available?: true] ++ Keyword.take(opts, [:nodes])
 
     ConflictResolver.resolve(%{
+      ci_skip: Keyword.get(opts, :ci_skip),
       task_id: ctx.issue.id,
       workspace_id: ctx.ws.id,
       repo_path: ctx.repo,

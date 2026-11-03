@@ -178,6 +178,17 @@ defmodule Arbiter.Nodes.PlacementTest do
       end
     end
 
+    # bd-8ufzng: the Free-tier bot token is static but membership-scoped and checked
+    # at dispatch; it is carried like the minted kinds.
+    test "a GitLab bot token is remote-carryable for every kind that carries a credential" do
+      assert :gitlab_bot_token in Placement.remote_git_credential_kinds()
+
+      for kind <- [:implementer, :resume, :fix_pass, :conflict_pass, :review_fix_round] do
+        request = Map.merge(@eligible, %{kind: kind, git_credential: :gitlab_bot_token})
+        assert Placement.eligible(request) == :ok, "#{kind}"
+      end
+    end
+
     test "a reviewer and an inspect-only run stay eligible beside a scoped credential" do
       scoped = Map.put(@eligible, :git_credential, :deploy_key)
 
@@ -421,6 +432,26 @@ defmodule Arbiter.Nodes.PlacementTest do
                  place(
                    %{
                      git_credential: :gitlab_project_token,
+                     kind: kind,
+                     mode: mode,
+                     task_id: task_id
+                   },
+                   [row("a")]
+                 ),
+               "#{kind} #{mode}"
+
+        Placement.release(task_id)
+      end
+    end
+
+    test "a GitLab bot token run lands on a node under prefer_remote and is not held under remote_only" do
+      for kind <- [:implementer, :review_fix_round], mode <- [:prefer_remote, :remote_only] do
+        task_id = "bd-glb-#{kind}-#{mode}"
+
+        assert {:ok, {:node, %{name: "a"}}} =
+                 place(
+                   %{
+                     git_credential: :gitlab_bot_token,
                      kind: kind,
                      mode: mode,
                      task_id: task_id

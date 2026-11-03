@@ -688,12 +688,38 @@ defmodule Arbiter.Mergers.Merger do
   @callback prepare(workspace :: Arbiter.Tasks.Workspace.t() | map() | nil, opts :: keyword()) ::
               :ok
 
+  @typedoc """
+  How a forge is told not to start a pipeline for one push (the merge train's
+  non-head MRs, bd-4y9dno): `{:push_option, opt}` is a `git push -o <opt>` option
+  (GitLab `ci.skip`), `{:commit_marker, text}` a marker the tip commit's message
+  must carry (GitHub `[skip ci]`).
+  """
+  @type ci_skip_mechanism :: {:push_option, String.t()} | {:commit_marker, String.t()}
+
+  @doc """
+  The forge's way to skip CI for a push, or `nil` when it has none *that is safe
+  to use*: a mechanism is only offered when the head's pipeline can be started
+  again later (`trigger_pipeline/2`). `opts` is the workspace's train settings
+  (`:workflow`, the GitHub workflow to dispatch). Optional; absent means `nil`.
+  """
+  @callback ci_skip_mechanism(opts :: map()) :: ci_skip_mechanism() | nil
+
+  @doc """
+  Start the pipeline for the MR's current head, which a skipped push left without
+  one: GitLab creates a merge request pipeline, GitHub dispatches `opts.workflow`
+  on the PR's head branch. Returns `{:ok, %{mode:, run_id:, url:}}`. Optional;
+  adapters without it cannot take part in CI-skipped pushes.
+  """
+  @callback trigger_pipeline(mr_ref, opts :: map()) :: {:ok, map()} | {:error, term()}
+
   @optional_callbacks prepare: 2,
                       update_branch: 1,
                       update_branch: 2,
                       ancestor?: 3,
                       failing_check_logs: 1,
                       rerun_ci: 2,
+                      ci_skip_mechanism: 1,
+                      trigger_pipeline: 2,
                       ci_job_artifacts: 3,
                       last_green_job_sha: 3,
                       deploy_pipelines: 3,

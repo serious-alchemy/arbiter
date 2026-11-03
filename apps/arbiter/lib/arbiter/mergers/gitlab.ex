@@ -472,6 +472,27 @@ defmodule Arbiter.Mergers.Gitlab do
     end
   end
 
+  # bd-4y9dno. A merge train push for an MR that is not the head carries
+  # `git push -o ci.skip`; the head's pipeline is a merge request pipeline.
+  @impl true
+  def ci_skip_mechanism(_opts), do: {:push_option, "ci.skip"}
+
+  @impl true
+  def trigger_pipeline(mr_ref, _opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, started} <-
+           request(cfg, :post, "/merge_requests/#{iid}/pipelines", json: %{})
+           |> handle_pipeline_create() do
+      {:ok,
+       %{
+         mode: :mr_pipeline,
+         run_id: Map.get(started, "id"),
+         url: Map.get(started, "web_url")
+       }}
+    end
+  end
+
   # Pipeline variables are the only way to carry inputs, and only a new pipeline
   # takes them; pipeline retry replays the original variables (same contract as
   # the GitHub adapter).

@@ -289,4 +289,86 @@ defmodule Arbiter.Guardrails.ReportGitCredentialTest do
     missing = messages(Report.build([ws], rules: []), :git_credential_secret_missing)
     assert Enum.any?(missing, &(&1 =~ "GL_NOPE" and &1 =~ "tonic"))
   end
+
+  describe "gitlab_bot_token expiry (bd-8ufzng)" do
+    @http Arbiter.Worker.GitCredential.HTTP
+
+    defp bot_workspace!(entry_extra \\ %{}) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rep-bot-#{System.unique_integer([:positive])}",
+          prefix: "rb#{:rand.uniform(99_999)}",
+          config: %{
+            "git_credentials" => %{
+              "repos" => %{
+                "tonic" =>
+                  Map.merge(%{"kind" => "gitlab_bot_token", "secret" => "GL_BOT"}, entry_extra)
+              }
+            }
+          },
+          secrets: %{"GL_BOT" => "glpat-bot"}
+        })
+
+      ws
+    end
+
+    defp in_days(n), do: Date.utc_today() |> Date.add(n) |> Date.to_iso8601()
+
+    defp stub_pat(expires_at) do
+      Req.Test.stub(@http, fn conn ->
+        Req.Test.json(conn, %{"expires_at" => expires_at, "scopes" => ["read_api"]})
+      end)
+    end
+
+    defp probe(ws),
+      do: Report.build([ws], rules: [], probe: true, req_options: [plug: {Req.Test, @http}])
+
+    test "a token expiring in 20 days: reported with its expiry, no warning" do
+      stub_pat(in_days(20))
+      ws = bot_workspace!()
+      report = probe(ws)
+
+      assert [%{git_credential_tokens: [token]}] = report.workspaces
+      assert token.expires_at == in_days(20)
+      assert token.days_left == 20
+      assert token.source == "live"
+      assert messages(report, :git_credential_token_expiring) == []
+    end
+
+    test "a token expiring within 14 days warns, naming the date and days left" do
+      stub_pat(in_days(14))
+      report = probe(bot_workspace!())
+
+      assert [message] = messages(report, :git_credential_token_expiring)
+      assert message =~ "tonic"
+      assert message =~ in_days(14)
+      assert message =~ "14"
+    end
+
+    test "an expired token warns that it expired" do
+      stub_pat(in_days(-2))
+      assert [message] = messages(probe(bot_workspace!()), :git_credential_token_expiring)
+      assert message =~ "expired"
+    end
+
+    test "a token with no expiry anywhere warns that it is unknown" do
+      stub_pat(nil)
+      assert [message] = messages(probe(bot_workspace!()), :git_credential_token_expiring)
+      assert message =~ "no expiry"
+    end
+
+    test "without a probe the configured expires_at is used and GitLab is not asked" do
+      ws = bot_workspace!(%{"expires_at" => in_days(5)})
+      report = Report.build([ws], rules: [])
+
+      assert [%{git_credential_tokens: [%{source: "config", days_left: 5}]}] = report.workspaces
+      assert [_] = messages(report, :git_credential_token_expiring)
+    end
+
+    test "posture/2 stays free of network calls and of token rows" do
+      ws = bot_workspace!(%{"expires_at" => in_days(5)})
+      assert %{"issues" => issues} = Report.posture(ws, rules: [])
+      assert is_list(issues)
+    end
+  end
 end
