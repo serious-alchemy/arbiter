@@ -82,7 +82,7 @@ defmodule Arbiter.NodeAgent.PodChannel.Listeners do
     bridge =
       shared ++
         [port: Keyword.get(opts, :bridge_port, 9443)] ++
-        Keyword.take(opts, [:bridge, :notify]) ++ [id: :bridge_listener]
+        Keyword.take(opts, [:bridge, :notify, :tls12_only]) ++ [id: :bridge_listener]
 
     boot =
       shared ++
