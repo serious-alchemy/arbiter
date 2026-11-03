@@ -141,6 +141,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
       with {:ok, task} <- load_task_or_use(task_id, args),
            :ok <- revalidate(task, args),
            {:ok, context} <- resolve_context(task, args),
+           context = Map.put(context, :ci_skip, Map.get(args, :ci_skip)),
            :ok <- PassAdmission.admit(task, :fix_pass, args) do
         # bd-842qio: a CI failure takes the ticket back to work (merging →
         # active) — bd-741sid: as soon as the pass is admitted into its slot.
@@ -522,6 +523,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
     meta = Map.merge(meta, ProviderRouting.run_meta(decision))
     meta = put_node_meta(meta, node, seed)
+    # bd-4y9dno: the host push of a pass for a waiting MR skips CI.
+    meta = if context.ci_skip, do: Map.put(meta, :ci_skip, context.ci_skip), else: meta
 
     # bd-741sid: registered under the ticket id, like every run on the ticket.
     opts = [
