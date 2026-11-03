@@ -76,6 +76,7 @@ defmodule Arbiter.NodeAgent.Run do
     Retained,
     RunSpec,
     Secrets,
+    SeedLayer,
     StdoutBuffer,
     Transcripts
   }
@@ -671,30 +672,62 @@ defmodule Arbiter.NodeAgent.Run do
       seed ->
         shadow = dirs["worktree"].host
 
-        seed_opts = [
-          home: dirs["home"] && dirs["home"].host,
-          root: Path.join(config.node_home, "deps-cache"),
-          scratch: Path.join(config.node_home, "deps-seed")
-        ]
+        # The container sees the shadow at the spec's mount path, not at this host
+        # directory, and Mix compares the directory it runs in with the one a manifest
+        # records: relocate to the former (SI5).
+        seed_opts =
+          [
+            home: dirs["home"] && dirs["home"].host,
+            root: Path.join(config.node_home, "deps-cache"),
+            scratch: Path.join(config.node_home, "deps-seed"),
+            retarget_to: dirs["worktree"].container
+          ] ++ Keyword.take(opts, [:podman, :runner])
 
-        case seed.(
-               shadow,
-               run_image(spec.image),
-               seed_opts ++ Keyword.take(opts, [:podman, :runner])
-             ) do
-          {:ok, _summary} ->
-            exclude_deps(shadow)
-
-          {:error, :no_lockfile} ->
-            :ok
-
-          {:error, reason} ->
-            Logger.warning(
-              "NodeAgent.Run: no deps cache for run #{spec.run}: #{inspect(reason, limit: 10)}"
-            )
-
-            :ok
+        case seed_layer(spec, shadow, seed_opts, opts) do
+          :installed -> exclude_deps(shadow)
+          :fallback -> seed_job(seed, spec, shadow, seed_opts)
         end
+    end
+  end
+
+  # SI5: a run that pulled the published image takes its deps from that image's seed
+  # layer, extracted once per layer and installed (reflink and relocation) when the
+  # checkout's lockfile is the layer's. A run built from a plan has no such layer.
+  defp seed_layer(%RunSpec{image: %{ref: ref, plan: nil}, run: run}, shadow, seed_opts, opts)
+       when is_binary(ref) do
+    install = Keyword.get(opts, :seed_layer_fun, &SeedLayer.install/3)
+
+    case install.(shadow, ref, seed_opts) do
+      {:ok, _summary} ->
+        :installed
+
+      {:fallback, reason} ->
+        Logger.info(
+          "NodeAgent.Run: run #{run} takes no deps from the image's seed layer " <>
+            "(#{inspect(reason, limit: 10)}); seeding on the node"
+        )
+
+        :fallback
+    end
+  end
+
+  defp seed_layer(_spec, _shadow, _seed_opts, _opts), do: :fallback
+
+  # Today's path: a networked seed job in the run's image, keyed by the checkout's own lock.
+  defp seed_job(seed, spec, shadow, seed_opts) do
+    case seed.(shadow, run_image(spec.image), seed_opts) do
+      {:ok, _summary} ->
+        exclude_deps(shadow)
+
+      {:error, :no_lockfile} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "NodeAgent.Run: no deps cache for run #{spec.run}: #{inspect(reason, limit: 10)}"
+        )
+
+        :ok
     end
   end
 

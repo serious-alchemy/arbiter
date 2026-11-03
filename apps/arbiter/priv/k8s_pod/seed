@@ -251,13 +251,11 @@ printf '.\n' >"$dot_git/commondir"
 # into `.git`.
 # The layer also carries `mix_home/` (Hex and rebar, for a podman run's HOME). A pod takes
 # them from the image's MIX_HOME, so it stays out of the checkout (bd-5wm92s).
+# seed-layer copies deps/ and _build/ and relocates them from the directory they were compiled
+# in to ARB_WORKTREE, where the worker mounts the checkout (SI5): Mix rebuilds a dependency whose
+# manifest names another directory, and the pre-push gate cannot rebuild a NIF offline.
 if [ -d "$seed_layer" ]; then
-  for entry in "$seed_layer"/* "$seed_layer"/.[!.]* "$seed_layer"/..?*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    [ "${entry##*/}" = mix_home ] && continue
-    cp -a --no-preserve=ownership "$entry" "$wt/"
-  done
-  chmod -R u+rwX "$wt" 2>/dev/null || true
+  sh "${ARB_BIN_DIR:-/opt/arbiter/bin}/seed-layer" "$seed_layer" "$wt" "${ARB_WORKTREE:-$wt}"
 fi
 if [ -e "$stage/worktree/.git" ]; then
   die "the boot bundle tries to write into .git"

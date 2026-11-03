@@ -1,0 +1,66 @@
+#!/bin/sh
+# /opt/arbiter/bin/seed-layer: install the image's seed layer into the checkout and
+# relocate it (SI5, docs/design/remote-workers.md §21.2.1). `seed` calls it.
+#
+#   seed-layer <layer> <checkout> <runs-at>
+#
+# <layer> is /opt/arbiter/seed: deps/, _build/, mix_home/ and the .complete stamp
+# (lock=, image=, src=). <checkout> is where the init container builds the work tree;
+# <runs-at> is where the worker container mounts it (ARB_WORKTREE), which is not the
+# same directory.
+#
+# deps/ and _build/ are copied. A compiled _build is not position independent: its
+# manifests record the directory Mix compiled in (the stamp's src=) and Mix compares that
+# with the directory it runs in, rebuilding a dependency that disagrees, which offline
+# fails for a NIF dependency. So the copy is relocated from src= to <runs-at> by
+# Arbiter.Worker.DepsRelocate, the same code the node agent runs, loaded from the two
+# source files that sit next to this script and run by the image's own elixir.
+#
+# The stamp and mix_home/ stay out of the checkout (a pod takes Hex and rebar from the
+# image's MIX_HOME, bd-5wm92s). Relocation is best effort: with no stamp, no elixir or a
+# failure, the copy is kept and a line says the dependencies will rebuild, which costs a
+# rebuild and never a wrong build.
+#
+# POSIX sh (the image's /bin/sh is dash). Runs as uid 10001 with a read-only root file
+# system; the checkout is a volume.
+set -eu
+umask 022
+
+layer=${1:?usage: seed-layer <layer> <checkout> <runs-at>}
+wt=${2:?usage: seed-layer <layer> <checkout> <runs-at>}
+runs_at=${3:?usage: seed-layer <layer> <checkout> <runs-at>}
+bin_dir=${ARB_BIN_DIR:-$(dirname "$0")}
+
+warn() {
+  echo "arbiter seed-layer: $1; the dependencies will rebuild" >&2
+}
+
+for entry in "$layer"/* "$layer"/.[!.]* "$layer"/..?*; do
+  [ -e "$entry" ] || [ -L "$entry" ] || continue
+  case ${entry##*/} in
+    mix_home | .complete) continue ;;
+  esac
+  cp -a --no-preserve=ownership "$entry" "$wt/"
+done
+chmod -R u+rwX "$wt" 2>/dev/null || true
+
+stamp=$layer/.complete
+if [ ! -f "$stamp" ]; then
+  warn "the seed layer has no .complete stamp"
+  exit 0
+fi
+from=$(sed -n 's/^src=//p' "$stamp" | head -n 1)
+if [ -z "$from" ]; then
+  warn "the seed layer's stamp names no src="
+  exit 0
+fi
+if ! command -v elixir >/dev/null 2>&1; then
+  warn "the image has no elixir to relocate with"
+  exit 0
+fi
+
+ARB_RELOCATE_ROOT=$wt ARB_RELOCATE_FROM=$from ARB_RELOCATE_TO=$runs_at \
+  ELIXIR_ERL_OPTIONS=+fnu \
+  elixir -r "$bin_dir/deps_relocate_etf.ex" -r "$bin_dir/deps_relocate.ex" -e \
+  'Arbiter.Worker.DepsRelocate.relocate(System.fetch_env!("ARB_RELOCATE_ROOT"), System.fetch_env!("ARB_RELOCATE_FROM"), System.fetch_env!("ARB_RELOCATE_TO"))' ||
+  warn "relocating the seed layer failed"
