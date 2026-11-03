@@ -6,6 +6,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
 
   alias Arbiter.Nodes.{Credentials, JoinToken, Node, NodeEvent, PairingRequest, PlacementWatch}
   alias Arbiter.Worker
+  alias Arbiter.Worker.Image.Source
   alias Arbiter.Workers.RunNode
 
   def node(%Node{} = node) do
@@ -121,7 +122,7 @@ defmodule ArbiterWeb.Api.NodeJSON do
     |> Map.put(:max_workers, row.override)
     |> Map.put(:self_upgrade, Map.get(row, :self_upgrade?, false))
     |> Map.put(:registries, get_in(row, [:caps, "registries"]) || [])
-    |> Map.put(:image_source, Arbiter.Worker.Image.Source.node_source(row))
+    |> Map.put(:image_source, Source.node_source(row))
     |> put_constrained(row)
   end
 

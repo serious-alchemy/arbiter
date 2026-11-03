@@ -541,8 +541,7 @@ defmodule Arbiter.Nodes.Placement do
       node_usable?(row, request) and
       pin_allows?(Map.get(row, :workspace_ids, []), Map.get(request, :workspace_id)) and
       labels_match?(Map.get(row, :labels, []), Map.get(request, :labels, [])) and
-      registry_covered?(row, Map.get(request, :registry)) and
-      registry_pullable?(row, Map.get(request, :registry))
+      registry_usable?(row, Map.get(request, :registry))
   end
 
   @doc """
@@ -562,6 +561,9 @@ defmodule Arbiter.Nodes.Placement do
   end
 
   def registry_pullable?(_row, _registry), do: true
+
+  defp registry_usable?(row, registry),
+    do: registry_covered?(row, registry) and registry_pullable?(row, registry)
 
   @doc "The host of a registry reference (`registry.gitlab.com/vstim` is `registry.gitlab.com`)."
   @spec registry_host(String.t()) :: String.t()

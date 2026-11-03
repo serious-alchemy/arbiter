@@ -13,7 +13,7 @@ defmodule Arbiter.NodeAgent.RegistryProbe do
 
   @type status :: String.t()
 
-  @doc "`%{host => \"reachable\" | \"unreachable\"}`. Options: `:req_options` (tests)."
+  @doc "A map of host to `reachable` or `unreachable`. Options: `:req_options` (tests)."
   @spec probe([term()], keyword()) :: %{String.t() => status()}
   def probe(hosts, opts \\ []) when is_list(hosts) do
     hosts

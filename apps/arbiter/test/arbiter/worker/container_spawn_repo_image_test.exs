@@ -243,8 +243,8 @@ defmodule Arbiter.Worker.ContainerSpawnRepoImageTest do
 
       assert_received {:published, %{repo: "vstim"}}
 
-      # the same machine under the default (build) builds, so it cannot
-      building = [image_source: [config: install, workspaces: []]]
+      # the same machine forced to build (nodes.machine_image_source build) cannot
+      building = [image_source: [machine_image_source: "build", config: install, workspaces: []]]
 
       assert {:error, {:image_unavailable, {:prebuilt_needs_registry, "vstim"}}} =
                ContainerSpawn.preflight_image(repo_path, machine, prebuilt_opts(tip) ++ building)
