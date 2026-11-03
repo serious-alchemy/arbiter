@@ -118,6 +118,10 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "bd-bg87oz: a remote pass whose node could not upload its final checkout fails the pass " <>
        "(the ticket goes back to Merging for the Watchdog's next attempt) rather than push a " <>
        "stale clone — an infrastructure failure of the run, not a review/merge guard"},
+    {Arbiter.Worker.ReviewGate, :fail_quota_refused_reviewer, 2,
+     "bd-3b3oks: marks the quota-refused reviewer's own run failed (typed :quota_exhausted) " <>
+       "so it is not recorded succeeded; the pass rotates to the next reviewer — a run " <>
+       "outcome, not a review/merge guard refusal"},
     {Arbiter.Worker.ReviewGate, :persist_message, 4,
      "thread persistence: mails the review thread, not an escalation"},
     {Arbiter.Worker.ReviewGate, :durable_lines, 1,
