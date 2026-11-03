@@ -47,12 +47,14 @@ defmodule Arbiter.Agents.Claude do
 
   alias Arbiter.Agents.Claude.Config
   alias Arbiter.Agents.Claude.ConfigDir
+  alias Arbiter.Agents.Claude.ControlChannel
   alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Agents.Claude.Security
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Sandbox
+  alias Arbiter.Worker.StopReason
 
   @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
 
@@ -312,6 +314,66 @@ defmodule Arbiter.Agents.Claude do
       %SecurityPolicy{} = policy -> policy
       _ -> SecurityPolicy.default()
     end
+  end
+
+  @doc """
+  Control-channel auth pre-flight (bd-a2zrh0): `initialize` reports the token
+  source, `get_usage` proves the token works — neither is a model turn, so this
+  replaces the billed `claude --print ping` round-trip.
+
+    * `tokenSource: "none"` → `{:error, :auth_expired}` (the CLI itself says it
+      has no credential);
+    * `get_usage` succeeds → `:ok` (the token was exercised against the API);
+    * `get_usage` fails with an auth error → `{:error, :auth_expired}`;
+    * **anything else** → `:skipped`, and `Preflight` runs `auth_probe_argv/1`
+      (the `ping`) exactly as before: control channel disabled / CLI too old /
+      request unsupported / timeout / CLI exit, a non-auth `get_usage` failure
+      (e.g. a setup token the usage endpoint refuses with a 429), or a workspace
+      with no credential (the ping path owns that refusal, bd-80ecol).
+
+  `initialize` alone never yields `:ok`: it names the token's *source*, not its
+  validity, so an expired token still reads as authenticated there.
+  """
+  @impl true
+  def auth_probe(opts \\ []) do
+    with true <- ControlChannel.enabled?(),
+         :ok <- CredentialCheck.check(Keyword.get(opts, :workspace)),
+         {:ok, %{account: account, usage: usage}} <- ControlChannel.run(control_opts(opts)) do
+      control_verdict(ControlChannel.auth_state(account), usage)
+    else
+      _ -> :skipped
+    end
+  end
+
+  defp control_opts(opts) do
+    opts
+    |> Keyword.take([:control_command, :cli_version, :timeout_ms])
+    |> Keyword.update(:timeout_ms, 15_000, &min(&1, 15_000))
+    |> Keyword.put(:usage, true)
+    |> Keyword.put(:env, spawn_env(opts))
+  end
+
+  defp control_verdict(:unauthenticated, _usage),
+    do: {:error, control_auth_reason("the CLI reports no credential (tokenSource: none)")}
+
+  defp control_verdict(_state, {:ok, _body}), do: :ok
+
+  defp control_verdict(_state, {:error, msg}) when is_binary(msg) do
+    case StopReason.classify(1, [msg], "claude") do
+      %StopReason{category: :auth_expired} -> {:error, control_auth_reason(msg)}
+      _ -> :skipped
+    end
+  end
+
+  defp control_verdict(_state, _usage), do: :skipped
+
+  defp control_auth_reason(detail) do
+    %StopReason{
+      category: :auth_expired,
+      summary: "Claude auth pre-flight (control channel): #{detail}",
+      remediation:
+        "Re-issue the workspace's Claude setup token (`claude setup-token`) or refresh the login."
+    }
   end
 
   @impl true
