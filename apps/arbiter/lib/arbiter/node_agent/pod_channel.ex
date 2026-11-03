@@ -6,7 +6,7 @@ defmodule Arbiter.NodeAgent.PodChannel do
 
   ```
   pod  --mTLS :9443-->  BridgeListener --adopt--> NodeAgent.Bridge --bridge.open--> primary
-  pod  --HTTPS :9444--> PodServer: /boot  /seed.bundle  /checkpoint  /transcripts  /commands
+  pod  --HTTPS :9444--> PodServer: /boot  /seed.bundle  /checkpoint  /transcripts  /commands  /events
   ```
 
     * **Identity.** `Arbiter.NodeAgent.PodChannel.CA` creates the per-install CA on

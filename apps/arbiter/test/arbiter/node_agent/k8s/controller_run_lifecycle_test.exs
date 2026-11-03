@@ -83,6 +83,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerRunLifecycleTest do
          observer: self(),
          now_fun: fn -> Agent.get(clock, & &1) end,
          tick_ms: nil,
+         event_feed: false,
          name: nil},
         id: {:controller, n}
       )

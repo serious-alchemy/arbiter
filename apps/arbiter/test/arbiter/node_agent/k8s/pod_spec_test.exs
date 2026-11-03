@@ -615,11 +615,24 @@ defmodule Arbiter.NodeAgent.K8s.PodSpecTest do
       meta = pod["metadata"]
 
       assert meta["labels"]["arbiter.dev/task"] == "bd-1hoo7j_review"
-      assert meta["annotations"] == %{"arbiter.dev/task" => "bd-1hoo7j#review"}
+      assert meta["annotations"]["arbiter.dev/task"] == "bd-1hoo7j#review"
     end
 
-    test "a task that is already a valid label gets no annotation" do
-      refute Map.has_key?(build!()["metadata"], "annotations")
+    test "a task that is already a valid label gets no task annotation" do
+      refute Map.has_key?(build!()["metadata"]["annotations"], "arbiter.dev/task")
+    end
+
+    test "the pod is annotated as an event-feed pod and its worker told so (bd-1nl506)" do
+      pod = build!()
+      assert pod["metadata"]["annotations"]["arbiter.dev/events"] == "1"
+      env = container(pod, "worker")["env"]
+      assert %{"name" => "ARB_EVENTS", "value" => "1"} in env
+    end
+
+    test "event_feed: false leaves the pod on the kubelet log" do
+      pod = build!(nil, %{event_feed: false})
+      refute Map.has_key?(pod["metadata"], "annotations")
+      refute Enum.any?(container(pod, "worker")["env"], &(&1["name"] == "ARB_EVENTS"))
     end
 
     test "the sanitized container name for every synthetic run id kind is accepted" do
