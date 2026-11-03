@@ -17,13 +17,37 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
       `remote` / `projects` of sibling `gitlab_bot_token` entries that name the same
       secret and host. Anything wider refuses the spawn.
 
-  Both checks fail closed: an answer that cannot be read is a refusal, never a
+  A **fine-grained** personal access token (bd-8h80lm) is recognised by the
+  `granular_scopes` list `personal_access_tokens/self` returns instead of `scopes`.
+  Its own resource list, not the bot's membership, is the boundary then (membership
+  is typically wider: the bot is a member of whole groups):
+
+    * every `granular_scopes` entry must be `access: "selected_memberships"` naming
+      one `project_id`; a group, `all_memberships`, `personal_projects`, `user` or
+      `instance` entry is not a project list and refuses;
+    * the `permissions` across entries must be within `allowed_granular_permissions/0`;
+    * the project ids are resolved to paths through
+      `GET /personal_access_tokens/self/associations`, and the paths must be exactly
+      the configured projects (same rule as membership above).
+
+  The fine-grained response shape (`granular_scopes`, `/self/associations`) is from
+  GitLab's API reference; the permission identifiers for Git push and download are
+  not documented there, so `allowed_granular_permissions/0` is an unverified
+  assumption: if it is wrong the guard refuses (naming the permissions it saw)
+  rather than passes.
+
+  Every check fails closed: an answer that cannot be read is a refusal, never a
   delivery. Nothing here logs or returns the token.
   """
 
   alias Arbiter.Tasks.Workspace
 
   @allowed_scopes ~w(read_api read_repository write_repository)
+  # UNVERIFIED (bd-8h80lm): GitLab's UI calls these "Code: Download" and "Code: Push",
+  # but its API reference does not list the identifiers. Capture a redacted
+  # `granular_scopes` of the real bot token and correct this list; until then a wrong
+  # name only makes the guard refuse.
+  @allowed_granular_permissions ~w(download_code push_code)
   @per_page 100
   @max_pages 20
   @warn_days 14
@@ -32,6 +56,10 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
           {:git_credential_bot_token_refused,
            {:scopes, [String.t()]}
            | {:membership, [String.t()]}
+           | {:resources, [String.t()]}
+           | {:granular_permissions, [String.t()]}
+           | {:granular_boundary, [String.t()]}
+           | :not_reachable
            | :no_expiry
            | :expired
            | :inactive
@@ -41,6 +69,10 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
   @doc "The scopes a bot token may carry."
   @spec allowed_scopes() :: [String.t()]
   def allowed_scopes, do: @allowed_scopes
+
+  @doc "The permissions a fine-grained bot token may carry (unverified names; see the moduledoc)."
+  @spec allowed_granular_permissions() :: [String.t()]
+  def allowed_granular_permissions, do: @allowed_granular_permissions
 
   @doc "Days ahead of the expiry `arb doctor` starts to warn."
   @spec warn_days() :: pos_integer()
@@ -56,8 +88,8 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
     with :ok <- check_configured_expiry(entry.expires_at),
          {:ok, pat} <- self_pat(entry, token, req_options),
          :ok <- check_pat(pat),
-         {:ok, member_of} <- memberships(entry, token, req_options) do
-      check_membership(member_of, allowed_projects(entry, remote, repos), remote)
+         {:ok, reach} <- reach(entry, token, pat, req_options) do
+      check_reach(reach, allowed_projects(entry, remote, repos), remote)
     end
   end
 
@@ -78,42 +110,123 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
   end
 
   defp check_pat(%{} = pat) do
-    scopes = List.wrap(Map.get(pat, "scopes"))
-    extra = Enum.reject(scopes, &(&1 in @allowed_scopes))
-
     cond do
       Map.get(pat, "active") == false or Map.get(pat, "revoked") == true ->
         refused(:inactive)
 
-      extra != [] ->
-        refused({:scopes, Enum.sort(extra)})
+      Map.has_key?(pat, "granular_scopes") ->
+        with :ok <- check_granular_permissions(Map.get(pat, "granular_scopes")),
+             do: check_pat_expiry(pat)
 
       true ->
-        case parse_date(Map.get(pat, "expires_at")) do
-          nil ->
-            refused(:no_expiry)
+        extra = pat |> Map.get("scopes") |> List.wrap() |> Enum.reject(&(&1 in @allowed_scopes))
 
-          %Date{} = date ->
-            if Date.compare(date, Date.utc_today()) == :lt, do: refused(:expired), else: :ok
-        end
+        if extra == [],
+          do: check_pat_expiry(pat),
+          else: refused({:scopes, Enum.sort(extra)})
     end
   end
 
-  defp check_membership(member_of, allowed, remote) do
+  defp check_pat_expiry(pat) do
+    case parse_date(Map.get(pat, "expires_at")) do
+      nil ->
+        refused(:no_expiry)
+
+      %Date{} = date ->
+        if Date.compare(date, Date.utc_today()) == :lt, do: refused(:expired), else: :ok
+    end
+  end
+
+  # A fine-grained token: the permissions across every resource entry. An unreadable
+  # list is unverifiable, never "no extras".
+  defp check_granular_permissions([_ | _] = scopes) do
+    if Enum.all?(scopes, &(is_map(&1) and is_list(Map.get(&1, "permissions")))) do
+      extra =
+        scopes
+        |> Enum.flat_map(&Map.fetch!(&1, "permissions"))
+        |> Enum.map(&to_string/1)
+        |> Enum.reject(&(&1 in @allowed_granular_permissions))
+        |> Enum.uniq()
+
+      if extra == [], do: :ok, else: refused({:granular_permissions, Enum.sort(extra)})
+    else
+      unverifiable("granular_scopes: an entry without a permissions list")
+    end
+  end
+
+  defp check_granular_permissions(_),
+    do: unverifiable("granular_scopes: no resources listed, so the token's reach is unknown")
+
+  # What the token reaches: `{:membership, paths}` for a classic PAT (the bot's
+  # memberships), `{:resources, paths}` for a fine-grained one (its own resource list).
+  @spec reach(map(), String.t(), map(), keyword()) ::
+          {:ok, {:membership | :resources, [String.t()]}} | {:error, refusal()}
+  defp reach(entry, token, pat, req_options) do
+    if Map.has_key?(pat, "granular_scopes") do
+      with {:ok, paths} <- granular_projects(entry, token, pat, req_options),
+           do: {:ok, {:resources, paths}}
+    else
+      with {:ok, paths} <- memberships(entry, token, req_options),
+           do: {:ok, {:membership, paths}}
+    end
+  end
+
+  # Each resource entry must name exactly one project; the ids are then resolved to
+  # paths. Callers have already run `check_granular_permissions/1`, so `scopes` is a
+  # non-empty list of maps.
+  defp granular_projects(entry, token, pat, req_options) do
+    scopes = Map.fetch!(pat, "granular_scopes")
+
+    wide =
+      for scope <- scopes, not project_scope?(scope), do: describe_boundary(scope)
+
+    if wide == [] do
+      ids = scopes |> Enum.map(&Map.fetch!(&1, "project_id")) |> Enum.uniq()
+
+      with {:ok, by_id} <- associations(entry, token, req_options) do
+        case Enum.reject(ids, &Map.has_key?(by_id, &1)) do
+          [] ->
+            {:ok, Enum.map(ids, &Map.fetch!(by_id, &1))}
+
+          missing ->
+            unverifiable(
+              "project id(s) #{Enum.join(missing, ", ")} are not in the token's associations"
+            )
+        end
+      end
+    else
+      refused({:granular_boundary, wide |> Enum.uniq() |> Enum.sort()})
+    end
+  end
+
+  defp project_scope?(scope),
+    do: scope["access"] == "selected_memberships" and is_integer(scope["project_id"])
+
+  defp describe_boundary(%{"access" => "selected_memberships", "group_id" => id})
+       when is_integer(id),
+       do: "group #{id} (every project in it)"
+
+  defp describe_boundary(%{"access" => access}) when is_binary(access), do: "access #{access}"
+  defp describe_boundary(_), do: "an unrecognised resource entry"
+
+  defp check_reach({kind, reached}, allowed, remote) do
     allowed = MapSet.new(Enum.map(allowed, &String.downcase/1))
-    member = Map.new(member_of, &{String.downcase(&1), &1})
+    reached_map = Map.new(reached, &{String.downcase(&1), &1})
 
     extra =
-      member
+      reached_map
       |> Enum.reject(fn {key, _} -> MapSet.member?(allowed, key) end)
       |> Enum.map(&elem(&1, 1))
 
     cond do
-      extra != [] -> refused({:membership, Enum.sort(extra)})
-      not Map.has_key?(member, String.downcase(remote)) -> refused(:not_a_member)
+      extra != [] -> refused({kind, Enum.sort(extra)})
+      not Map.has_key?(reached_map, String.downcase(remote)) -> refused(not_reached(kind))
       true -> :ok
     end
   end
+
+  defp not_reached(:membership), do: :not_a_member
+  defp not_reached(:resources), do: :not_reachable
 
   defp refused(reason), do: {:error, {:git_credential_bot_token_refused, reason}}
 
@@ -170,6 +283,43 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
 
       {:ok, %Req.Response{status: status}} ->
         unverifiable("projects?membership=true: HTTP #{status}")
+
+      {:error, why} ->
+        unverifiable(why)
+    end
+  end
+
+  # `GET /personal_access_tokens/self/associations` -> `%{project id => path}`.
+  defp associations(entry, token, req_options),
+    do: associations(entry, token, req_options, 1, %{})
+
+  defp associations(_entry, _token, _req_options, page, _acc) when page > @max_pages,
+    do: unverifiable("more than #{@max_pages * @per_page} associations")
+
+  defp associations(entry, token, req_options, page, acc) do
+    params = [per_page: @per_page, page: page]
+    path = "/personal_access_tokens/self/associations"
+
+    case get(entry, token, path, params, req_options) do
+      {:ok, %Req.Response{status: 200, body: %{"projects" => projects}} = response}
+      when is_list(projects) ->
+        acc =
+          for %{"id" => id, "path_with_namespace" => p} <- projects,
+              is_integer(id),
+              is_binary(p),
+              into: acc,
+              do: {id, p}
+
+        case Req.Response.get_header(response, "x-next-page") do
+          [next | _] when next != "" -> associations(entry, token, req_options, page + 1, acc)
+          _ -> {:ok, acc}
+        end
+
+      {:ok, %Req.Response{status: 200}} ->
+        unverifiable("personal_access_tokens/self/associations: unreadable answer")
+
+      {:ok, %Req.Response{status: status}} ->
+        unverifiable("personal_access_tokens/self/associations: HTTP #{status}")
 
       {:error, why} ->
         unverifiable(why)
@@ -279,6 +429,71 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
     case self_pat(parsed, token, req_options) do
       {:ok, pat} -> parse_date(Map.get(pat, "expires_at"))
       _ -> nil
+    end
+  end
+
+  @type unreachable :: %{
+          repo: String.t(),
+          remote: String.t(),
+          secret: String.t(),
+          host: String.t()
+        }
+
+  @doc """
+  The configured repos whose project the token cannot reach (bd-8h80lm), one row
+  per repo: each `gitlab_bot_token` entry with a `remote` is checked against what
+  its token reaches (the bot's memberships for a classic PAT, the token's own
+  resources for a fine-grained one). A token whose reach cannot be read (GitLab
+  unreachable, an unreadable answer, a group-wide boundary) yields no rows: the
+  dispatch guard, not the report, is what refuses it. Options as `expiries/2`;
+  with `probe: false` nothing is asked and no rows come back.
+  """
+  @spec unreachable(map() | nil, keyword()) :: [unreachable()]
+  def unreachable(workspace, opts \\ []) do
+    if Keyword.get(opts, :probe, true) do
+      req_options = Keyword.get(opts, :req_options, [])
+      store = secret_store(workspace)
+
+      workspace
+      |> Arbiter.Worker.GitCredential.block()
+      |> Map.get("repos", %{})
+      |> Enum.filter(fn {_repo, entry} ->
+        match?(%{"kind" => "gitlab_bot_token", "remote" => r} when is_binary(r), entry)
+      end)
+      |> Enum.group_by(fn {_repo, e} ->
+        {e["secret"], e["host"] || "gitlab.com", e["api_url"]}
+      end)
+      |> Enum.flat_map(&unreachable_in_group(&1, store, req_options))
+      |> Enum.sort_by(& &1.repo)
+    else
+      []
+    end
+  end
+
+  # One token (secret + host + api_url) and the entries that use it.
+  defp unreachable_in_group({{secret, host, api_url}, group}, store, req_options) do
+    case reached_paths(%{host: host, api_url: api_url}, Map.get(store, secret), req_options) do
+      {:ok, paths} ->
+        reached = MapSet.new(paths, &String.downcase/1)
+
+        for {repo, e} <- group, not MapSet.member?(reached, String.downcase(e["remote"])) do
+          %{repo: to_string(repo), remote: e["remote"], secret: secret, host: host}
+        end
+
+      :unknown ->
+        []
+    end
+  end
+
+  defp reached_paths(_parsed, token, _req_options) when not is_binary(token) or token == "",
+    do: :unknown
+
+  defp reached_paths(parsed, token, req_options) do
+    with {:ok, pat} <- self_pat(parsed, token, req_options),
+         {:ok, {_kind, paths}} <- reach(parsed, token, pat, req_options) do
+      {:ok, paths}
+    else
+      _ -> :unknown
     end
   end
 
