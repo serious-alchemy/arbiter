@@ -6799,11 +6799,13 @@ defmodule Arbiter.Worker do
 
   # bd-2z3ogf: the 7d reset recorded in the account's latest quota snapshot,
   # consulted only when the stop message carried no reset time of its own.
-  defp weekly_reset_for(%State{} = state, %{category: :quota_exhausted, retry_after: nil}) do
+  @doc false
+  def weekly_reset_for(%State{} = state, %{category: :quota_exhausted, retry_after: nil}) do
     now = DateTime.utc_now()
 
-    with %Arbiter.Tasks.Issue{workspace_id: ws_id} when is_binary(ws_id) <-
-           load_issue(state.task_id),
+    # `effective_workspace_id/1`, not `load_issue(task_id)`: a `<task>#review`
+    # worker has neither an Issue of its own nor a workspace_id (bd-2z3ogf).
+    with ws_id when is_binary(ws_id) <- effective_workspace_id(state),
          {:ok, agent_type} <- quota_stop_agent_type(state),
          %{secondary_reset_at: %DateTime{} = at} <-
            ws_id |> Arbiter.Quota.latest_for_workspace(agent_type) |> GateSnapshot.normalize(),
@@ -6818,7 +6820,7 @@ defmodule Arbiter.Worker do
     :exit, _ -> nil
   end
 
-  defp weekly_reset_for(_state, _reason), do: nil
+  def weekly_reset_for(_state, _reason), do: nil
 
   # bd-cwq8b0: can this worker's provider rewrite its argv for a `--resume`?
   # Same test `inject_resume_argv/4` applies at respawn time.
