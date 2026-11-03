@@ -63,6 +63,7 @@ defmodule Arbiter.Worker.Image.LocalPublishedTest do
     File.write!(mountinfo, "36 35 98:0 / #{rt} rw,noatime - tmpfs none rw\n")
 
     [
+      published_image: true,
       repo: "vstim",
       run: "arb-local-1",
       provider: "claude",
