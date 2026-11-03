@@ -33,8 +33,8 @@ defmodule Arbiter.Nodes.Placement do
       redispatch after a failure BEFORE the agent started (prepare, publish, pull,
       a node refusal) is placed like a first attempt, `Dispatch.node_kind/2`,
       bd-amm00p; a retained primary worktree with work in it is `:local_work`);
-    * every non-Claude provider (`:non_claude_provider`; the podman backend is
-      wired for Claude only);
+    * every provider outside `remote_providers/0` (`:provider_not_remote`; Claude and Codex are in it, Codex per node on `caps.credential_sync`; the podman backend is
+      wired for Claude and Codex only);
     * anything not run in a podman container (`:not_podman`: bwrap-jailed or
       unsandboxed; the jail needs the primary's filesystem and keyring);
     * a dispatch handed no checkout at all (`:no_private_clone`: `provision_worktree:
@@ -42,7 +42,7 @@ defmodule Arbiter.Nodes.Placement do
       read-only seeded checkout of the target branch tip (`inspect?`, bd-6ypj2y),
       placed like a reviewer's: nothing is collected or pushed back, and only notes,
       progress and the transcript return. Off podman or Claude it is `:not_podman` /
-      `:non_claude_provider` like any other run;
+      `:provider_not_remote` like any other run;
     * a dispatch whose home clone already holds uncommitted work
       (`:local_work`: a re-dispatch of a ticket an earlier local run left
       dirty; the seed carries commits, not the work tree, and the run's snapshot
@@ -166,10 +166,33 @@ defmodule Arbiter.Nodes.Placement do
   # worker's GitLab API credential, so the container of *every* run kind holds it.
   @remote_git_credential_kinds [:github_app, :gitlab_project_token, :gitlab_bot_token]
 
+  # SI11 (§21.5): the providers with a remote credential path. Claude's travels with
+  # every run; Codex's rotating login needs the node to advertise
+  # `caps.credential_sync: ["codex"]` (checked per node in `candidate?/3`).
+  @remote_providers ["claude", "codex"]
+
+  @doc "The providers a run may be placed remotely with (`ContainerSpawn` reads the same set)."
+  @spec remote_providers() :: [String.t()]
+  def remote_providers, do: @remote_providers
+
+  @doc """
+  Can `row` carry `provider`'s login back to the primary? Claude needs nothing; any other
+  remote provider needs it in the node's `caps.credential_sync`.
+  """
+  @spec credential_synced?(map(), atom() | String.t() | nil) :: boolean()
+  def credential_synced?(_row, provider) when provider in [:claude, "claude"], do: true
+
+  def credential_synced?(row, provider) do
+    case get_in(Map.get(row, :caps) || %{}, ["credential_sync"]) do
+      list when is_list(list) -> to_string(provider) in list
+      _ -> false
+    end
+  end
+
   @type mode :: :local_only | :prefer_remote | :remote_only
   @type reason ::
           :follow_up
-          | :non_claude_provider
+          | :provider_not_remote
           | :not_podman
           | :no_private_clone
           | :local_work
@@ -235,7 +258,7 @@ defmodule Arbiter.Nodes.Placement do
   def eligible(request) do
     cond do
       request.kind not in @remote_kinds -> {:local_only, :follow_up}
-      not claude?(request.provider) -> {:local_only, :non_claude_provider}
+      not remote_provider?(request.provider) -> {:local_only, :provider_not_remote}
       request.layout != :private_clone -> {:local_only, :not_podman}
       no_checkout?(request) -> {:local_only, :no_private_clone}
       Map.get(request, :local_work?, false) -> {:local_only, :local_work}
@@ -290,7 +313,7 @@ defmodule Arbiter.Nodes.Placement do
   defp no_checkout?(request),
     do: Map.get(request, :no_pr?, false) and not Map.get(request, :inspect?, false)
 
-  defp claude?(provider), do: to_string(provider) == "claude"
+  defp remote_provider?(provider), do: to_string(provider) in @remote_providers
 
   @doc "Why a run is local-only, as a phrase for a hold message."
   @spec reason_phrase(reason(), map()) :: String.t()
@@ -299,10 +322,11 @@ defmodule Arbiter.Nodes.Placement do
 
   def reason_phrase(:follow_up, _), do: "follow-up runs stay on the primary"
 
-  def reason_phrase(:non_claude_provider, %{provider: provider}),
-    do: "provider #{provider} has no podman path"
+  def reason_phrase(:provider_not_remote, %{provider: provider}),
+    do: "provider #{provider} has no remote credential path"
 
-  def reason_phrase(:non_claude_provider, _), do: "only Claude has a podman path"
+  def reason_phrase(:provider_not_remote, _),
+    do: "only Claude and Codex have a remote credential path"
 
   def reason_phrase(:not_podman, _),
     do: "sandbox is not podman (bwrap-jailed or unsandboxed)"
@@ -542,7 +566,8 @@ defmodule Arbiter.Nodes.Placement do
       node_usable?(row, request) and
       pin_allows?(Map.get(row, :workspace_ids, []), Map.get(request, :workspace_id)) and
       labels_match?(Map.get(row, :labels, []), Map.get(request, :labels, [])) and
-      registry_usable?(row, Map.get(request, :registry))
+      registry_usable?(row, Map.get(request, :registry)) and
+      credential_synced?(row, Map.get(request, :provider))
   end
 
   @doc """

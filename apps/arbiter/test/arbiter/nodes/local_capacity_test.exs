@@ -450,7 +450,7 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
       for kind <- Map.keys(LocalCapacity.kinds()) do
         assert {:error, {:no_node_capacity, info}} =
                  LocalCapacity.admit("bd-zero-#{kind}", kind,
-                   reason: {:local_only, :non_claude_provider},
+                   reason: {:local_only, :provider_not_remote},
                    provider: :codex
                  )
 
@@ -458,7 +458,7 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
         assert info.node == "local"
 
         assert info.phrase ==
-                 "held — local capacity 0 (run is local-only: provider codex has no podman path)"
+                 "held — local capacity 0 (run is local-only: provider codex has no remote credential path)"
       end
     end
 
@@ -577,7 +577,7 @@ defmodule Arbiter.Nodes.LocalCapacityTest do
       assert {:error, {:no_node_capacity, info}} = LocalCapacity.gate(request, [])
 
       assert info.phrase =~
-               "held — local capacity 0 (run is local-only: provider agy has no podman path)"
+               "held — local capacity 0 (run is local-only: provider agy has no remote credential path)"
     end
 
     test "remote_only with no node capacity is refused before the local cap is read" do
