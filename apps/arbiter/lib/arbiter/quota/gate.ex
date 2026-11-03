@@ -595,9 +595,20 @@ defmodule Arbiter.Quota.Gate do
   """
   @spec window_seconds(String.t() | nil, ProviderAccount.t() | nil) :: pos_integer() | nil
   def window_seconds(label, account \\ nil) do
+    label = base_label(label)
+
     account_window_seconds(account, label) || Map.get(@builtin_window_seconds, label) ||
       minutes_label_seconds(label)
   end
+
+  @doc """
+  A window label without its scope: `"7d (Fable)"` → `"7d"` (bd-e0b7so). A scoped
+  window (`Arbiter.Quota.Gate.Snapshot`'s `scoped`) is a nested window of the
+  long one, so it has the long window's length, rates and class.
+  """
+  @spec base_label(String.t() | nil) :: String.t() | nil
+  def base_label(label) when is_binary(label), do: String.replace(label, ~r/ \(.+\)\z/, "")
+  def base_label(label), do: label
 
   # A `"<n>m"` label (a Codex window of a length with no named label, derived
   # from the stored `window_minutes` — bd-7lkvb6) is n minutes long.
@@ -735,16 +746,21 @@ defmodule Arbiter.Quota.Gate do
         now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
         policy = merge_account(policy, Keyword.get(opts, :account))
         pace_opts = [now: now, priority: nil]
-        primary? = s.window_label != nil and not snapshot_stale?(s, now)
-        long? = not snapshot_long_stale?(s, now)
 
-        [
-          {primary?, &primary_status_binding/3},
-          {long?, &secondary_status_binding/3},
-          {long?, &secondary_warning_binding/3}
-        ]
-        |> Enum.filter(fn {trusted?, _rule} -> trusted? end)
-        |> Enum.find_value(fn {_trusted?, rule} -> rule.(s, policy, pace_opts) end)
+        s
+        |> Snapshot.long_views()
+        |> Enum.find_value(fn view ->
+          primary? = view.window_label != nil and not snapshot_stale?(view, now)
+          long? = not snapshot_long_stale?(view, now)
+
+          [
+            {primary?, &primary_status_binding/3},
+            {long?, &secondary_status_binding/3},
+            {long?, &secondary_warning_binding/3}
+          ]
+          |> Enum.filter(fn {trusted?, _rule} -> trusted? end)
+          |> Enum.find_value(fn {_trusted?, rule} -> rule.(view, policy, pace_opts) end)
+        end)
     end
   end
 
@@ -831,9 +847,11 @@ defmodule Arbiter.Quota.Gate do
 
       [
         {:primary, s.window_label != nil and not snapshot_stale?(s, now), s.window_label,
-         s.utilization, s.reset_at},
-        {:long, not snapshot_long_stale?(s, now) and s.secondary_window_label != nil,
-         s.secondary_window_label, s.secondary_utilization, s.secondary_reset_at}
+         s.utilization, s.reset_at}
+        | for view <- Snapshot.long_views(s) do
+            {:long, not snapshot_long_stale?(view, now) and view.secondary_window_label != nil,
+             view.secondary_window_label, view.secondary_utilization, view.secondary_reset_at}
+          end
       ]
       |> Enum.find_value(fn {window, trusted?, label, used, reset_at} ->
         trusted? and is_number(used) and
@@ -1359,21 +1377,33 @@ defmodule Arbiter.Quota.Gate do
 
   # `pace?` false (DC8's `pace: false`) leaves the utilization rules out: what
   # is left is `hard_stop/3`'s status rules, in the same order and trust.
+  #
+  # The scoped windows of the snapshot (bd-e0b7so) are extra long windows: the
+  # same rules run over `Snapshot.long_views/1` — the base window first, then
+  # each scoped one — and the first hold wins. The primary window and the burn
+  # governor belong to the account, so only the base view runs them.
   defp binding(%Snapshot{} = s, policy, now, priority, pace?) do
     pace_opts = [now: now, priority: priority]
-    primary? = not snapshot_stale?(s, now)
-    long? = not snapshot_long_stale?(s, now)
 
-    [
-      {primary?, &primary_status_binding/3},
-      {long?, &secondary_status_binding/3},
-      {primary? and pace?, &primary_utilization_binding/3},
-      {long? and pace?, &secondary_utilization_binding/3},
-      {long?, &secondary_warning_binding/3},
-      {long? and pace?, &burn_binding/3}
-    ]
-    |> Enum.filter(fn {trusted?, _rule} -> trusted? end)
-    |> Enum.find_value(fn {_trusted?, rule} -> rule.(s, policy, pace_opts) end)
+    s
+    |> Snapshot.long_views()
+    |> Enum.with_index()
+    |> Enum.find_value(fn {view, index} ->
+      base? = index == 0
+      primary? = base? and not snapshot_stale?(view, now)
+      long? = not snapshot_long_stale?(view, now)
+
+      [
+        {primary?, &primary_status_binding/3},
+        {long?, &secondary_status_binding/3},
+        {primary? and pace?, &primary_utilization_binding/3},
+        {long? and pace?, &secondary_utilization_binding/3},
+        {long?, &secondary_warning_binding/3},
+        {base? and long? and pace?, &burn_binding/3}
+      ]
+      |> Enum.filter(fn {trusted?, _rule} -> trusted? end)
+      |> Enum.find_value(fn {_trusted?, rule} -> rule.(view, policy, pace_opts) end)
+    end)
   end
 
   # The rolling-24h burn governor (bd-cklotu): a flat rule, last in the order,
@@ -1601,7 +1631,7 @@ defmodule Arbiter.Quota.Gate do
 
   # The long windows are the ones the secondary mapping names; everything else
   # ("5h", "session", "used", "primary") is the short/primary window.
-  defp primary_window?(window), do: window not in ["7d", "weekly", "30d"]
+  defp primary_window?(window), do: base_label(window) not in ["7d", "weekly", "30d"]
 
   defp percent(n) when is_number(n), do: "#{round(n * 100)}%"
   defp percent(_), do: "—"

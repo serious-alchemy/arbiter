@@ -23,7 +23,7 @@ defmodule Arbiter.NodeAgent.PodChannel.Tls do
   @doc """
   Server options for `identity` (`%{key:, der:}`, the controller's server
   certificate) and `ca`. Extra options: `:require_client_cert` (default `true`),
-  `:send_timeout_ms`.
+  `:send_timeout_ms`, `:tls12_only` (default `false`; pins TLS 1.2).
   """
   @spec server_options(Cert.t(), Cert.t(), keyword()) :: keyword()
   def server_options(identity, ca, opts \\ []) do
@@ -34,7 +34,15 @@ defmodule Arbiter.NodeAgent.PodChannel.Tls do
       verify: :verify_peer,
       depth: 0,
       fail_if_no_peer_cert: Keyword.get(opts, :require_client_cert, true),
-      versions: [:"tlsv1.3", :"tlsv1.2"],
+      versions:
+        if(Keyword.get(opts, :tls12_only, false),
+          do: [:"tlsv1.2"],
+          else: [:"tlsv1.3", :"tlsv1.2"]
+        ),
+      # TLS 1.3 NewSessionTicket records after the handshake coincide with
+      # socat's decode_error alert on :9443; tickets are never resumed here
+      # (`reuse_sessions: false`), so do not send them.
+      session_tickets: :disabled,
       reuse_sessions: false,
       honor_cipher_order: true
     ]

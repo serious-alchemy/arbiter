@@ -32,6 +32,8 @@ defmodule Arbiter.Nodes.Bridge.Stream do
 
   use GenServer, restart: :temporary
 
+  require Logger
+
   @send_timeout_ms 30_000
   @dial_timeout_ms 5_000
 
@@ -157,14 +159,17 @@ defmodule Arbiter.Nodes.Bridge.Stream do
   end
 
   def handle_info({tag, sock}, %{sock: sock} = state) when tag in [:tcp_closed, :ssl_closed] do
+    Logger.debug("bridge stream: #{tag} (peer closed)")
     notify(state, :eof)
     state = %{state | eof_in?: true}
     if state.eof_out?, do: {:stop, :normal, state}, else: {:noreply, state}
   end
 
   def handle_info({tag, sock, reason}, %{sock: sock} = state)
-      when tag in [:tcp_error, :ssl_error],
-      do: fail(state, {:read, reason})
+      when tag in [:tcp_error, :ssl_error] do
+    Logger.debug("bridge stream: #{tag} #{inspect(reason)}")
+    fail(state, {:read, reason})
+  end
 
   def handle_info(_other, state), do: {:noreply, state}
 
