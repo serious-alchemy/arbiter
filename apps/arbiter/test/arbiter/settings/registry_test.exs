@@ -131,11 +131,11 @@ defmodule Arbiter.Settings.RegistryTest do
   # SI4 (`docs/design/remote-workers.md` §21.4, §21.6): the install-wide read credential a
   # machine node may be handed for one pull, and the switch that lets machines pull at all.
   describe "machine-node pull settings (SI4)" do
-    test "nodes.machine_image_source is auto or build, defaults to build, operator-only" do
-      assert %{value: "build", default: "build", overridden: false, allowed: ["auto", "build"]} =
+    test "nodes.machine_image_source is auto or build, defaults to auto, operator-only" do
+      assert %{value: "auto", default: "auto", overridden: false, allowed: ["auto", "build"]} =
                Registry.describe("nodes.machine_image_source")
 
-      assert Settings.machine_image_source() == "build"
+      assert Settings.machine_image_source() == "auto"
 
       for bad <- ["registry", "Auto", "", 1, true] do
         assert {:error, msg} = Registry.cast("nodes.machine_image_source", bad)
@@ -150,7 +150,7 @@ defmodule Arbiter.Settings.RegistryTest do
       assert {:ok, "auto"} = Registry.put("nodes.machine_image_source", "auto")
       assert Settings.machine_image_source() == "auto"
       assert {:ok, nil} = Registry.put("nodes.machine_image_source", nil)
-      assert Settings.machine_image_source() == "build"
+      assert Settings.machine_image_source() == "auto"
       assert {:error, :invalid_value} = Settings.set_nodes_machine_image_source("registry")
     end
 

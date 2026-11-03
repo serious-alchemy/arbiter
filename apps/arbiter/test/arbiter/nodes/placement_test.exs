@@ -759,6 +759,36 @@ defmodule Arbiter.Nodes.PlacementTest do
                ])
     end
 
+    test "SI4a: a machine node that reports the repo's registry unreachable is not a candidate" do
+      reg = "registry.gitlab.com/vstim"
+      down = row("down", registry_reach: %{"registry.gitlab.com" => "unreachable"})
+      up = row("up", registry_reach: %{"registry.gitlab.com" => "reachable"})
+
+      assert {:ok, {:node, %{name: "up"}}} = place(%{registry: reg}, [down, up])
+      assert {:ok, {:local, :no_node}} = place(%{registry: reg}, [down])
+
+      assert {:error, {:no_node_capacity, _}} =
+               place(%{mode: :remote_only, registry: reg}, [down])
+    end
+
+    test "SI4a: another registry's unreachability, or no registry on the request, filters nothing" do
+      down = row("down", registry_reach: %{"ghcr.io" => "unreachable"})
+
+      assert {:ok, {:node, %{name: "down"}}} =
+               place(%{registry: "registry.gitlab.com/vstim"}, [down])
+
+      assert {:ok, {:node, %{name: "down"}}} = place(%{}, [down])
+    end
+
+    test "SI4a: a node whose pull of the registry was refused is passed over while pull_blocked" do
+      blocked = row("blocked", pull_blocked: ["registry.gitlab.com"])
+
+      assert {:ok, {:local, :no_node}} =
+               place(%{registry: "registry.gitlab.com/vstim"}, [blocked])
+
+      assert {:ok, {:node, _}} = place(%{registry: "ghcr.io/ryan"}, [blocked])
+    end
+
     test "registry_covered?/2" do
       assert Placement.registry_covered?(cluster("a", ["r.io/x/"]), "r.io/x")
       assert Placement.registry_covered?(cluster("a", ["r.io/x/"]), "r.io/x/sub")

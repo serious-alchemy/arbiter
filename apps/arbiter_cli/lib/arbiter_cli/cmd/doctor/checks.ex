@@ -2210,6 +2210,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       ] ++
         Enum.flat_map(nodes, &node_results/1) ++
         registry ++
+        pull_results(resp["registry"], nodes) ++
         placements ++
         [local_cap_result(resp)] ++
         advisory_result(resp["local_cap_advisory"]) ++
@@ -2470,7 +2471,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp node_results(%{"kind" => "cluster"} = n),
     do: [node_result(n) | cluster_results(n)]
 
-  defp node_results(n), do: [node_result(n)]
+  defp node_results(n), do: [node_result(n)] ++ List.wrap(image_source_result(n))
 
   defp cluster_results(n) do
     name = n["name"]
@@ -2559,6 +2560,91 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       "netpol_unenforced" -> netpol
       "psa_unenforced" -> psa
     end)
+  end
+
+  # SI4a (§21.4): where a machine node's worker image comes from. `registry`: it pulls the
+  # published digest. `build`: the legacy plan path, kept during the migration window
+  # (SI13 retires it). Registry hosts the node reports unreachable, or whose last pull it was
+  # refused (`pull_failed` / `contract_mismatch`), are a warning: it is passed over for them.
+  defp image_source_result(%{"image_source" => source} = n) when is_binary(source) do
+    reach =
+      for {host, "unreachable"} <- Map.get(n, "registry_reach") || %{}, do: "#{host} unreachable"
+
+    refused = for host <- List.wrap(n["pull_blocked"]), do: "#{host} pull refused"
+    problems = reach ++ refused
+    name = "node #{n["name"]} image source"
+
+    cond do
+      problems != [] ->
+        nodes_result(
+          name,
+          :warn,
+          "#{source}; #{Enum.join(problems, ", ")}: no run for that registry is placed on it " <>
+            "(a pull refusal clears after a few minutes)",
+          "From the node, check `curl -I https://<registry>/v2/` and the node's egress; for a " <>
+            "refusal see the node agent log (the image's runtime-contract label, CLI set and provider)."
+        )
+
+      source == "build" ->
+        nodes_result(
+          name,
+          :warn,
+          "build (legacy path: the node builds the worker image from a plan)",
+          "Pull needs an agent that lists `registry` in caps.image_sources and " <>
+            "nodes.machine_image_source auto (`arb settings get nodes.machine_image_source`)."
+        )
+
+      true ->
+        nodes_result(name, :ok, source)
+    end
+  end
+
+  defp image_source_result(_n), do: nil
+
+  # SI4a (§21.4): one row per registry the primary pushes to: is a pull credential
+  # configured (never its value), and which nodes report the host unreachable.
+  defp pull_results(%{"registries" => [_ | _] = entries}, nodes) do
+    for %{"pull_credential" => pull} = entry <- entries, is_binary(pull) do
+      pull_result(entry, pull, unreachable_from(entry["registry"], nodes))
+    end
+  end
+
+  defp pull_results(_registry, _nodes), do: []
+
+  defp unreachable_from(registry, nodes) do
+    host = registry |> to_string() |> String.split("/", parts: 2) |> hd()
+
+    for n <- nodes, get_in(n, ["registry_reach", host]) == "unreachable", do: n["name"]
+  end
+
+  defp pull_result(entry, pull, down) do
+    name = "registry pull #{entry["registry"]}"
+
+    credential =
+      case pull do
+        "ref" -> "credential configured (pull_credentials_ref)"
+        "install" -> "credential configured (nodes.registry_pull_*)"
+        "anonymous" -> "anonymous pull (public_ok)"
+        _ -> "no pull credential: machine nodes build from a plan"
+      end
+
+    reach = if down == [], do: "", else: "; unreachable from #{Enum.join(down, ", ")}"
+
+    if pull == "none" or down != [] do
+      nodes_result(
+        name,
+        :warn,
+        credential <> reach,
+        if(pull == "none",
+          do:
+            "Set worker.image.pull_credentials_ref / worker.repos.<repo>.image.pull_credentials_ref " <>
+              "(a read-only `user:password` secret) or nodes.registry_pull_username / " <>
+              "nodes.registry_pull_password; never the push credential."
+        )
+      )
+    else
+      nodes_result(name, :ok, credential)
+    end
   end
 
   defp node_result(n) do

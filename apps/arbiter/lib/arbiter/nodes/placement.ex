@@ -541,8 +541,33 @@ defmodule Arbiter.Nodes.Placement do
       node_usable?(row, request) and
       pin_allows?(Map.get(row, :workspace_ids, []), Map.get(request, :workspace_id)) and
       labels_match?(Map.get(row, :labels, []), Map.get(request, :labels, [])) and
-      registry_covered?(row, Map.get(request, :registry))
+      registry_usable?(row, Map.get(request, :registry))
   end
+
+  @doc """
+  SI4a (§21.4): can `row` pull from `registry`'s host right now? False when the node
+  reported that host unreachable (`registry_reach`, from its `hb`), or when its last pull
+  from it was refused (`pull_blocked`: a `pull_failed` / `contract_mismatch` refusal that
+  has not cooled down yet). The machine-node counterpart of `registry_covered?/2`; true
+  without a registry or without a report.
+  """
+  @spec registry_pullable?(map(), String.t() | nil) :: boolean()
+  def registry_pullable?(row, registry) when is_binary(registry) and registry != "" do
+    host = registry_host(registry)
+    reach = Map.get(row, :registry_reach) || %{}
+    blocked = Map.get(row, :pull_blocked) || []
+
+    Map.get(reach, host) != "unreachable" and host not in blocked
+  end
+
+  def registry_pullable?(_row, _registry), do: true
+
+  defp registry_usable?(row, registry),
+    do: registry_covered?(row, registry) and registry_pullable?(row, registry)
+
+  @doc "The host of a registry reference (`registry.gitlab.com/vstim` is `registry.gitlab.com`)."
+  @spec registry_host(String.t()) :: String.t()
+  def registry_host(registry), do: registry |> String.split("/", parts: 2) |> hd()
 
   @doc """
   KH13: can `row` pull images from `registry` (the repo's registry reference, e.g.

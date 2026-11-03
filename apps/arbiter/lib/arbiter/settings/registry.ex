@@ -221,7 +221,7 @@ defmodule Arbiter.Settings.Registry do
         "auto: a machine node that can pull runs the repo's published image when the repo " <>
           "has a registry and a pull credential that node may hold (no CLI files, no build " <>
           "on the node); build: every machine node builds from a plan, as before. " <>
-          "null = build. Operator-only."
+          "null = auto (the default since SI4a). Operator-only."
     },
     %{
       key: "worker.cli.versions",
@@ -674,7 +674,7 @@ defmodule Arbiter.Settings.Registry do
   def default("nodes.registry_public_ok"), do: false
   def default("nodes.registry_pull_username"), do: nil
   def default("nodes.registry_pull_password"), do: nil
-  def default("nodes.machine_image_source"), do: "build"
+  def default("nodes.machine_image_source"), do: "auto"
   def default("worker.cli.versions"), do: nil
   def default("worker.cli.manual"), do: []
   def default("worker.cli_set.hold"), do: nil

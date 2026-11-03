@@ -553,8 +553,10 @@ defmodule Arbiter.Worker.ContainerSpawnRegistryImageTest do
       refute inspect(image, limit: :infinity, printable_limit: :infinity) =~ @push_pw
     end
 
-    test "the default stays build: the same node keeps the plan, nothing is published" do
-      opts = [publish: [stub: fn _ -> flunk("published") end]] ++ source([])
+    test "build forces the plan: the same node keeps it, nothing is published" do
+      opts =
+        [publish: [stub: fn _ -> flunk("published") end]] ++ source(machine_image_source: "build")
+
       assert {:ok, @plan} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
     end
 
@@ -603,8 +605,11 @@ defmodule Arbiter.Worker.ContainerSpawnRegistryImageTest do
       assert {:error, {:image_pending, :image_key_1}} =
                ContainerSpawn.registry_image(@plan, registry_node(), @ctx, publish: publish)
 
-      # under the default (build) the same node builds: nothing is published or held
-      build = [publish: [stub: fn _ -> flunk("published") end, wait: false]] ++ source([])
+      # forced to build, the same node builds: nothing is published or held
+      build =
+        [publish: [stub: fn _ -> flunk("published") end, wait: false]] ++
+          source(machine_image_source: "build")
+
       assert {:ok, @plan} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, build)
     end
   end

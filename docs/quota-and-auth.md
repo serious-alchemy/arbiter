@@ -213,6 +213,73 @@ remains is cost and noise on the Watchdog's poll rather than a correctness
 problem. Making the probe non-agentic (a deny-all tool posture, or dropping the
 model round-trip entirely) is follow-up work.
 
+## Claude: auth status and usage over the control channel (bd-a2zrh0)
+
+The Claude pre-flight used to be one billed `claude --print ping` turn, and the
+quota poll rode `/api/oauth/usage` with whatever access token sat in a
+`.credentials.json` — a token that only refreshes while an interactive `claude`
+session runs. `Arbiter.Agents.Claude.ControlChannel` replaces both *when it can*
+by driving the CLI in SDK mode:
+
+    claude -p --input-format stream-json --output-format stream-json --verbose
+
+and writing one JSON `control_request` per stdin line (`initialize`, then
+`get_usage`). Neither request is a model turn, so neither spends quota.
+
+| Consumer | Control channel | Used when |
+|---|---|---|
+| `Claude.auth_probe/1` (→ `Preflight`, `CredentialWatchdog`) | `initialize` → `account.tokenSource`, then `get_usage` | `tokenSource: "none"` → `:auth_expired`; `get_usage` succeeds → `:ok`; `get_usage` auth error → `:auth_expired` |
+| `Quota.capture_oauth_usage/2` (→ `CloudProbe`) | `get_usage`, with `CLAUDE_CONFIG_DIR` = the quota grant's dir | the account has a quota grant (`:cli_credentials_path`) or falls back to the operator login |
+
+**`initialize` alone is never an `:ok`.** It names the token's *source*, not its
+validity — an expired OAuth token still reads as authenticated there. Only
+`get_usage`, which exercises the token against the API, upgrades the verdict.
+
+### Stability, version floor, fallback
+
+`get_usage` is an **experimental** control request, and the response shapes are
+not a published, versioned contract. So nothing depends on it:
+
+* **Minimum CLI version: `2.1.0`** (`ControlChannel.min_cli_version/0`;
+  `config :arbiter, Arbiter.Agents.Claude.ControlChannel, min_cli_version: …`,
+  `nil` disables the gate). It is a **conservative floor, not a measured
+  one** — the CLI used to develop this was not available to the author, so the
+  exact release that introduced `get_usage` is unverified. The floor only saves
+  a spawn; the runtime fallback below is what actually protects callers.
+* **Older CLIs** (`claude --version` below the floor): the channel is never
+  spawned; the `ping` pre-flight and the HTTP quota poll run exactly as before.
+* **Unsupported or silent CLIs** — an `error` `control_response`, a CLI that
+  exits, no answer within 15s, a missing binary, a `get_usage` body with no
+  usage windows — all collapse to `{:unsupported, reason}`. `auth_probe/1`
+  returns `:skipped` (so `Preflight` runs `auth_probe_argv/1`, the `ping`) and
+  the quota path falls through to `OAuthUsage.fetch/1`, whose 401/429 handling,
+  cooldown and paging are unchanged.
+* **A non-auth `get_usage` failure** is also a fallback, not a verdict. In
+  particular a long-lived setup token (`CLAUDE_CODE_OAUTH_TOKEN`) is
+  inference-only and `/api/oauth/usage` refuses it with a 429
+  (bd-4ag0nj), so an install whose workers run *only* on setup tokens will
+  mostly see the `ping` fallback. The saving applies to installs with a
+  usage-capable login.
+* Kill switch: `config :arbiter, Arbiter.Agents.Claude.ControlChannel, enabled: false`.
+  It is off in `config/test.exs`; tests drive it against a stub CLI
+  (`Arbiter.Test.ClaudeControlStub`).
+
+The spawn runs in `Preflight.probe_cwd/0`, never the BEAM's cwd, in a process
+that traps exits (a CLI that dies before reading stdin makes its port exit with
+`:epipe`, which must not take the poller down), and the process tree is always
+killed afterwards.
+
+### Not done here
+
+* **Interrupts.** Workers are one-shot `claude --print` runs, not
+  stream-json input sessions, so there is no live control channel to send an
+  `interrupt` on; stopping a worker is unchanged. Adopting the channel for
+  worker sessions is a separate, larger change.
+* **A live CLI check.** The wire format above follows the Claude Agent SDK
+  control protocol as described in the t3code research; it is exercised here
+  only against a stub. Verify on the arbiter host after deploy (see the PR's
+  "Not verifiable pre-merge" note).
+
 ## Which providers the dashboard shows (bd-i2gwwn)
 
 The status bar's quota chip and the `/usage` "Rate limits" panel show only the

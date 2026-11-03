@@ -22,6 +22,23 @@ defmodule Arbiter.Nodes.RefusalTest do
   # bd-bmecet adds the primary's own two: a placement the controller never acknowledged or lost.
   @reasons ~w(no_capacity unschedulable image_unavailable bad_spec service_not_ready unacknowledged placement_lost placement_timeout startup_failed)
 
+  describe "pull_refusal?/1 (SI4a)" do
+    test "an image_unavailable refusal of a pull or a contract check is a pull refusal" do
+      for detail <- [
+            ~s({:pull_failed, 125, "unauthorized"}),
+            ~s({:contract_mismatch, "arbiter.runtime-contract", "2"})
+          ] do
+        assert Refusal.pull_refusal?(%{reason: "image_unavailable", detail: detail})
+      end
+    end
+
+    test "other refusals and other image_unavailable causes are not" do
+      refute Refusal.pull_refusal?(%{reason: "image_unavailable", detail: "{:inspect_failed, 1}"})
+      refute Refusal.pull_refusal?(%{reason: "image_unavailable", detail: nil})
+      refute Refusal.pull_refusal?(%{reason: "no_capacity", detail: "{:pull_failed, 1, \"x\"}"})
+    end
+  end
+
   describe "from_start_error/1" do
     test "recognises a refusal as the spawn error carries it" do
       for reason <- @reasons do

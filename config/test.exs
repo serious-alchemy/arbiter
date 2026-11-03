@@ -495,3 +495,8 @@ config :arbiter, :cli_set_watcher, enabled: false
 # (`Arbiter.ReviewGate.RulingResume`). Production does it off the recording
 # caller's process; the suite runs it inline so a test can assert the outcome.
 config :arbiter, :ruling_resume, :sync
+
+# bd-a2zrh0: the Claude control channel spawns the real `claude` CLI. Off under
+# test so no suite run drives a host's installed CLI (or its login); the tests
+# of the channel itself turn it on and point it at a stub CLI.
+config :arbiter, Arbiter.Agents.Claude.ControlChannel, enabled: false

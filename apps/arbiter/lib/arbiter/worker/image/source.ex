@@ -14,8 +14,8 @@ defmodule Arbiter.Worker.Image.Source do
       publishes and sends the pinned `ref`, the image's CLI set and `pull_auth`, and
       no CLI files.
     * `:build` — everything else, exactly as before: the node builds the plan and
-      fetches the CLI files. `nodes.machine_image_source` defaults to `build`, so
-      the pull path is opt-in until SI4a.
+      fetches the CLI files. `nodes.machine_image_source` defaults to `auto` since SI4a;
+      `build` forces every machine node back to this path.
 
   Options: `:machine_image_source` (replaces the setting's read; tests) and
   `PullCredential.for_node/4`'s.
@@ -38,6 +38,21 @@ defmodule Arbiter.Worker.Image.Source do
     case caps(node)["image_sources"] do
       sources when is_list(sources) -> "registry" in sources
       _ -> false
+    end
+  end
+
+  @doc """
+  Where `node`'s worker images come from, for the doctor and the nodes page (SI4a):
+  `"registry"` for a node that can take the published image (a cluster, or a machine
+  whose agent lists `registry` under `nodes.machine_image_source: auto`), else `"build"`.
+  Whether a given run pulls also depends on the repo's pull credential (`choose/3`).
+  """
+  @spec node_source(map(), keyword()) :: String.t()
+  def node_source(node, opts \\ []) do
+    cond do
+      registry_only?(node) -> "registry"
+      pulls?(node) and machine_source(opts) == "auto" -> "registry"
+      true -> "build"
     end
   end
 

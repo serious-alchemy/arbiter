@@ -43,9 +43,9 @@ defmodule Arbiter.Worker.Image.SourceTest do
     refute Source.registry_only?(machine())
   end
 
-  test "the default is build: a pull-capable machine with a credential still builds" do
-    # nothing set (and no database in this test): `nodes.machine_image_source` reads as build
-    assert Source.choose(machine(), ctx(), opts([])) == :build
+  test "SI4a: the default is auto: a pull-capable machine with a credential pulls" do
+    # nothing passed: `nodes.machine_image_source` reads its default
+    assert {:pull, _} = Source.choose(machine(), ctx(), opts([]))
     assert Source.choose(machine(), ctx(), opts(machine_image_source: "build")) == :build
   end
 
