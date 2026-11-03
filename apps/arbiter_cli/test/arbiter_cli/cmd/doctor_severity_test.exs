@@ -750,7 +750,7 @@ defmodule ArbiterCli.Cmd.DoctorSeverityTest do
     # SI1a: one row per CLI plus the hold.
     @cli_ids ~w(
       cli_versions.cli_claude cli_versions.cli_codex cli_versions.cli_arb
-      cli_versions.cli_set_hold
+      cli_versions.cli_set_hold cli_versions.local_published_image
     )
 
     # bd-8t4yui: one row per provider the server's canary reports.
