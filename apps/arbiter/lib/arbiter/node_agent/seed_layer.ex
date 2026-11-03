@@ -43,7 +43,6 @@ defmodule Arbiter.NodeAgent.SeedLayer do
   alias Arbiter.Worker.DepsCache
   alias Arbiter.Worker.ReleaseEnv
 
-
   @seed_dir "/opt/arbiter/seed"
   @quick_timeout_ms 60_000
   @extract_timeout_ms 10 * 60_000
