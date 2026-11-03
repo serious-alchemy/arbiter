@@ -180,6 +180,8 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       assert seed_cf =~ "COPY deps/ /opt/arbiter/seed/deps/"
       assert seed_cf =~ "COPY _build/ /opt/arbiter/seed/_build/"
       assert seed_cf =~ "COPY mix_home/ /opt/arbiter/seed/mix_home/"
+      # SI5: the stamp a node or pod needs to relocate the layer (lock, toolchain tag, src).
+      assert seed_cf =~ "COPY .complete /opt/arbiter/seed/.complete\n"
 
       {codex_tag, codex_cf, codex_extra} = codex
       {claude_tag, claude_cf, claude_extra} = claude

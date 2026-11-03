@@ -70,6 +70,7 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
   @cli_timestamp "0"
   @seed_artifacts ["deps", "_build"]
   @mix_home "mix_home"
+  @stamp ".complete"
   @controller_base "FROM docker.io/library/debian:trixie-slim"
   @controller_uid 10_001
   @push_timeout_ms 30 * 60_000
@@ -266,7 +267,8 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
 
         containerfile =
           "FROM #{plan.tag}\n" <>
-            Enum.map_join(artifacts, "", fn a -> "COPY #{a}/ #{@seed_dest}/#{a}/\n" end)
+            Enum.map_join(artifacts, "", fn a -> "COPY #{a}/ #{@seed_dest}/#{a}/\n" end) <>
+            stamp_copy(dir)
 
         with :ok <- build(local, containerfile, dir, work, opts),
              {:ok, layer} <- push(local, repository, tag, :seed, cfg, opts) do
@@ -279,6 +281,16 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
       {:skip, reason} ->
         skipped(reason, excluded)
     end
+  end
+
+  # SI5: the cache's `.complete` stamp (`lock=`, `image=`, `src=`) rides in the layer.
+  # `DepsCache.install/3` refuses a directory without it, and its `src=` line is what a
+  # node or a pod relocates the copied `_build` manifests and `priv` links from. Without
+  # it Mix rebuilds every dependency, and the offline pre-push gate fails on the NIF ones.
+  defp stamp_copy(dir) do
+    if File.regular?(Path.join(dir, @stamp)),
+      do: "COPY #{@stamp} #{@seed_dest}/#{@stamp}\n",
+      else: ""
   end
 
   defp skipped(reason, excluded),

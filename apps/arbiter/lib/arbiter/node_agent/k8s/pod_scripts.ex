@@ -22,17 +22,31 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
 
   ## The image's scripts (K7)
 
-  `bin/0` is the two programs the base image carries under `/opt/arbiter/bin`
-  (`Arbiter.Worker.Image` bakes them into the base layer, so a change to either
-  rebuilds the base once): `seed`, the init container's second stage, and
-  `snapshotter`, the native sidecar. They live in `priv/k8s_pod/` as plain files so
-  `shellcheck` and the podman harness can run them as the pod does.
+  `bin/0` is the programs the base image carries under `/opt/arbiter/bin`
+  (`Arbiter.Worker.Image` bakes them into the base layer, so a change to any of them
+  rebuilds the base once): `seed`, the init container's second stage, `seed-layer`, which
+  `seed` calls to install the image's seed layer relocated (SI5), and `snapshotter`, the
+  native sidecar. They live in `priv/k8s_pod/` as plain files so `shellcheck` and the
+  podman harness can run them as the pod does.
+
+  `sources/0` is the two Elixir files `seed-layer` relocates with, byte for byte the
+  files the node agent runs (`Arbiter.Worker.DepsRelocate` and `.Etf`), installed beside
+  the scripts and run by the image's own `elixir`. There is one relocation and two
+  runtimes; a copy would drift.
   """
 
   @bin_dir Path.expand("../../../../priv/k8s_pod", __DIR__)
-  @bin_names ~w(seed snapshotter)
+  @bin_names ~w(seed seed-layer snapshotter)
   for name <- @bin_names, do: @external_resource(Path.join(@bin_dir, name))
   @bin Map.new(@bin_names, &{&1, File.read!(Path.join(@bin_dir, &1))})
+
+  @worker_dir Path.expand("../../worker", __DIR__)
+  @source_files %{
+    "deps_relocate.ex" => Path.join(@worker_dir, "deps_relocate.ex"),
+    "deps_relocate_etf.ex" => Path.join(@worker_dir, "deps_relocate/etf.ex")
+  }
+  for {_name, path} <- @source_files, do: @external_resource(path)
+  @sources Map.new(@source_files, fn {name, path} -> {name, File.read!(path)} end)
 
   @gate ~S"""
   set -eu
@@ -181,6 +195,10 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
   @spec bin() :: %{String.t() => String.t()}
   def bin, do: @bin
 
+  @doc "The Elixir sources `seed-layer` relocates with, installed beside `bin/0`, by file name."
+  @spec sources() :: %{String.t() => String.t()}
+  def sources, do: @sources
+
   @doc """
   The `RUN` instruction that installs `bin/0` as `/opt/arbiter/bin/<name>` (mode
   0755, owned by root, so the uid-10001 worker cannot rewrite them).
@@ -193,7 +211,7 @@ defmodule Arbiter.NodeAgent.K8s.PodScripts do
   @spec image_install() :: String.t()
   def image_install do
     steps =
-      for {name, text} <- Enum.sort(@bin) do
+      for {name, text} <- Enum.sort(Map.merge(@bin, @sources)) do
         b64 =
           text
           |> Base.encode64()

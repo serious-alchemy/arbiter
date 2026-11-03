@@ -121,6 +121,44 @@ defmodule Arbiter.Worker.DepsRelocateTest do
     end
   end
 
+  # SI5: the tree is relocated where it sits on the host but runs at another path (a
+  # node's container sees the shadow at the spec's mount path, a pod's worker at
+  # `ARB_WORKTREE`). Mix compares the path it runs at, so the manifests must name that.
+  describe "relocate/3 (files here, running there)" do
+    test "manifests and CMake caches are retargeted to the run-time path, links stay relative",
+         %{tmp_dir: tmp} do
+      source = compiled_source(Path.join(tmp, "source"))
+      cmake_dep(source, "crc32cer", Path.join(source, "deps/crc32cer/c_build"))
+      files = Path.join(tmp, "wt")
+      File.mkdir_p!(files)
+      {_, 0} = System.cmd("cp", ["-a", Path.join(source, "deps"), Path.join(files, "deps")])
+      {_, 0} = System.cmd("cp", ["-a", Path.join(source, "_build"), Path.join(files, "_build")])
+      File.rm_rf!(source)
+
+      running_at = "/work/run-7"
+      assert :ok = DepsRelocate.relocate(files, source, running_at)
+
+      assert {:manifest, dir, [:other]} = manifest(files)
+      assert dir == running_at <> "/deps/lazy_html"
+      # The link works from where the files are, and would from the mount.
+      assert File.exists?(nif(files))
+
+      assert {:ok, "../../../../deps/lazy_html/priv"} =
+               File.read_link(Path.join(files, "_build/test/lib/lazy_html/priv"))
+
+      # A CMake cache bound to the old directory is not bound to the run-time one either.
+      refute File.exists?(Path.join(files, "deps/crc32cer/c_build/CMakeCache.txt"))
+    end
+
+    test "a CMake cache already bound to the run-time path is kept", %{tmp_dir: tmp} do
+      files = Path.join(tmp, "wt")
+      bound = cmake_dep(files, "bound", "/work/run-7/deps/bound/c_build")
+
+      assert :ok = DepsRelocate.scrub_cmake_caches(files, "/work/run-7")
+      assert File.exists?(Path.join(bound, "CMakeCache.txt"))
+    end
+  end
+
   describe "Worktree.seed_compiled_deps/3 (a fresh worktree)" do
     test "the NIF is usable from the worktree after the source is gone", %{tmp_dir: tmp} do
       source = compiled_source(Path.join(tmp, "source"))
