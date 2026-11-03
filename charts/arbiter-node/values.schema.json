@@ -148,7 +148,8 @@
             "gate_timeout_s": {"type": "integer", "minimum": 0, "maximum": 86400}
           }
         },
-        "snapshotIntervalS": {"type": ["integer", "null"], "minimum": 10, "maximum": 3600}
+        "snapshotIntervalS": {"type": ["integer", "null"], "minimum": 10, "maximum": 3600},
+        "eventFeed": {"type": ["boolean", "null"]}
       }
     },
     "placement": {
