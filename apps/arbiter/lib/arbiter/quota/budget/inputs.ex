@@ -4,7 +4,10 @@ defmodule Arbiter.Quota.Budget.Inputs do
   (account, pool, policy workspace) (bd-6c8g4t, DC3; design §3.1-§3.6). Used by
   `Arbiter.Quota.Budget.Server`; read-only.
 
-    * **Pools** — one per account, from `ModelFamily.classify/2`; agy has two.
+    * **Pools** — one per account, from `ModelFamily.classify/2`; agy has two. A
+      Claude account with per-model weekly windows (bd-e0b7so) also gets one
+      scoped input per window (`scope:` set): the budget of a card on that model,
+      in the same pool.
       Each agy pool reads the quota row with a model that picks its bucket
       group (`Snapshot.normalize/2`'s `:model`).
     * **Policy variants** — the account's own policy (`policy_workspace: nil`),
@@ -36,6 +39,7 @@ defmodule Arbiter.Quota.Budget.Inputs do
   alias Arbiter.Providers.Pause
   alias Arbiter.Quota
   alias Arbiter.Quota.BudgetCalibration
+  alias Arbiter.Quota.Gate.Snapshot
 
   @agy_pools [
     {"antigravity:gemini_models", "gemini-2.5-pro"},
@@ -105,7 +109,7 @@ defmodule Arbiter.Quota.Budget.Inputs do
     seats = Concurrency.live_count(account)
     workspaces = Resolver.workspaces(account.id)
 
-    for {pool, model} <- pools(account),
+    for {pool, model, scope} <- pools(account, quota),
         {workspace, share} <- variants(account, workspaces) do
       %{
         account_id: account.id,
@@ -115,6 +119,7 @@ defmodule Arbiter.Quota.Budget.Inputs do
         share: share,
         pool: pool,
         model: model,
+        scope: scope,
         quota: quota,
         metered?: Quota.provider_code(account.provider) != nil,
         now: now,
@@ -127,14 +132,35 @@ defmodule Arbiter.Quota.Budget.Inputs do
     end
   end
 
-  defp pools(%ProviderAccount{provider: :antigravity}), do: @agy_pools
+  defp pools(%ProviderAccount{provider: :antigravity}, _quota),
+    do: Enum.map(@agy_pools, fn {pool, model} -> {pool, model, nil} end)
 
-  defp pools(%ProviderAccount{provider: provider}) do
+  defp pools(%ProviderAccount{provider: provider}, quota) do
     case ModelFamily.classify(provider, nil).pool do
-      pool when is_binary(pool) -> [{pool, nil}]
+      pool when is_binary(pool) -> with_scoped(pool, scopes(quota))
       _ -> []
     end
   end
+
+  # The pool's own input, then one per known per-model weekly window
+  # (bd-e0b7so): the budget of a card on that model. They are nested windows
+  # of the same pool, so the seats stay the pool's. With scoped windows the
+  # pool's own input is for a card on a model none of them covers (`:unscoped`);
+  # without, it is what it always was.
+  defp with_scoped(pool, []), do: [{pool, nil, nil}]
+
+  defp with_scoped(pool, scopes),
+    do: [{pool, :unscoped, nil} | Enum.map(scopes, &{pool, &1, &1})]
+
+  defp scopes(%{scoped_limits: limits}) when is_list(limits) do
+    limits
+    |> Snapshot.scoped_windows()
+    |> Enum.map(& &1.scope)
+    |> Enum.filter(&ModelFamily.known_scope?/1)
+    |> Enum.uniq()
+  end
+
+  defp scopes(_quota), do: []
 
   # The account's own policy, then every linked workspace that sets its own.
   defp variants(account, workspaces) do

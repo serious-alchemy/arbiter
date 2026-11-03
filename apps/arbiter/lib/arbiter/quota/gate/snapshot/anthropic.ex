@@ -26,7 +26,8 @@ defmodule Arbiter.Quota.Gate.Snapshot.Anthropic do
       secondary_reset_at: q.reset_7d_at,
       secondary_window_label: "7d",
       burn_24h: q.burn_24h,
-      burn_24h_at: q.burn_24h_at
+      burn_24h_at: q.burn_24h_at,
+      scoped: Snapshot.scoped_windows(q.scoped_limits)
     }
     |> put_primary(q)
   end

@@ -2796,6 +2796,39 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp maybe_add_gemini_model_hint(_provider, _task, _workspace, opts), do: opts
 
+  # A Claude account with per-model weekly windows (bd-e0b7so) is gated on the
+  # card's own model: exhausting Fable's weekly limit holds a Fable card and
+  # leaves the account serving other models. Same best-effort hint as agy's,
+  # added only when the account reports such a window (so every other dispatch
+  # is untouched). An unresolvable model leaves `model: nil` in the opts: the
+  # gate then reads the worst of all windows, the conservative default.
+  defp maybe_add_claude_model_hint(opts, task, workspace, %{scoped_limits: [_ | _]}) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" ->
+        opts
+
+      _ ->
+        Keyword.put(opts, :model, claude_model_hint(task, workspace, opts))
+    end
+  end
+
+  defp maybe_add_claude_model_hint(opts, _task, _workspace, _quota), do: opts
+
+  defp claude_model_hint(task, workspace, opts) do
+    config = Routing.decide(task, workspace, opts).config
+    agent_config = get_in((workspace && workspace.config) || %{}, ["agent", "config"]) || %{}
+
+    case config["model"] do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        ModelFamily.model_for_tier(:claude, config["model_tier"], agent_config)
+    end
+  rescue
+    _ -> nil
+  end
+
   defp gemini_model_tier_hint(task, workspace, opts) do
     config = Routing.decide(task, workspace, opts).config
 
@@ -3315,6 +3348,7 @@ defmodule Arbiter.Worker.Dispatch do
     gate_opts =
       provider
       |> maybe_add_gemini_model_hint(task, workspace, opts)
+      |> maybe_add_claude_model_hint(task, workspace, quota)
       |> Keyword.put(:account, account)
       |> then(&if(enforced?, do: Keyword.put(&1, :pace, false), else: &1))
 

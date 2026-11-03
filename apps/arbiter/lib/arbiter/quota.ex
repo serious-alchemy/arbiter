@@ -49,6 +49,7 @@ defmodule Arbiter.Quota do
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
   alias Arbiter.Agents.Claude.ControlChannel
+  alias Arbiter.Agents.ModelFamily
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.CloudCode
   alias Arbiter.Quota.Gate
@@ -814,12 +815,30 @@ defmodule Arbiter.Quota do
       # consecutive-401 tracking or the periodic CLI probe) directly here.
       credentials_expired: Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Claude),
       per_model_utilization: q.per_model_utilization || %{},
+      scoped: serialize_scoped(q.scoped_limits),
       extra_usage: q.extra_usage || %{},
       oauth_utilization_5h: q.oauth_utilization_5h,
       oauth_utilization_7d: q.oauth_utilization_7d,
       oauth_captured_at: iso(q.oauth_captured_at),
       capture_source: q.capture_source
     }
+  end
+
+  # The per-model weekly windows (bd-e0b7so) as the quota surfaces show them.
+  # `matched` is whether the scope names a Claude model the gate knows; an
+  # unmatched one is shown, and gated only when `is_active`.
+  defp serialize_scoped(limits) do
+    for w <- Snapshot.scoped_windows(limits) do
+      %{
+        scope: w.scope,
+        label: w.label,
+        utilization: w.utilization,
+        status: w.status,
+        reset_at: iso(w.reset_at),
+        is_active: w.active?,
+        matched: ModelFamily.known_scope?(w.scope)
+      }
+    end
   end
 
   # ---- Google Cloud Code Assist quota (bd-57ukgb) ------------------------
@@ -1253,6 +1272,8 @@ defmodule Arbiter.Quota do
     secondary =
       if is_map(usage.spend), do: Map.put(secondary, :spend, usage.spend), else: secondary
 
+    secondary = put_scoped_limits(secondary, usage)
+
     {action, attrs} =
       if is_number(usage.utilization_5h) or is_number(usage.utilization_7d) do
         primary =
@@ -1295,6 +1316,40 @@ defmodule Arbiter.Quota do
 
       broadcast_quota_update(account_id, quota)
       {:ok, quota}
+    end
+  end
+
+  # The per-model weekly windows of `limits[]` (bd-e0b7so). A body that reported
+  # `limits[]` replaces what was stored, so a scoped limit Anthropic stops
+  # reporting stops gating; a body with no `limits[]` at all (a thin or broken
+  # one) leaves the stored windows alone, like every other column.
+  defp put_scoped_limits(attrs, %{limits: []}), do: attrs
+
+  defp put_scoped_limits(attrs, %{scoped: scoped}) do
+    Enum.each(scoped, &log_unmatched_scope/1)
+    Map.put(attrs, :scoped_limits, scoped)
+  end
+
+  # A scope that matches no known Claude model is shown but only gated when
+  # active (`Arbiter.Quota.Gate.Snapshot`); say so once per scope per boot.
+  defp log_unmatched_scope(%{"scope" => scope} = window) do
+    key = {__MODULE__, :unmatched_scope, scope}
+
+    if not ModelFamily.known_scope?(scope) and
+         :persistent_term.get(key, nil) == nil do
+      :persistent_term.put(key, true)
+
+      treatment =
+        if window["is_active"] == true,
+          do: "active, so it gates every model",
+          else: "not active, shown but not gated"
+
+      require Logger
+
+      Logger.warning(
+        "Arbiter.Quota: weekly_scoped limit for unmatched scope #{inspect(scope)} " <>
+          "(no known Claude model): #{treatment}"
+      )
     end
   end
 
