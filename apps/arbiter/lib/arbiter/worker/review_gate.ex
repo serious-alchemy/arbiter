@@ -5141,11 +5141,23 @@ defmodule Arbiter.Worker.ReviewGate do
   # wording, which agy reports alongside a clean exit and a "SUCCESS" result
   # event). A non-zero exit means the subprocess genuinely failed, so the
   # full classification applies there.
+  #
+  # bd-3b3oks: Codex exits 0 after a `turn.failed` carrying its usage-limit
+  # refusal, so the pass looked like a clean exit with no verdict. The stream
+  # formatter writes that refusal as a `⚠ codex turn failed:` / `⚠ codex:` line
+  # followed by the normalized `usage limit reached` signal; `:quota_exhausted`
+  # is trusted on a clean exit only when that harness-emitted banner is present
+  # (the model's own prose never starts with it).
   defp classify_stop(0, lines) do
-    case StopReason.classify(0, Enum.reverse(lines)) do
+    ordered = Enum.reverse(lines)
+
+    case StopReason.classify(0, ordered) do
       %StopReason{category: category} = reason
       when category in [:stream_schema_drift, :agent_print_timeout] ->
         reason
+
+      %StopReason{category: :quota_exhausted} = reason ->
+        if codex_failure_banner?(ordered), do: reason
 
       _ ->
         nil
@@ -5157,6 +5169,13 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp classify_stop(_status, _lines), do: nil
+
+  defp codex_failure_banner?(lines) do
+    Enum.any?(lines, fn line ->
+      is_binary(line) and
+        Regex.match?(~r/^\s*⚠ codex( turn failed)?:/, line)
+    end)
+  end
 
   # Human-actionable inconclusive message for a reviewer that died of a known
   # infrastructure failure rather than genuinely finishing without a verdict —
@@ -5227,6 +5246,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp handle_reviewer_quota_exhausted(state, %StopReason{} = reason) do
     pool = reviewer_pool(state)
     state = record_reviewer_quota_exhausted(state, reason)
+    fail_quota_refused_reviewer(state, reason)
 
     Logger.warning(
       "ReviewGate: reviewer #{provider_label(reviewer_provider_for(state))} for " <>
@@ -5242,6 +5262,17 @@ defmodule Arbiter.Worker.ReviewGate do
       {nil, _selection} -> {:done, escalate_quota_exhausted(state)}
       {next, selection} -> rotate_reviewer(state, next, pool, selection, :quota_exhausted)
     end
+  end
+
+  # bd-3b3oks: the refused pass did no review, so its run must not be stamped
+  # `:succeeded` (what a `:normal` stop does). Fail it with the typed quota
+  # reason BEFORE rotation stops the worker; no-op if it is already gone.
+  defp fail_quota_refused_reviewer(state, %StopReason{} = reason) do
+    if is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid) do
+      safe(fn -> Worker.fail(state.reviewer_pid, reason) end)
+    end
+
+    :ok
   end
 
   defp record_reviewer_quota_exhausted(state, %StopReason{} = reason) do
