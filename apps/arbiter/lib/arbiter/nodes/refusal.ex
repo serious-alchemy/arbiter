@@ -67,6 +67,21 @@ defmodule Arbiter.Nodes.Refusal do
 
   def from_start_error(_), do: :error
 
+  @doc """
+  SI4a (§21.4): is this refusal the pull path's — a machine node that could not pull the
+  published digest (`image_unavailable{pull_failed}`) or found it short of the runtime
+  contract, CLI set or provider (`image_unavailable{contract_mismatch}`)? The agent sends
+  the reason's `inspect/1` as the detail. Such a refusal is not about the run: the session
+  marks the node as not pulling that registry for a while (`pull_blocked`), so the requeued
+  ticket goes to another node, runs on the primary (`prefer_remote`), or is held
+  (`remote_only`).
+  """
+  @spec pull_refusal?(map()) :: boolean()
+  def pull_refusal?(%{reason: "image_unavailable", detail: d}) when is_binary(d),
+    do: String.starts_with?(d, "{:pull_failed") or String.starts_with?(d, "{:contract_mismatch")
+
+  def pull_refusal?(_), do: false
+
   defp detail(d) when is_binary(d), do: d
   defp detail(_), do: nil
 

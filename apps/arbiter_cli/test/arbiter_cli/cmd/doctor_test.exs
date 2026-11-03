@@ -3009,6 +3009,89 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert detail =~ "arbiter.seed-lock"
     end
 
+    test "SI4a: a machine node gets an image source row; build is the legacy-path warning" do
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [
+            node_row(%{"name" => "pulls", "image_source" => "registry"}),
+            node_row(%{"name" => "builds", "image_source" => "build"})
+          ]
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :ok, detail: detail} = named(results, "node pulls image source")
+      assert detail =~ "registry"
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(results, "node builds image source")
+
+      assert detail =~ "legacy"
+      assert hint =~ "nodes.machine_image_source"
+    end
+
+    test "SI4a: a node that cannot reach a registry or was refused a pull is a warning" do
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [
+            node_row(%{
+              "name" => "boxed",
+              "image_source" => "registry",
+              "registry_reach" => %{"ghcr.io" => "unreachable", "r.io" => "reachable"},
+              "pull_blocked" => ["r.io"]
+            })
+          ]
+        })
+      )
+
+      assert %{status: :warn, detail: detail} = named(nodes_results(), "node boxed image source")
+      assert detail =~ "ghcr.io unreachable"
+      assert detail =~ "r.io pull refused"
+    end
+
+    test "SI4a: a registry row per registry: pull credential configured, and its reach" do
+      reg = fn registry, pull ->
+        config_registry(%{"registry" => registry, "pull_credential" => pull})
+      end
+
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [
+            node_row(%{
+              "name" => "boxed",
+              "image_source" => "registry",
+              "registry_reach" => %{
+                "ghcr.io" => "unreachable",
+                "registry.gitlab.com" => "reachable"
+              }
+            })
+          ],
+          "registry" => %{
+            "configured" => false,
+            "registries" => [
+              reg.("ghcr.io/ryan", "ref"),
+              reg.("registry.gitlab.com/vstim", "none"),
+              reg.("docker.io/pub", "anonymous")
+            ]
+          }
+        })
+      )
+
+      results = nodes_results()
+
+      assert %{status: :warn, detail: detail} = named(results, "registry pull ghcr.io/ryan")
+      assert detail =~ "credential configured"
+      assert detail =~ "unreachable from boxed"
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(results, "registry pull registry.gitlab.com/vstim")
+
+      assert detail =~ "no pull credential"
+      assert hint =~ "pull_credentials_ref"
+
+      assert %{status: :ok} = named(results, "registry pull docker.io/pub")
+    end
+
     test "each workspace/repo registry gets its own row, with the anonymous-read answer (KH12)" do
       stub_nodes(
         nodes_resp(%{

@@ -387,9 +387,10 @@ defmodule ArbiterWeb.RemotePullTest do
     end
   end
 
-  test "the default (build): the same node is sent the plan and its CLI files, and no credential",
+  test "build forces the legacy path: the same node is sent the plan and its CLI files, and no credential",
        ctx do
-    assert Settings.machine_image_source() == "build"
+    assert Settings.machine_image_source() == "auto"
+    {:ok, _} = Settings.set_nodes_machine_image_source("build")
 
     opts = prepare_opts(ctx, publish: [stub: fn _ -> flunk("published under build") end])
     assert {:ok, request} = ContainerSpawn.prepare_remote(opts)

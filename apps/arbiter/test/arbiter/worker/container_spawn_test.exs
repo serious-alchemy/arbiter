@@ -274,11 +274,12 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       refute body =~ Base.encode64("pusher:" <> @push_install)
     end
 
-    test "the default (build) sends the plan and CLI files, and no credential at all", ctx do
+    test "machine_image_source build sends the plan and CLI files, and no credential at all",
+         ctx do
       opts =
         plan_opts(ctx,
           node: pull_node(),
-          image_source: [config: install(), workspaces: []],
+          image_source: [machine_image_source: "build", config: install(), workspaces: []],
           publish: [stub: fn _ -> flunk("published") end]
         )
 

@@ -69,6 +69,7 @@ defmodule Arbiter.NodeAgent.Connection do
   alias Arbiter.NodeAgent.Bridge
   alias Arbiter.NodeAgent.Config
   alias Arbiter.NodeAgent.Protocol
+  alias Arbiter.NodeAgent.RegistryProbe
   alias Arbiter.NodeAgent.Retained
   alias Arbiter.NodeAgent.Status
   alias Arbiter.NodeAgent.Upgrade
@@ -76,6 +77,8 @@ defmodule Arbiter.NodeAgent.Connection do
   alias Arbiter.NodeAgent.WsClient
 
   require Logger
+
+  @registry_reprobe_every 30
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -106,6 +109,9 @@ defmodule Arbiter.NodeAgent.Connection do
       reap_task: nil,
       boot_epoch: nil,
       hb_timer: nil,
+      # SI4a: the hosts `hello_ok.registries` named and what the last probe found
+      registry_hosts: [],
+      registry_reach: %{},
       hb_seq: 0,
       hb_refs: MapSet.new(),
       last_ack: nil,
@@ -138,6 +144,9 @@ defmodule Arbiter.NodeAgent.Connection do
   def handle_continue(:connect, state), do: {:noreply, connect(state)}
 
   @impl true
+  def handle_info({:registry_reach, reach}, state) when is_map(reach),
+    do: {:noreply, %{state | registry_reach: reach}}
+
   def handle_info(:connect, state), do: {:noreply, connect(%{state | retry_timer: nil})}
 
   # -- messages from the socket ----------------------------------------------------
@@ -575,6 +584,7 @@ defmodule Arbiter.NodeAgent.Connection do
         hello_timer: nil,
         grace_timer: nil,
         held: held_runs(payload["runs"]),
+        registry_hosts: registry_hosts(payload["registries"]),
         last_ack: now(),
         hb_timer: Process.send_after(self(), :heartbeat, hb_interval_ms)
     }
@@ -591,6 +601,7 @@ defmodule Arbiter.NodeAgent.Connection do
       do: Logger.info("node agent upgrade to #{config.version} confirmed")
 
     request_upgrade(state, payload["upgrade"])
+    probe_registries(state.registry_hosts)
     resume_streams(backend(state), payload["stdout_cursors"])
     attach_runs(backend(state), payload["runs"])
     Bridge.attach(bridge(state), state.client, Protocol.topic(config))
@@ -724,8 +735,10 @@ defmodule Arbiter.NodeAgent.Connection do
           state.client,
           Protocol.topic(config),
           "hb",
-          backend(state).heartbeat(config, seq)
+          state |> registry_fields(backend(state).heartbeat(config, seq))
         )
+
+      if rem(seq, @registry_reprobe_every) == 0, do: probe_registries(state.registry_hosts)
 
       put_status(state, %{hb_seq: seq})
 
@@ -737,6 +750,28 @@ defmodule Arbiter.NodeAgent.Connection do
       }
     end
   end
+
+  # SI4a: the readiness `registry` rows. Probed off-process (a probe waits on the network)
+  # on `hello_ok` and every `@registry_reprobe_every` heartbeats; reported in each `hb`.
+  defp registry_hosts(hosts) when is_list(hosts), do: Enum.filter(hosts, &is_binary/1)
+  defp registry_hosts(_), do: []
+
+  defp probe_registries([]), do: :ok
+
+  defp probe_registries(hosts) do
+    parent = self()
+    opts = Application.get_env(:arbiter, :registry_probe_opts, [])
+
+    {:ok, _} =
+      Task.start(fn -> send(parent, {:registry_reach, RegistryProbe.probe(hosts, opts)}) end)
+
+    :ok
+  end
+
+  defp registry_fields(%{registry_reach: reach}, hb) when map_size(reach) > 0,
+    do: Map.put(hb, "registries", reach)
+
+  defp registry_fields(_state, hb), do: hb
 
   defp ack(state, ref) do
     put_status(state, %{last_hb_ack_at: DateTime.utc_now() |> DateTime.to_iso8601()})

@@ -183,6 +183,8 @@ defmodule Arbiter.Nodes.Overview do
       k8s_version: Map.get(snapshot, :k8s_version),
       degraded: Map.get(snapshot, :degraded, []),
       readiness: Map.get(snapshot, :readiness, []),
+      registry_reach: Map.get(snapshot, :registry_reach, %{}),
+      pull_blocked: Map.get(snapshot, :pull_blocked, []),
       constrained?: constrained?(snapshot),
       pending: pending(snapshot)
     }
