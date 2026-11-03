@@ -936,6 +936,119 @@ defmodule Arbiter.NodeAgent.RunTest do
       assert File.exists?(Path.join(stub, "run.argv"))
     end
 
+    # SI5: a pull run's deps come from the pulled image's seed layer.
+    defp pulled_checkout_spec(run) do
+      spec =
+        spec(run, %{
+          "checkout" => %{"branch" => "feature/x", "read_only" => true},
+          "image" => %{
+            "tag" => "localhost/arbiter-dev/beam:abc123",
+            "plan" => nil,
+            "ref" => @pull_ref,
+            "cli_set" => "0a1b2c3d",
+            "provider" => "claude"
+          }
+        })
+
+      Map.update!(spec, "mounts", fn mounts -> Enum.reject(mounts, &(&1["kind"] == "cli")) end)
+    end
+
+    test "a pull run installs the pulled image's seed layer, relocated to the container path",
+         %{opts: opts, home: home} do
+      test = self()
+
+      layer_fun = fn shadow, ref, layer_opts ->
+        send(test, {:layer, shadow, ref, layer_opts})
+        {:ok, %{method: :reflink}}
+      end
+
+      deps_fun = fn _, _, _ ->
+        send(test, :seed_job)
+        {:ok, %{}}
+      end
+
+      opts =
+        Keyword.merge(opts,
+          deps_cache: true,
+          deps_fun: deps_fun,
+          seed_layer_fun: layer_fun,
+          checkout_fun: &fake_checkout/3
+        )
+
+      assert {:ok, "sl1"} = Runs.assign(pulled_checkout_spec("sl1"), opts)
+      wait_event("sl1", "exit")
+
+      shadow = Path.join([home, "runs", "sl1", "worktree"])
+      assert_received {:layer, ^shadow, @pull_ref, layer_opts}
+      assert layer_opts[:root] == Path.join(home, "deps-cache")
+      assert layer_opts[:scratch] == Path.join(home, "deps-seed")
+      assert layer_opts[:home] == Path.join([home, "runs", "sl1", "home"])
+
+      # The container sees the shadow at the spec's mount path, not the host directory:
+      # that is the directory Mix compares the manifests with.
+      worktree_mount =
+        Enum.find(pulled_checkout_spec("sl1")["mounts"], &(&1["kind"] == "worktree"))
+
+      assert layer_opts[:retarget_to] == worktree_mount["path"]
+      refute layer_opts[:retarget_to] == shadow
+
+      refute_received :seed_job
+      assert File.read!(Path.join(shadow, ".git/info/exclude")) =~ "/_build"
+    end
+
+    test "a lock mismatch falls back to the node's seed job, in the pulled digest",
+         %{opts: opts, home: home} do
+      test = self()
+
+      layer_fun = fn _shadow, _ref, _opts ->
+        {:fallback, {:lock_mismatch, "checkout-lock", "layer-lock"}}
+      end
+
+      deps_fun = fn shadow, image, seed_opts ->
+        send(test, {:seed_job, shadow, image, seed_opts})
+        {:ok, %{}}
+      end
+
+      opts =
+        Keyword.merge(opts,
+          deps_cache: true,
+          deps_fun: deps_fun,
+          seed_layer_fun: layer_fun,
+          checkout_fun: &fake_checkout/3
+        )
+
+      assert {:ok, "sl2"} = Runs.assign(pulled_checkout_spec("sl2"), opts)
+      wait_event("sl2", "exit")
+
+      shadow = Path.join([home, "runs", "sl2", "worktree"])
+      assert_received {:seed_job, ^shadow, @pull_ref, seed_opts}
+      # The fallback relocates to the container path too.
+      worktree_mount =
+        Enum.find(pulled_checkout_spec("sl2")["mounts"], &(&1["kind"] == "worktree"))
+
+      assert seed_opts[:retarget_to] == worktree_mount["path"]
+    end
+
+    test "a run that builds its image from a plan never tries a seed layer",
+         %{opts: opts} do
+      test = self()
+
+      opts =
+        Keyword.merge(opts,
+          deps_cache: true,
+          deps_fun: fn _, _, _ -> {:ok, %{}} end,
+          seed_layer_fun: fn _, _, _ ->
+            send(test, :layer_tried)
+            {:ok, %{}}
+          end,
+          checkout_fun: &fake_checkout/3
+        )
+
+      assert {:ok, "sl3"} = Runs.assign(checkout_spec("sl3"), opts)
+      wait_event("sl3", "exit")
+      refute_received :layer_tried
+    end
+
     test "a seed that fails does not refuse the run: the worker fetches for itself",
          %{opts: opts, stub: stub} do
       opts =

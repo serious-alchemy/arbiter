@@ -325,7 +325,7 @@ defmodule Arbiter.Worker.DepsCache do
         {:ok, %{method: :unchanged, ms: elapsed(started)}}
       else
         with {:ok, method} <- copy_artifacts(cache_dir, worktree, opts) do
-          retarget_manifests(worktree, stamp)
+          retarget_manifests(worktree, stamp, Keyword.get(opts, :retarget_to, worktree))
           record(worktree, stamp)
           {:ok, %{method: method, ms: elapsed(started)}}
         end
@@ -338,11 +338,61 @@ defmodule Arbiter.Worker.DepsCache do
   # `_build` seeded at one path is stale at every other, and its `priv` symlinks
   # still name the seed's scratch directory (see `DepsRelocate`). The seed ran at
   # the `src=` path in the stamp; point both at the worktree instead.
-  defp retarget_manifests(worktree, stamp) do
-    case Regex.run(~r/^src=(.+)$/m, stamp) do
-      [_, from] -> DepsRelocate.relocate(worktree, from)
+  #
+  # `to` is where the checkout *runs*, which on a node is the spec's mount path inside
+  # the container, not the host directory the copy is made in (SI5): Mix compares the
+  # path it runs at, so a manifest naming the host path is stale and rebuilds.
+  defp retarget_manifests(worktree, stamp, to) do
+    case parse_stamp(stamp) do
+      %{src: from} when is_binary(from) -> DepsRelocate.relocate(worktree, from, to)
       _ -> DepsRelocate.relink(worktree)
     end
+  end
+
+  @doc """
+  The fields of a cache's `.complete` stamp (`lock`, `image`, `src`; a missing one is
+  `nil`), from its text. `lock` is the SHA-256 of the `mix.lock` it was seeded from,
+  `image` the toolchain tag it was compiled in, `src` the directory it was compiled at.
+  """
+  @spec parse_stamp(String.t()) :: %{
+          lock: String.t() | nil,
+          image: String.t() | nil,
+          src: String.t() | nil
+        }
+  def parse_stamp(text) when is_binary(text) do
+    %{
+      lock: stamp_field(text, ~r/^lock=(.+)$/m),
+      image: stamp_field(text, ~r/^image=(.+)$/m),
+      src: stamp_field(text, ~r/^src=(.+)$/m)
+    }
+  end
+
+  defp stamp_field(text, regex) do
+    case Regex.run(regex, text) do
+      [_, value] -> String.trim(value)
+      _ -> nil
+    end
+  end
+
+  @doc """
+  The lock hash a cache is keyed by, for the `mix.lock` committed at `ref` in
+  `repo_path`: the SHA-256 of the blob, hex. `{:error, :no_lockfile}` without one.
+  """
+  @spec lock_hash(String.t(), String.t()) :: {:ok, String.t()} | {:error, :no_lockfile}
+  def lock_hash(repo_path, ref) do
+    with {:ok, lock} <- read_lock(repo_path, ref), do: {:ok, digest(lock)}
+  end
+
+  @doc """
+  Install an already-completed cache directory into `worktree` (a seed layer a node
+  extracted, SI5): `seed_checkout/3`'s whole install step with no seed job.
+  `lock_hash` is the lock the directory was seeded from. Options are `install/3`'s
+  plus `:home`.
+  """
+  @spec install_extracted(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def install_extracted(cache_dir, lock_hash, worktree, opts \\ []) do
+    install_cache({:ok, %{dir: cache_dir, seeded?: false, lock_hash: lock_hash}}, worktree, opts)
   end
 
   defp elapsed(started), do: System.monotonic_time(:millisecond) - started

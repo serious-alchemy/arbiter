@@ -279,6 +279,31 @@ defmodule Arbiter.Worker.DepsCacheTest do
       refute original == dir
     end
 
+    test "points each manifest at :retarget_to, the path the checkout runs at (SI5)", ctx do
+      opts = Keyword.put(ctx.opts, :retarget_to, "/workspace/run-1")
+      assert {:ok, _} = DepsCache.install(ctx.cache, ctx.worker, opts)
+
+      manifest = Path.join(ctx.worker, "_build/test/lib/jason/.mix/compile.elixir")
+
+      assert {29, %{}, %{}, "/workspace/run-1/deps/jason",
+              %{config: [tailwind: [web: [cd: "/workspace/run-1/apps/web"]]]}} =
+               manifest |> File.read!() |> :erlang.binary_to_term()
+
+      # The files themselves are where the copy was made.
+      assert File.exists?(Path.join(ctx.worker, "deps/jason/mix.exs"))
+    end
+
+    test "parse_stamp/1 reads lock, image and src; lock_hash/2 is the lock's SHA-256", ctx do
+      assert %{lock: "abc", image: "img:1", src: "/tmp/s/src"} =
+               DepsCache.parse_stamp("lock=abc\nimage=img:1\nsrc=/tmp/s/src\n")
+
+      assert %{lock: nil, image: nil, src: nil} = DepsCache.parse_stamp("")
+
+      expected = :crypto.hash(:sha256, "%{\"jason\" => 1}\n") |> Base.encode16(case: :lower)
+      assert {:ok, ^expected} = DepsCache.lock_hash(ctx.checkout, "HEAD")
+      assert {:error, :no_lockfile} = DepsCache.lock_hash(ctx.checkout, "HEAD~0:nothing")
+    end
+
     test "leaves a manifest it cannot read alone", ctx do
       File.write!(Path.join(ctx.cache, "_build/test/lib/jason/.mix/compile.elixir"), "garbage")
       assert {:ok, _} = DepsCache.install(ctx.cache, ctx.worker, ctx.opts)

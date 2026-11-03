@@ -49,6 +49,8 @@ defmodule Arbiter.NodeAgent.K8s.PodRuntimeTest do
       {"ARB_BOOT_NONCE", channel.nonce},
       {"ARB_RUN", H.run_id()},
       {"ARB_SEED_LAYER", Path.join(tmp, "no-seed-layer")},
+      # seed calls seed-layer from the image's /opt/arbiter/bin; here, from priv/.
+      {"ARB_BIN_DIR", Path.dirname(H.script("seed"))},
       {"TMPDIR", dirs.tmp},
       {"HOME", dirs.tmp}
     ]
