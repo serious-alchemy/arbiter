@@ -102,6 +102,23 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "Harness:    2.1.310"
     end
 
+    test "prints why a local run built its image instead of taking the published one (SI-L)" do
+      stub_get("/api/workers/bd-fb", %{
+        "task_id" => "bd-fb",
+        "kind" => "implement",
+        "state" => "working",
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "image_ref" => "localhost/arbiter-dev/x:abc",
+        "image_fallback" => "pull_failed: podman pull exited 125",
+        "output_lines" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-fb"]) end)
+      assert out =~ "Fallback:   pull_failed: podman pull exited 125"
+    end
+
     test "a run with no provenance prints no provenance lines (SI3)" do
       stub_get("/api/workers/bd-noprov", %{
         "task_id" => "bd-noprov",

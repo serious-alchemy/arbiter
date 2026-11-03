@@ -112,6 +112,20 @@ defmodule ArbiterWeb.RunDetailLiveTest do
       assert has_element?(view, "#run-harness-version", "2.1.310")
     end
 
+    test "shows why a local run built its image instead of taking the published one (SI-L)",
+         %{conn: conn} do
+      r =
+        run(%{
+          task_id: "bd-fallback-run",
+          image_ref: "localhost/arbiter-dev/x:abc",
+          image_fallback: "pull_failed: podman pull exited 125 (registry unreachable or refused)"
+        })
+
+      {:ok, view, _html} = live_run(conn, r.id)
+
+      assert has_element?(view, "#run-image-fallback", "pull_failed")
+    end
+
     test "a host-local run has no provenance block", %{conn: conn} do
       r = run(%{task_id: "bd-noprov-run"})
       {:ok, view, _html} = live_run(conn, r.id)

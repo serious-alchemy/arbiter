@@ -80,6 +80,7 @@ defmodule Arbiter.Workers.Runs do
     :routing_decision,
     :guardrail_decision,
     :image_ref,
+    :image_fallback,
     :cli_set,
     :harness_version
   ]

@@ -489,6 +489,10 @@ config :arbiter,
 
 # K8: the controller-image boot publish is driven by `Publisher.publish_controller/1` in tests.
 config :arbiter, :image_publisher, boot: false, ledger: nil, prefetch: false
+
+# SI-L: local runs take the published image from the local podman store. Off in the suite:
+# a test that exercises it passes `local_image: [published_image: true, …]`.
+config :arbiter, :local_published_image, false
 config :arbiter, :cli_set_watcher, enabled: false
 
 # A merge-permitting ReviewGate ruling resumes the ticket's merge path

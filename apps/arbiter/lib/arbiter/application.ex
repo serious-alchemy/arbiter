@@ -255,6 +255,10 @@ defmodule Arbiter.Application do
         Arbiter.Worker.CliFetcher.Scheduler,
         # K8 (bd-9vrbx7): publishes images to `nodes.registry` (inert while it is unset).
         Arbiter.Worker.Image.Publisher,
+        # SI-L (bd-4cq0qt): local runs take the published image from the local podman
+        # store; the live local runs it must not lose, and the GC of what it pulled.
+        Arbiter.Worker.Image.LocalRuns,
+        Arbiter.Worker.Image.LocalPublished.gc_spec(),
         # SI2 (OD13): republishes recently published repos when the CLI set moves.
         Arbiter.Worker.CliSet.Watcher,
         # bd-50d5j6: persists a podman Codex run's rotated auth.json when its

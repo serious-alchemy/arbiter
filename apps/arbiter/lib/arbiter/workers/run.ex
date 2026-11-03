@@ -125,6 +125,7 @@ defmodule Arbiter.Workers.Run do
         :guardrail_decision,
         :harness_version,
         :image_ref,
+        :image_fallback,
         :cli_set
       ]
     end
@@ -170,6 +171,7 @@ defmodule Arbiter.Workers.Run do
         :guardrail_decision,
         :harness_version,
         :image_ref,
+        :image_fallback,
         :cli_set,
         :stdout_offset
       ]
@@ -269,6 +271,15 @@ defmodule Arbiter.Workers.Run do
 
       description "SI3: the image the run ran in: the digest-pinned ref for a registry " <>
                     "node, else the tag. nil for a host-local run and for rows before SI3."
+    end
+
+    attribute :image_fallback, :string do
+      public? true
+
+      description "SI-L: why a local run built its image instead of taking the published " <>
+                    "one (cold cache with the registry unreachable, nothing published yet, " <>
+                    "a label mismatch); a short line carrying no credential. nil when the " <>
+                    "run took the image it asked for, and for rows before SI-L."
     end
 
     attribute :cli_set, :string do
