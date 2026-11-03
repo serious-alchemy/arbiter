@@ -206,8 +206,33 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
     end
   end
 
+  # The exchange runs in its own short-lived process that traps exits. A CLI
+  # that dies before it reads stdin makes the linked port exit with `:epipe`,
+  # and that exit signal would otherwise kill the *caller* — the quota poller or
+  # the credential watchdog — over a probe that was only ever advisory.
   defp exchange(exec, args, opts) do
-    timeout = positive(opts[:timeout_ms]) || @default_timeout_ms
+    parent = self()
+    ref = make_ref()
+
+    {_pid, mref} =
+      spawn_monitor(fn ->
+        Process.flag(:trap_exit, true)
+        send(parent, {ref, converse_with_cli(exec, args, opts)})
+      end)
+
+    receive do
+      {^ref, result} ->
+        Process.demonitor(mref, [:flush])
+        result
+
+      {:DOWN, ^mref, :process, _, reason} ->
+        {:unsupported, {:crashed, reason}}
+    end
+  end
+
+  defp converse_with_cli(exec, args, opts) do
+    timeout =
+      positive(opts[:timeout_ms]) || @default_timeout_ms
 
     port =
       Port.open(
@@ -298,6 +323,9 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
 
       {^port, {:exit_status, status}} ->
         {:exit, status}
+
+      {:EXIT, ^port, reason} ->
+        {:exit, reason}
     after
       remaining -> :timeout
     end

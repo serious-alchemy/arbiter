@@ -27,7 +27,9 @@ defmodule Arbiter.Agents.ClaudeControlPreflightTest do
     File.write!(fake, "#!/bin/sh\n: > #{marker}\necho pong\n")
     File.chmod!(fake, 0o755)
 
-    prev_env = for v <- ~w(PATH ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN), do: {v, System.get_env(v)}
+    prev_env =
+      for v <- ~w(PATH ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN), do: {v, System.get_env(v)}
+
     prev_cfg = Application.get_env(:arbiter, ControlChannel)
     Application.put_env(:arbiter, ControlChannel, enabled: true)
     System.put_env("PATH", bin_dir <> ":" <> System.get_env("PATH", ""))

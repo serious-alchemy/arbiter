@@ -109,6 +109,28 @@ defmodule Arbiter.Agents.Claude.ControlChannelTest do
     end
   end
 
+  describe "a CLI that dies before reading stdin" do
+    test "never takes the caller down (the port's :epipe exit is contained)" do
+      # Without containment the linked port's :epipe exit signal kills a
+      # non-trapping caller (CloudProbe, the credential watchdog) outright.
+      results =
+        for _ <- 1..40 do
+          {pid, ref} =
+            spawn_monitor(fn ->
+              exit(
+                {:result, ControlChannel.run(control_command: ["sh", "-c", "exit 3"], env: [])}
+              )
+            end)
+
+          receive do
+            {:DOWN, ^ref, :process, ^pid, reason} -> reason
+          end
+        end
+
+      assert Enum.all?(results, &match?({:result, {:unsupported, _}}, &1)), inspect(results)
+    end
+  end
+
   describe "the process is reaped" do
     test "a hung CLI does not outlive the call", %{stub: stub, tmp_dir: tmp_dir} do
       # The stub `exec`s sleep, so the os_pid the channel kills is the sleeper.

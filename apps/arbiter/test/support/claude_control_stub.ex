@@ -15,6 +15,7 @@ defmodule Arbiter.Test.ClaudeControlStub do
   | `usage_401`       | get_usage → error carrying a 401 |
   | `usage_429`       | get_usage → error carrying a 429 |
   | `usage_hang`      | get_usage never answered |
+  | `usage_empty`     | get_usage → success with a body carrying no usage windows |
   | `exit`            | exits 3 immediately |
   | `hang`            | sleeps without reading |
   """
@@ -70,6 +71,8 @@ defmodule Arbiter.Test.ClaudeControlStub do
               #{error_reply("Request failed with status code 429: rate limited")} ;;
             usage_hang)
               sleep 30 ;;
+            usage_empty)
+              printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{}}}\\n' "$id" ;;
             *)
               printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":%s}}\\n' "$id" '#{Jason.encode!(@usage_body)}' ;;
           esac ;;

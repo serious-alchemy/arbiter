@@ -315,6 +315,7 @@ defmodule Arbiter.Agents.Claude do
       _ -> SecurityPolicy.default()
     end
   end
+
   @doc """
   Control-channel auth pre-flight (bd-a2zrh0): `initialize` reports the token
   source, `get_usage` proves the token works — neither is a model turn, so this

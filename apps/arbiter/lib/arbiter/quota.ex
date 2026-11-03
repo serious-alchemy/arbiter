@@ -48,6 +48,7 @@ defmodule Arbiter.Quota do
   alias Arbiter.Accounts.Credentials
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
+  alias Arbiter.Agents.Claude.ControlChannel
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.CloudCode
   alias Arbiter.Quota.Gate
@@ -58,6 +59,7 @@ defmodule Arbiter.Quota do
   alias Arbiter.Quota.SpendCache
   alias Arbiter.Tasks.Workspace
   require Ash.Query
+  require Logger
 
   resources do
     resource Arbiter.Quota.AnthropicQuota
@@ -983,14 +985,56 @@ defmodule Arbiter.Quota do
   # The grant's access token is read from its file here, at fetch time, on
   # every poll — never cached or persisted — so a refresh the CLI writes in
   # place is picked up by the very next poll.
-  defp fetch_oauth_usage(fetch_opts, {:quota_grant, path}) do
+  defp fetch_oauth_usage(fetch_opts, token_source) do
+    case control_channel_usage(fetch_opts, token_source) do
+      {:ok, usage} -> {:ok, usage}
+      :fallback -> http_oauth_usage(fetch_opts, token_source)
+    end
+  end
+
+  # bd-a2zrh0: ask the `claude` CLI itself for usage over the stream-json
+  # control channel (`get_usage`), pointed at the very config dir the HTTP poll
+  # would have read a token from. The CLI refreshes its own access token as it
+  # goes, so this does not depend on an interactive session keeping the login
+  # alive. It is only ever *tried*: any failure — channel disabled, CLI too old
+  # or silent, request unsupported, an error answer, a body with no usage
+  # windows — returns `:fallback` and the HTTP poll below runs unchanged, so
+  # its 401/429 handling, cooldown and paging are all still the source of truth.
+  # An explicit `:token` or a stored account token has no config dir to point
+  # the CLI at, so those never go through the channel.
+  defp control_channel_usage(fetch_opts, token_source) do
+    with {:ok, env} <- control_channel_env(token_source),
+         true <- ControlChannel.enabled?(),
+         {:ok, body} <-
+           ControlChannel.fetch_usage([env: env] ++ Keyword.get(fetch_opts, :control_channel, [])),
+         true <- usage_windows?(body) do
+      {:ok, OAuthUsage.parse_usage(body)}
+    else
+      other ->
+        Logger.debug("Quota: control-channel usage unavailable, using HTTP: #{inspect(other)}")
+        :fallback
+    end
+  end
+
+  defp control_channel_env({:quota_grant, path}),
+    do: {:ok, [{"CLAUDE_CONFIG_DIR", GrantFile.config_dir(path)}]}
+
+  defp control_channel_env(:operator_credentials_file), do: {:ok, []}
+  defp control_channel_env(_), do: :none
+
+  defp usage_windows?(body) when is_map(body),
+    do: Enum.any?(["five_hour", "seven_day", "limits"], &Map.has_key?(body, &1))
+
+  defp usage_windows?(_), do: false
+
+  defp http_oauth_usage(fetch_opts, {:quota_grant, path}) do
     case GrantFile.read(path) do
       {:ok, grant} -> OAuthUsage.fetch(Keyword.put(fetch_opts, :token, grant.access_token))
       {:error, reason} -> {:error, {:grant_unreadable, reason}}
     end
   end
 
-  defp fetch_oauth_usage(fetch_opts, _token_source), do: OAuthUsage.fetch(fetch_opts)
+  defp http_oauth_usage(fetch_opts, _token_source), do: OAuthUsage.fetch(fetch_opts)
 
   # A workspace's workers read only their own account's credential
   # (`ConfigDir.oauth_token/1`, the only source since the P13 flip) — so this
