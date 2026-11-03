@@ -4552,14 +4552,12 @@ defmodule Arbiter.Worker.Dispatch do
   defp mcp_target(_task, worktree_path, _path, _opts) when is_binary(worktree_path),
     do: worktree_path
 
-  defp mcp_target(%Issue{} = task, nil, path, opts) when is_binary(path) do
+  defp mcp_target(task, nil, path, opts) do
     if Issue.no_pr_type?(task.issue_type) and
          Path.expand(path) != Path.expand(resolve_repo_path(task, Keyword.get(opts, :repo)) || "") do
       path
     end
   end
-
-  defp mcp_target(_task, _worktree_path, _path, _opts), do: nil
 
   defp start_agent_session(opts, session_opts) do
     start = Keyword.get(opts, :claude_start, &ClaudeSession.start/1)
