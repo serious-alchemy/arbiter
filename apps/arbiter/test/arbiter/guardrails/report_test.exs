@@ -293,17 +293,24 @@ defmodule Arbiter.Guardrails.ReportGitCredentialTest do
   describe "gitlab_bot_token expiry (bd-8ufzng)" do
     @http Arbiter.Worker.GitCredential.HTTP
 
-    defp bot_workspace!(entry_extra \\ %{}) do
+    defp bot_workspace!(entry_extra \\ %{}, more_repos \\ %{}) do
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "rep-bot-#{System.unique_integer([:positive])}",
           prefix: "rb#{:rand.uniform(99_999)}",
           config: %{
             "git_credentials" => %{
-              "repos" => %{
-                "tonic" =>
-                  Map.merge(%{"kind" => "gitlab_bot_token", "secret" => "GL_BOT"}, entry_extra)
-              }
+              "repos" =>
+                Map.merge(
+                  %{
+                    "tonic" =>
+                      Map.merge(
+                        %{"kind" => "gitlab_bot_token", "secret" => "GL_BOT"},
+                        entry_extra
+                      )
+                  },
+                  more_repos
+                )
             }
           },
           secrets: %{"GL_BOT" => "glpat-bot"}
@@ -363,6 +370,32 @@ defmodule Arbiter.Guardrails.ReportGitCredentialTest do
 
       assert [%{git_credential_tokens: [%{source: "config", days_left: 5}]}] = report.workspaces
       assert [_] = messages(report, :git_credential_token_expiring)
+    end
+
+    test "doctor names each configured repo the token cannot reach" do
+      Req.Test.stub(@http, fn conn ->
+        case conn.request_path do
+          "/api/v4/projects" ->
+            Req.Test.json(conn, [%{"path_with_namespace" => "acme/tonic"}])
+
+          _ ->
+            Req.Test.json(conn, %{"expires_at" => in_days(60), "scopes" => ["read_api"]})
+        end
+      end)
+
+      ws =
+        bot_workspace!(%{"remote" => "acme/tonic"}, %{
+          "tonic_device" => %{
+            "kind" => "gitlab_bot_token",
+            "secret" => "GL_BOT",
+            "remote" => "acme/tonic_device"
+          }
+        })
+
+      assert [message] = messages(probe(ws), :git_credential_unreachable)
+      assert message =~ "git_credentials.repos.tonic_device"
+      assert message =~ "acme/tonic_device"
+      refute message =~ "repos.tonic "
     end
 
     test "posture/2 stays free of network calls and of token rows" do

@@ -98,6 +98,7 @@ defmodule Arbiter.Guardrails.Report do
     block = Config.block(ws)
     subjects = attached_subjects(ws)
     tokens = token_rows(ws, expiry_opts)
+    unreachable = if expiry_opts, do: GitlabBot.unreachable(ws, expiry_opts), else: []
 
     resolved =
       for {type, subject} <- subjects do
@@ -119,7 +120,8 @@ defmodule Arbiter.Guardrails.Report do
           cap_issues(ws, block, Enum.map(subjects, &elem(&1, 1))) ++
           binding_issues(name, block, resolved) ++
           secret_issues(ws, name, block) ++
-          git_credential_issues(ws, name, rules != []) ++ token_issues(name, tokens)
+          git_credential_issues(ws, name, rules != []) ++
+          token_issues(name, tokens) ++ unreachable_issues(name, unreachable)
     }
   end
 
@@ -308,6 +310,18 @@ defmodule Arbiter.Guardrails.Report do
     for row <- tokens,
         message = token_warning(row),
         do: issue(:git_credential_token_expiring, name, message)
+  end
+
+  # bd-8h80lm: the configured repos the token cannot reach, named one per repo.
+  defp unreachable_issues(name, rows) do
+    for row <- rows do
+      issue(
+        :git_credential_unreachable,
+        name,
+        "git_credentials.repos.#{row.repo} bot token (#{row.secret}) cannot reach #{row.remote}; " <>
+          "give the bot access to it (membership for a classic token, a resource for a fine-grained one)"
+      )
+    end
   end
 
   defp token_warning(%{expires_at: nil} = row),
