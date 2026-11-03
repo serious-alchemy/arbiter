@@ -11,53 +11,12 @@ defmodule Arbiter.Agents.Claude.ControlChannelTest do
 
   alias Arbiter.Agents.Claude.ControlChannel
 
-  @usage_body %{
-    "five_hour" => %{"utilization" => 42.0, "resets_at" => "2030-01-01T05:00:00Z"},
-    "seven_day" => %{"utilization" => 10.0, "resets_at" => "2030-01-07T00:00:00Z"}
-  }
+  alias Arbiter.Test.ClaudeControlStub
 
-  # A POSIX-sh stand-in for `claude -p --input-format stream-json …`. It reads
-  # one JSON control_request per line from stdin and answers per `$1` (mode).
-  @stub """
-  #!/bin/sh
-  MODE="$1"
-  [ "$MODE" = "exit" ] && exit 3
-  [ "$MODE" = "hang" ] && exec sleep 30
-  while IFS= read -r line; do
-    id=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\\([^"]*\\)".*/\\1/p')
-    sub=$(printf '%s' "$line" | sed -n 's/.*"subtype":"\\([^"]*\\)".*/\\1/p')
-    printf '{"type":"system","subtype":"noise"}\\n'
-    case "$sub" in
-      initialize)
-        case "$MODE" in
-          init_unsupported)
-            printf '{"type":"control_response","response":{"subtype":"error","request_id":"%s","error":"Unsupported control request subtype: initialize"}}\\n' "$id" ;;
-          no_token)
-            printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"account":{"tokenSource":"none"}}}}\\n' "$id" ;;
-          init_hang)
-            sleep 30 ;;
-          *)
-            printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"account":{"tokenSource":"claude.ai","subscriptionType":"max"}}}}\\n' "$id" ;;
-        esac ;;
-      get_usage)
-        case "$MODE" in
-          no_usage)
-            printf '{"type":"control_response","response":{"subtype":"error","request_id":"%s","error":"Unsupported control request subtype: get_usage"}}\\n' "$id" ;;
-          usage_401)
-            printf '{"type":"control_response","response":{"subtype":"error","request_id":"%s","error":"Request failed with status code 401: invalid authentication credentials"}}\\n' "$id" ;;
-          usage_hang)
-            sleep 30 ;;
-          *)
-            printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":%s}}\\n' "$id" '#{Jason.encode!(@usage_body)}' ;;
-        esac ;;
-    esac
-  done
-  """
+  @usage_body ClaudeControlStub.usage_body()
 
   setup %{tmp_dir: tmp_dir} do
-    path = Path.join(tmp_dir, "claude-stub.sh")
-    File.write!(path, @stub)
-    {:ok, stub: path}
+    {:ok, stub: ClaudeControlStub.write!(tmp_dir)}
   end
 
   defp run(stub, mode, opts \\ []) do
