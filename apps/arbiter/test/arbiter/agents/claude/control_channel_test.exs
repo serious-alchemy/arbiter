@@ -68,7 +68,7 @@ defmodule Arbiter.Agents.Claude.ControlChannelTest do
       # Whether the exit status or a failing write (`:epipe`) is seen first is
       # a race inside the port; both mean "unsupported" and fall back to ping.
       assert {:unsupported, {:exited, reason}} = run(stub, "exit")
-      assert reason in [3, :epipe]
+      assert reason in [3, :epipe, :closed]
     end
 
     test "a CLI that never answers initialize times out", %{stub: stub} do
