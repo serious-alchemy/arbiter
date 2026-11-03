@@ -664,13 +664,15 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert info.phrase =~ "run is local-only: sandbox is not podman"
     end
 
-    test "a non-Claude podman task dispatch is held as local-only (provider)", %{ws: ws} do
+    test "a Codex podman task dispatch is not held as local-only for its provider (SI11)", %{
+      ws: ws
+    } do
       issue = research!(ws)
 
       assert {:error, {:no_node_capacity, info}} =
-               dispatch(issue, @podman ++ [agent_type: :agy])
+               dispatch(issue, @podman ++ [agent_type: :codex])
 
-      assert info.phrase =~ "run is local-only: provider agy has no remote credential path"
+      refute info.phrase =~ "provider codex"
     end
 
     test "a research dispatch given no checkout at all is held with that reason", %{ws: ws} do
