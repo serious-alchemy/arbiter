@@ -16,6 +16,7 @@ defmodule Arbiter.NodeAgent.K8s.EventFeedWireTest do
   alias Arbiter.NodeAgent.K8s.PodScripts
   alias Arbiter.NodeAgent.PodChannel.{PodServer, Runs}
   alias Arbiter.NodeAgent.PodChannelKit, as: Kit
+  alias Arbiter.Nodes.{RunStreams, StdoutFrame}
 
   @loopback {127, 0, 0, 1}
 
@@ -86,11 +87,13 @@ defmodule Arbiter.NodeAgent.K8s.EventFeedWireTest do
   end
 
   # What the controller does when the worker has ended: tell the follower, wait for the drain.
-  defp drained_text(ctx) do
+  defp drained_frames(ctx) do
     LogFollower.finish(ctx.follower)
     assert_receive {:log_drained, "run-1", _}, 10_000
-    frames() |> Enum.map(&payload/1) |> Enum.join()
+    frames()
   end
+
+  defp drained_text(ctx), do: ctx |> drained_frames() |> Enum.map_join(&payload/1)
 
   defp frames(acc \\ []) do
     receive do
@@ -111,6 +114,29 @@ defmodule Arbiter.NodeAgent.K8s.EventFeedWireTest do
 
     assert out == "one\ntwo\n{\"type\":\"result\"}\ndone\n"
     assert drained_text(ctx) == out
+  end
+
+  test "the primary stream takes every line of the run, the done signal last", ctx do
+    {out, 0} =
+      wrapper(ctx, [
+        "sh",
+        "-c",
+        ~S/echo '{"type":"system"}'; echo '{"type":"result"}'; echo 'arb done'/
+      ])
+
+    table = RunStreams.open(%RunStreams{}, "run-1", :handle, self(), nil)
+
+    {_table, effects} =
+      Enum.reduce(drained_frames(ctx), {table, []}, fn frame, {table, seen} ->
+        {:ok, "run-1", {:cursor, cursor}, bytes} = StdoutFrame.decode(frame)
+        {table, effects} = RunStreams.data_cursor(table, "run-1", cursor, bytes)
+        {table, seen ++ effects}
+      end)
+
+    lines = for {:send, _owner, {:handle, {:data, {:eol, line}}}} <- effects, do: line
+
+    assert lines == String.split(String.trim(out), "\n")
+    assert List.last(lines) == "arb done"
   end
 
   test "a large multi chunk stream of long lines arrives whole", ctx do
