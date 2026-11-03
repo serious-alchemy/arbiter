@@ -173,6 +173,9 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
     end
   end
 
+  # `exec` is the PATH-resolved `claude` binary and the argument list is the
+  # literal `["--version"]`; nothing from a request or a ticket reaches either.
+  # sobelow_skip ["CI.System"]
   defp cli_version_from_binary do
     with exec when is_binary(exec) <- System.find_executable("claude"),
          task = Task.async(fn -> System.cmd(exec, ["--version"], stderr_to_stdout: true) end),
