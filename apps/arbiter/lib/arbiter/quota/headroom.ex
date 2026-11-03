@@ -56,7 +56,7 @@ defmodule Arbiter.Quota.Headroom do
   The binding window's headroom for `quota` under `policy` (see
   `t:Arbiter.Quota.Gate.policy/0`), or `nil` when unknown.
 
-  Options: `:model` (the agy pool selector), `:now`, and `:priority` — the
+  Options: `:model` (the agy pool selector, and the model whose scoped weekly windows count), `:now`, and `:priority` — the
   task's own priority, which reads an exempt dispatch's lifted line
   (design §4.2, `Arbiter.Quota.Gate.pace/6`), so routing sees the same
   ceiling the gate holds at.
@@ -103,10 +103,14 @@ defmodule Arbiter.Quota.Headroom do
         do: [],
         else: [{:primary, s.window_label, s.utilization, s.reset_at}]
 
+    # The base long window, then each scoped one the snapshot carries for this
+    # model (bd-e0b7so): a card draws on all of them, so all are priced.
     long =
-      if is_nil(s.secondary_window_label) or Gate.long_window_stale?(s, now),
-        do: [],
-        else: [{:long, s.secondary_window_label, s.secondary_utilization, s.secondary_reset_at}]
+      for view <- Snapshot.long_views(s),
+          not is_nil(view.secondary_window_label),
+          not Gate.long_window_stale?(view, now) do
+        {:long, view.secondary_window_label, view.secondary_utilization, view.secondary_reset_at}
+      end
 
     primary ++ long
   end

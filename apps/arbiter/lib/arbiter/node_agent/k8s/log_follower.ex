@@ -22,16 +22,27 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
       last frame (`nil` for a run with no output), which the controller puts in `exit`. A pod
       that is already gone drains with what was sent.
 
+  ## Event mode (bd-1nl506)
+
+  With `source: :events` there is no reader and no kubelet: the pod ships the run's NDJSON
+  event file and `push_events/5` hands each byte-offset chunk in (`EventLines` keeps the
+  position, trims a retried chunk, refuses a gap). Frames, cursors (`"e<offset>"`), acks,
+  the window and `attach/2` are the same. The end is reported (`{:log_drained, ...}`) once
+  `finish/1` has been called and the pod sent its final chunk, or `:final_wait_ms` after
+  `finish/1` without one; a last line with no newline is dropped and reported first as
+  `{:log_truncated, run, bytes}`.
+
   Started unlinked and monitoring `:owner` (the controller), which it follows to the grave.
 
   Options: `:run`, `:pod`, `:client`, `:owner` (required), `:emit` (`fn frame -> any`),
   `:cursor` (resume after it), `:container` ("worker"), `:frame_bytes` (16 KiB),
-  `:window_bytes` (256 KiB), `:retry_ms` (500).
+  `:window_bytes` (256 KiB), `:retry_ms` (500), `:source` (`:log` or `:events`), `:final_wait_ms` (10 s, events).
   """
 
   use GenServer
 
   alias Arbiter.NodeAgent.K8s.Client
+  alias Arbiter.NodeAgent.K8s.EventLines
   alias Arbiter.NodeAgent.K8s.LogLines
   alias Arbiter.Nodes.StdoutFrame
 
@@ -40,6 +51,7 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
   @frame_bytes 16 * 1024
   @window_bytes 256 * 1024
   @retry_ms 500
+  @final_wait_ms 10_000
 
   # -- API ----------------------------------------------------------------------
 
@@ -57,6 +69,17 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
   @doc "The worker container has ended: drain the tail, then report `:log_drained`."
   @spec finish(GenServer.server()) :: :ok
   def finish(follower), do: GenServer.cast(follower, :finish)
+
+  @doc """
+  Event mode: the pod shipped `bytes`, which start at file offset `offset`; `final?` says
+  the worker ended and this is the last chunk. `{:ok, next}` once the frames are taken (held
+  while the window is full), `{:gap, next}` when `offset` is past `next` (the sender
+  resumes from `next`), `{:busy, next}` while an earlier chunk is still held.
+  """
+  @spec push_events(GenServer.server(), non_neg_integer(), binary(), boolean(), timeout()) ::
+          {:ok, non_neg_integer()} | {:gap, non_neg_integer()} | {:busy, non_neg_integer()}
+  def push_events(follower, offset, bytes, final?, timeout \\ 15_000),
+    do: GenServer.call(follower, {:events, offset, bytes, final?}, timeout)
 
   @doc "The cursor of the last frame taken from the log (`nil`: none yet)."
   @spec position(GenServer.server()) :: String.t() | nil
@@ -93,10 +116,14 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
       waiting: nil,
       final?: false,
       drained?: false,
-      reader: nil
+      reader: nil,
+      source: Keyword.get(opts, :source, :log),
+      events: EventLines.new(Keyword.get(opts, :cursor)),
+      feed_final?: false,
+      final_wait_ms: Keyword.get(opts, :final_wait_ms, @final_wait_ms)
     }
 
-    {:ok, %{state | reader: start_reader(state)}}
+    {:ok, start_source(state)}
   end
 
   @impl true
@@ -108,8 +135,30 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
   # The reader hands over the lines of a chunk; it is answered when they are taken, which is
   # held back while the window is full.
   def handle_call({:lines, lines}, from, state) do
-    state = %{state | waiting: {from, pack(lines, state.frame_bytes)}}
+    state = %{state | waiting: {from, pack(lines, state.frame_bytes), :ok}}
     {:noreply, release_reader(state)}
+  end
+
+  # Event mode: a chunk the pod shipped. The EventLines reader refuses a gap, trims a retry
+  # and keeps a partial last line; the HTTP caller is answered when its frames are taken.
+  def handle_call({:events, _at, _bytes, _final?}, _from, %{drained?: true} = state),
+    do: {:reply, {:ok, EventLines.next(state.events)}, state}
+
+  def handle_call({:events, _at, _bytes, _final?}, _from, %{waiting: waiting} = state)
+      when waiting != nil,
+      do: {:reply, {:busy, EventLines.next(state.events)}, state}
+
+  def handle_call({:events, at, bytes, final?}, from, state) do
+    case EventLines.feed(state.events, at, bytes) do
+      {_events, {:gap, next}} ->
+        {:reply, {:gap, next}, state}
+
+      {events, {:ok, lines}} ->
+        state = %{state | events: events, feed_final?: state.feed_final? or final?}
+        reply = {:ok, EventLines.next(events)}
+        state = %{state | waiting: {from, pack(lines, state.frame_bytes), reply}}
+        {:noreply, state |> release_reader() |> maybe_drain()}
+    end
   end
 
   def handle_call(:drained, _from, state) do
@@ -119,10 +168,10 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
 
   @impl true
   def handle_cast({:ack, cursor}, state),
-    do: {:noreply, state |> trim(cursor) |> release_reader()}
+    do: {:noreply, state |> trim(cursor) |> release_reader() |> maybe_drain()}
 
   def handle_cast({:attach, cursor}, state) do
-    state = state |> trim(cursor) |> release_reader()
+    state = state |> trim(cursor) |> release_reader() |> maybe_drain()
     for {_cursor, frame, _size} <- :queue.to_list(state.queue), do: state.emit.(frame)
     {:noreply, state}
   end
@@ -131,6 +180,12 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
   # container must not hold the exit back) and the tail is read from the position to EOF.
   # Frames of the cut reader that were not taken are read again from the position.
   def handle_cast(:finish, %{final?: true} = state), do: {:noreply, state}
+
+  # Event mode: nothing is cut or re-read; the pod's final chunk (or the wait) ends the feed.
+  def handle_cast(:finish, %{source: :events} = state) do
+    Process.send_after(self(), :final_wait_over, state.final_wait_ms)
+    {:noreply, maybe_drain(%{state | final?: true})}
+  end
 
   def handle_cast(:finish, state) do
     if is_pid(state.reader), do: Process.exit(state.reader, :kill)
@@ -152,6 +207,11 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
     {:noreply, %{state | reader: nil}}
   end
 
+  # Event mode: the pod never said it was done; take what arrived (a partial last line is
+  # dropped and reported).
+  def handle_info(:final_wait_over, state),
+    do: {:noreply, maybe_drain(%{state | feed_final?: true})}
+
   def handle_info(:restart_reader, %{reader: nil, drained?: false} = state),
     do: {:noreply, %{state | reader: start_reader(state)}}
 
@@ -164,6 +224,25 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
   end
 
   def terminate(_reason, _state), do: :ok
+
+  defp start_source(%{source: :events} = state), do: state
+  defp start_source(state), do: %{state | reader: start_reader(state)}
+
+  # Event mode: the end is reported once the worker has ended, the feed is over and every
+  # frame is taken. A partial last line is dropped, and said so (`:log_truncated`).
+  defp maybe_drain(%{source: :events, final?: true, feed_final?: true, drained?: false} = state) do
+    if state.waiting == nil do
+      with {:truncated, bytes} <- EventLines.finish(state.events),
+           do: send(state.owner, {:log_truncated, state.run, bytes})
+
+      send(state.owner, {:log_drained, state.run, state.position})
+      %{state | drained?: true}
+    else
+      state
+    end
+  end
+
+  defp maybe_drain(state), do: state
 
   # -- frames ---------------------------------------------------------------------
 
@@ -218,14 +297,14 @@ defmodule Arbiter.NodeAgent.K8s.LogFollower do
   # all of its batch has.
   defp release_reader(%{waiting: nil} = state), do: state
 
-  defp release_reader(%{waiting: {from, []}} = state) do
-    GenServer.reply(from, :ok)
+  defp release_reader(%{waiting: {from, [], reply}} = state) do
+    GenServer.reply(from, reply)
     %{state | waiting: nil}
   end
 
-  defp release_reader(%{waiting: {from, [frame | rest]}, unacked: unacked} = state)
+  defp release_reader(%{waiting: {from, [frame | rest], reply}, unacked: unacked} = state)
        when unacked < state.window_bytes,
-       do: release_reader(take(%{state | waiting: {from, rest}}, frame))
+       do: release_reader(take(%{state | waiting: {from, rest, reply}}, frame))
 
   defp release_reader(state), do: state
 
