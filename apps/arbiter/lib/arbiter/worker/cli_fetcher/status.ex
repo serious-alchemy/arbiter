@@ -26,6 +26,7 @@ defmodule Arbiter.Worker.CliFetcher.Status do
 
     %{
       hold: Settings.worker_cli_set_hold(),
+      local_published: Arbiter.Worker.Image.LocalPublished.enabled?(),
       scheduler: %{
         enabled: Map.get(scheduler, :enabled, false),
         checked_at: iso(Map.get(scheduler, :checked_at))
