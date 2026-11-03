@@ -217,7 +217,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # bd-1o2zh6 (RW9): the node agent's run supervisor opens the one
     # `podman run` Port; every other `node_agent/**` file spawns nothing (this
     # inventory fails if one starts to).
-    "apps/arbiter/lib/arbiter/node_agent/run.ex" => :scrubbed
+    "apps/arbiter/lib/arbiter/node_agent/run.ex" => :scrubbed,
+    # SI5: the seed layer's `chmod -R` cleanup goes through `ReleaseEnv.cmd/3`.
+    "apps/arbiter/lib/arbiter/node_agent/seed_layer.ex" => :scrubbed
   }
 
   # Spawn primitives that run a command of their own choosing. Rule 1 inspects
