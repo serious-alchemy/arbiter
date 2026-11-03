@@ -475,10 +475,10 @@ defmodule Arbiter.Agents.Codex.Stream do
 
     cond do
       detail["type"] == "usage_limit_reached" or detail["code"] == "usage_limit_reached" ->
-        {:quota, reset_epoch(detail)}
+        {:quota, reset_epoch(detail) || Arbiter.Worker.StopReason.codex_try_again_epoch(message)}
 
       message =~ ~r/hit your usage limit|usage limit (has been )?reached/i ->
-        {:quota, reset_epoch(detail)}
+        {:quota, reset_epoch(detail) || Arbiter.Worker.StopReason.codex_try_again_epoch(message)}
 
       # The MCP streamable-HTTP client's optional GET/SSE stream being refused
       # (`rmcp::transport...: GET returned HTTP 401`) is a non-fatal MCP
