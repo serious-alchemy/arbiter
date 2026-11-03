@@ -35,7 +35,7 @@ defmodule Arbiter.NodeAgent.ImagePull do
   `:runtime_dir`, `:require_tmpfs`, `:mountinfo` (`Secrets`'), `:pull_timeout_ms`.
   """
 
-  alias Arbiter.NodeAgent.{PullAuth, RunSpec, Secrets}
+  alias Arbiter.NodeAgent.{ImageGC, PullAuth, RunSpec, Secrets}
   alias Arbiter.Worker.Container
 
   @runtime_contracts [1]
@@ -49,7 +49,11 @@ defmodule Arbiter.NodeAgent.ImagePull do
 
   @doc "Make `spec.image.ref` present on this node and check its labels."
   @spec ensure(RunSpec.t(), keyword()) :: :ok | {:error, {atom(), term()}}
-  def ensure(%RunSpec{image: %{ref: ref} = image} = spec, opts) when is_binary(ref) do
+  def ensure(%RunSpec{image: %{ref: ref} = image, run: run} = spec, opts) when is_binary(ref) do
+    # SI6: the ledger learns of the use first, so a collection cannot take the image
+    # between the check below and the container.
+    ImageGC.claim(ref, run)
+
     with :ok <- present_or_pull(ref, image, spec, opts),
          {:ok, labels} <- labels(ref, opts) do
       check(labels, image)
@@ -61,9 +65,17 @@ defmodule Arbiter.NodeAgent.ImagePull do
   defp present_or_pull(ref, image, spec, opts) do
     case podman(opts, ["image", "exists", ref], @quick_timeout_ms) do
       {_, 0} -> :ok
-      _ -> pull(ref, image, spec, opts)
+      _ -> pull(ref, image, spec, opts) |> pulled(ref, spec)
     end
   end
+
+  # Only an image the agent pulled enters the GC ledger (SI6).
+  defp pulled(:ok, ref, spec) do
+    ImageGC.pulled(ref, spec.run)
+    :ok
+  end
+
+  defp pulled(error, _ref, _spec), do: error
 
   defp pull(ref, image, %RunSpec{pull_auth: nil}, opts), do: run_pull(ref, image, [], nil, opts)
 

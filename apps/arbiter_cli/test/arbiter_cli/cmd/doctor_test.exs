@@ -3009,6 +3009,41 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert detail =~ "arbiter.seed-lock"
     end
 
+    test "SI6: a node's images row is ok, warns on unrelieved pressure and lists legacy images" do
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [
+            node_row(%{
+              "name" => "tidy",
+              "images" => %{"count" => 2, "bytes" => 3_221_225_472, "legacy" => []}
+            }),
+            node_row(%{
+              "name" => "full",
+              "images" => %{"count" => 1, "bytes" => 0, "pressure_unrelieved" => true}
+            }),
+            node_row(%{
+              "name" => "old",
+              "images" => %{
+                "count" => 0,
+                "bytes" => 0,
+                "legacy" => ["localhost/arbiter-dev/abc:latest"]
+              }
+            })
+          ]
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :ok, detail: detail} = named(results, "node tidy images")
+      assert detail =~ "2 held"
+      assert %{status: :warn, detail: detail} = named(results, "node full images")
+      assert detail =~ "pressure"
+
+      assert %{status: :warn, detail: detail, hint: hint} = named(results, "node old images")
+      assert detail =~ "localhost/arbiter-dev/abc:latest"
+      assert hint =~ "podman image rm"
+    end
+
     test "SI4a: a machine node gets an image source row; build is the legacy-path warning" do
       stub_nodes(
         nodes_resp(%{

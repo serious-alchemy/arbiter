@@ -69,6 +69,7 @@ defmodule Arbiter.NodeAgent.Supervisor do
           ] ++
             image_builder() ++
             Runs.child_specs() ++
+            [{Arbiter.NodeAgent.ImageGC, config: config}] ++
             [
               {Bridge, node_home: config.node_home},
               monitor_spec(config),
