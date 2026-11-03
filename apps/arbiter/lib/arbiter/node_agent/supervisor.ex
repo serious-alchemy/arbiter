@@ -98,14 +98,10 @@ defmodule Arbiter.NodeAgent.Supervisor do
     |> Keyword.put_new(:bridges_release_fun, &Bridge.release/1)
   end
 
-  # bd-6w7usy: the machine senses its own temperature and memory pressure and derates the slots
-  # it offers; each heartbeat reports the result (`Protocol.heartbeat/2`). Before `Connection`.
-  # Its cap is the node's own (suggestion, bounded by the owner's ceiling); the primary applies
-  # the derate level to whatever cap the operator has set.
   # SI7: the `image.prefetch` queue, one background pull at a time.
   defp prefetch_spec(config) do
     pull_opts =
-      Keyword.take(config.run_opts || [], [
+      Keyword.take(config.run_opts, [
         :podman,
         :runner,
         :runtime_dir,
@@ -117,6 +113,10 @@ defmodule Arbiter.NodeAgent.Supervisor do
     {Arbiter.NodeAgent.ImagePrefetch, pull_opts: pull_opts}
   end
 
+  # bd-6w7usy: the machine senses its own temperature and memory pressure and derates the slots
+  # it offers; each heartbeat reports the result (`Protocol.heartbeat/2`). Before `Connection`.
+  # Its cap is the node's own (suggestion, bounded by the owner's ceiling); the primary applies
+  # the derate level to whatever cap the operator has set.
   defp monitor_spec(config) do
     {Arbiter.Machine.Monitor,
      name: config.monitor,
