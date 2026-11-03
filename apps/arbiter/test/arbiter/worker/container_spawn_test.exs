@@ -131,6 +131,106 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
   end
 
+  describe "prepare/1 takes the published image (SI-L, bd-4cq0qt)" do
+    @digest String.duplicate("9", 64)
+    @published "registry.example.com/arbiter/vstim/worker@sha256:" <> @digest
+
+    # The local image step against a stand-in podman: `present?` says whether the digest
+    # is in the local store, `pull` what a pull answers, the labels are the pinned set's.
+    defp local_image(ctx, cfg \\ %{}) do
+      test = self()
+      rt = Path.join(ctx.dir, "rt")
+      File.mkdir_p!(rt)
+      mountinfo = Path.join(ctx.dir, "mountinfo")
+      File.write!(mountinfo, "36 35 98:0 / #{rt} rw,noatime - tmpfs none rw\n")
+      ledger = Path.join(ctx.dir, "publish-ledger.term")
+
+      Arbiter.Worker.Image.PublishLedger.record(%{repo: "vstim", repo_path: "/r"},
+        ledger: ledger,
+        ref: @published
+      )
+
+      {:ok, set} = Arbiter.Worker.CliSet.resolve(ctx.opts)
+
+      labels =
+        %{"arbiter.runtime-contract" => "1", "arbiter.cli-providers" => "claude,codex"}
+        |> Map.merge(Map.new(Arbiter.Worker.CliSet.labels(set)))
+
+      runner = fn "podman", args, _opts ->
+        send(test, {:local_podman, args})
+
+        case args do
+          ["image", "exists", _] -> if Map.get(cfg, :present?, false), do: {"", 0}, else: {"", 1}
+          ["pull" | _] -> Map.get(cfg, :pull, {"", 0})
+          ["image", "inspect" | _] -> {Jason.encode!([%{"Labels" => labels}]), 0}
+        end
+      end
+
+      without_image = Keyword.delete(ctx.opts, :image)
+
+      [repo: "vstim", local_build: fn _repo_path, _base -> {:ok, %{tag: @image}} end] ++
+        [
+          local_image: [
+            published_image: true,
+            podman: "podman",
+            runner: runner,
+            runtime_dir: rt,
+            mountinfo: mountinfo,
+            ledger: ledger,
+            registry_opts: [config: %{registry: "registry.example.com/arbiter"}],
+            gc: [name: :no_such_local_gc]
+          ]
+        ] ++ without_image
+    end
+
+    test "a cached digest runs with no pull, no network and no CLI bind mounts", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(local_image(ctx, %{present?: true}))
+
+      assert request.image == @published
+      assert request.cli_mounts == []
+      refute Map.get(request, :image_fallback)
+      refute_received {:local_podman, ["pull" | _]}
+
+      assert %{image_ref: @published, cli_set: set8} = ContainerSpawn.provenance(request)
+      assert is_binary(set8)
+
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request))
+      # the image carries the CLIs at /opt/arbiter/cli; no host file is bound over them
+      refute Enum.any?(mounts(wrapped.argv), &String.contains?(&1, "/opt/arbiter/cli"))
+    end
+
+    test "a cold cache pulls the digest, then runs it", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(local_image(ctx))
+
+      assert request.image == @published
+      assert request.cli_mounts == []
+      assert_received {:local_podman, ["pull", "--quiet" | _]}
+    end
+
+    test "an unreachable registry with a cold cache runs the local build and records why",
+         ctx do
+      opts =
+        local_image(ctx, %{pull: {"dial tcp: lookup registry.example.com: no such host", 125}})
+
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+
+      assert request.image == @image
+      assert request.cli_mounts != []
+      assert request.image_fallback =~ "pull_failed"
+
+      assert %{image_ref: @image, image_fallback: reason} = ContainerSpawn.provenance(request)
+      assert reason =~ "pull_failed"
+    end
+
+    test "an explicit image tag is never replaced by the published one", ctx do
+      opts = Keyword.put(local_image(ctx, %{present?: true}), :image, @image)
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+      assert request.image == @image
+      assert request.cli_mounts != []
+      refute_received {:local_podman, _}
+    end
+  end
+
   describe "prepare_remote/1 provenance (SI3)" do
     test "the remote request carries the digest-pinned ref, the set and the label version", ctx do
       ref = "registry.example/arbiter/x@sha256:" <> String.duplicate("b", 64)
@@ -146,7 +246,12 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       {:ok, set} = Arbiter.Worker.CliSet.resolve(ctx.opts)
 
       assert ContainerSpawn.provenance(request) ==
-               %{image_ref: ref, cli_set: set.set8, harness_version: "2.1.310"}
+               %{
+                 image_ref: ref,
+                 cli_set: set.set8,
+                 harness_version: "2.1.310",
+                 image_fallback: nil
+               }
     end
   end
 

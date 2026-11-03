@@ -22,10 +22,12 @@ defmodule Arbiter.Nodes.Prefetch do
   `:send_fun` (`(node_id, payload -> :ok | {:error, term})`; default
   `Session.prefetch/2` on the node's session), `:credential_opts` (to `PullCredential`),
   `:credential_fun` (`(workspace, repo, row -> PullCredential.for_node/4's result)`),
-  and `:async` (default `true`).
+  `:local` (`false` skips the local store, or a 2-arity function replaces
+  `LocalPublished.prefetch/2`, SI-L), and `:async` (default `true`).
   """
 
   alias Arbiter.Nodes.{Allowlist, Overview, Placement, Registry, Session}
+  alias Arbiter.Worker.Image.LocalPublished
   alias Arbiter.Worker.Image.PullCredential
 
   require Logger
@@ -59,12 +61,30 @@ defmodule Arbiter.Nodes.Prefetch do
   end
 
   defp safely(ctx, published, opts) do
+    local(ctx, published, opts)
     _ = run(ctx, published, opts)
     :ok
   rescue
     e ->
       Logger.warning("image.prefetch: skipped: #{Exception.message(e)}")
       :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # SI-L: the machine the primary runs on is a candidate too: a local run takes the same
+  # published image, from the local podman store (`LocalPublished`). Independent of the
+  # fleet: its failure costs the node sends nothing, and the next local run pulls for itself.
+  defp local(ctx, published, opts) do
+    case Keyword.get(opts, :local, &LocalPublished.prefetch/2) do
+      false ->
+        :ok
+
+      fun when is_function(fun, 2) ->
+        fun.(ctx, published)
+    end
+  rescue
+    e -> Logger.warning("image.prefetch: local store skipped: #{Exception.message(e)}")
   catch
     :exit, _ -> :ok
   end

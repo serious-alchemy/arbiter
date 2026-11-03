@@ -107,4 +107,51 @@ defmodule Arbiter.Nodes.PrefetchTest do
     assert :ok = Prefetch.after_publish(%{repo: "x"}, %{ref: @ref}, prefetch: hook)
     assert_received {:hook, %{repo: "x"}, %{ref: @ref}}
   end
+
+  describe "the local machine (SI-L)" do
+    test "after a publish the local store is prefetched too, whatever the node fleet is" do
+      test = self()
+
+      assert :ok =
+               Prefetch.after_publish(%{repo: "vstim"}, %{ref: @ref},
+                 prefetch: true,
+                 async: false,
+                 nodes: [],
+                 local: fn ctx, published ->
+                   send(test, {:local_prefetch, ctx, published})
+                   :ok
+                 end
+               )
+
+      assert_received {:local_prefetch, %{repo: "vstim"}, %{ref: @ref}}
+    end
+
+    test "a local prefetch that blows up neither fails the publish nor skips the nodes" do
+      assert :ok =
+               Prefetch.after_publish(%{workspace: %{id: "ws-1"}, repo: "vstim"}, %{ref: @ref},
+                 prefetch: true,
+                 async: false,
+                 nodes: [row("a")],
+                 local: fn _, _ -> raise "podman exploded" end,
+                 send_fun: &send(self(), {:prefetch, &1, &2}),
+                 credential_fun: fn _, _, _ ->
+                   {:ok, %{auth: @auth, level: :repo, insecure?: false}}
+                 end
+               )
+
+      assert_received {:prefetch, "node-a", _}
+    end
+
+    test "local: false leaves the local store alone" do
+      assert :ok =
+               Prefetch.after_publish(%{repo: "vstim"}, %{ref: @ref},
+                 prefetch: true,
+                 async: false,
+                 nodes: [],
+                 local: false
+               )
+
+      refute_received {:local_prefetch, _, _}
+    end
+  end
 end
