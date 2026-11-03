@@ -494,13 +494,6 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
-  # bd-6ircwr: the transcript snapshot is staged in this host's tmp dir and
-  # bind-mounted by the local podman backend; a node cannot see it. A run promised
-  # one is refused rather than run studying nothing (the rule `ContainerSpawn.prepare/1`
-  # applies locally).
-  defp no_remote_research(nil), do: :ok
-  defp no_remote_research(_), do: {:error, {:research_transcripts_unsupported, :remote_node}}
-
   # RW9: a run placed on a node (`opts[:node]`, from `Worker.Dispatch`'s
   # `ensure_node_capacity/2`). The primary half runs here (egress, image plan,
   # published CLI files), then the run is *assigned* to the node and this waits
@@ -523,11 +516,16 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
+  # bd-1fkwj9: a `research_read` run on a node is handed no transcript snapshot: the
+  # snapshot is staged in this host's tmp dir and bind-mounted by the local podman
+  # backend (`:research_transcripts` is not in the `Keyword.take` below, on purpose),
+  # and copying transcripts to a node would put sensitive data on a disk the primary does
+  # not own. The run reads them through `GET /api/workers/:task/log` instead, under
+  # the `research_read` claim its token carries, and nothing is left on the node.
   defp prepare_remote_container(opts, policy, port_args, ctx, node, attempt) do
     provider = Keyword.get(opts, :provider) || "claude"
 
     with :ok <- remote_git_credential(Keyword.get(opts, :git_material)),
-         :ok <- no_remote_research(Keyword.get(opts, :research_transcripts)),
          {:ok, _sandbox} <- Arbiter.Worker.Sandbox.module(policy, provider),
          {:ok, request} <-
            PlacementWatch.step(attempt, :prepare, fn ->

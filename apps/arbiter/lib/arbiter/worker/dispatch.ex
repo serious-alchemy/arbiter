@@ -5053,8 +5053,7 @@ defmodule Arbiter.Worker.Dispatch do
                   # with `policy`, which is what wraps it under `podman`.
                   sandbox_wrap: true
                 ] ++
-                Keyword.take(opts, [:mcp_config, :arb_token]) ++
-                research_agent_opts(research, task)
+                Keyword.take(opts, [:mcp_config, :arb_token])
 
             tracker_context = fetch_tracker_context(task, workspace)
 
@@ -5156,6 +5155,7 @@ defmodule Arbiter.Worker.Dispatch do
                    session_meta ++
                    sandbox_session_opts(policy, workspace, opts) ++
                    [projection: projection, git_credential: git_credential] ++
+                   research_session_opts(research, task, opts) ++
                    Keyword.take(opts, [:arb_token])}
 
               {:error, reason} ->
@@ -5439,11 +5439,22 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # The workspace whose transcripts a granted run may read, for the podman spawn.
-  defp research_agent_opts(%{granted?: true}, %Issue{workspace_id: ws}),
-    do: [research_transcripts: ws]
+  # The workspace whose transcripts a granted run may read, for the spawn on the
+  # primary's podman: `ClaudeSession` stages a read-only snapshot of them
+  # (`ResearchGrant.stage_transcripts/3`) and mounts it. This must ride the *session*
+  # opts: `ClaudeSession` never sees the adapter's `agent_opts`, so the snapshot was
+  # never mounted when it was put there (bd-1fkwj9).
+  #
+  # A run placed on a node is handed none (bd-1fkwj9): transcripts are sensitive and
+  # a node's disk is not the primary's, so the run reads them through
+  # `GET /api/workers/:task/log`, which its `research_read` claim opens, and nothing
+  # is shipped to or stored on the node. (The fallback to the primary re-enters here
+  # with `:node` dropped, and gets the snapshot like any local run.)
+  defp research_session_opts(%{granted?: true}, %Issue{workspace_id: ws}, opts) do
+    if Keyword.get(opts, :node), do: [], else: [research_transcripts: ws]
+  end
 
-  defp research_agent_opts(_research, _task), do: []
+  defp research_session_opts(_research, _task, _opts), do: []
 
   defp reinject_permission_claims(_task, [], opts), do: opts
 
