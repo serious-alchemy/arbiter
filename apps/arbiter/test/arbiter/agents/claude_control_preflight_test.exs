@@ -29,6 +29,7 @@ defmodule Arbiter.Agents.ClaudeControlPreflightTest do
 
     prev_env = for v <- ~w(PATH ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN), do: {v, System.get_env(v)}
     prev_cfg = Application.get_env(:arbiter, ControlChannel)
+    Application.put_env(:arbiter, ControlChannel, enabled: true)
     System.put_env("PATH", bin_dir <> ":" <> System.get_env("PATH", ""))
     System.put_env("ANTHROPIC_API_KEY", "sk-ant-test")
 
