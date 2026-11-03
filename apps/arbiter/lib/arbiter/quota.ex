@@ -1041,10 +1041,9 @@ defmodule Arbiter.Quota do
   defp control_channel_env(:operator_credentials_file), do: {:ok, []}
   defp control_channel_env(_), do: :none
 
-  defp usage_windows?(body) when is_map(body),
+  # `ControlChannel.fetch_usage/1` only ever hands back a map body on `{:ok, _}`.
+  defp usage_windows?(body),
     do: Enum.any?(["five_hour", "seven_day", "limits"], &Map.has_key?(body, &1))
-
-  defp usage_windows?(_), do: false
 
   defp http_oauth_usage(fetch_opts, {:quota_grant, path}) do
     case GrantFile.read(path) do
