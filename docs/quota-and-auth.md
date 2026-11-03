@@ -472,6 +472,38 @@ primary-class key set on a Claude account's `quota_config`, in a workspace's
 | `weekly_warning_policy` | 7d | applies | applies |
 | `threshold_mode`, `pace_curve`, `on_exhaustion`, `overage_alert_usd`, `pace_exempt_priority` | window-agnostic | applies | applies |
 
+## Per-model weekly limits: nested windows of the `claude` pool (bd-e0b7so)
+
+Anthropic's `limits[]` can carry `kind: "weekly_scoped"` entries, one per model
+(`scope.model.display_name`, e.g. `Fable`). A scoped limit is a **subset** of
+`weekly_all` (a Fable run draws on both), so it is a window nested in the one
+`claude` pool and never a pool of its own: seats are counted once.
+
+- **Stored** on `anthropic_quotas.scoped_limits`, replaced by every poll that
+  reports `limits[]` and left alone by one that does not.
+- **Projected per model.** `Gate.Snapshot.normalize(quota, model: m)` carries
+  the scoped windows whose scope matches `m` (`ModelFamily.scope_matches?/2`:
+  every word of the display name is a word of the model id, so `Fable` matches
+  `claude-fable-5-1` and `fable`). `model: nil` carries all of them (the
+  conservative reading, as for agy); with no `:model` option the snapshot carries
+  none, which is the account-level view the board reads.
+- **Evaluated like the base long window.** `Gate`, `Headroom` and `Budget` run
+  the `weekly_*` keys and the account's `pace_curve` over each scoped window,
+  labelled `7d (Fable)`. A card's budget is the `min` over its windows, and the
+  first-seat rule's "below the line on every trusted window" includes its scoped
+  window. A hold reads `7d (Fable) binds, ...`.
+- **Holds only the matching model.** `Budget.Server` publishes a scoped variant
+  beside the pool's budget (`Budget.scope`) and `SeatCheck` picks it by the
+  card's model, so exhausting Fable holds Fable cards while the account serves
+  other models. The dispatch gate resolves the card's model for an account that
+  reports a scoped window; an unresolvable model reads the worst of all.
+- **Unknown scopes.** A scope that matches no known Claude model is logged once
+  and shown in `arb quota` (`scoped`, `matched: false`), and gated, on every
+  model, only when Anthropic marks it `is_active`.
+
+The scheduler walk (`Board.WalkInputs`) still plans against the pool-level
+budget; a Fable card it promotes is held at admission by `SeatCheck`.
+
 ## The paced line and `pace_curve` (bd-bq0gi8)
 
 In `threshold_mode: "paced"` a window's ceiling follows the clock. With

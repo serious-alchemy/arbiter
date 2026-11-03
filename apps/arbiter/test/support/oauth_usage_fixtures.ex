@@ -50,6 +50,28 @@ defmodule Arbiter.Quota.OAuthUsageFixtures do
     }
   end
 
+  @doc """
+  `five_hour_null/0` with Fable's weekly scoped limit exhausted: `percent: 100`,
+  `severity: "rejected"`, `is_active: true`. Derived from the recorded body by
+  changing only those scoped fields (the exhausted shape itself has not been
+  recorded); `weekly_all` stays at 61%, so the account still serves other models.
+  """
+  @spec scoped_exhausted() :: map()
+  def scoped_exhausted do
+    body = five_hour_null()
+
+    limits =
+      Enum.map(body["limits"], fn
+        %{"kind" => "weekly_scoped"} = l ->
+          %{l | "percent" => 100, "severity" => "rejected", "is_active" => true}
+
+        l ->
+          %{l | "is_active" => false}
+      end)
+
+    %{body | "limits" => limits}
+  end
+
   @doc "Legacy shape: both 5h and 7d windows present, session limit active."
   @spec legacy() :: map()
   def legacy do

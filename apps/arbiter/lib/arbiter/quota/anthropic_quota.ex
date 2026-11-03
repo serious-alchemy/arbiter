@@ -91,6 +91,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
         :per_model_utilization,
         :extra_usage,
         :spend,
+        :scoped_limits,
         :oauth_utilization_5h,
         :oauth_utilization_7d,
         :oauth_captured_at
@@ -102,6 +103,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
         :per_model_utilization,
         :extra_usage,
         :spend,
+        :scoped_limits,
         :oauth_utilization_5h,
         :oauth_utilization_7d,
         :oauth_captured_at
@@ -126,6 +128,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
         :per_model_utilization,
         :extra_usage,
         :spend,
+        :scoped_limits,
         :oauth_utilization_5h,
         :oauth_utilization_7d,
         :oauth_captured_at,
@@ -147,6 +150,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
         :per_model_utilization,
         :extra_usage,
         :spend,
+        :scoped_limits,
         :oauth_utilization_5h,
         :oauth_utilization_7d,
         :oauth_captured_at,
@@ -219,6 +223,12 @@ defmodule Arbiter.Quota.AnthropicQuota do
       default %{}
 
       description "Per-model 7d utilization fraction (0-1) from /api/oauth/usage, e.g. %{\"sonnet\" => 0.42}."
+    end
+
+    attribute :scoped_limits, {:array, :map} do
+      public? true
+
+      description "Per-model weekly limits from /api/oauth/usage limits[] (kind weekly_scoped), nested windows of the weekly one (bd-e0b7so): a list of maps with scope, utilization (0-1), status, reset_at (iso8601) and is_active."
     end
 
     attribute :extra_usage, :map do
