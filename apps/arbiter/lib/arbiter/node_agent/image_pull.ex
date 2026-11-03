@@ -49,12 +49,24 @@ defmodule Arbiter.NodeAgent.ImagePull do
 
   @doc "Make `spec.image.ref` present on this node and check its labels."
   @spec ensure(RunSpec.t(), keyword()) :: :ok | {:error, {atom(), term()}}
-  def ensure(%RunSpec{image: %{ref: ref} = image, run: run} = spec, opts) when is_binary(ref) do
+  def ensure(%RunSpec{image: %{ref: ref} = image, run: run, pull_auth: auth}, opts)
+      when is_binary(ref),
+      do: ensure_ref(ref, image, auth, run, opts)
+
+  @doc """
+  `ensure/2` for a caller with no `RunSpec`: the primary's own local run
+  (`Arbiter.Worker.Image.LocalPublished`, SI-L). `image` is `ensure/2`'s `image` map
+  (`:cli_set`, `:provider`, `:insecure?`), `auth` a `PullAuth` or `nil`, `run` the
+  ledger's run id. `opts[:gc]` is the `ImageGC` option list (`:name`) to record the use in.
+  """
+  @spec ensure_ref(String.t(), map(), PullAuth.t() | nil, String.t(), keyword()) ::
+          :ok | {:error, {atom(), term()}}
+  def ensure_ref(ref, image, auth, run, opts) when is_binary(ref) do
     # SI6: the ledger learns of the use first, so a collection cannot take the image
     # between the check below and the container.
-    ImageGC.claim(ref, run)
+    ImageGC.claim(ref, run, gc(opts))
 
-    with :ok <- present_or_pull(ref, image, spec, opts),
+    with :ok <- present_or_pull(ref, image, auth, run, opts),
          {:ok, labels} <- labels(ref, opts) do
       check(labels, image)
     end
@@ -62,20 +74,22 @@ defmodule Arbiter.NodeAgent.ImagePull do
 
   # -- present, or pulled -------------------------------------------------------------
 
-  defp present_or_pull(ref, image, spec, opts) do
+  defp present_or_pull(ref, image, auth, run, opts) do
     case podman(opts, ["image", "exists", ref], @quick_timeout_ms) do
       {_, 0} -> :ok
-      _ -> ref |> pull(image, spec.pull_auth, spec.run, opts) |> pulled(ref, spec.run)
+      _ -> ref |> pull(image, auth, run, opts) |> pulled(ref, run, opts)
     end
   end
 
   # Only an image the agent pulled enters the GC ledger (SI6).
-  defp pulled(:ok, ref, run) do
-    ImageGC.pulled(ref, run)
+  defp pulled(:ok, ref, run, opts) do
+    ImageGC.pulled(ref, run, gc(opts))
     :ok
   end
 
-  defp pulled(error, _ref, _run), do: error
+  defp pulled(error, _ref, _run, _opts), do: error
+
+  defp gc(opts), do: Keyword.get(opts, :gc, [])
 
   @doc """
   SI7 (`image.prefetch`, §21.4): make `ref` present ahead of any run. `podman image
@@ -89,7 +103,7 @@ defmodule Arbiter.NodeAgent.ImagePull do
   def prefetch(ref, image, auth, run, opts) when is_binary(ref) do
     case podman(opts, ["image", "exists", ref], @quick_timeout_ms) do
       {_, 0} -> :ok
-      _ -> ref |> pull(image, auth, run, opts) |> pulled(ref, run)
+      _ -> ref |> pull(image, auth, run, opts) |> pulled(ref, run, opts)
     end
   end
 
