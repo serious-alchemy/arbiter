@@ -420,8 +420,7 @@ defmodule Arbiter.Worker.DriverTest do
           Ash.create(Issue, %{
             title: "cd-overrun",
             workspace_id: ws.id,
-            issue_type: unquote(type),
-            notes: "findings write-up"
+            issue_type: unquote(type)
           })
 
         {:ok, worker_pid} =
@@ -431,6 +430,11 @@ defmodule Arbiter.Worker.DriverTest do
             workspace_id: ws.id,
             meta: %{issue_type: unquote(type)}
           )
+
+        # bd-48ycdn: research findings must be written by the run itself.
+        Arbiter.Actor.with_actor(Arbiter.Actor.worker(task.id), fn ->
+          {:ok, _} = Ash.update(task, %{notes: "findings write-up"}, action: :update)
+        end)
 
         {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
         {:ok, machine_pid} = Machine.start(machine_id)

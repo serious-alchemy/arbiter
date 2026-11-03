@@ -71,6 +71,21 @@ defmodule Arbiter.Worker.NotesGateTest do
     task
   end
 
+  # The agent's own write: its bearer token resolves to the `worker:<ticket>`
+  # actor (`Arbiter.Actor.from_scope/1`). Called after `start_worker/2`, so it
+  # lands inside the run's window.
+  defp worker_writes_notes!(task, notes, how \\ :replace) do
+    {:ok, fresh} = Ash.get(Issue, task.id)
+
+    input = if how == :append, do: %{append_notes: notes}, else: %{notes: notes}
+
+    Arbiter.Actor.with_actor(Arbiter.Actor.worker(task.id), fn ->
+      {:ok, _} = Ash.update(fresh, input, action: :update)
+    end)
+
+    :ok
+  end
+
   defp tmp_dir!(tag) do
     dir = Path.join(System.tmp_dir!(), "#{tag}-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
@@ -204,8 +219,9 @@ defmodule Arbiter.Worker.NotesGateTest do
     end
 
     test "arb-done with populated notes completes cleanly", %{ws: ws} do
-      task = new_task(ws, "## Findings\n\nResearch complete. Conclusion: viable.")
+      task = new_task(ws)
       pid = start_worker(task, %{notes_nudge_cap: 0})
+      worker_writes_notes!(task, "## Findings\n\nResearch complete. Conclusion: viable.")
 
       send(pid, {:__claude_session_done__, "arb done"})
 
@@ -224,6 +240,99 @@ defmodule Arbiter.Worker.NotesGateTest do
       wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       assert Worker.state(pid).meta.failure_reason == :blank_notes_at_completion
+    end
+  end
+
+  describe "findings must be written during the run (bd-48ycdn)" do
+    @old_notes "## Context (coordinator, 10-15)\n\nEarlier readout of the cluster; see PR #1200."
+
+    defp escalation_for(ws, task) do
+      Message.inbox("admiral", workspace_id: ws.id)
+      |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == task.id))
+    end
+
+    test "pre-existing notes and no write by the run: parks with a no-findings cause", %{ws: ws} do
+      task = new_task(ws, @old_notes)
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+
+      snap = Worker.state(pid)
+      refute snap.outcome == :succeeded
+      assert snap.meta.failure_reason == :no_findings_written_this_run
+      assert snap.meta.notes_gate_detail == :cap_exhausted
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      refute reloaded.state == :closed
+      # The coordinator's notes are untouched.
+      assert reloaded.notes == @old_notes
+
+      escalation = escalation_for(ws, task)
+      assert escalation
+      assert escalation.subject =~ "no findings"
+      assert escalation.body =~ "no findings were written"
+    end
+
+    test "a coordinator write during the run is not the run's findings", %{ws: ws} do
+      task = new_task(ws, @old_notes)
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      {:ok, fresh} = Ash.get(Issue, task.id)
+
+      Arbiter.Actor.with_actor(Arbiter.Actor.coordinator(), fn ->
+        {:ok, _} =
+          Ash.update(fresh, %{notes: @old_notes <> "\n\nFollow-up from me."}, action: :update)
+      end)
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+      assert Worker.state(pid).meta.failure_reason == :no_findings_written_this_run
+    end
+
+    test "pre-existing notes plus the run's own write completes", %{ws: ws} do
+      task = new_task(ws, @old_notes)
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+      worker_writes_notes!(task, @old_notes <> "\n\n## Findings\n\nRoot cause: X.")
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
+    end
+
+    test "the run's own append_notes write completes", %{ws: ws} do
+      task = new_task(ws, @old_notes)
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+      worker_writes_notes!(task, "## Findings\n\nRoot cause: Y.", :append)
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
+    end
+
+    test "a write by the worker before the run started does not count", %{ws: ws} do
+      task = new_task(ws)
+      worker_writes_notes!(task, "Findings from an earlier attempt.")
+      # Ensure the run starts strictly after the write.
+      Process.sleep(5)
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+      assert Worker.state(pid).meta.failure_reason == :no_findings_written_this_run
+    end
+
+    test "a clean exit without `arb done` is judged the same way", %{ws: ws} do
+      task = new_task(ws, @old_notes)
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      :ok = exit_clean_without_done(pid, "ng-exit-stale")
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+      assert Worker.state(pid).meta.failure_reason == :no_findings_written_this_run
     end
   end
 
@@ -321,8 +430,9 @@ defmodule Arbiter.Worker.NotesGateTest do
       notes =
         "Triage NOT performed: no gh CLI or ci_* MCP tools in this sandbox. Needs re-dispatch."
 
-      task = new_task(ws, notes)
+      task = new_task(ws)
       pid = start_worker(task, %{notes_nudge_cap: 0})
+      worker_writes_notes!(task, notes)
 
       send(pid, {:__claude_session_done__, "arb done"})
 
@@ -344,14 +454,14 @@ defmodule Arbiter.Worker.NotesGateTest do
     end
 
     test "analytical prose mentioning 'not performed' / 'redispatch' still completes", %{ws: ws} do
-      task =
-        new_task(
-          ws,
-          "Root cause: validation is not performed for nil inputs, so the job needs redispatch " <>
-            "after a crash. The old report said \"Triage NOT performed\" but that was a quote."
-        )
-
+      task = new_task(ws)
       pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      worker_writes_notes!(
+        task,
+        "Root cause: validation is not performed for nil inputs, so the job needs redispatch " <>
+          "after a crash. The old report said \"Triage NOT performed\" but that was a quote."
+      )
 
       send(pid, {:__claude_session_done__, "arb done"})
 
@@ -359,8 +469,9 @@ defmodule Arbiter.Worker.NotesGateTest do
     end
 
     test "real findings still complete", %{ws: ws} do
-      task = new_task(ws, "Root cause: flaky timeout in foo_test; re-ran green.")
+      task = new_task(ws)
       pid = start_worker(task, %{notes_nudge_cap: 0})
+      worker_writes_notes!(task, "Root cause: flaky timeout in foo_test; re-ran green.")
 
       send(pid, {:__claude_session_done__, "arb done"})
 
@@ -417,8 +528,9 @@ defmodule Arbiter.Worker.NotesGateTest do
 
     test "clean exit with populated notes completes via the notes gate (no resume loop)",
          %{ws: ws} do
-      task = new_task(ws, "## Findings\n\nInvestigation complete. Conclusion: viable.")
+      task = new_task(ws)
       pid = start_worker(task, %{notes_nudge_cap: 0})
+      worker_writes_notes!(task, "## Findings\n\nInvestigation complete. Conclusion: viable.")
 
       :ok = exit_clean_without_done(pid, "ng-exit-populated")
 
