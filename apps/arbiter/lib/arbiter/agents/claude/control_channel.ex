@@ -385,7 +385,7 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
       end
     end
 
-    if is_port(port) and Port.info(port) != nil, do: Port.close(port)
+    if Port.info(port) != nil, do: Port.close(port)
     :ok
   rescue
     _ -> :ok
