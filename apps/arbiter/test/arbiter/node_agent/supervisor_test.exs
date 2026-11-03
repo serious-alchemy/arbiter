@@ -50,6 +50,7 @@ defmodule Arbiter.NodeAgent.SupervisorTest do
     assert Enum.sort(children) ==
              Enum.sort([
                Arbiter.NodeAgent.TaskSupervisor,
+               Arbiter.NodeAgent.ImageGC,
                Arbiter.NodeAgent.Status,
                Arbiter.NodeAgent.Upgrader,
                Arbiter.NodeAgent.RunRegistry,

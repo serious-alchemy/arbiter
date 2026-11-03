@@ -70,6 +70,7 @@ defmodule Arbiter.NodeAgent.Protocol do
     |> put_present("load", load())
     |> put_present("free_mem", meminfo("MemAvailable"))
     |> Map.merge(derate_fields(Monitor.current(config.monitor)))
+    |> put_present("images", Arbiter.NodeAgent.ImageGC.stats())
   end
 
   # bd-6w7usy: what the machine sensed and decided about itself. Nothing is sent while
