@@ -141,6 +141,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.GateEnv
   alias Arbiter.Worker.GitCredential
   alias Arbiter.Worker.Image
+  alias Arbiter.Worker.Image.LocalPublished
   alias Arbiter.Worker.Image.Publisher
   alias Arbiter.Worker.Image.Registry, as: ImageRegistry
   alias Arbiter.Worker.Image.RepoConfig
@@ -188,6 +189,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
           required(:provider) => String.t(),
           required(:image) => String.t(),
           required(:image_ref) => String.t() | nil,
+          optional(:image_fallback) => String.t() | nil,
           required(:cli_set) => String.t() | nil,
           required(:harness_version) => String.t() | nil,
           required(:podman) => String.t() | nil,
@@ -291,14 +293,14 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, mounts} <- clone_mounts(worktree),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
          {:ok, research_dir} <- stage_research(opts, tmp_dir),
-         {:ok, image} <- fetch_image(opts, worktree),
-         {:ok, set, cli_mounts} <- resolve_cli(provider, opts),
+         name = container_name(opts),
+         {:ok, image, source} <- fetch_image(opts, worktree, provider, name),
+         {:ok, set, cli_mounts} <- local_cli(source, provider, opts),
          {:ok, home, config_dir, codex_auth} <- run_dirs(provider, tmp_dir, policy, opts),
          {:ok, temp_dir} <- container_temp_dir(provider, tmp_dir),
          # Before the egress run starts: a cold seed takes minutes.
          deps_cache = seed_deps(opts, worktree, image, home),
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree),
-         name = container_name(opts),
          {:ok, services} <- start_services(opts, name),
          {:ok, git_secrets} <- create_git_secrets(opts, name, tmp_dir, services) do
       track_codex_auth(opts, codex_auth)
@@ -309,6 +311,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
          provider: provider,
          image: image,
          image_ref: image,
+         image_fallback: fallback_of(source),
          cli_set: set.set8,
          harness_version: cli_version(set, provider),
          podman: Keyword.get(opts, :podman),
@@ -465,24 +468,73 @@ defmodule Arbiter.Worker.ContainerSpawn do
     end
   end
 
-  defp fetch_image(opts, worktree) do
+  # `{:ok, image, source}`: `source` is how the image was chosen, for `local_cli/3` and
+  # the run's provenance: `:explicit` (a tag the caller or config named), `:published`
+  # (SI-L: the repo's published digest, from the local podman store), `:build` (the
+  # local build) or `{:fallback, reason}` (the build, because the published image could
+  # not be had).
+  defp fetch_image(opts, worktree, provider, name) do
     case Keyword.get(opts, :image) || Application.get_env(:arbiter, :worker_container_image) do
-      tag when is_binary(tag) and tag != "" -> {:ok, tag}
-      _ -> ensure_image(opts, worktree)
+      tag when is_binary(tag) and tag != "" -> {:ok, tag, :explicit}
+      _ -> published_or_build(opts, worktree, provider, name)
     end
   end
 
-  defp ensure_image(opts, worktree) do
+  # SI-L (bd-4cq0qt, OD11): a local run takes the published per-repo image every node
+  # takes, served from the local podman store, and falls back to the local build only
+  # when it cannot be had (`Image.LocalPublished`). Nothing here can strand a run.
+  defp published_or_build(opts, worktree, provider, name) do
+    case local_published(opts, provider, name) do
+      {:published, %{ref: ref}} -> {:ok, ref, :published}
+      {:fallback, reason} -> build_image(opts, worktree, {:fallback, reason})
+      {:build, nil} -> build_image(opts, worktree, :build)
+    end
+  end
+
+  defp local_published(opts, provider, name) do
+    local = Keyword.get(opts, :local_image, [])
+
+    with true <- LocalPublished.enabled?(local) || {:build, nil},
+         {:ok, set} <- CliSet.resolve(opts) do
+      LocalPublished.resolve(
+        [
+          workspace: Keyword.get(opts, :workspace),
+          repo: Keyword.get(opts, :repo),
+          run: name,
+          owner: Keyword.get(opts, :owner),
+          provider: provider,
+          expect_cli_set: set.set8
+        ] ++ local
+      )
+    else
+      # An unresolvable CLI set is `resolve_cli/2`'s error to report, as it always was.
+      _ -> {:build, nil}
+    end
+  end
+
+  defp build_image(opts, worktree, source) do
     repo_path = PrivateClone.main_repo(worktree)
     base = Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
+    build = Keyword.get(opts, :local_build, &Image.ensure/2)
 
     with true <- is_binary(repo_path) or {:error, {:not_a_private_clone, worktree}},
-         {:ok, %{tag: tag}} <- Image.ensure(repo_path, base) do
-      {:ok, tag}
+         {:ok, %{tag: tag}} <- build.(repo_path, base) do
+      {:ok, tag, source}
     else
       {:error, reason} -> {:error, {:image_unavailable, reason}}
     end
   end
+
+  # The published image carries its CLIs as layers: nothing is bind-mounted, and the
+  # set is resolved only for the run's provenance. Every other source mounts the cache.
+  defp local_cli(:published, _provider, opts) do
+    with {:ok, set} <- CliSet.resolve(opts), do: {:ok, set, []}
+  end
+
+  defp local_cli(_source, provider, opts), do: resolve_cli(provider, opts)
+
+  defp fallback_of({:fallback, reason}), do: reason
+  defp fallback_of(_source), do: nil
 
   # The clone's `deps/` and `_build/` come from the cache seeded inside this
   # image (`DepsCache`, bd-1wm14e), not from the host's own `_build`, which is
@@ -595,16 +647,22 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   @doc """
   SI3: what a prepared spawn (`prepare/1`'s or `prepare_remote/1`'s request)
-  ran in: `%{image_ref, cli_set, harness_version}`, the last read from the
-  image's `arbiter.cli.<provider>.version` label.
+  ran in: `%{image_ref, cli_set, harness_version, image_fallback}`, the version read
+  from the image's `arbiter.cli.<provider>.version` label. `image_fallback` (SI-L) is
+  why a local run built its image instead of taking the published one, else `nil`.
   """
   @spec provenance(map()) :: %{
           image_ref: String.t() | nil,
           cli_set: String.t() | nil,
-          harness_version: String.t() | nil
+          harness_version: String.t() | nil,
+          image_fallback: String.t() | nil
         }
   def provenance(request),
-    do: Map.new([:image_ref, :cli_set, :harness_version], &{&1, Map.get(request, &1)})
+    do:
+      Map.new(
+        [:image_ref, :cli_set, :harness_version, :image_fallback],
+        &{&1, Map.get(request, &1)}
+      )
 
   # An empty or unpinned cache is an install state, not a bug: say what it is and
   # how to fill it, beside the `{:cli_not_cached, provider}` the caller gets.

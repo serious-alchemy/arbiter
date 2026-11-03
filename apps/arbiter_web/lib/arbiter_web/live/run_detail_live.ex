@@ -278,7 +278,7 @@ defmodule ArbiterWeb.RunDetailLive do
 
             <%!-- ── Provenance: image, CLI set, harness version (SI3) ───── --%>
             <div
-              :if={@run.image_ref || @run.cli_set || @run.harness_version}
+              :if={@run.image_ref || @run.cli_set || @run.harness_version || @run.image_fallback}
               id="run-provenance"
               class="flex flex-col gap-1 rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--arb-panel-alt)] px-3 py-2 text-[12px] text-[var(--text-secondary)]"
             >
@@ -287,6 +287,9 @@ defmodule ArbiterWeb.RunDetailLive do
               </span>
               <span :if={@run.image_ref} id="run-image-ref" class="font-mono break-all">
                 image {@run.image_ref}
+              </span>
+              <span :if={@run.image_fallback} id="run-image-fallback" class="font-mono break-all">
+                local build (published image unavailable): {@run.image_fallback}
               </span>
               <span :if={@run.cli_set} id="run-cli-set" class="font-mono">
                 CLI set {@run.cli_set}

@@ -335,6 +335,7 @@ defmodule ArbiterCli.Cmd.Worker do
   defp emit_provenance(run) do
     if run["image_ref"], do: IO.puts("Image:      #{run["image_ref"]}")
     if run["cli_set"], do: IO.puts("CLI set:    #{run["cli_set"]}")
+    if run["image_fallback"], do: IO.puts("Fallback:   #{run["image_fallback"]}")
     if run["harness_version"], do: IO.puts("Harness:    #{run["harness_version"]}")
   end
 

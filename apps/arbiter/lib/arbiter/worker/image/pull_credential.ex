@@ -79,6 +79,22 @@ defmodule Arbiter.Worker.Image.PullCredential do
     end
   end
 
+  @doc """
+  The credential the **primary itself** pulls its own repo image with (SI-L: a local
+  run takes the published image). The same sources as `for_node/4` and the same refusal
+  of a push credential, but no reach rule: the primary holds the push credential
+  already, and the pull token never leaves it. `{:ok, %{auth, level, insecure?}}` or
+  `{:error, reason}` (`:no_pull_credential` when none is configured).
+  """
+  @spec for_local(term(), String.t() | nil, keyword()) :: {:ok, t()} | {:error, term()}
+  def for_local(workspace, repo, opts \\ []) do
+    with {:ok, registry} <- registry(workspace, repo, opts),
+         {:ok, level, login} <- credential(workspace, repo, registry, opts),
+         :ok <- not_push(login, registry, workspace, repo, opts) do
+      {:ok, %{auth: auth(registry, login), level: level, insecure?: registry.insecure? == true}}
+    end
+  end
+
   defp registry(workspace, repo, opts) do
     case Registry.resolve(workspace, repo, opts) do
       {:ok, %Registry{} = cfg} -> {:ok, cfg}

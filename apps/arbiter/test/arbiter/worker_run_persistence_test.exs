@@ -247,7 +247,8 @@ defmodule Arbiter.WorkerRunPersistenceTest do
       request = %{
         image_ref: "localhost/arbiter-dev/x:abc-clifeed0123",
         cli_set: "feed0123",
-        harness_version: "0.130.0"
+        harness_version: "0.130.0",
+        image_fallback: "pull_failed: podman pull exited 125 (registry unreachable or refused)"
       }
 
       port_args = %{
@@ -277,6 +278,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
       assert run.image_ref == "localhost/arbiter-dev/x:abc-clifeed0123"
       assert run.cli_set == "feed0123"
       assert run.harness_version == "0.130.0"
+      assert run.image_fallback =~ "pull_failed"
     end
 
     test "a remote spawn's request supplies the same three" do
