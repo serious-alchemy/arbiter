@@ -41,7 +41,19 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
 
   ## The run's output and its end (K15)
 
-    * **`stdout`.** Once the worker container runs, an `Arbiter.NodeAgent.K8s.LogFollower`
+    * **`stdout`, from the event feed (bd-1nl506).** A pod annotated `arbiter.dev/events`
+      (every pod this controller builds, unless `:event_feed` is `false`) ships the agent's
+      stdout and stderr as NDJSON, teed by its entry wrapper and POSTed in byte-offset chunks
+      to the pod channel's `/events` (`Arbiter.NodeAgent.PodChannel.PodPlug`), which hands
+      them to the run's `LogFollower` in event mode (`event_feed/2`). The feed, not the
+      kubelet's log, is the source of the done signal and the outcome: the log keeps the same
+      bytes for a human and is never read for such a pod, so a line it drops, reorders or
+      re-stamps changes nothing. Only complete lines are forwarded; a last line with no
+      newline is dropped and the exit says `stdout_truncated: <bytes>`. A pod that never
+      sends its final chunk (killed) ends the stream `:event_final_wait_ms` (10 s) after the
+      worker ends. A pod without the annotation (made before this, or with `event_feed:
+      false`) is read from its log as below.
+    * **`stdout`, from the log.** Once the worker container runs, an `Arbiter.NodeAgent.K8s.LogFollower`
       reads its log and the sink gets `{:run_push, run, "stdout", {:binary, frame}}` (`ARB2`
       frames with opaque cursors). `ack/3` is the primary's acknowledgement; `resume/2` is
       the cursor `hello_ok` says the primary holds, applied by the `attach_all/2` that
@@ -186,6 +198,14 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   end
 
   @doc """
+  The event feed of `run` (bd-1nl506): `{:ok, follower}` when the run's output is read from
+  the NDJSON its pod ships (the pod channel hands each chunk to it), else `:error`.
+  """
+  @spec event_feed(GenServer.server(), String.t()) :: {:ok, pid()} | :error
+  def event_feed(controller \\ __MODULE__, run),
+    do: GenServer.call(controller, {:event_feed, run})
+
+  @doc """
   The primary acknowledged `run`'s output up to the opaque `cursor` (K15).
   """
   @spec ack(GenServer.server(), String.t(), String.t()) :: :ok
@@ -256,6 +276,8 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
       now_fun: Keyword.get(opts, :now_fun, &DateTime.utc_now/0),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       protect_s: Keyword.get(opts, :protect_s, @default_protect_s),
+      event_feed: Keyword.get(opts, :event_feed, true),
+      event_final_wait_ms: opts[:event_final_wait_ms],
       runs: %{},
       logs: %{},
       acked: %{},
@@ -348,6 +370,14 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   end
 
   def handle_call(:report, _from, state), do: {:reply, build_report(state), state}
+
+  def handle_call({:event_feed, run}, _from, state) do
+    case state.logs do
+      %{^run => %{source: :events, pid: pid}} -> {:reply, {:ok, pid}, state}
+      _ -> {:reply, :error, state}
+    end
+  end
+
   def handle_call(:run_ids, _from, state), do: {:reply, Map.keys(state.runs), state}
 
   def handle_call({:outcome, run}, _from, state) do
@@ -388,6 +418,17 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
       end
 
     {:noreply, reevaluate(state, run)}
+  end
+
+  # bd-1nl506: the event file ended on a partial line, which was dropped.
+  def handle_info({:log_truncated, run, bytes}, state) do
+    logs =
+      case state.logs do
+        %{^run => log} -> Map.put(state.logs, run, %{log | truncated: bytes})
+        logs -> logs
+      end
+
+    {:noreply, %{state | logs: logs}}
   end
 
   # K15: the pod channel forwarded a checkpoint (or failed to); the last one is the exit's.
@@ -505,6 +546,7 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     facts =
       state.identity
       |> Map.take(~w(registry install_id node_id owner_uid bridge_addr gate_addr max_wall_s)a)
+      |> Map.put(:event_feed, state.event_feed)
       |> Map.put(:boot_nonce, nonce)
 
     case PodSpec.build(run_spec, ControllerConfig.pod_config(config, facts)) do
@@ -901,20 +943,44 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
     sink_state = %{sink: state.sink}
     cursor = state.acked[entry.run]
 
+    source = if events_pod?(entry), do: :events, else: :log
+
     {:ok, pid} =
       LogFollower.start(
-        run: entry.run,
-        pod: entry.pod,
-        client: state.client,
-        owner: self(),
-        cursor: cursor,
-        emit: fn frame -> push(sink_state, entry.run, "stdout", {:binary, frame}) end
+        [
+          run: entry.run,
+          pod: entry.pod,
+          client: state.client,
+          owner: self(),
+          cursor: cursor,
+          source: source,
+          emit: fn frame -> push(sink_state, entry.run, "stdout", {:binary, frame}) end
+        ] ++ final_wait(state)
       )
 
     if final?, do: LogFollower.finish(pid)
-    log = %{pid: pid, ref: Process.monitor(pid), drained?: false, position: cursor}
+
+    log = %{
+      pid: pid,
+      ref: Process.monitor(pid),
+      drained?: false,
+      position: cursor,
+      source: source,
+      truncated: nil
+    }
+
     %{state | logs: Map.put(state.logs, entry.run, log)}
   end
+
+  # A pod carrying the annotation ships its output as an event feed (bd-1nl506); one made
+  # before that (or with `event_feed: false`) is read from its log, as before.
+  defp events_pod?(%{last_pod: pod}) when is_map(pod),
+    do: get_in(pod, ["metadata", "annotations", "arbiter.dev/events"]) == "1"
+
+  defp events_pod?(_entry), do: false
+
+  defp final_wait(%{event_final_wait_ms: ms}) when is_integer(ms), do: [final_wait_ms: ms]
+  defp final_wait(_state), do: []
 
   defp stop_follower(state, run) do
     case Map.pop(state.logs, run) do
@@ -983,9 +1049,21 @@ defmodule Arbiter.NodeAgent.K8s.Controller do
   # How the stream ended, for `exit`: the cursor of its last frame, or `size: 0` for a run
   # that never wrote (the primary completes a stream on either).
   defp stdout_end(state, entry) do
-    case last_cursor(state, entry.run) do
-      nil -> %{"size" => 0}
-      cursor -> %{"cursor" => cursor}
+    end_of =
+      case last_cursor(state, entry.run) do
+        nil -> %{"size" => 0}
+        cursor -> %{"cursor" => cursor}
+      end
+
+    case state.logs do
+      %{} = logs when is_map_key(logs, entry.run) ->
+        case logs[entry.run].truncated do
+          bytes when is_integer(bytes) -> Map.put(end_of, "stdout_truncated", bytes)
+          _ -> end_of
+        end
+
+      _ ->
+        end_of
     end
   end
 

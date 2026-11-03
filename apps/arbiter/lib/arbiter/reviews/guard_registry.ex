@@ -974,6 +974,37 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "in tests outside the diff, is re-run once per head; the same test failing again " <>
           "gets a fix pass (briefed, for outside-diff tests), different outside-diff ones " <>
           "escalate as a suspected flake"
+    },
+    %{
+      id: :merge_train_car,
+      doc_ref: "W23",
+      class: :a,
+      class_source: :inferred,
+      class_note:
+        "bd-6dyva0. Not in §5.3's table, which predates the speculative merge train. With " <>
+          "merge.train.depth > 1 it is the freshness half of W1's merge authorisation: W1 " <>
+          "still decides coverage on the MR's own head and W7 still pins the forge merge to " <>
+          "it, and a car's green pipeline may stand in for the serial sync only when the " <>
+          "car is a proven non-authored merge (TrainCar.verify) and the forge's merge would " <>
+          "land exactly its tested tree (landing_tree). It fails closed — no proof, no " <>
+          "merge on the car — and its terminal is the serial path, whose freshness budget " <>
+          "(W1/bd-5z9yvb's max_freshness_syncs) parks and pages once.",
+      bound: {:attempts, {:config, :car_builds_per_head}},
+      episode: {:task, :mr_ref, :head_sha},
+      terminal: :proceeds,
+      sites: [
+        {Watchdog, :do_build_car, 3},
+        {Watchdog, :build_new_car, 4},
+        {Watchdog, :authorize_car_merge, 3},
+        {Watchdog, :landing, 1},
+        {Watchdog, :eject_car, 3}
+      ],
+      anchors: ["@car_builds_per_head", "TrainCar.verify", "TrainCar.landing_tree", "eject_car"],
+      summary:
+        "speculative merge train: an MR merges on its car's green pipeline only at the front, " <>
+          "on a car proven non-authored, when the forge's merge would land the car's tested " <>
+          "tree; otherwise the car is rebuilt, at most @car_builds_per_head times per head, " <>
+          "or the MR goes back to the serial path"
     }
   ]
 

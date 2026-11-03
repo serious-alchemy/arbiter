@@ -183,6 +183,11 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # bd-2oo8kf: git only (`merge-tree`, `merge-base`) directly; the `log | patch-id` pipe goes
     # through `ReleaseEnv.cmd/3` (`sh -c`). Proves a synced head is the reviewed head.
     "apps/arbiter/lib/arbiter/mergers/sync_proof.ex" => :pure_tool,
+    # bd-6dyva0: git only (fetch / rev-parse / merge-tree / commit-tree / log /
+    # merge-base, and push / push --delete of the Arbiter-owned
+    # `arbiter/train/*` car refs) to build, verify and retire a speculative
+    # merge-train car, through one literal `System.cmd("git", …)`.
+    "apps/arbiter/lib/arbiter/mergers/train_car.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/reviews/conflict_resolution.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/github/repo_resolver.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/reviews/checkout.ex" => :pure_tool,

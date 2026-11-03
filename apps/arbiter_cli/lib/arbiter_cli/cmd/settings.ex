@@ -9,8 +9,9 @@ defmodule ArbiterCli.Cmd.Settings do
       arb settings unset <key>
       arb settings schema [--json]
 
-  Secrets (`nodes.registry_password`) are write-only and always strings; prefer
-  `arb settings set nodes.registry_password -` (stdin) or `--file <path>` to argv.
+  Secrets (`nodes.registry_password`, `nodes.registry_pull_password`) are write-only
+  and always strings; prefer `arb settings set <key> -` (stdin) or `--file <path>`
+  to argv.
 
   `get` shows, per key, the value in force, whether it comes from an
   `override` or the `default`, and what the default is. `unset` (and
@@ -82,7 +83,7 @@ defmodule ArbiterCli.Cmd.Settings do
   # A secret key (`Registry`'s "secret" type) is always a string — "12345" must
   # not become an integer — and has a stdin / file form so it need not ride argv
   # (visible to `ps` and shell history).
-  @secret_keys ["nodes.registry_password"]
+  @secret_keys ["nodes.registry_password", "nodes.registry_pull_password"]
 
   defp set([key | rest], opts, mode) when key in @secret_keys do
     value =

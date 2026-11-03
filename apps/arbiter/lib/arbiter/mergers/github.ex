@@ -1516,6 +1516,122 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
+  # ---- speculative merge-train cars (bd-6dyva0) ------------------------------
+  #
+  # A car branch's push starts the repo's `on: push` workflows for it; a repo
+  # that runs CI some other way names a workflow to dispatch on the car instead
+  # (`merge.train.workflow`). Either way the car's verdict is every workflow run
+  # on the car's sha, taken together, as `branch_pipeline/3` judges a commit.
+
+  @impl true
+  def run_ref_pipeline(mr_ref, %{ref: ref}, opts) when is_binary(mr_ref) and is_binary(ref) do
+    case Map.get(opts, :workflow) do
+      workflow when is_binary(workflow) and workflow != "" ->
+        with {:ok, cfg} <- Config.resolve(),
+             {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+             :ok <-
+               cfg
+               |> request(
+                 :post,
+                 "/repos/#{owner}/#{repo}/actions/workflows/#{URI.encode(workflow)}/dispatches",
+                 json: %{ref: ref}
+               )
+               |> expect_ok() do
+          {:ok, nil}
+        end
+
+      _ ->
+        {:ok, nil}
+    end
+  end
+
+  @impl true
+  def ref_pipeline(mr_ref, %{ref: ref, sha: sha}, _opts)
+      when is_binary(mr_ref) and is_binary(ref) and is_binary(sha) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, runs} <- car_runs(cfg, owner, repo, ref, sha) do
+      case runs |> newest_per_workflow() |> car_verdict(sha) do
+        nil -> {:ok, nil}
+        %{failed_runs: _} = verdict -> {:ok, with_branch_jobs(verdict, cfg, owner, repo)}
+        verdict -> {:ok, verdict}
+      end
+    end
+  end
+
+  # Every unfinished run on the car's sha, superseded or not: none of them is
+  # testing anything the train will merge any more.
+  @impl true
+  def cancel_ref_pipeline(mr_ref, %{ref: ref, sha: sha}, _opts)
+      when is_binary(mr_ref) and is_binary(ref) and is_binary(sha) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, runs} <- car_runs(cfg, owner, repo, ref, sha) do
+      runs
+      |> Enum.reject(&(Map.get(&1, "status") == "completed"))
+      |> Enum.reduce_while(:ok, fn run, :ok ->
+        path = "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/cancel"
+
+        case cfg |> request(:post, path, json: %{}) |> expect_ok() do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  # The workflow runs on the car's branch at the car's sha.
+  defp car_runs(cfg, owner, repo, ref, sha) do
+    case cfg
+         |> request(:get, "/repos/#{owner}/#{repo}/actions/runs",
+           params: [head_sha: sha, branch: ref, per_page: 50]
+         )
+         |> handle_json() do
+      {:ok, %{"workflow_runs" => runs}} when is_list(runs) ->
+        {:ok, Enum.filter(runs, &(Map.get(&1, "head_sha") == sha))}
+
+      {:ok, _} ->
+        {:error, :unexpected_runs_response}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # One verdict per workflow, its newest run: a dispatch and a push of the same
+  # commit (or a re-trigger) are one verdict, not two.
+  defp newest_per_workflow(runs) do
+    runs
+    |> Enum.group_by(&(Map.get(&1, "workflow_id") || Map.get(&1, "name")))
+    |> Enum.map(fn {_workflow, group} -> Enum.max_by(group, &(Map.get(&1, "id") || 0)) end)
+  end
+
+  defp car_verdict([], _sha), do: nil
+
+  defp car_verdict(runs, sha) do
+    case runs |> Enum.map(&deploy_status/1) |> car_status() do
+      "failed" ->
+        branch_run(sha, runs, "failed")
+
+      status ->
+        newest = Enum.max_by(runs, &(Map.get(&1, "id") || 0))
+        %{id: Map.get(newest, "id"), sha: sha, status: status, url: Map.get(newest, "html_url")}
+    end
+  end
+
+  # One status for every workflow run on the car: any red is red; anything still
+  # going is going; only skipped runs mean nothing tested it.
+  defp car_status(statuses) do
+    cond do
+      "failed" in statuses -> "failed"
+      "running" in statuses -> "running"
+      Enum.any?(statuses, &(&1 in ["pending", "manual"])) -> "pending"
+      "canceled" in statuses -> "canceled"
+      Enum.all?(statuses, &(&1 == "skipped")) -> "skipped"
+      true -> "success"
+    end
+  end
+
   # The CI backpressure signal (#1126): the repo's workflow runs for pull requests
   # that are `queued` (waiting for a runner). `total_count` is the whole queue; the
   # page (newest first) only dates the oldest, so a deeper queue than a page reads

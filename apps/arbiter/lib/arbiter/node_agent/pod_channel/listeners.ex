@@ -87,7 +87,7 @@ defmodule Arbiter.NodeAgent.PodChannel.Listeners do
     boot =
       shared ++
         [port: Keyword.get(opts, :boot_port, 9444), config: Keyword.fetch!(opts, :config)] ++
-        Keyword.take(opts, [:notify, :max_upload_bytes])
+        Keyword.take(opts, [:notify, :events, :max_upload_bytes])
 
     {:ok, sup} =
       Supervisor.start_link(

@@ -317,4 +317,36 @@ defmodule Arbiter.Board.CiBackpressureTest do
       assert {:error, :ci_queue_unsupported} = CiBackpressure.poll(ws, "vstim")
     end
   end
+
+  describe "verdict/3 (the speculative merge train's gate, bd-6dyva0)" do
+    test "a saturated repo holds, naming the counts" do
+      ws = workspace!(%{"max_pending" => 4})
+      assert {:hold, "9 pending, oldest 5m"} = CiBackpressure.verdict(ws, "vstim", opts(forge(9)))
+    end
+
+    test "below the threshold is clear" do
+      ws = workspace!(%{"max_pending" => 4})
+      assert :ok = CiBackpressure.verdict(ws, "vstim", opts(forge(1)))
+    end
+
+    test "an ungated repo is clear without asking the forge" do
+      ws = workspace!(nil)
+      poller = fn _ws, _repo -> flunk("an ungated repo must not be polled") end
+      assert :ok = CiBackpressure.verdict(ws, "vstim", opts(poller))
+      assert :ok = CiBackpressure.verdict(nil, "vstim", opts(poller))
+    end
+
+    test "a failed poll fails open" do
+      ws = workspace!(%{"max_pending" => 1})
+
+      capture_log(fn ->
+        assert :ok =
+                 CiBackpressure.verdict(
+                   ws,
+                   "vstim",
+                   opts(fn _ws, _repo -> {:error, :timeout} end)
+                 )
+      end)
+    end
+  end
 end

@@ -1189,6 +1189,72 @@ defmodule Arbiter.Nodes.SessionTest do
     })
   end
 
+  describe "SI4a: the pull path's readiness and refusals" do
+    @ref "registry.example.com/arb/repo@sha256:abc"
+
+    defp pull_spec(run), do: %{"run" => run, "image" => %{"ref" => @ref}}
+
+    defp assign_pull!(pid, run) do
+      owner = self()
+      task = Task.async(fn -> Session.assign(pid, run, pull_spec(run), owner) end)
+      assert_receive {:node_session, {:push, "assign", %{"run" => ^run}}}
+      task
+    end
+
+    test "hb registries show on the snapshot, malformed entries dropped", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+
+      assert {:ok, _} =
+               Session.heartbeat(pid, %{
+                 "seq" => 1,
+                 "registries" => %{"a.io" => "reachable", "b.io" => "unreachable", "c.io" => "?"}
+               })
+
+      assert Session.snapshot(pid).registry_reach == %{
+               "a.io" => "reachable",
+               "b.io" => "unreachable"
+             }
+    end
+
+    test "a pull_failed refusal passes the node over for that registry until the cooldown ends",
+         %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      task = assign_pull!(pid, "run-pf")
+
+      Session.node_event(pid, "run.refused", %{
+        "run" => "run-pf",
+        "reason" => "image_unavailable",
+        "detail" => ~s({:pull_failed, 125, "unauthorized"})
+      })
+
+      assert {:error, {:refused, "image_unavailable", _}} = Task.await(task)
+      assert Session.snapshot(pid).pull_blocked == ["registry.example.com"]
+
+      advance(c, 601)
+      assert Session.snapshot(pid).pull_blocked == []
+    end
+
+    test "other refusals do not block pulling", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      task = assign_pull!(pid, "run-nc")
+
+      Session.node_event(pid, "run.refused", %{
+        "run" => "run-nc",
+        "reason" => "no_capacity",
+        "detail" => "full"
+      })
+
+      assert {:error, {:refused, "no_capacity", _}} = Task.await(task)
+      assert Session.snapshot(pid).pull_blocked == []
+    end
+
+    test "hello_ok names the registries to probe", %{node: node, clock: c} do
+      {:ok, _} = Arbiter.Settings.set_nodes_registry("registry.example.com/arb")
+      assert {:ok, %{hello_ok: ok}} = attach(node, c)
+      assert ok["registries"] == ["registry.example.com"]
+    end
+  end
+
   defp forwarding_channel do
     parent = self()
 

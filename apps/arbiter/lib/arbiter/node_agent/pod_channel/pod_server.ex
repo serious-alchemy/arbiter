@@ -17,7 +17,7 @@ defmodule Arbiter.NodeAgent.PodChannel.PodServer do
   @doc "A child spec for a supervisor."
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
-    plug_opts = Keyword.take(opts, [:runs, :config, :notify, :max_upload_bytes])
+    plug_opts = Keyword.take(opts, [:runs, :config, :notify, :events, :max_upload_bytes])
 
     transport =
       Tls.server_options(Keyword.fetch!(opts, :identity), Keyword.fetch!(opts, :ca),

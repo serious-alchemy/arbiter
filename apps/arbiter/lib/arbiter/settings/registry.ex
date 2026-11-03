@@ -197,6 +197,33 @@ defmodule Arbiter.Settings.Registry do
           "stops waiting (the publish keeps running); null = 1800000 (30 minutes). Operator-only."
     },
     %{
+      key: "nodes.registry_pull_username",
+      type: "registry_user",
+      description:
+        "Read-only login for nodes.registry that a machine node is handed for one pull of a " <>
+          "published image (with nodes.registry_pull_password), and only an unpinned node: it " <>
+          "reads every repo's images there. null = none. Operator-only."
+    },
+    %{
+      key: "nodes.registry_pull_password",
+      type: "secret",
+      description:
+        "Read-only token for nodes.registry (e.g. a GitLab deploy token with read_registry), " <>
+          "never the push password: refused when equal to nodes.registry_password. Stored " <>
+          "encrypted (Cloak), write-only; a node gets it in one assign and keeps it on tmpfs " <>
+          "for one pull. Send it with `arb settings set nodes.registry_pull_password -` " <>
+          "(reads stdin). Operator-only."
+    },
+    %{
+      key: "nodes.machine_image_source",
+      type: "machine_image_source",
+      description:
+        "auto: a machine node that can pull runs the repo's published image when the repo " <>
+          "has a registry and a pull credential that node may hold (no CLI files, no build " <>
+          "on the node); build: every machine node builds from a plan, as before. " <>
+          "null = auto (the default since SI4a). Operator-only."
+    },
+    %{
       key: "worker.cli.versions",
       type: "cli_versions",
       description:
@@ -237,6 +264,8 @@ defmodule Arbiter.Settings.Registry do
                     nodes.registry nodes.registry_username nodes.registry_password
                     nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref
                     nodes.registry.publish_timeout_ms
+                    nodes.registry_pull_username nodes.registry_pull_password
+                    nodes.machine_image_source
                     worker.cli.versions worker.cli.manual worker.cli_set.hold)
 
   # Built at compile time from the fixed schema above, so no input ever mints an
@@ -244,7 +273,7 @@ defmodule Arbiter.Settings.Registry do
   # Values that are strings whatever they look like: a password of "12345" must not
   # be unwrapped to an integer.
   @secret_mask "********"
-  @string_types ~w(registry_ref registry_user secret chart_ref cli_set_hold)
+  @string_types ~w(registry_ref registry_user secret chart_ref cli_set_hold machine_image_source)
 
   @key_atoms Map.new(@keys, &{&1, String.to_atom(&1)})
 
@@ -273,6 +302,7 @@ defmodule Arbiter.Settings.Registry do
   defp allowed("quota_provider_list"), do: Arbiter.Quota.Visibility.provider_codes()
   defp allowed("admission_mode"), do: Settings.scheduler_admission_modes()
   defp allowed("cli_name_list"), do: Settings.cli_names()
+  defp allowed("machine_image_source"), do: Settings.machine_image_sources()
   defp allowed(_), do: nil
 
   @doc """
@@ -390,6 +420,15 @@ defmodule Arbiter.Settings.Registry do
   end
 
   defp do_cast("cli_set_hold", _), do: {:error, "value must be a short token string, or null"}
+
+  defp do_cast("machine_image_source", source) when is_binary(source) do
+    if source in Settings.machine_image_sources(),
+      do: {:ok, source},
+      else: {:error, "value must be auto or build, or null"}
+  end
+
+  defp do_cast("machine_image_source", _),
+    do: {:error, "value must be auto or build, or null"}
 
   defp do_cast("admission_mode", mode) when is_binary(mode) do
     if mode in Settings.scheduler_admission_modes(),
@@ -532,6 +571,15 @@ defmodule Arbiter.Settings.Registry do
 
   defp write("nodes.registry_public_ok", v), do: wrap(Settings.set_nodes_registry_public_ok(v))
 
+  defp write("nodes.registry_pull_username", v),
+    do: wrap(Settings.set_nodes_registry_pull_username(v))
+
+  defp write("nodes.registry_pull_password", v),
+    do: wrap(Settings.set_nodes_registry_pull_password(v))
+
+  defp write("nodes.machine_image_source", v),
+    do: wrap(Settings.set_nodes_machine_image_source(v))
+
   defp write("worker.cli.versions", v), do: wrap(Settings.set_worker_cli_versions(v))
   defp write("worker.cli.manual", v), do: wrap(Settings.set_worker_cli_manual(v))
   defp write("worker.cli_set.hold", v), do: wrap(Settings.set_worker_cli_set_hold(v))
@@ -577,6 +625,8 @@ defmodule Arbiter.Settings.Registry do
     do: Settings.nodes_registry_publish_timeout_ms()
 
   def override("nodes.registry_public_ok"), do: Settings.nodes_registry_public_ok()
+  def override("nodes.registry_pull_username"), do: Settings.nodes_registry_pull_username()
+  def override("nodes.machine_image_source"), do: Settings.nodes_machine_image_source()
   def override("worker.cli.versions"), do: Settings.worker_cli_versions()
   def override("worker.cli.manual"), do: Settings.worker_cli_manual()
   def override("worker.cli_set.hold"), do: Settings.worker_cli_set_hold()
@@ -584,6 +634,9 @@ defmodule Arbiter.Settings.Registry do
   # Write-only: a stored password reads as a mask, never as the secret or its ciphertext.
   def override("nodes.registry_password"),
     do: if(Settings.nodes_registry_password_set?(), do: @secret_mask)
+
+  def override("nodes.registry_pull_password"),
+    do: if(Settings.nodes_registry_pull_password_set?(), do: @secret_mask)
 
   @doc "The value in force with no override (app env, else hardcoded); `nil` = auto-detect."
   @spec default(key()) :: term()
@@ -619,6 +672,9 @@ defmodule Arbiter.Settings.Registry do
   def default("nodes.registry.publish_timeout_ms"), do: Settings.default_publish_timeout_ms()
 
   def default("nodes.registry_public_ok"), do: false
+  def default("nodes.registry_pull_username"), do: nil
+  def default("nodes.registry_pull_password"), do: nil
+  def default("nodes.machine_image_source"), do: "auto"
   def default("worker.cli.versions"), do: nil
   def default("worker.cli.manual"), do: []
   def default("worker.cli_set.hold"), do: nil

@@ -144,11 +144,22 @@ defmodule Arbiter.Test.StubMerger do
     :ok
   end
 
-  @doc "Set the result `merge/2` returns (`:ok` or `{:error, term}`)."
+  @doc """
+  Set the result `merge/2` returns (`:ok` or `{:error, term}`). A 2-arity
+  function is called with `(ref, expected_sha)` on each merge, outside the
+  store, and its return is the merge's — so a test can play the forge and land
+  a real merge commit (bd-6dyva0).
+  """
   def set_merge_result(result) do
     ensure_started()
     Agent.update(@name, fn s -> %{s | merge_result: result} end)
     :ok
+  end
+
+  @doc "Every `merge/2` call as `{ref, expected_sha}`, oldest first."
+  def merges_in_order do
+    ensure_started()
+    Agent.get(@name, fn s -> s |> Map.get(:merge_log, []) |> Enum.reverse() end)
   end
 
   @doc "Set the `failing_check_logs/1` result list for `ref`."
@@ -219,11 +230,15 @@ defmodule Arbiter.Test.StubMerger do
   def merge(ref, expected_sha) do
     ensure_started()
 
-    Agent.get_and_update(@name, fn s ->
-      s = update_in(s, [:merges, ref], &((&1 || 0) + 1))
-      s = Map.put(s, :last_merge, {ref, expected_sha})
-      {s.merge_result, s}
-    end)
+    result =
+      Agent.get_and_update(@name, fn s ->
+        s = update_in(s, [:merges, ref], &((&1 || 0) + 1))
+        s = Map.put(s, :last_merge, {ref, expected_sha})
+        s = Map.update(s, :merge_log, [{ref, expected_sha}], &[{ref, expected_sha} | &1])
+        {s.merge_result, s}
+      end)
+
+    if is_function(result, 2), do: result.(ref, expected_sha), else: result
   end
 
   # The context-taking variant production callers go through
@@ -503,6 +518,102 @@ defmodule Arbiter.Test.StubMerger do
       end)
 
     if is_function(answer, 0), do: answer.(), else: answer
+  end
+
+  # ---- speculative merge-train cars (bd-6dyva0) ------------------------------
+
+  @doc """
+  Set what `ref_pipeline/3` reports for the car at `sha`: a GitLab status word
+  (default `"running"`; `"failed"` carries one failed `test` job), `:none` for
+  no pipeline yet, a full pipeline map, or `{:error, reason}`.
+  """
+  def set_car_status(sha, status) when is_binary(sha) do
+    ensure_started()
+
+    Agent.update(@name, fn s ->
+      Map.update(s, :car_statuses, %{sha => status}, &Map.put(&1, sha, status))
+    end)
+
+    :ok
+  end
+
+  @doc "Every `run_ref_pipeline/3` call as `%{ref, sha, id, opts}`, oldest first."
+  def car_runs do
+    ensure_started()
+    Agent.get(@name, fn s -> s |> Map.get(:car_runs, []) |> Enum.reverse() end)
+  end
+
+  @doc "Every `cancel_ref_pipeline/3` call's car map, oldest first."
+  def car_cancels do
+    ensure_started()
+    Agent.get(@name, fn s -> s |> Map.get(:car_cancels, []) |> Enum.reverse() end)
+  end
+
+  @doc "Override what `run_ref_pipeline/3` returns (e.g. a refused pipeline)."
+  def set_run_ref_result(result) do
+    ensure_started()
+    Agent.update(@name, &Map.put(&1, :run_ref_result, result))
+    :ok
+  end
+
+  @impl true
+  def ref_push_options, do: []
+
+  @impl true
+  def run_ref_pipeline(_mr_ref, %{ref: ref, sha: sha}, opts) do
+    ensure_started()
+
+    Agent.get_and_update(@name, fn s ->
+      id = length(Map.get(s, :car_runs, [])) + 1
+
+      s =
+        Map.update(
+          s,
+          :car_runs,
+          [%{ref: ref, sha: sha, id: id, opts: opts}],
+          &[%{ref: ref, sha: sha, id: id, opts: opts} | &1]
+        )
+
+      result =
+        Map.get(s, :run_ref_result) ||
+          {:ok,
+           %{id: id, sha: sha, status: "created", url: "https://stub.example/pipelines/#{id}"}}
+
+      {result, s}
+    end)
+  end
+
+  @impl true
+  def ref_pipeline(_mr_ref, %{sha: sha} = car, _opts) do
+    ensure_started()
+
+    case Agent.get(@name, fn s -> s |> Map.get(:car_statuses, %{}) |> Map.get(sha, "running") end) do
+      :none ->
+        {:ok, nil}
+
+      {:error, _} = error ->
+        error
+
+      %{} = pipeline ->
+        {:ok, pipeline}
+
+      status when is_binary(status) ->
+        {:ok,
+         %{
+           id: Map.get(car, :pipeline),
+           sha: sha,
+           status: status,
+           url: "https://stub.example/pipelines/#{Map.get(car, :pipeline)}",
+           jobs: if(status == "failed", do: [%{name: "test", stage: "test", status: "failed"}])
+         }}
+    end
+  end
+
+  @impl true
+  def cancel_ref_pipeline(_mr_ref, car, _opts) do
+    ensure_started()
+    Agent.update(@name, fn s -> Map.update(s, :car_cancels, [car], &[car | &1]) end)
+    :ok
   end
 
   # ---- internals ----------------------------------------------------------

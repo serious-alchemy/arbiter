@@ -15,6 +15,8 @@ defmodule Arbiter.Worker.Image.RepoConfigTest do
     ref: nil,
     registry: nil,
     credentials_ref: nil,
+    pull_credentials_ref: nil,
+    pull_credentials_level: nil,
     public_ok: false,
     seed: :primary
   }
@@ -47,6 +49,8 @@ defmodule Arbiter.Worker.Image.RepoConfigTest do
                ref: "registry.gitlab.com/vstim/app/w:main",
                registry: "registry.gitlab.com/vstim/app",
                credentials_ref: "secret:GITLAB",
+               pull_credentials_ref: nil,
+               pull_credentials_level: nil,
                public_ok: false,
                seed: :image
              }
@@ -77,6 +81,59 @@ defmodule Arbiter.Worker.Image.RepoConfigTest do
       workspace = ws(%{"image" => %{"source" => "bogus", "seed" => 3, "registry" => 4}})
       assert RepoConfig.resolve(workspace, "vstim") == @defaults
       assert RepoConfig.resolve(ws(%{"image" => "x"}), "vstim") == @defaults
+
+      assert RepoConfig.resolve(ws(%{"image" => %{"pull_credentials_ref" => 5}}), "vstim") ==
+               @defaults
+    end
+  end
+
+  # SI4 (§21.4): which level wrote the pull credential decides which nodes may hold it.
+  describe "resolve/2: the pull credential and the level it was written at (SI4)" do
+    test "a repo's own pull_credentials_ref is :repo" do
+      workspace =
+        ws(%{"repos" => %{"vstim" => %{"image" => %{"pull_credentials_ref" => "secret:P"}}}})
+
+      assert %{pull_credentials_ref: "secret:P", pull_credentials_level: :repo} =
+               RepoConfig.resolve(workspace, "vstim")
+
+      assert %{pull_credentials_ref: nil, pull_credentials_level: nil} =
+               RepoConfig.resolve(workspace, "other")
+    end
+
+    test "the workspace's is :workspace for every repo that names none, and a repo's wins" do
+      workspace =
+        ws(%{
+          "image" => %{"pull_credentials_ref" => "secret:WS"},
+          "repos" => %{"vstim" => %{"image" => %{"pull_credentials_ref" => "secret:OWN"}}}
+        })
+
+      assert %{pull_credentials_ref: "secret:WS", pull_credentials_level: :workspace} =
+               RepoConfig.resolve(workspace, "other")
+
+      assert %{pull_credentials_ref: "secret:OWN", pull_credentials_level: :repo} =
+               RepoConfig.resolve(workspace, "vstim")
+    end
+
+    test "a repo with a registry of its own does not inherit the workspace's pull credential" do
+      workspace =
+        ws(%{
+          "image" => %{
+            "registry" => "registry.gitlab.com/ws",
+            "pull_credentials_ref" => "secret:WS"
+          },
+          "repos" => %{
+            "vstim" => %{"image" => %{"registry" => "ghcr.io/vstim"}},
+            "own" => %{
+              "image" => %{"registry" => "ghcr.io/own", "pull_credentials_ref" => "secret:OWN"}
+            }
+          }
+        })
+
+      assert %{registry: "ghcr.io/vstim", pull_credentials_ref: nil, pull_credentials_level: nil} =
+               RepoConfig.resolve(workspace, "vstim")
+
+      assert %{pull_credentials_ref: "secret:OWN", pull_credentials_level: :repo} =
+               RepoConfig.resolve(workspace, "own")
     end
   end
 

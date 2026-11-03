@@ -409,6 +409,129 @@ defmodule Arbiter.NodeAgent.RunSpecTest do
     end
   end
 
+  # SI4 (`docs/design/remote-workers.md` §21.4): a machine node pulls the published image
+  # with a read credential the primary hands it for that one pull.
+  describe "pull_auth and the pulled image's identity (SI4)" do
+    @digest String.duplicate("d", 64)
+    @pull_ref "registry.example.com:5000/arbiter/vstim/worker@sha256:" <> @digest
+    @password "glpat-PULL-only-0123456789"
+
+    defp pull_spec(overrides \\ %{}, image_overrides \\ %{}) do
+      image =
+        Map.merge(
+          %{
+            "tag" => "localhost/arbiter-dev/beam:abc123",
+            "plan" => nil,
+            "ref" => @pull_ref,
+            "cli_set" => "0a1b2c3d",
+            "provider" => "claude"
+          },
+          image_overrides
+        )
+
+      spec(
+        Map.merge(
+          %{
+            "image" => image,
+            "pull_auth" => %{
+              "registry" => "registry.example.com:5000",
+              "username" => "deploy-token-7",
+              "password" => @password
+            }
+          },
+          overrides
+        )
+      )
+    end
+
+    test "a pull spec validates: the ref, the CLI set and provider it must carry, the credential" do
+      assert {:ok, %RunSpec{} = run} = RunSpec.validate(pull_spec(%{}, %{"insecure" => true}))
+
+      assert run.image.ref == @pull_ref
+      assert run.image.cli_set == "0a1b2c3d"
+      assert run.image.provider == "claude"
+      assert run.image.insecure? == true
+
+      assert %Arbiter.NodeAgent.PullAuth{
+               registry: "registry.example.com:5000",
+               username: "deploy-token-7",
+               password: @password
+             } = run.pull_auth
+    end
+
+    test "no pull_auth is an anonymous pull; insecure defaults to false" do
+      assert {:ok, run} = RunSpec.validate(Map.delete(pull_spec(), "pull_auth"))
+      assert run.pull_auth == nil
+      assert run.image.insecure? == false
+    end
+
+    test "a credential with nothing to pull, or for another registry than the ref's, is refused" do
+      no_ref = pull_spec(%{"image" => %{"tag" => "localhost/x:1", "plan" => nil}})
+      assert {:error, {:refused, {:bad_value, "pull_auth"}}} = RunSpec.validate(no_ref)
+
+      for other <- ["evil.example.com", "registry.example.com", "registry.example.com:5001"] do
+        bad = put_in(pull_spec()["pull_auth"]["registry"], other)
+        assert {:error, {:refused, {:bad_value, "pull_auth.registry"}}} = RunSpec.validate(bad)
+      end
+    end
+
+    test "a malformed credential is refused, and the refusal never carries the password" do
+      auth = pull_spec()["pull_auth"]
+
+      for bad <- [
+            "registry.example.com:5000",
+            Map.delete(auth, "password"),
+            Map.put(auth, "password", ""),
+            Map.put(auth, "password", "pw\nwith-newline"),
+            Map.put(auth, "password", "pw\0nul"),
+            Map.put(auth, "password", String.duplicate("p", 4097)),
+            Map.put(auth, "password", 12),
+            Map.put(auth, "username", "user:colon"),
+            Map.put(auth, "username", "user name"),
+            Map.put(auth, "username", ""),
+            Map.put(auth, "token", "extra")
+          ] do
+        assert {:error, {:refused, reason}} = RunSpec.validate(pull_spec(%{"pull_auth" => bad}))
+        assert match?({:bad_value, "pull_auth" <> _}, reason), inspect(reason)
+        refute inspect(reason) =~ @password
+      end
+    end
+
+    test "a malformed CLI set, provider or insecure flag is refused" do
+      for {key, bad} <- [
+            {"cli_set", "XYZ"},
+            {"cli_set", "0a1b2c3d\n"},
+            {"cli_set", 7},
+            {"provider", "Claude Code"},
+            {"provider", ""},
+            {"insecure", "yes"}
+          ] do
+        assert {:error, {:refused, {:bad_value, "image." <> ^key}}} =
+                 RunSpec.validate(pull_spec(%{}, %{key => bad}))
+      end
+    end
+
+    test "inspecting a validated spec shows neither the credential nor the secrets" do
+      {:ok, run} = RunSpec.validate(pull_spec())
+
+      text = inspect(run, limit: :infinity, printable_limit: :infinity)
+      refute text =~ @password
+      refute text =~ "deploy-token-7"
+      refute text =~ Base.encode64("deploy-token-7:" <> @password)
+      # the secrets map's value ("tok") is gone with it
+      refute text =~ ~s("tok")
+      assert text =~ "registry.example.com:5000"
+    end
+
+    test "redact/1 masks the credential" do
+      redacted = RunSpec.redact(pull_spec())
+
+      refute inspect(redacted) =~ @password
+      refute inspect(redacted) =~ "deploy-token-7"
+      assert redacted["pull_auth"]["registry"] == "registry.example.com:5000"
+    end
+  end
+
   test "redact/1 hides secrets and prompt content so a spec can be logged" do
     redacted =
       spec(%{

@@ -74,6 +74,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
   @ca_configmap "arbiter-ca"
   @seed_root "/arb/work"
   @run_dir "/run/arb"
+  @events_annotation "arbiter.dev/events"
   @ca_dir "/etc/arb/ca"
   @service_tmpfs_size "256Mi"
   @run_size "64Mi"
@@ -296,8 +297,14 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
 
   defp annotations(_run), do: %{}
 
-  defp put_annotations(meta, run) do
-    case annotations(run) do
+  # bd-1nl506: the controller reads this pod's output from its event feed, not its log.
+  defp put_annotations(meta, run, cfg) do
+    annotations = annotations(run)
+
+    annotations =
+      if cfg.event_feed, do: Map.put(annotations, @events_annotation, "1"), else: annotations
+
+    case annotations do
       empty when map_size(empty) == 0 -> meta
       annotations -> Map.put(meta, "annotations", annotations)
     end
@@ -610,7 +617,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
             }
           ]
         }
-        |> put_annotations(run),
+        |> put_annotations(run, cfg),
       "spec" =>
         %{
           "restartPolicy" => "Never",
@@ -821,6 +828,7 @@ defmodule Arbiter.NodeAgent.K8s.PodSpec do
     |> Map.merge(service_env)
     |> Map.put("ARB_BRIDGE_ADDR", cfg.bridge_addr)
     |> Map.put("ARB_BRIDGES", Enum.join(run.bridges, " "))
+    |> then(&if(cfg.event_feed, do: Map.put(&1, "ARB_EVENTS", "1"), else: &1))
     |> then(&if(path = mount_path(run, "home"), do: Map.put(&1, "HOME", path), else: &1))
   end
 

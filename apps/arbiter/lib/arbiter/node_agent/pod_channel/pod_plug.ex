@@ -11,6 +11,7 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
   | `GET /session` | `control` client certificate | stream the session transcript a resumed run continues from `GET /nodes/runs/:run/session` |
   | `PUT /transcripts` | `control` client certificate | forward the transcripts tar to `PUT /nodes/runs/:run/transcripts` |
   | `GET /commands[?wait=s]` | `control` client certificate | long-poll the run's command mailbox |
+  | `POST /events` | `control` client certificate | hand a chunk of the run's NDJSON event file (`x-arb-offset`: its first byte's file offset; `x-arb-final: 1` on the last) to the run's event feed (`Arbiter.NodeAgent.K8s.LogFollower`, event mode); answers `{"next": offset}`: `200` taken, `409` gap (resume from `next`), `429` an earlier chunk is still held, `503` the controller has no feed for the run yet |
 
   **The run is the certificate's `CN`, never the URL or the body**, and the
   certificate must be the very leaf `Arbiter.NodeAgent.PodChannel.Runs` minted
@@ -24,7 +25,7 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
   which is how the controller learns the final snapshot has been forwarded and
   may hold `exit` until then (K§10.3).
 
-  Plug options: `:runs`, `:config` (`Arbiter.NodeAgent.Config`, the primary and
+  Plug options: `:events` (`run -> {:ok, pid} | :error`, the run's feed), `:runs`, `:config` (`Arbiter.NodeAgent.Config`, the primary and
   its credential), `:notify`, `:max_upload_bytes` (default 1 GiB).
   """
 
@@ -32,6 +33,7 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
 
   import Plug.Conn
 
+  alias Arbiter.NodeAgent.K8s.LogFollower
   alias Arbiter.NodeAgent.PodChannel.{Runs, Upstream}
 
   require Logger
@@ -39,6 +41,7 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
   @max_nonce_bytes 512
   @default_max_upload 1_073_741_824
   @max_wait_s 30
+  @max_events_bytes 1_048_576
   @default_wait_s 25
 
   @impl true
@@ -58,17 +61,17 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
       {"GET", [route]} when route in ["seed.bundle", "session"] ->
         control(conn, opts, &download(&1, &2, &3, route))
 
-      {"PUT", ["checkpoint"]} ->
-        control(conn, opts, &upload(&1, &2, &3, :checkpoint))
+      {"PUT", [route]} when route in ["checkpoint", "transcripts"] ->
+        control(conn, opts, &upload(&1, &2, &3, upload_kind(route)))
 
-      {"PUT", ["transcripts"]} ->
-        control(conn, opts, &upload(&1, &2, &3, :transcripts))
+      {"POST", ["events"]} ->
+        control(conn, opts, &events/3)
 
       {"GET", ["commands"]} ->
         control(conn, opts, &commands/3)
 
       {_, [route]}
-      when route in ["seed.bundle", "session", "checkpoint", "transcripts", "commands"] ->
+      when route in ["seed.bundle", "session", "checkpoint", "transcripts", "commands", "events"] ->
         json(conn, 405, %{error: "method_not_allowed"})
 
       _ ->
@@ -177,6 +180,9 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
     end
   end
 
+  defp upload_kind("checkpoint"), do: :checkpoint
+  defp upload_kind("transcripts"), do: :transcripts
+
   defp route_of(:checkpoint), do: {"checkout", "application/x-git-bundle"}
   defp route_of(:transcripts), do: {"transcripts", "application/gzip"}
 
@@ -196,6 +202,66 @@ defmodule Arbiter.NodeAgent.PodChannel.PodPlug do
     case Runs.await_commands(runs(opts), run, wait_s * 1_000) do
       {:ok, commands} -> json(conn, 200, %{commands: commands})
       {:error, _} -> json(conn, 403, %{error: "forbidden"})
+    end
+  end
+
+  # ---- /events ------------------------------------------------------------------------
+
+  defp events(conn, opts, run) do
+    with {:ok, offset} <- events_offset(conn),
+         {:ok, bytes, conn} <- events_body(conn) do
+      final? = get_req_header(conn, "x-arb-final") == ["1"]
+      deliver_events(conn, opts, run, offset, bytes, final?)
+    else
+      {:error, status, error} -> json(conn, status, %{error: error})
+    end
+  end
+
+  defp deliver_events(conn, opts, run, offset, bytes, final?) do
+    feed = Keyword.get(opts, :events, fn _run -> :error end)
+
+    case feed.(run) do
+      {:ok, follower} ->
+        case push_events(follower, offset, bytes, final?) do
+          {:ok, next} ->
+            json(conn, 200, %{next: next})
+
+          {:gap, next} ->
+            json(conn, 409, %{next: next})
+
+          {:busy, next} ->
+            conn |> put_resp_header("retry-after", "1") |> json(429, %{next: next})
+
+          :error ->
+            conn |> put_resp_header("retry-after", "1") |> json(503, %{error: "not_ready"})
+        end
+
+      :error ->
+        conn |> put_resp_header("retry-after", "1") |> json(503, %{error: "not_ready"})
+    end
+  end
+
+  # A follower that is gone, or held past the timeout, is a retry for the sender.
+  defp push_events(follower, offset, bytes, final?) do
+    LogFollower.push_events(follower, offset, bytes, final?, 20_000)
+  catch
+    :exit, _ -> :error
+  end
+
+  defp events_offset(conn) do
+    with [value] <- get_req_header(conn, "x-arb-offset"),
+         {n, ""} when n >= 0 <- Integer.parse(value) do
+      {:ok, n}
+    else
+      _ -> {:error, 400, "bad_offset"}
+    end
+  end
+
+  defp events_body(conn) do
+    case read_body(conn, length: @max_events_bytes) do
+      {:ok, body, conn} -> {:ok, body, conn}
+      {:more, _body, _conn} -> {:error, 413, "too_large"}
+      {:error, _} -> {:error, 400, "bad_request"}
     end
   end
 

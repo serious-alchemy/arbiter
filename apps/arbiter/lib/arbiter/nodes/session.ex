@@ -94,6 +94,10 @@ defmodule Arbiter.Nodes.Session do
   @default_tick_ms 5_000
   @default_reap_interval_ms 10 * 60_000
   @default_prepare_timeout_ms 25 * 60_000
+  # SI4 (§21.4): a machine node that pulls the published image (about 1.3 GB unpacked when
+  # cold) instead of building a toolchain is bounded for a pull. A pull that outlives it
+  # keeps going on the node, so its next run finds the image.
+  @default_pull_prepare_timeout_ms 10 * 60_000
   @default_hold_ms 150_000
   @default_adopt_timeout_ms 30_000
   # bd-bmecet: a cluster node must show a placed run (`hb.runs`) within this long, and a run
@@ -104,6 +108,7 @@ defmodule Arbiter.Nodes.Session do
   @default_ack_timeout_ms 120_000
   @default_pending_timeout_ms 300_000
   @default_stalled_cooldown_ms 300_000
+  @default_pull_cooldown_ms 600_000
 
   defstruct [
     :node_id,
@@ -134,16 +139,24 @@ defmodule Arbiter.Nodes.Session do
       readiness: [],
       capacity: nil,
       prepare_timeout_ms: @default_prepare_timeout_ms,
+      pull_prepare_timeout_ms: @default_pull_prepare_timeout_ms,
       hold_ms: @default_hold_ms,
       adopt_timeout_ms: @default_adopt_timeout_ms,
       ack_timeout_ms: @default_ack_timeout_ms,
       pending_timeout_ms: @default_pending_timeout_ms,
       stalled_cooldown_ms: @default_stalled_cooldown_ms,
+      pull_cooldown_ms: @default_pull_cooldown_ms,
       # bd-bmecet: runs still waiting on the node to start them (`run => %{at, stage, stage_at,
       # message}`, monotonic ms) and, once a placement was failed over, until when the node is
       # ranked last for new placements.
       placing: %{},
-      stalled_until: nil
+      stalled_until: nil,
+      # SI4a (§21.4): the registry hosts the agent last reported reachable/unreachable (its
+      # `hb`), the registry host of each run assigned to pull, and until when (clock ms) a
+      # host's pull was refused (`pull_failed` / `contract_mismatch`) so the node is passed over.
+      registry_reach: %{},
+      pull_hosts: %{},
+      pull_blocked: %{}
     },
     allow_skew?: false,
     state: :online,
@@ -248,6 +261,14 @@ defmodule Arbiter.Nodes.Session do
           {:ok, term()} | {:error, term()}
   def assign(pid, run, spec, owner, opts \\ []),
     do: GenServer.call(pid, {:assign, run, spec, owner, opts}, :infinity)
+
+  @doc """
+  The prepare budget of a run a machine node pulls the published image for (SI4,
+  `docs/design/remote-workers.md` §21.4): 10 minutes, in place of the 25 a cold
+  toolchain build on the node is given. Session option `:pull_prepare_timeout_ms`.
+  """
+  @spec default_pull_prepare_timeout_ms() :: pos_integer()
+  def default_pull_prepare_timeout_ms, do: @default_pull_prepare_timeout_ms
 
   @doc """
   The stage the node last reported for `run` (A3): `:assigned` (pushed, nothing heard),
@@ -477,6 +498,10 @@ defmodule Arbiter.Nodes.Session do
         :prepare_timeout_ms,
         Keyword.get(opts, :prepare_timeout_ms, @default_prepare_timeout_ms)
       )
+      |> put_info(
+        :pull_prepare_timeout_ms,
+        Keyword.get(opts, :pull_prepare_timeout_ms, @default_pull_prepare_timeout_ms)
+      )
       |> put_info(:hold_ms, Keyword.get(opts, :hold_ms, @default_hold_ms))
       |> put_info(
         :adopt_timeout_ms,
@@ -548,7 +573,7 @@ defmodule Arbiter.Nodes.Session do
         Process.monitor(owner)
         # What `Arbiter.Worker.Executor.Node` calls `stop/1` and `signal/2` with.
         handle = {:remote, {state.node_id, run, make_ref()}}
-        ms = Keyword.get(opts, :prepare_timeout_ms, state.info.prepare_timeout_ms)
+        ms = Keyword.get(opts, :prepare_timeout_ms) || prepare_budget(spec, state.info)
         Process.send_after(self(), {:prepare_timeout, run}, ms)
 
         bridges = bridge_map(spec)
@@ -560,6 +585,8 @@ defmodule Arbiter.Nodes.Session do
           | streams: RunStreams.open(state.streams, run, handle, owner, from, bridges),
             checkouts: put_checkout(state.checkouts, run, Keyword.get(opts, :checkout))
         }
+
+        state = note_pull_host(state, run, spec)
 
         state =
           put_placing(state, run, %{at: now, stage: :assigned, stage_at: now, message: nil})
@@ -902,6 +929,7 @@ defmodule Arbiter.Nodes.Session do
 
   defp node_event_apply(state, "run.refused", %{"run" => run} = payload) do
     state = %{state | checkouts: Map.delete(state.checkouts, run)}
+    state = block_pull(state, run, payload)
     apply_streams(state, RunStreams.refused(state.streams, run, payload))
   end
 
@@ -1413,7 +1441,16 @@ defmodule Arbiter.Nodes.Session do
     }
     |> put_limits(state)
     |> put_cursors(state)
+    |> put_registries()
     |> put_upgrade(state, Nodes.get_node(state.node_id))
+  end
+
+  # SI4a (§21.4): the registry hosts the agent should probe (`GET /v2/`) and report in its `hb`.
+  defp put_registries(ok) do
+    case Nodes.Registries.named() do
+      [] -> ok
+      hosts -> Map.put(ok, "registries", hosts)
+    end
   end
 
   # K15: where each opaque-cursor stream (a cluster node's) stands here, so a controller that
@@ -1424,6 +1461,22 @@ defmodule Arbiter.Nodes.Session do
       cursors -> Map.put(ok, "stdout_cursors", cursors)
     end
   end
+
+  # SI4 (§21.4): a machine node that pulls the published image (a digest-pinned ref and
+  # no plan) is bounded for a pull, never longer than a build. A cluster keeps the budget
+  # it is told in `hello_ok`, and a node that builds keeps the build-sized one.
+  defp prepare_budget(spec, %{kind: "machine"} = info) do
+    if pull_spec?(spec),
+      do: min(info.pull_prepare_timeout_ms, info.prepare_timeout_ms),
+      else: info.prepare_timeout_ms
+  end
+
+  defp prepare_budget(_spec, info), do: info.prepare_timeout_ms
+
+  defp pull_spec?(%{"image" => %{"ref" => ref} = image}) when is_binary(ref),
+    do: is_nil(Map.get(image, "plan"))
+
+  defp pull_spec?(_spec), do: false
 
   # A3: a cluster node bounds its own pending/starting time by this budget; the primary's
   # prepare watchdog (`:prepare_timeout`) is the only clock on a run until it is `running`.
@@ -1496,6 +1549,7 @@ defmodule Arbiter.Nodes.Session do
       state
       |> heartbeat_degraded(payload)
       |> heartbeat_readiness(payload)
+      |> heartbeat_registries(payload)
       |> heartbeat_upgrade(payload)
       |> heartbeat_capacity(payload["capacity"])
       |> heartbeat_stages(payload["runs"])
@@ -1571,6 +1625,52 @@ defmodule Arbiter.Nodes.Session do
     do: put_info(state, :degraded, degraded(word))
 
   defp heartbeat_degraded(state, _payload), do: state
+
+  # SI4a (§21.4): the agent's `hb` carries `registries`, `%{host => "reachable" | "unreachable"}`
+  # for the hosts `hello_ok.registries` named. Display data and a placement input, so only
+  # well-formed entries are kept.
+  defp heartbeat_registries(state, %{"registries" => %{} = reach}) do
+    reach =
+      for {host, status} <- reach,
+          is_binary(host),
+          status in ["reachable", "unreachable"],
+          into: %{},
+          do: {String.slice(host, 0, 255), status}
+
+    put_info(state, :registry_reach, reach)
+  end
+
+  defp heartbeat_registries(state, _payload), do: state
+
+  defp note_pull_host(state, run, %{"image" => %{"ref" => ref}} = spec) when is_binary(ref) do
+    if pull_spec?(spec),
+      do: put_info(state, :pull_hosts, Map.put(state.info.pull_hosts, run, ref_host(ref))),
+      else: state
+  end
+
+  defp note_pull_host(state, _run, _spec), do: state
+
+  defp ref_host(ref), do: ref |> String.split("/", parts: 2) |> hd()
+
+  # SI4a: a pull refusal (`Refusal.pull_refusal?/1`) passes this node over for that registry
+  # for `pull_cooldown_ms`, so the requeued ticket is placed elsewhere, locally or held.
+  defp block_pull(state, run, payload) do
+    {host, hosts} = Map.pop(state.info.pull_hosts, run)
+    state = put_info(state, :pull_hosts, hosts)
+    refusal = %{reason: payload["reason"], detail: payload["detail"]}
+
+    if is_binary(host) and Nodes.Refusal.pull_refusal?(refusal) do
+      until = state.clock.() + state.info.pull_cooldown_ms
+      put_info(state, :pull_blocked, Map.put(state.info.pull_blocked, host, until))
+    else
+      state
+    end
+  end
+
+  defp pull_blocked_hosts(state) do
+    now = state.clock.()
+    for {host, until} <- state.info.pull_blocked, until > now, do: host
+  end
 
   # A cluster node's hb replaces the readiness checks when it carries them.
   defp heartbeat_readiness(%{info: %{kind: "cluster"}} = state, %{"readiness" => block}),
@@ -1833,6 +1933,8 @@ defmodule Arbiter.Nodes.Session do
       k8s_version: state.info.k8s_version,
       degraded: state.info.degraded,
       readiness: state.info.readiness,
+      registry_reach: state.info.registry_reach,
+      pull_blocked: pull_blocked_hosts(state),
       node_capacity: state.info.capacity,
       max_workers: max_workers(state),
       runs: state.runs,

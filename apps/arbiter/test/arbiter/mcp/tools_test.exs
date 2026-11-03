@@ -3179,6 +3179,9 @@ defmodule Arbiter.MCP.ToolsTest do
       "nodes.registry_password": nil,
       "nodes.registry_insecure": nil,
       "nodes.registry_public_ok": nil,
+      "nodes.registry_pull_username": nil,
+      "nodes.registry_pull_password": nil,
+      "nodes.machine_image_source": nil,
       "nodes.chart_ref": nil,
       "worker.cli.versions": nil,
       "worker.cli.manual": nil,
@@ -3202,7 +3205,9 @@ defmodule Arbiter.MCP.ToolsTest do
             ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
                     nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
                     nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
-                    nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref) do
+                    nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref
+                    nodes.registry_pull_username nodes.registry_pull_password
+                    nodes.machine_image_source) do
         assert {:error, {:unauthorized, msg}} =
                  Tools.installation_config_set(ctx.coordinator, %{"key" => key, "value" => 1})
 
