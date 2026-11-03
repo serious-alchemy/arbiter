@@ -222,6 +222,41 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert reason =~ "pull_failed"
     end
 
+    defp flush_local_podman do
+      receive do
+        {:local_podman, _} -> flush_local_podman()
+      after
+        0 -> :ok
+      end
+    end
+
+    test "worker.image.local_published switches the step at runtime, no restart (SI-L off switch)",
+         ctx do
+      owner = Ecto.Adapters.SQL.Sandbox.start_owner!(Arbiter.Repo, shared: true)
+      on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(owner) end)
+
+      opts =
+        Keyword.update!(local_image(ctx), :local_image, &Keyword.delete(&1, :published_image))
+
+      # unset: the app env (false in the suite) decides, so the local build
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+      assert request.image == @image
+
+      # on at runtime: the very next run pulls the published digest
+      {:ok, _} = Arbiter.Settings.set_worker_image_local_published(true)
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+      assert request.image == @published
+      assert_received {:local_podman, ["pull", "--quiet" | _]}
+
+      # off at runtime: local build and CLI bind mounts, nothing pulled
+      {:ok, _} = Arbiter.Settings.set_worker_image_local_published(false)
+      flush_local_podman()
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+      assert request.image == @image
+      assert request.cli_mounts != []
+      refute_received {:local_podman, _}
+    end
+
     test "an explicit image tag is never replaced by the published one", ctx do
       opts = Keyword.put(local_image(ctx, %{present?: true}), :image, @image)
       assert {:ok, request} = ContainerSpawn.prepare(opts)

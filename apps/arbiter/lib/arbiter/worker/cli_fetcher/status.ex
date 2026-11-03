@@ -17,6 +17,7 @@ defmodule Arbiter.Worker.CliFetcher.Status do
   alias Arbiter.Worker.CliFetcher
   alias Arbiter.Worker.CliFetcher.Cache
   alias Arbiter.Worker.CliFetcher.Scheduler
+  alias Arbiter.Worker.Image.LocalPublished
 
   @spec build(keyword()) :: map()
   def build(opts \\ []) do
@@ -26,6 +27,7 @@ defmodule Arbiter.Worker.CliFetcher.Status do
 
     %{
       hold: Settings.worker_cli_set_hold(),
+      local_published: LocalPublished.enabled?(),
       scheduler: %{
         enabled: Map.get(scheduler, :enabled, false),
         checked_at: iso(Map.get(scheduler, :checked_at))

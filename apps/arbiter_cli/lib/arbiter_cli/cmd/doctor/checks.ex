@@ -2066,7 +2066,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   def check_cli_versions do
     case Client.get("/api/server/cli_versions") do
       {:ok, %{"clis" => clis, "hold" => hold} = resp} when is_list(clis) ->
-        Enum.map(clis, &cli_row/1) ++ [cli_hold_row(hold, resp["scheduler"])]
+        Enum.map(clis, &cli_row/1) ++
+          [cli_hold_row(hold, resp["scheduler"]), local_published_row(resp)]
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         [server_error_result("cli versions", err)]
@@ -2115,6 +2116,23 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     do: ", last bump #{from || "unpinned"} -> #{to} (#{at})"
 
   defp cli_last_bump(_), do: ", never bumped"
+
+  defp local_published_row(%{"local_published" => false}) do
+    nodes_result(
+      "local published image",
+      :warn,
+      "off: local runs build locally and bind-mount the CLIs; the local image GC is idle",
+      "Re-enable: arb settings set worker.image.local_published null"
+    )
+  end
+
+  defp local_published_row(_resp) do
+    nodes_result(
+      "local published image",
+      :ok,
+      "on (switch off: arb settings set worker.image.local_published false)"
+    )
+  end
 
   defp cli_hold_row(nil, scheduler) do
     nodes_result("cli set hold", :ok, "no hold" <> cli_scheduler_note(scheduler))

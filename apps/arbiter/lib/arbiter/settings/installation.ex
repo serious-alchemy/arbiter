@@ -117,6 +117,7 @@ defmodule Arbiter.Settings.Installation do
     :worker_cli_versions,
     :worker_cli_manual,
     :worker_cli_set_hold,
+    :worker_image_local_published,
     :dashboard_dismissed_update_version,
     :dashboard_dismissed_deploy
   ]
@@ -445,6 +446,13 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description "worker.cli_set.hold: freezes the CLI set and every auto-bump (SI1a, SI2); nil = no hold."
+    end
+
+    attribute :worker_image_local_published, :boolean do
+      public? true
+      allow_nil? true
+
+      description "worker.image.local_published: local runs take the published image (SI-L); nil/true = on, false = off (local build and CLI bind mounts, local image GC idle)."
     end
 
     create_timestamp :created_at

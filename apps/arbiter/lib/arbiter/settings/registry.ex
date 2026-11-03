@@ -246,6 +246,15 @@ defmodule Arbiter.Settings.Registry do
       description:
         "Freezes the published CLI set: while set, the auto-bump fetches and pins nothing " <>
           "(the rollback for a bad CLI release); null = no hold. Operator-only."
+    },
+    %{
+      key: "worker.image.local_published",
+      type: "boolean",
+      description:
+        "Local runs take the published per-repo image from the local podman store (SI-L); " <>
+          "null/true = on (the default), false = off: local runs build locally and bind-mount " <>
+          "the CLIs, pull nothing, and the local image GC removes nothing. Takes effect on " <>
+          "the next run. Operator-only."
     }
   ]
 
@@ -266,7 +275,8 @@ defmodule Arbiter.Settings.Registry do
                     nodes.registry.publish_timeout_ms
                     nodes.registry_pull_username nodes.registry_pull_password
                     nodes.machine_image_source
-                    worker.cli.versions worker.cli.manual worker.cli_set.hold)
+                    worker.cli.versions worker.cli.manual worker.cli_set.hold
+                    worker.image.local_published)
 
   # Built at compile time from the fixed schema above, so no input ever mints an
   # atom (some keys are dotted: `:"nodes.public_url"`).
@@ -584,6 +594,9 @@ defmodule Arbiter.Settings.Registry do
   defp write("worker.cli.manual", v), do: wrap(Settings.set_worker_cli_manual(v))
   defp write("worker.cli_set.hold", v), do: wrap(Settings.set_worker_cli_set_hold(v))
 
+  defp write("worker.image.local_published", v),
+    do: wrap(Settings.set_worker_image_local_published(v))
+
   defp wrap({:ok, updated}), do: {:ok, updated}
   defp wrap({:error, reason}), do: {:error, {:invalid, inspect(reason)}}
 
@@ -630,6 +643,7 @@ defmodule Arbiter.Settings.Registry do
   def override("worker.cli.versions"), do: Settings.worker_cli_versions()
   def override("worker.cli.manual"), do: Settings.worker_cli_manual()
   def override("worker.cli_set.hold"), do: Settings.worker_cli_set_hold()
+  def override("worker.image.local_published"), do: Settings.worker_image_local_published()
 
   # Write-only: a stored password reads as a mask, never as the secret or its ciphertext.
   def override("nodes.registry_password"),
@@ -678,6 +692,7 @@ defmodule Arbiter.Settings.Registry do
   def default("worker.cli.versions"), do: nil
   def default("worker.cli.manual"), do: []
   def default("worker.cli_set.hold"), do: nil
+  def default("worker.image.local_published"), do: true
   def default("nodes.allow_public_endpoint"), do: false
   def default("nodes.join_token_ttl_minutes"), do: Settings.default_join_token_ttl_minutes()
   def default("nodes.fence_after_s"), do: Arbiter.Nodes.Liveness.default_fence_after_s()

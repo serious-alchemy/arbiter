@@ -795,6 +795,17 @@ defmodule Arbiter.Settings do
   @spec worker_cli_set_hold() :: String.t() | nil
   def worker_cli_set_hold, do: read_setting(:worker_cli_set_hold)
 
+  @doc "The persisted `worker.image.local_published` override (`nil` = default on)."
+  @spec worker_image_local_published() :: boolean() | nil
+  def worker_image_local_published, do: read_setting(:worker_image_local_published)
+
+  @spec set_worker_image_local_published(boolean() | nil) ::
+          {:ok, boolean() | nil} | {:error, term()}
+  def set_worker_image_local_published(v) when is_nil(v) or is_boolean(v),
+    do: write_setting(:worker_image_local_published, v)
+
+  def set_worker_image_local_published(_), do: {:error, :invalid_value}
+
   @doc "Whether `value` is a valid `worker.cli_set.hold` token."
   @spec valid_cli_set_hold?(term()) :: boolean()
   def valid_cli_set_hold?(value) when is_binary(value), do: Regex.match?(@cli_hold_re, value)

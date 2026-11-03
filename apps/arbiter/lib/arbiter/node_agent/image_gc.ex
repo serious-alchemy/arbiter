@@ -302,6 +302,24 @@ defmodule Arbiter.NodeAgent.ImageGC do
   # -- collection ------------------------------------------------------------------------
 
   defp do_collect(state) do
+    if skip?(state), do: {skipped_result(state), state}, else: do_collect_now(state)
+  end
+
+  # `:skip_fun` (the local store's runtime off switch): a collection that removes nothing.
+  defp skip?(state), do: fetch(state, :skip_fun, fn -> false end) == true
+
+  defp skipped_result(state) do
+    %{
+      removed: [],
+      seeds_removed: [],
+      kept: %{},
+      pressure: state.pressure,
+      pressure_unrelieved: false,
+      skipped: true
+    }
+  end
+
+  defp do_collect_now(state) do
     pressure? = pressure_now?(state)
     ctx = context(state)
     plan = plan(state.entries, ctx, pressure?: pressure?, grace_s: grace_s(state))

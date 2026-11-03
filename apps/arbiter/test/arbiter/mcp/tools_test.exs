@@ -3185,7 +3185,8 @@ defmodule Arbiter.MCP.ToolsTest do
       "nodes.chart_ref": nil,
       "worker.cli.versions": nil,
       "worker.cli.manual": nil,
-      "worker.cli_set.hold": nil
+      "worker.cli_set.hold": nil,
+      "worker.image.local_published": nil
     }
 
     test "the coordinator tunes finish-first but not the operator-only floor switches", ctx do
