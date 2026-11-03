@@ -70,8 +70,8 @@ defmodule Arbiter.Nodes.PlacementTest do
         assert {:local_only, :not_podman} =
                  Placement.eligible(%{@eligible | kind: kind, layout: :worktree})
 
-        assert {:local_only, :non_claude_provider} =
-                 Placement.eligible(%{@eligible | kind: kind, provider: :codex})
+        assert {:local_only, :provider_not_remote} =
+                 Placement.eligible(%{@eligible | kind: kind, provider: :agy})
       end
     end
 
@@ -84,8 +84,8 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:local_only, :not_podman} =
                Placement.eligible(%{@eligible | kind: :resume, layout: :worktree})
 
-      assert {:local_only, :non_claude_provider} =
-               Placement.eligible(%{@eligible | kind: :resume, provider: :codex})
+      assert {:local_only, :provider_not_remote} =
+               Placement.eligible(%{@eligible | kind: :resume, provider: :agy})
 
       assert {:local_only, :placement_local_only} =
                Placement.eligible(%{@eligible | kind: :resume, mode: :local_only})
@@ -96,10 +96,29 @@ defmodule Arbiter.Nodes.PlacementTest do
     end
 
     test "a non-Claude provider stays local" do
-      for provider <- [:codex, :agy, :gemini, :grok] do
-        assert {:local_only, :non_claude_provider} =
+      for provider <- [:agy, :gemini, :grok, nil] do
+        assert {:local_only, :provider_not_remote} =
                  Placement.eligible(%{@eligible | provider: provider})
       end
+    end
+
+    test "Codex is in the remote-provider set; the node, not eligibility, gates it" do
+      assert Placement.remote_providers() == ["claude", "codex"]
+      assert Placement.eligible(%{@eligible | provider: :codex}) == :ok
+    end
+
+    test "Codex places on a node only with credential_sync" do
+      plain = row("plain", caps: %{})
+      other = row("other", caps: %{"credential_sync" => ["claude"]})
+      synced = row("synced", caps: %{"credential_sync" => ["codex"]}, live: 1)
+
+      assert {:ok, {:local, :no_node}} = place([provider: :codex], [plain, other])
+      assert {:ok, {:node, %{name: "synced"}}} = place([provider: :codex], [plain, other, synced])
+
+      assert {:error, {:no_node_capacity, _}} =
+               place([provider: :codex, mode: :remote_only], [plain, other])
+
+      assert {:ok, {:node, %{name: "plain"}}} = place([], [plain])
     end
 
     test "a bwrap-jailed or unsandboxed layout stays local" do
@@ -122,8 +141,8 @@ defmodule Arbiter.Nodes.PlacementTest do
       assert {:local_only, :not_podman} =
                Placement.eligible(%{inspect_request | layout: :linked_worktree})
 
-      assert {:local_only, :non_claude_provider} =
-               Placement.eligible(%{inspect_request | provider: :codex})
+      assert {:local_only, :provider_not_remote} =
+               Placement.eligible(%{inspect_request | provider: :agy})
 
       assert {:local_only, :placement_local_only} =
                Placement.eligible(%{inspect_request | mode: :local_only})
@@ -254,7 +273,7 @@ defmodule Arbiter.Nodes.PlacementTest do
     test "every reason has a phrase the hold message can use" do
       for reason <- [
             :follow_up,
-            :non_claude_provider,
+            :provider_not_remote,
             :not_podman,
             :no_private_clone,
             :placement_local_only,

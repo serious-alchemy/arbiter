@@ -3127,6 +3127,50 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert %{status: :ok} = named(results, "registry pull docker.io/pub")
     end
 
+    test "SI11: an `image <repo>` row per published repo: digest, CLIs, providers, seed" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => false,
+            "registries" => [],
+            "repo_images" => [
+              %{
+                "repo" => "vstim",
+                "ref" =>
+                  "registry.example.com/arb/vstim/worker@sha256:" <> String.duplicate("a", 64),
+                "providers" => ["claude", "codex"],
+                "clis" => [
+                  %{"name" => "claude", "version" => "2.1.0"},
+                  %{"name" => "codex", "version" => "0.9.1"}
+                ],
+                "seed" => %{"status" => "pushed", "reason" => nil}
+              },
+              %{
+                "repo" => "bare",
+                "ref" =>
+                  "registry.example.com/arb/bare/worker@sha256:" <> String.duplicate("b", 64),
+                "providers" => ["claude"],
+                "clis" => [%{"name" => "claude", "version" => "2.1.0"}],
+                "seed" => %{"status" => "skipped", "reason" => "seed: none"}
+              }
+            ]
+          }
+        })
+      )
+
+      results = nodes_results()
+
+      assert %{status: :ok, detail: detail} = named(results, "image vstim")
+      assert detail =~ "sha256:aaaaaaaaaaaa"
+      assert detail =~ "claude 2.1.0"
+      assert detail =~ "codex 0.9.1"
+      assert detail =~ "providers claude, codex"
+      assert detail =~ "seed pushed"
+
+      assert %{status: :ok, detail: detail} = named(results, "image bare")
+      assert detail =~ "seed skipped (seed: none)"
+    end
+
     test "each workspace/repo registry gets its own row, with the anonymous-read answer (KH12)" do
       stub_nodes(
         nodes_resp(%{

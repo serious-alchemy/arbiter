@@ -101,6 +101,39 @@ defmodule Arbiter.Worker.ContainerSpawnRepoImageTest do
     refute_received {:published, _}
   end
 
+  # SI11 (§21.5): the image's labels, not the host, say which providers can run.
+  describe "provider_not_in_image preflight (SI11)" do
+    defp with_providers(opts, providers) do
+      Keyword.put(opts, :publish,
+        stub: fn _ctx ->
+          {:ok, %{ref: "registry.example.com/x/worker@sha256:" <> @digest, providers: providers}}
+        end
+      )
+    end
+
+    test "refuses a provider the published image does not list", %{tmp_dir: tmp} do
+      repo_path = repo!(tmp, %{"README.md" => "hi\n"})
+      opts = opts(nil, "vstim") |> with_providers(["claude"]) |> Keyword.put(:provider, "codex")
+
+      assert {:error, {:image_unavailable, {:provider_not_in_image, "codex", ["claude"]}}} =
+               ContainerSpawn.preflight_image(repo_path, registry_node(), opts)
+    end
+
+    test "passes a provider the image lists, and a run that names none", %{tmp_dir: tmp} do
+      repo_path = repo!(tmp, %{"README.md" => "hi\n"})
+      base = opts(nil, "vstim") |> with_providers(["claude", "codex"])
+
+      assert :ok =
+               ContainerSpawn.preflight_image(
+                 repo_path,
+                 registry_node(),
+                 Keyword.put(base, :provider, :codex)
+               )
+
+      assert :ok = ContainerSpawn.preflight_image(repo_path, registry_node(), base)
+    end
+  end
+
   test "a node that builds its own image never touches any of this", %{tmp_dir: tmp} do
     repo_path = repo!(tmp, %{"README.md" => "hi\n"})
     build_node = %{id: "n2", caps: %{"image" => "build"}}

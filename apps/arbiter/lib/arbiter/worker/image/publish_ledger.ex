@@ -45,7 +45,14 @@ defmodule Arbiter.Worker.Image.PublishLedger do
         key = {Map.get(ctx, :repo), Map.get(ctx, :repo_path)}
 
         :global.trans({{__MODULE__, file}, self()}, fn ->
-          entry = %{key: key, ctx: ctx, at: now, ref: Keyword.get(opts, :ref)}
+          entry = %{
+            key: key,
+            ctx: ctx,
+            at: now,
+            ref: Keyword.get(opts, :ref),
+            image: Keyword.get(opts, :image)
+          }
+
           entries = Map.put(read(file), key, entry)
           write(file, entries)
         end)
@@ -100,6 +107,40 @@ defmodule Arbiter.Worker.Image.PublishLedger do
   end
 
   def last_ref(_repo, _opts), do: nil
+
+  @doc """
+  SI11: per repo, its newest publish as the doctor's `image <repo>` row shows it:
+  `%{repo, ref, at, providers, clis, seed}` (the last three are `nil` for a publish
+  recorded before they were kept). `[]` while the ledger is off.
+  """
+  @spec images(keyword()) :: [map()]
+  def images(opts \\ []) do
+    case path(opts) do
+      nil ->
+        []
+
+      file ->
+        file
+        |> read()
+        |> Map.values()
+        |> Enum.filter(&(is_binary(elem(&1.key, 0)) and is_binary(Map.get(&1, :ref))))
+        |> Enum.group_by(&elem(&1.key, 0))
+        |> Enum.map(fn {_repo, entries} -> Enum.max_by(entries, & &1.at, DateTime) end)
+        |> Enum.sort_by(&elem(&1.key, 0))
+        |> Enum.map(fn entry ->
+          image = Map.get(entry, :image) || %{}
+
+          %{
+            repo: elem(entry.key, 0),
+            ref: entry.ref,
+            at: entry.at,
+            providers: Map.get(image, :providers),
+            clis: Map.get(image, :clis),
+            seed: Map.get(image, :seed)
+          }
+        end)
+    end
+  end
 
   defp read(file) do
     with {:ok, bin} <- File.read(file),

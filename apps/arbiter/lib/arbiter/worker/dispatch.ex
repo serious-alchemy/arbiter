@@ -3047,7 +3047,7 @@ defmodule Arbiter.Worker.Dispatch do
 
     image_opts =
       [workspace: workspace, repo: repo, publish: image_publish_opts(opts)] ++
-        Keyword.take(opts, [:image])
+        Keyword.take(opts, [:image, :provider])
 
     case publish_image(task, repo, node, image_opts) do
       :ok ->

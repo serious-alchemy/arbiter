@@ -629,13 +629,13 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert info.phrase =~ "held — local capacity 0 (no node had a free slot)"
     end
 
-    test "an agy/codex implementer is held with its provider as the reason", %{ws: ws} do
-      issue = ready!(ws, "codex run")
+    test "an agy implementer is held with its provider as the reason", %{ws: ws} do
+      issue = ready!(ws, "agy run")
 
-      assert {:error, {:no_node_capacity, info}} = dispatch(issue, agent_type: :codex)
+      assert {:error, {:no_node_capacity, info}} = dispatch(issue, agent_type: :agy)
 
       assert info.phrase ==
-               "held — local capacity 0 (run is local-only: provider codex has no podman path)"
+               "held — local capacity 0 (run is local-only: provider agy has no remote credential path)"
 
       assert Ash.get!(Issue, issue.id).state == :queued
     end
@@ -664,13 +664,15 @@ defmodule Arbiter.Worker.DispatchNodePlacementTest do
       assert info.phrase =~ "run is local-only: sandbox is not podman"
     end
 
-    test "a non-Claude podman task dispatch is held as local-only (provider)", %{ws: ws} do
+    test "a Codex podman task dispatch is not held as local-only for its provider (SI11)", %{
+      ws: ws
+    } do
       issue = research!(ws)
 
       assert {:error, {:no_node_capacity, info}} =
                dispatch(issue, @podman ++ [agent_type: :codex])
 
-      assert info.phrase =~ "run is local-only: provider codex has no podman path"
+      refute info.phrase =~ "provider codex"
     end
 
     test "a research dispatch given no checkout at all is held with that reason", %{ws: ws} do
