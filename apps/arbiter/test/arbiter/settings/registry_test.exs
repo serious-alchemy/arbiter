@@ -14,7 +14,7 @@ defmodule Arbiter.Settings.RegistryTest do
            nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.chart_ref nodes.registry_username
            nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.registry.publish_timeout_ms
            nodes.registry_pull_username nodes.registry_pull_password nodes.machine_image_source
-           worker.cli.versions worker.cli.manual worker.cli_set.hold)
+           worker.cli.versions worker.cli.manual worker.cli_set.hold worker.image.local_published)
 
   test "keys/0 lists every installation setting" do
     assert Registry.keys() == @keys
@@ -469,7 +469,7 @@ defmodule Arbiter.Settings.RegistryTest do
                       nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
                       nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.registry.publish_timeout_ms nodes.chart_ref
                       nodes.registry_pull_username nodes.registry_pull_password nodes.machine_image_source
-                      worker.cli.versions worker.cli.manual worker.cli_set.hold)
+                      worker.cli.versions worker.cli.manual worker.cli_set.hold worker.image.local_published)
 
     test "operator_only_keys/0 is the schema's operator-only set" do
       assert Enum.sort(Registry.operator_only_keys()) == Enum.sort(@operator_only)
@@ -573,7 +573,8 @@ defmodule Arbiter.Settings.RegistryTest do
     end
 
     test "all three are operator-only" do
-      for key <- ~w(worker.cli.versions worker.cli.manual worker.cli_set.hold) do
+      for key <-
+            ~w(worker.cli.versions worker.cli.manual worker.cli_set.hold worker.image.local_published) do
         assert {:error, {:unauthorized, _}} = Registry.put(key, nil, authority: :coordinator)
       end
     end

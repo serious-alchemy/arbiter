@@ -4,7 +4,7 @@ defmodule Arbiter.Worker.Image.LocalPublishedTest do
   every node, served from the local podman store. podman is a stand-in runner
   that records each call and, for `pull`, what the auth file held at that moment.
   """
-  use ExUnit.Case, async: true
+  use Arbiter.DataCase, async: false
 
   alias Arbiter.NodeAgent.ImageGC
   alias Arbiter.Worker.Image.LocalPublished
@@ -163,6 +163,38 @@ defmodule Arbiter.Worker.Image.LocalPublishedTest do
   end
 
   describe "the local store's GC" do
+    test "removes nothing while worker.image.local_published is off", ctx do
+      on_exit(fn -> Arbiter.Settings.set_worker_image_local_published(nil) end)
+      name = :"local_gc_off_#{System.unique_integer([:positive])}"
+      ref = "registry.example.com/arbiter/vstim/worker@sha256:" <> String.duplicate("4", 64)
+      test = self()
+
+      runner = fn "podman", args, _ ->
+        send(test, {:podman, args})
+        if match?(["rmi", _], args), do: {"", 0}, else: {"10\n", 0}
+      end
+
+      start_supervised!(
+        LocalPublished.gc_spec(
+          name: name,
+          runs: :no_such_runs,
+          node_home: ctx.tmp_dir,
+          runner: runner,
+          podman: "podman",
+          interval_ms: :infinity,
+          collect_on_pull: false,
+          grace_s: 0,
+          now_fun: fn -> 2_000_000 end,
+          space_fun: fn -> {1_000_000_000_000, 900_000_000_000} end
+        )
+      )
+
+      :ok = ImageGC.pulled(ref, "arb-a", name: name)
+      {:ok, _} = Arbiter.Settings.set_worker_image_local_published(false)
+      assert {:ok, %{removed: []}} = ImageGC.collect(name: name)
+      refute_received {:podman, ["rmi", _]}
+    end
+
     test "never removes an image a live local run uses", ctx do
       name = :"local_gc_#{System.unique_integer([:positive])}"
       runs = :"local_runs_#{System.unique_integer([:positive])}"

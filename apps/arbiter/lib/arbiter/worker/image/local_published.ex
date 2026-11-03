@@ -36,7 +36,8 @@ defmodule Arbiter.Worker.Image.LocalPublished do
   (`Arbiter.Worker.Image.LocalRuns`) is never removed; `podman rmi` (never `-f`) refuses
   an image a container still uses besides.
 
-  Switched off by `config :arbiter, :local_published_image, false` (the test suite's
+  Switched off at runtime by `worker.image.local_published` false (`arb settings set`,
+  no restart; the GC then removes nothing), or by `config :arbiter, :local_published_image, false` (the test suite's
   default) or `published_image: false` in the options. Options: `:workspace`, `:repo`,
   `:run` (the container name; the GC ledger's run id), `:owner`, `:provider`,
   `:expect_cli_set` (the pinned set8 the image must carry), `:ledger` (`PublishLedger`),
@@ -65,7 +66,16 @@ defmodule Arbiter.Worker.Image.LocalPublished do
   def enabled?(opts \\ []) do
     case Keyword.fetch(opts, :published_image) do
       {:ok, value} -> value != false
-      :error -> Application.get_env(:arbiter, :local_published_image, true) != false
+      :error -> setting_or_config()
+    end
+  end
+
+  # The runtime switch (`worker.image.local_published`, `arb settings set`) wins over the
+  # app env; unset falls back to `config :arbiter, :local_published_image` (default on).
+  defp setting_or_config do
+    case Arbiter.Settings.worker_image_local_published() do
+      nil -> Application.get_env(:arbiter, :local_published_image, true) != false
+      value -> value != false
     end
   end
 
@@ -241,6 +251,9 @@ defmodule Arbiter.Worker.Image.LocalPublished do
       |> Keyword.put_new(:name, gc_name())
       |> Keyword.put(:config, %{node_home: home})
       |> Keyword.put(:runs_fun, fn -> LocalRuns.live(name: runs) end)
+      |> Keyword.put_new(:skip_fun, fn ->
+        Arbiter.Settings.worker_image_local_published() == false
+      end)
       |> Keyword.put_new(:retained_fun, fn -> [] end)
       |> Keyword.put_new(:gate_fun, fn -> [] end)
 

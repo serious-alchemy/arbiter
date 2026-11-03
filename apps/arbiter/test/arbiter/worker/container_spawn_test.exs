@@ -9,7 +9,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
   `container_spawn_podman_test.exs` (`@moduletag :podman`).
   """
   # async: false: Application env, a shared Worker registry and Ports.
-  use ExUnit.Case, async: false
+  use Arbiter.DataCase, async: false
 
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Guardrails.Projection
@@ -220,6 +220,31 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
 
       assert %{image_ref: @image, image_fallback: reason} = ContainerSpawn.provenance(request)
       assert reason =~ "pull_failed"
+    end
+
+    test "worker.image.local_published switches the step at runtime, no restart (SI-L off switch)",
+         ctx do
+      opts =
+        Keyword.update!(local_image(ctx), :local_image, &Keyword.delete(&1, :published_image))
+
+      on_exit(fn -> Arbiter.Settings.set_worker_image_local_published(nil) end)
+
+      # unset: the app env (false in the suite) decides, so the local build
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+      assert request.image == @image
+
+      # on at runtime: the very next run pulls the published digest
+      {:ok, _} = Arbiter.Settings.set_worker_image_local_published(true)
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+      assert request.image == @published
+      assert_received {:local_podman, ["pull", "--quiet" | _]}
+
+      # off at runtime: local build and CLI bind mounts, nothing pulled
+      {:ok, _} = Arbiter.Settings.set_worker_image_local_published(false)
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+      assert request.image == @image
+      assert request.cli_mounts != []
+      refute_received {:local_podman, _}
     end
 
     test "an explicit image tag is never replaced by the published one", ctx do
