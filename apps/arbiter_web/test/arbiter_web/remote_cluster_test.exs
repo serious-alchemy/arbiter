@@ -189,6 +189,7 @@ defmodule ArbiterWeb.RemoteClusterTest do
          token_file: ctx.token_file,
          backoff: [base: 20, max: 80],
          tree: [
+           event_feed: false,
            config_loader: [path: ctx.config_path, interval_ms: nil],
            informer: [backoff_ms: {5, 20}],
            pod_channel: [ip: {127, 0, 0, 1}, bridge_port: 0, boot_port: 0],

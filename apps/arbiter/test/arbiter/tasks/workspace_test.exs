@@ -204,6 +204,39 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       end
     end
 
+    # bd-6dyva0: the speculative merge train.
+    test "accepts merge.train, workspace-wide and per repo" do
+      config = %{
+        "merge" => %{
+          "train" => %{"depth" => 3, "workflow" => "train.yml"},
+          "repos" => %{"vstim" => %{"train" => %{"depth" => "4", "ref_prefix" => "trains/"}}}
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "train-depth", config: config})
+      assert ws.config["merge"]["train"]["depth"] == 3
+    end
+
+    test "fails when merge.train is not a map or its depth is not a positive integer" do
+      for {merge, message} <- [
+            {%{"train" => 3}, "merge.train must be a map"},
+            {%{"train" => %{"depth" => 0}}, "merge.train.depth must be a positive integer"},
+            {%{"train" => %{"depth" => "two"}}, "merge.train.depth must be a positive integer"},
+            {%{"repos" => %{"m" => %{"train" => %{"depth" => -1}}}},
+             "merge.repos.m.train.depth must be a positive integer"},
+            {%{"train" => %{"ref_prefix" => ""}},
+             "merge.train.ref_prefix must be a non-empty string"}
+          ] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "bad-train-#{System.unique_integer([:positive])}",
+                   config: %{"merge" => merge}
+                 })
+
+        assert err |> Exception.message() |> String.contains?(message), message
+      end
+    end
+
     test "fails when merge is not a map" do
       config = %{"merge" => "direct"}
 

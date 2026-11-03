@@ -862,6 +862,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     valid_strategies = Arbiter.Tasks.Workspace.valid_merger_strategies()
 
     changeset
+    |> validate_merge_train(Map.get(merge, "train"), label)
     |> then(fn cs ->
       case Map.get(merge, "strategy") do
         nil ->
@@ -912,6 +913,52 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       end
     end)
   end
+
+  # bd-6dyva0: `merge.train`, the speculative merge train — `depth` a positive
+  # integer (a numeric string, as `arb config set` writes it, is fine), `ref_prefix`
+  # and `workflow` non-empty strings.
+  defp validate_merge_train(changeset, nil, _label), do: changeset
+
+  defp validate_merge_train(changeset, train, label) when not is_map(train) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "#{label}.train must be a map; got: #{inspect(train)}"
+    )
+  end
+
+  defp validate_merge_train(changeset, train, label) do
+    changeset =
+      if train_depth_ok?(Map.get(train, "depth")),
+        do: changeset,
+        else:
+          Changeset.add_error(changeset,
+            field: :config,
+            message:
+              "#{label}.train.depth must be a positive integer; got: " <>
+                inspect(Map.get(train, "depth"))
+          )
+
+    Enum.reduce(~w(ref_prefix workflow), changeset, fn key, cs ->
+      case Map.get(train, key) do
+        nil ->
+          cs
+
+        value when is_binary(value) and value != "" ->
+          cs
+
+        other ->
+          Changeset.add_error(cs,
+            field: :config,
+            message: "#{label}.train.#{key} must be a non-empty string; got: #{inspect(other)}"
+          )
+      end
+    end)
+  end
+
+  defp train_depth_ok?(nil), do: true
+  defp train_depth_ok?(n) when is_integer(n), do: n >= 1
+  defp train_depth_ok?(s) when is_binary(s), do: match?({n, ""} when n >= 1, Integer.parse(s))
+  defp train_depth_ok?(_), do: false
 
   defp validate_agent_block(changeset, _label, nil), do: changeset
 

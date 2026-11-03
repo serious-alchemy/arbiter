@@ -116,6 +116,8 @@ defmodule Arbiter.NodeAgent.PodChannel.PodServerTest do
       req_options: []
     }
 
+    feeds = start_supervised!({Agent, fn -> %{} end}, id: :feeds)
+
     server =
       start_supervised!(
         {PodServer,
@@ -126,10 +128,11 @@ defmodule Arbiter.NodeAgent.PodChannel.PodServerTest do
          ip: @loopback,
          port: 0,
          notify: self(),
+         events: fn run -> Agent.get(feeds, &Map.fetch(&1, run)) end,
          max_upload_bytes: 1_000_000}
       )
 
-    %{ca: ca, runs: runs, port: PodServer.port(server)}
+    %{ca: ca, runs: runs, feeds: feeds, port: PodServer.port(server)}
   end
 
   defp url(ctx, path), do: "https://localhost:#{ctx.port}#{path}"
@@ -418,6 +421,94 @@ defmodule Arbiter.NodeAgent.PodChannel.PodServerTest do
       :ok = Runs.push_command(ctx.runs, "run-1", %{"op" => "stop"})
 
       assert Jason.decode!(Task.await(task).body) == %{"commands" => [%{"op" => "stop"}]}
+    end
+  end
+
+  describe "POST /events" do
+    alias Arbiter.NodeAgent.K8s.LogFollower
+
+    defp feed!(ctx, run, opts \\ []) do
+      me = self()
+
+      {:ok, pid} =
+        LogFollower.start(
+          [
+            run: run,
+            pod: "pod",
+            source: :events,
+            client: nil,
+            owner: me,
+            emit: fn f -> send(me, {:frame, f}) end
+          ] ++
+            opts
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: LogFollower.stop(pid) end)
+      Agent.update(ctx.feeds, &Map.put(&1, run, pid))
+      pid
+    end
+
+    defp post_events(ctx, files, offset, body, extra \\ []) do
+      request(ctx, :post, "/events", files, "control",
+        body: body,
+        headers: [{"x-arb-offset", Integer.to_string(offset)}] ++ extra
+      )
+    end
+
+    test "hands the chunk to the run's feed and answers the next offset", ctx do
+      %{files: files} = boot(ctx)
+      pid = feed!(ctx, "run-1")
+
+      resp = post_events(ctx, files, 0, "one\ntwo\n")
+      assert resp.status == 200
+      assert Jason.decode!(resp.body) == %{"next" => 8}
+      assert LogFollower.position(pid) == "e8"
+      assert_receive {:frame, _}
+    end
+
+    test "the run is the certificate's, never the request's", ctx do
+      %{files: files} = boot(ctx)
+      feed!(ctx, "run-2")
+      resp = post_events(ctx, files, 0, "x\n", [{"x-arb-run", "run-2"}])
+      assert resp.status == 503
+    end
+
+    test "a gap is a 409 with the offset to resume from", ctx do
+      %{files: files} = boot(ctx)
+      feed!(ctx, "run-1")
+      resp = post_events(ctx, files, 50, "x\n")
+      assert resp.status == 409
+      assert Jason.decode!(resp.body) == %{"next" => 0}
+    end
+
+    test "final marks the end of the feed", ctx do
+      %{files: files} = boot(ctx)
+      pid = feed!(ctx, "run-1")
+      LogFollower.finish(pid)
+      assert post_events(ctx, files, 0, "x\n", [{"x-arb-final", "1"}]).status == 200
+      assert_receive {:log_drained, "run-1", "e2"}
+    end
+
+    test "503 while the controller has no feed for the run", ctx do
+      %{files: files} = boot(ctx)
+      resp = post_events(ctx, files, 0, "x\n")
+      assert resp.status == 503
+    end
+
+    test "400 for a missing or malformed offset, 413 over the size cap, 401 without a certificate",
+         ctx do
+      %{files: files} = boot(ctx)
+      feed!(ctx, "run-1")
+      assert request(ctx, :post, "/events", files, "control", body: "x").status == 400
+
+      assert request(ctx, :post, "/events", files, "control",
+               body: "x",
+               headers: [{"x-arb-offset", "-3"}]
+             ).status == 400
+
+      big = String.duplicate("x", 1_048_577)
+      assert post_events(ctx, files, 0, big).status == 413
+      assert request(ctx, :post, "/events", nil, nil, body: "x").status == 401
     end
   end
 

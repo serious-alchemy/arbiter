@@ -2,6 +2,8 @@
 apiVersion: v1
 kind: Pod
 metadata:
+  annotations:
+    arbiter.dev/events: '1'
   labels:
     app.kubernetes.io/component: worker
     app.kubernetes.io/name: arbiter-worker
@@ -32,7 +34,105 @@ spec:
           . /run/arb/env
           set +a
           rm -f /run/arb/env
-          exec "$$@"
+
+          if [ "$${ARB_EVENTS:-}" != 1 ]; then
+            exec "$$@"
+          fi
+
+          # The event feed (bd-1nl506). The agent's stdout and stderr are teed to an NDJSON file
+          # and shipped to the controller in byte-offset chunks (POST /events), which the primary
+          # reads instead of the kubelet's log; the log keeps the same bytes for a human. The
+          # command keeps its argv and its exit status; SIGTERM/SIGINT are forwarded to it.
+          umask 077
+          events_dir=$${ARB_EVENTS_DIR:-$${HOME:-/tmp}/.arb-events}
+          run_dir=$${ARB_RUN_DIR:-/run/arb}
+          ca_file=$${ARB_CA_FILE:-/etc/arb/ca/ca.crt}
+          chunk=$${ARB_EVENTS_CHUNK:-262144}
+          addr=$${ARB_BRIDGE_ADDR:-}
+          case $$addr in
+            *:*) addr="[$$addr]" ;;
+          esac
+          channel=$${ARB_EVENTS_URL:-https://$${addr}:$${ARB_CHANNEL_PORT:-9444}/events}
+          mkdir -p "$$events_dir"
+          events=$$events_dir/events.ndjson
+          fifo=$$events_dir/events.fifo
+          part=$$events_dir/part
+          reply=$$events_dir/reply
+          rm -f "$$events" "$$fifo"
+          : >"$$events"
+          mkfifo "$$fifo"
+
+          tee -a "$$events" <"$$fifo" &
+          tee_pid=$$!
+          "$$@" <&0 >"$$fifo" 2>&1 &
+          cmd_pid=$$!
+          trap 'kill -TERM "$$cmd_pid" 2>/dev/null || true' TERM INT
+
+          # Bytes of the file the controller holds. It is the controller's word (`next` in the
+          # reply) that moves it, in either direction: a restarted controller asks for a rewind.
+          sent=0
+          code=000
+
+          post() {
+            tail -c +$$((sent + 1)) "$$events" | head -c "$$chunk" >"$$part"
+            code=$$(curl -sS --cacert "$$ca_file" \
+              --cert "$$run_dir/tls/control.crt" --key "$$run_dir/tls/control.key" \
+              --max-time 30 -X POST -H "x-arb-offset: $$sent" -H "x-arb-final: $$1" \
+              --data-binary @"$$part" -o "$$reply" -w '%{http_code}' "$$channel" 2>/dev/null) || code=000
+            case $$code in
+              200 | 409)
+                next=$$(sed -n 's/.*"next" *: *\([0-9][0-9]*\).*/\1/p' "$$reply" 2>/dev/null | head -n 1)
+                if [ -n "$$next" ]; then
+                  sent=$$next
+                elif [ "$$code" = 200 ]; then
+                  sent=$$((sent + $$(wc -c <"$$part")))
+                fi
+                return 0
+                ;;
+            esac
+            return 1
+          }
+
+          # While the command runs: ship whatever has been written, poll for more.
+          while kill -0 "$$cmd_pid" 2>/dev/null; do
+            size=$$(wc -c <"$$events")
+            if [ "$$sent" -lt "$$size" ]; then
+              if post 0; then continue; fi
+              sleep 2
+            fi
+            sleep 0.5
+          done
+
+          status=0
+          wait "$$cmd_pid" || status=$$?
+
+          # The tee ends with the command's last write; a background process of the command that
+          # still holds the pipe open does not get to hold the run back.
+          waited=0
+          while kill -0 "$$tee_pid" 2>/dev/null && [ "$$waited" -lt 50 ]; do
+            sleep 0.1
+            waited=$$((waited + 1))
+          done
+
+          # The rest, and then the end of the feed: a chunk marked final. A feed that is cut short
+          # (this loop gives up, or the container is killed) is the controller's to notice: it
+          # drops a last line with no newline and reports the stream as truncated.
+          tries=0
+          rounds=0
+          while [ "$$tries" -lt "$${ARB_EVENTS_FINAL_TRIES:-30}" ] && [ "$$rounds" -lt 100000 ]; do
+            rounds=$$((rounds + 1))
+            size=$$(wc -c <"$$events")
+            final=0
+            if [ "$$sent" -ge "$$size" ]; then final=1; fi
+            if post "$$final"; then
+              if [ "$$final" = 1 ] && [ "$$code" = 200 ]; then break; fi
+            else
+              tries=$$((tries + 1))
+              sleep 1
+            fi
+          done
+
+          exit "$$status"
         - sh
         - claude
         - --print
@@ -43,6 +143,8 @@ spec:
           value: proxy arb
         - name: ARB_BRIDGE_ADDR
           value: 10.43.98.199
+        - name: ARB_EVENTS
+          value: '1'
         - name: ARB_WORKER_BEAD_ID
           value: bd-1nfuq5
         - name: AWS_ACCESS_KEY_ID
