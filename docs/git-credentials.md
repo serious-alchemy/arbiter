@@ -215,7 +215,7 @@ kinds. It is an explicit opt-in and it is **weaker**; read "Compared with
    project or group: Arbiter refuses the spawn if it is.
 2. Sign in as the bot (or use an admin to impersonate it) and create a **personal access
    token** with scopes **`read_api`, `read_repository`, `write_repository`** and an
-   **expiry**. Never `api`, never `sudo`.
+   **expiry**. Never `api`, never `sudo`. A fine-grained token limited to those projects works too (see below).
 3. `arb workspace secret set GITLAB_BOT_PAT --file bot-pat`.
 4. In the workspace `config`, per repo:
 
@@ -234,10 +234,10 @@ kinds. It is an explicit opt-in and it is **weaker**; read "Compared with
 
    `secret` is required. `host` (default `gitlab.com`), `username` (default `oauth2`),
    `remote` and `api_url` are as for the other GitLab kind. `projects` lists further
-   `owner/repo` paths the bot may be a member of, and `expires_at` (`YYYY-MM-DD`) is your
+   `owner/repo` paths the bot may reach, and `expires_at` (`YYYY-MM-DD`) is your
    record of the PAT's expiry. Entries that share a `secret` and `host` widen each other's
    allowed projects (their `remote` and `projects`), so you list a project once.
-5. `arb server doctor` shows the token's expiry and warns once it is 14 days away.
+5. `arb server doctor` shows the token's expiry and warns once it is 14 days away, and names each repo the token cannot reach (below).
 
 ### What Arbiter checks at every dispatch
 
@@ -258,6 +258,50 @@ refusal, never a delivery):
 Each refusal says why (`the GitLab bot token was refused: it carries scope(s) api; only
 read_api, read_repository, write_repository are allowed ...`) and no worker runs on the
 operator's credential instead.
+
+### Fine-grained personal access tokens (bd-8h80lm)
+
+A GitLab **fine-grained** personal access token (beta in 18.10, generally available in
+19.2, any tier) lists its own resources, so it is the better choice when the bot's
+group membership is wider than the projects workers push to (the real bot is Maintainer
+on a whole group but its token is limited to a few projects). Arbiter recognises one by
+the `granular_scopes` list that `GET /personal_access_tokens/self` returns instead of
+`scopes` (present from GitLab 19.5). For such a token **its resource list, not the bot's
+membership, is the boundary**; the classic-PAT checks above are unchanged.
+
+At every dispatch Arbiter then requires:
+
+* **Resources are a project list.** Every `granular_scopes` entry must be
+  `access: "selected_memberships"` naming one `project_id`. A group entry (every project in
+  it, including later ones), `all_memberships`, `personal_projects`, `user` or `instance`
+  refuses the spawn and the message says which. An empty or unreadable list refuses too.
+* **Only the permissions the kind needs.** The permissions across all entries must be
+  `download_code` and `push_code` (the UI's *Code: Download* and *Code: Push*); anything
+  else (say `read_job`) refuses and is named. **These two identifiers are an unverified
+  assumption**: GitLab's API reference documents the `granular_scopes` shape but not the
+  permission names. If the real token carries other names, the dispatch is refused and the
+  message lists exactly what GitLab reported, so the allowlist
+  (`GitlabBot.allowed_granular_permissions/0`) can be corrected from a redacted
+  `GET /personal_access_tokens/self`.
+* **The projects are exactly the configured ones.** The project ids are resolved to paths
+  with `GET /personal_access_tokens/self/associations`, and the same rule as membership
+  applies: all of them must be the spawn's project, the entry's `projects` or a sibling's,
+  and the spawn's project must be among them. A project beyond that refuses the spawn and the
+  message names it. A project id the associations do not list is unverifiable, which also
+  refuses. `projects?membership=true` is not asked.
+* The token is active and has an unexpired expiry, as for a classic PAT.
+
+If the API cannot say what the token reaches (an error, a missing field, an unexpected
+shape), the spawn is refused; nothing is delivered on a guess.
+
+### `arb server doctor`: repos the token cannot reach
+
+For each `gitlab_bot_token` entry with a `remote`, doctor asks what the entry's token
+reaches (the bot's memberships for a classic PAT, the token's own resources for a
+fine-grained one) and warns once per repo that is missing, for example
+`git_credentials.repos.tonic_device bot token (GL_BOT) cannot reach emricare/tonic_device`.
+Set `remote` on each entry to have it checked. If GitLab cannot be asked or its answer cannot
+be read, doctor stays silent about reach (the dispatch guard still refuses).
 
 ### Delivery
 
@@ -410,6 +454,11 @@ directory only while a run is live, and `podman secret ls` lists no Arbiter git 
   covered, not GitLab's real answers. The first dispatch on a real project shows that
   `personal_access_tokens/self` and `projects?membership=true` answer as expected (they
   need a GitLab version that has the `self` endpoint).
+  The fine-grained path is tested against stubbed responses shaped after GitLab's API
+  reference, not a captured token: the permission names `download_code` / `push_code` are an
+  assumption, and the first dispatch with the real fine-grained bot token confirms (or
+  corrects) them, along with `granular_scopes` appearing on `/self` and the associations
+  listing the token's projects.
 * A fix round on a node can read its own token (it is in the container's
   environment). A copy the agent itself writes into its transcript or work tree stays
   on the node with the run's directory until the node's reaper takes it (24 h). By

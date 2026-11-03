@@ -58,6 +58,9 @@ defmodule Arbiter.Worker.GitCredentialGitlabBotTest do
     pat_status = Keyword.get(opts, :pat_status, 200)
     projects = Keyword.get(opts, :projects, ["acme/tonic"])
     per_page = Keyword.get(opts, :per_page, 100)
+    associations = Keyword.get(opts, :associations, [])
+    associations_status = Keyword.get(opts, :associations_status, 200)
+    associations_per_page = Keyword.get(opts, :associations_per_page, 100)
 
     Req.Test.stub(@http, fn conn ->
       send(
@@ -84,6 +87,25 @@ defmodule Arbiter.Worker.GitCredentialGitlabBotTest do
               pat
             )
           )
+
+        "/api/v4/personal_access_tokens/self/associations" ->
+          page = String.to_integer(conn.params["page"] || "1")
+
+          slice =
+            associations
+            |> Enum.drop((page - 1) * associations_per_page)
+            |> Enum.take(associations_per_page)
+
+          more? = length(associations) > page * associations_per_page
+
+          conn
+          |> Plug.Conn.put_status(associations_status)
+          |> Plug.Conn.put_resp_header("x-next-page", if(more?, do: "#{page + 1}", else: ""))
+          |> Req.Test.json(%{
+            "groups" => [],
+            "projects" =>
+              for({id, path} <- slice, do: %{"id" => id, "path_with_namespace" => path})
+          })
 
         "/api/v4/projects" ->
           page = String.to_integer(conn.params["page"] || "1")
@@ -450,6 +472,153 @@ defmodule Arbiter.Worker.GitCredentialGitlabBotTest do
     end
   end
 
+  # ---- fine-grained personal access tokens (bd-8h80lm) -------------------------------
+  #
+  # Source of the stubbed shapes: GitLab's personal access tokens API reference
+  # (https://docs.gitlab.com/api/personal_access_tokens/): `GET .../self` carries
+  # `granular_scopes: [%{"access" => "selected_memberships", "permissions" => [...],
+  # "project_id" => N, "group_id" => nil}]` instead of classic `scopes`, and
+  # `GET .../self/associations` answers `{"groups": [...], "projects": [%{"id", ...,
+  # "path_with_namespace"}]}`. `read_job` is the docs' own example permission. The
+  # docs do NOT list the identifiers of the "Code: Download" / "Code: Push"
+  # permissions; `download_code` / `push_code` below are ASSUMED names (no real
+  # response was captured) and the guard's allowlist uses the same assumption.
+  # No real token response was used.
+  describe "fine-grained tokens" do
+    @fine_perms ["download_code", "push_code"]
+    # The bot's group membership is wider (mesaana, blog) than the token's resources.
+    @wide_assoc [{1, "acme/tonic"}, {2, "acme/mesaana"}, {3, "acme/blog"}]
+
+    defp fine_pat(project_ids, permissions \\ @fine_perms) do
+      %{
+        "scopes" => nil,
+        "granular_scopes" =>
+          for id <- project_ids do
+            %{
+              "access" => "selected_memberships",
+              "permissions" => permissions,
+              "project_id" => id,
+              "group_id" => nil
+            }
+          end
+      }
+    end
+
+    test "a token limited to the configured project passes though membership is wider" do
+      stub_gitlab(
+        pat: fine_pat([1]),
+        associations: @wide_assoc,
+        projects: ["acme/tonic", "acme/mesaana", "acme/blog"]
+      )
+
+      assert {:ok, %Material{kind: :gitlab_bot_token, token: @bot, remote: "acme/tonic"}} =
+               materialize(workspace())
+
+      assert_receive {:gitlab, "GET", "/api/v4/personal_access_tokens/self/associations", _,
+                      [@bot]}
+
+      # membership is not the boundary for a fine-grained token
+      refute_received {:gitlab, "GET", "/api/v4/projects", _, _}
+    end
+
+    test "a token reaching a project outside the configured ones is refused, naming it" do
+      stub_gitlab(pat: fine_pat([1, 2]), associations: @wide_assoc)
+
+      assert {:error, {:git_credential_bot_token_refused, {:resources, ["acme/mesaana"]}} = error} =
+               materialize(workspace())
+
+      message = GitCredential.format_error(error)
+      assert message =~ "acme/mesaana"
+      refute message =~ @bot
+    end
+
+    test "projects listed on the entry are allowed resources" do
+      stub_gitlab(pat: fine_pat([1, 2]), associations: @wide_assoc)
+
+      assert {:ok, _} = materialize(workspace(%{"projects" => ["acme/mesaana"]}))
+    end
+
+    test "a token not scoped to the spawn's project is refused" do
+      stub_gitlab(pat: fine_pat([2]), associations: @wide_assoc)
+
+      assert {:error, {:git_credential_bot_token_refused, {:resources, ["acme/mesaana"]}}} =
+               materialize(workspace())
+
+      assert {:error, {:git_credential_bot_token_refused, :not_reachable}} =
+               materialize(workspace(%{"projects" => ["acme/mesaana"]}))
+    end
+
+    test "permissions beyond what the kind needs are refused, naming them" do
+      stub_gitlab(pat: fine_pat([1], @fine_perms ++ ["read_job"]), associations: @wide_assoc)
+
+      assert {:error,
+              {:git_credential_bot_token_refused, {:granular_permissions, ["read_job"]}} = error} =
+               materialize(workspace())
+
+      assert GitCredential.format_error(error) =~ "read_job"
+    end
+
+    test "a group, all-memberships or user boundary is refused: it is not a project list" do
+      for scope <- [
+            %{"access" => "selected_memberships", "project_id" => nil, "group_id" => 9},
+            %{"access" => "all_memberships", "project_id" => nil, "group_id" => nil},
+            %{"access" => "personal_projects", "project_id" => nil, "group_id" => nil},
+            %{"access" => "instance", "project_id" => nil, "group_id" => nil}
+          ] do
+        stub_gitlab(
+          pat: %{
+            "scopes" => nil,
+            "granular_scopes" => [Map.put(scope, "permissions", @fine_perms)]
+          },
+          associations: @wide_assoc
+        )
+
+        assert {:error, {:git_credential_bot_token_refused, {:granular_boundary, [_]}}} =
+                 materialize(workspace())
+      end
+    end
+
+    test "resources that cannot be determined refuse the spawn" do
+      # associations unavailable
+      stub_gitlab(pat: fine_pat([1]), associations: @wide_assoc, associations_status: 403)
+      assert {:error, {:git_credential_bot_token_unverifiable, _}} = materialize(workspace())
+
+      # a project id the associations do not resolve
+      stub_gitlab(pat: fine_pat([1, 77]), associations: @wide_assoc)
+      assert {:error, {:git_credential_bot_token_unverifiable, why}} = materialize(workspace())
+      assert why =~ "77"
+
+      # an empty or unreadable resource list
+      stub_gitlab(pat: %{"scopes" => nil, "granular_scopes" => []}, associations: @wide_assoc)
+      assert {:error, {:git_credential_bot_token_unverifiable, _}} = materialize(workspace())
+
+      stub_gitlab(pat: %{"scopes" => nil, "granular_scopes" => "all"}, associations: @wide_assoc)
+      assert {:error, {:git_credential_bot_token_unverifiable, _}} = materialize(workspace())
+
+      stub_gitlab(
+        pat: %{"scopes" => nil, "granular_scopes" => [%{"access" => "selected_memberships"}]},
+        associations: @wide_assoc
+      )
+
+      assert {:error, {:git_credential_bot_token_unverifiable, _}} = materialize(workspace())
+    end
+
+    test "an inactive or no-expiry fine-grained token is refused like a classic one" do
+      stub_gitlab(pat: Map.put(fine_pat([1]), "active", false), associations: @wide_assoc)
+      assert {:error, {:git_credential_bot_token_refused, :inactive}} = materialize(workspace())
+
+      stub_gitlab(pat: Map.put(fine_pat([1]), "expires_at", nil), associations: @wide_assoc)
+      assert {:error, {:git_credential_bot_token_refused, :no_expiry}} = materialize(workspace())
+    end
+
+    test "associations are read across pages" do
+      stub_gitlab(pat: fine_pat([1, 3]), associations: @wide_assoc, associations_per_page: 1)
+
+      assert {:error, {:git_credential_bot_token_refused, {:resources, ["acme/blog"]}}} =
+               materialize(workspace())
+    end
+  end
+
   describe "expiry (doctor)" do
     alias Arbiter.Worker.GitCredential.GitlabBot
 
@@ -478,6 +647,64 @@ defmodule Arbiter.Worker.GitCredentialGitlabBotTest do
                GitlabBot.expiries(workspace(%{"expires_at" => in_days(90)}), probe: false)
 
       refute_received {:gitlab, _, _, _, _}
+    end
+
+    defp two_repo_workspace do
+      workspace(
+        %{"remote" => "acme/tonic"},
+        %{"GL_BOT" => @bot},
+        %{
+          "tonic_device" => %{
+            "kind" => "gitlab_bot_token",
+            "secret" => "GL_BOT",
+            "host" => "gitlab.com",
+            "remote" => "acme/tonic_device"
+          }
+        }
+      )
+    end
+
+    test "unreachable/2 names each configured repo a classic token's membership misses" do
+      stub_gitlab(projects: ["acme/tonic"])
+
+      assert [%{repo: "tonic_device", remote: "acme/tonic_device", secret: "GL_BOT"}] =
+               GitlabBot.unreachable(two_repo_workspace(),
+                 req_options: [plug: {Req.Test, @http}]
+               )
+    end
+
+    test "unreachable/2 uses a fine-grained token's own resources, not membership" do
+      stub_gitlab(
+        pat: %{
+          "scopes" => nil,
+          "granular_scopes" => [
+            %{
+              "access" => "selected_memberships",
+              "permissions" => ["download_code", "push_code"],
+              "project_id" => 1,
+              "group_id" => nil
+            }
+          ]
+        },
+        associations: [{1, "acme/tonic"}, {4, "acme/tonic_device"}],
+        projects: ["acme/tonic", "acme/tonic_device"]
+      )
+
+      assert [%{repo: "tonic_device"}] =
+               GitlabBot.unreachable(two_repo_workspace(),
+                 req_options: [plug: {Req.Test, @http}]
+               )
+    end
+
+    test "unreachable/2 reports nothing it cannot determine, and asks nobody without a probe" do
+      stub_gitlab(pat_status: 500)
+
+      assert [] =
+               GitlabBot.unreachable(two_repo_workspace(),
+                 req_options: [plug: {Req.Test, @http}]
+               )
+
+      assert [] = GitlabBot.unreachable(two_repo_workspace(), probe: false)
     end
 
     test "a repo with another kind reports nothing" do
