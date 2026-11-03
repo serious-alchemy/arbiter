@@ -213,10 +213,31 @@ defmodule Arbiter.Agents.Codex.StreamTest do
       assert DateTime.to_unix(at) == 1_790_000_000
     end
 
+    test "a dated `try again at` message yields a reset epoch (bd-2z3ogf)" do
+      local = NaiveDateTime.add(NaiveDateTime.local_now(), 3 * 86_400, :second)
+
+      stamp =
+        Calendar.strftime(local, "%b ") <>
+          "#{local.day}th, " <> Calendar.strftime(local, "%Y %-I:%M %p")
+
+      msg =
+        "You've hit your usage limit. Upgrade to Plus to continue using Codex " <>
+          "(https://chatgpt.com/explore/plus), or try again at #{stamp}."
+
+      event = %{"type" => "turn.failed", "error" => %{"message" => msg}}
+      lines = event |> Stream.format_event() |> Enum.map(&elem(&1, 0))
+
+      assert %{category: :quota_exhausted, retry_after: %DateTime{} = at} =
+               Arbiter.Worker.StopReason.classify(1, lines, "codex")
+
+      secs = DateTime.diff(at, DateTime.utc_now())
+      assert secs > 2 * 86_400 and secs < 4 * 86_400
+    end
+
     test "free-tier plain-text usage-limit wording is normalized without a reset time" do
       msg =
         "You've hit your usage limit. Upgrade to Plus to continue using Codex " <>
-          "(https://chatgpt.com/explore/plus), or try again at Oct 2nd, 2026 3:04 PM."
+          "(https://chatgpt.com/explore/plus), or try again later."
 
       event = %{"type" => "turn.failed", "error" => %{"message" => msg}}
       lines = event |> Stream.format_event() |> Enum.map(&elem(&1, 0))

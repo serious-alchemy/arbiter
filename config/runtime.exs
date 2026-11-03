@@ -10,6 +10,21 @@ case Integer.parse(System.get_env("ARBITER_API_MAX_CONCURRENCY", "")) do
   _ -> :ok
 end
 
+# `:9443` bridge listener (bd-5uhdrs): `ARBITER_BRIDGE_TLS12_ONLY=true` pins it to
+# TLS 1.2 (default off: TLS 1.3 with 1.2 fallback). `ARBITER_BRIDGE_STREAM_LOG_LEVEL`
+# (debug|info|notice|warning) sets the level of Bridge.Stream's peer-close/error logs.
+if System.get_env("ARBITER_BRIDGE_TLS12_ONLY") in ["1", "true", "TRUE", "True"] do
+  config :arbiter, :bridge_tls12_only, true
+end
+
+case System.get_env("ARBITER_BRIDGE_STREAM_LOG_LEVEL") do
+  level when level in ["debug", "info", "notice", "warning"] ->
+    config :arbiter, :bridge_stream_close_log_level, String.to_existing_atom(level)
+
+  _ ->
+    :ok
+end
+
 # The VM's role (docs/design/remote-workers.md §3). `ARB_ROLE=agent` makes this
 # release a node agent: it starts only `Arbiter.NodeAgent.Supervisor`, so none
 # of the primary's runtime config below applies — no SECRET_KEY_BASE, no Repo,
