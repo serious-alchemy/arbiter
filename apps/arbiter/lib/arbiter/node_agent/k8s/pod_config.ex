@@ -31,12 +31,13 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   | `timeouts` | `grace_s` (pod grace), `gate_timeout_s`; the others belong to the controller |
   | `snapshot_interval_s` | default 300 |
   | `service_image_allowlist` | extra service image prefixes (`docker.io/pgsty/`) |
+  | `event_feed` | default `true`: the worker ships the agent's stdio as an NDJSON event feed over the pod channel, which the controller reads instead of the kubelet log (bd-1nl506); the pod is annotated `arbiter.dev/events` and the controller follows its feed. `false` leaves the kubelet log as the run's output |
   """
 
   alias Arbiter.NodeAgent.K8s.Quantity
 
   @required ~w(registry install_id node_id owner_uid bridge_addr gate_addr boot_nonce max_wall_s)a
-  @optional ~w(namespace worker services_resources placement image_pull_secrets registries timeouts snapshot_interval_s service_image_allowlist)a
+  @optional ~w(namespace worker services_resources placement image_pull_secrets registries timeouts snapshot_interval_s service_image_allowlist event_feed)a
 
   @dns_re ~r/\A[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\z/
   @subdomain_re ~r/\A[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?\z/
@@ -84,7 +85,8 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
     registries: [],
     timeouts: %{"grace_s" => 120, "gate_timeout_s" => 30},
     snapshot_interval_s: 300,
-    service_image_allowlist: []
+    service_image_allowlist: [],
+    event_feed: true
   }
 
   @type t :: %{required(atom()) => term()}
@@ -132,7 +134,8 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
          {:ok, registries} <- optional(config, :registries, &registries/1),
          {:ok, timeouts} <- optional(config, :timeouts, &timeouts/1),
          {:ok, interval} <- optional(config, :snapshot_interval_s, &int(&1, 10..3600//1)),
-         {:ok, allow} <- optional(config, :service_image_allowlist, &prefixes/1) do
+         {:ok, allow} <- optional(config, :service_image_allowlist, &prefixes/1),
+         {:ok, event_feed} <- optional(config, :event_feed, &flag/1) do
       {:ok,
        %{
          registry: registry,
@@ -151,7 +154,8 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
          registries: registries,
          timeouts: timeouts,
          snapshot_interval_s: interval,
-         service_image_allowlist: allow
+         service_image_allowlist: allow,
+         event_feed: event_feed
        }}
     end
   end
@@ -256,6 +260,9 @@ defmodule Arbiter.NodeAgent.K8s.PodConfig do
   end
 
   # -- scalars --------------------------------------------------------------------------
+
+  defp flag(value) when is_boolean(value), do: {:ok, value}
+  defp flag(_value), do: :error
 
   defp registry(value) when is_binary(value),
     do: if(Regex.match?(@registry_re, value), do: {:ok, value}, else: :error)

@@ -66,6 +66,7 @@ defmodule Arbiter.NodeAgent.Backend.K8sTest do
            ~w(registry install_id node_id owner_uid bridge_addr gate_addr max_wall_s)a
          ),
        sink: self(),
+       event_feed: false,
        tick_ms: nil}
     )
 

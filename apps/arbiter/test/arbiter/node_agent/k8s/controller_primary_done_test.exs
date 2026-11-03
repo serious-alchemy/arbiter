@@ -62,7 +62,7 @@ defmodule Arbiter.NodeAgent.K8s.ControllerPrimaryDoneTest do
     informer
   end
 
-  defp start_controller(env, n \\ 1) do
+  defp start_controller(env, n \\ 1, opts \\ []) do
     informer = start_informer(env, {:informer, n})
     clock = env.clock
 
@@ -88,6 +88,8 @@ defmodule Arbiter.NodeAgent.K8s.ControllerPrimaryDoneTest do
          observer: self(),
          now_fun: fn -> Agent.get(clock, & &1) end,
          tick_ms: nil,
+         event_feed: Keyword.get(opts, :event_feed, false),
+         event_final_wait_ms: 100,
          name: nil},
         id: {:controller, n}
       )
@@ -375,6 +377,152 @@ defmodule Arbiter.NodeAgent.K8s.ControllerPrimaryDoneTest do
       assert %{state: :finished, outcome: :failed} = snap
       assert snap.meta.stop_reason.category == :exited_without_done
       refute Map.get(snap.meta, :done_seen)
+    end
+  end
+
+  # -- the event feed is the source of truth (bd-1nl506) --------------------------------------
+  #
+  # The pod ships the agent's stdio as NDJSON (`POST /events`, which hands each chunk to the
+  # run's `LogFollower` in event mode: `Controller.event_feed/2`). The kubelet's log is then
+  # only for a human: nothing in it is read, so what it drops, reorders or garbles changes
+  # nothing about the run's done signal and outcome.
+  describe "a k8s run's done signal and outcome come from the event feed" do
+    alias Arbiter.NodeAgent.K8s.LogFollower
+
+    defp events_run(env) do
+      controller = start_controller(env, 1, event_feed: true)
+      run = running!(env, controller, 1)
+      %{pid: pid, handle: handle} = start_worker()
+      table = RunStreams.open(%RunStreams{}, run, handle, pid, nil)
+      {:ok, feed} = Controller.event_feed(controller, run)
+      %{controller: controller, run: run, table: table, pid: pid, feed: feed}
+    end
+
+    defp ship(feed, offset, text, final? \\ false) do
+      assert {:ok, next} = LogFollower.push_events(feed, offset, text, final?)
+      assert next == offset + byte_size(text)
+      next
+    end
+
+    defp ndjson(lines), do: Enum.map_join(lines, &(&1 <> "\n"))
+
+    defp end_run(env, %{controller: controller, run: run, table: table}) do
+      set_status(env, 1, exited_status(:complete))
+      observed(run, :exit)
+      finish_run(controller, run, table)
+    end
+
+    test "the pod's pod is annotated for the feed and its follower is the event one", env do
+      %{run: run} = events_run(env)
+      pod = FakeK8sApi.handle(env.api, {:get, pod_name(1)})
+      assert pod["metadata"]["annotations"]["arbiter.dev/events"] == "1"
+      assert run == run_id(1)
+    end
+
+    test "done and the result are taken from the feed while the kubelet log says nothing",
+         env do
+      ctx = events_run(env)
+      FakeK8sApi.push_log(env.api, pod_name(1), "kubelet noise only")
+
+      text =
+        ndjson([assistant("working"), assistant("All finished.\n\narb done"), result_event()])
+
+      ship(ctx.feed, 0, text, true)
+      _ = end_run(env, ctx)
+
+      assert %{state: :finished, outcome: :succeeded} = Worker.state(ctx.pid)
+      assert Worker.state(ctx.pid).meta.done_seen == true
+    end
+
+    test "a done in the kubelet log that the feed lacks is not a done", env do
+      ctx = events_run(env)
+      FakeK8sApi.push_log(env.api, pod_name(1), assistant("All finished.\n\narb done"))
+      FakeK8sApi.push_log(env.api, pod_name(1), result_event())
+
+      ship(ctx.feed, 0, ndjson([assistant("working")]), true)
+      _ = end_run(env, ctx)
+
+      snap = Worker.state(ctx.pid)
+      assert %{state: :finished, outcome: :failed} = snap
+      assert snap.meta.stop_reason.category == :exited_without_done
+    end
+
+    test "kubelet lines dropped, reordered and garbled do not lose the done signal", env do
+      ctx = events_run(env)
+
+      # the log has the closing lines first, the done line mangled, and the rest missing
+      FakeK8sApi.push_log(env.api, pod_name(1), result_event())
+      FakeK8sApi.push_log(env.api, pod_name(1), "arb d")
+      FakeK8sApi.push_log_offset(env.api, pod_name(1), assistant("working"))
+
+      text =
+        ndjson([assistant("working"), assistant("All finished.\n\narb done"), result_event()])
+
+      # delivered in chunks, one of them retried
+      {a, rest} = String.split_at(text, 20)
+      {b, c} = String.split_at(rest, 30)
+      next = ship(ctx.feed, 0, a)
+      _ = ship(ctx.feed, 0, a)
+      next = ship(ctx.feed, next, b)
+      ship(ctx.feed, next, c, true)
+      _ = end_run(env, ctx)
+
+      assert %{state: :finished, outcome: :succeeded} = Worker.state(ctx.pid)
+      assert Worker.state(ctx.pid).meta.done_seen == true
+    end
+
+    test "a done line cut mid-way is not taken as success and does not crash", env do
+      ctx = events_run(env)
+      done = assistant("All finished.\n\narb done")
+      cut = binary_part(done, 0, byte_size(done) - 9)
+      ship(ctx.feed, 0, ndjson([assistant("working")]) <> cut, true)
+      _ = end_run(env, ctx)
+
+      snap = Worker.state(ctx.pid)
+      assert %{state: :finished, outcome: :failed} = snap
+      assert snap.meta.stop_reason.category == :exited_without_done
+      refute Map.get(snap.meta, :done_seen)
+    end
+
+    test "a result event cut mid-way is dropped; the complete done before it stands", env do
+      ctx = events_run(env)
+      cut = binary_part(result_event(), 0, byte_size(result_event()) - 9)
+      ship(ctx.feed, 0, ndjson([assistant("All finished.\n\narb done")]) <> cut, true)
+      _ = end_run(env, ctx)
+
+      assert %{state: :finished, outcome: :succeeded} = Worker.state(ctx.pid)
+    end
+
+    test "the done line itself cut before its newline is not a done", env do
+      ctx = events_run(env)
+      # complete JSON, but the file ended before the newline: a truncated line
+      ship(ctx.feed, 0, assistant("All finished.\n\narb done"), true)
+      _ = end_run(env, ctx)
+
+      snap = Worker.state(ctx.pid)
+      assert %{state: :finished, outcome: :failed} = snap
+      assert snap.meta.stop_reason.category == :exited_without_done
+      refute Map.get(snap.meta, :done_seen)
+    end
+
+    test "the exit says the stream was truncated", env do
+      ctx = events_run(env)
+      ship(ctx.feed, 0, ndjson([assistant("working")]) <> "{\"type\":\"res", true)
+      set_status(env, 1, exited_status(:complete))
+      observed(ctx.run, :exit)
+      assert_receive {:run_push, run, "exit", payload}, 5_000
+      assert run == ctx.run
+      assert payload["stdout_truncated"] == 12
+      assert is_binary(payload["cursor"])
+    end
+
+    test "a pod that never sends its final chunk still ends the run, from what arrived", env do
+      ctx = events_run(env)
+      ship(ctx.feed, 0, ndjson([assistant("All finished.\n\narb done"), result_event()]))
+      _ = end_run(env, ctx)
+
+      # the feed is the truth even without its last word: what was complete was kept
+      assert %{state: :finished, outcome: :succeeded} = Worker.state(ctx.pid)
     end
   end
 end

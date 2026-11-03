@@ -23,7 +23,8 @@ defmodule Arbiter.NodeAgent.K8s.NodeTree do
   Options: `:config` (the agent's `Arbiter.NodeAgent.Config`, with the credential),
   `:client`, `:identity` (`Arbiter.NodeAgent.K8s.Identity.resolve/4`), `:canary_image`
   (a `fn -> {:ok, image} | {:error, reason}`), `:tree` (per-child extra options for tests:
-  `:pod_channel`, `:config_loader`, `:informer`, `:lease`, `:controller_supervisor`).
+  `:pod_channel`, `:config_loader`, `:informer`, `:lease`, `:controller_supervisor`, and
+  `:event_feed`, default `true`: `false` leaves every run's output on the kubelet log).
   """
 
   use Supervisor
@@ -78,7 +79,11 @@ defmodule Arbiter.NodeAgent.K8s.NodeTree do
              identity: identity,
              image: Keyword.fetch!(opts, :canary_image),
              name: ControllerSupervisor,
-             controller: [lease: @lease, sink: Connection]
+             controller: [
+               lease: @lease,
+               sink: Connection,
+               event_feed: Keyword.get(tree, :event_feed, true)
+             ]
            ],
            tree[:controller_supervisor] || []
          )},
@@ -112,6 +117,7 @@ defmodule Arbiter.NodeAgent.K8s.NodeTree do
         config: config,
         # the final checkpoint's upload is what the controller holds `exit` for (K§10.3)
         notify: &Controller.notify/1,
+        events: &Controller.event_feed/1,
         server_names: [@service, "#{@service}.#{ns}", "#{@service}.#{ns}.svc"],
         server_ips: server_ips(identity.bridge_addr)
       ],
