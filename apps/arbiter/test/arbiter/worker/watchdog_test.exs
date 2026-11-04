@@ -1495,6 +1495,108 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert state.conflict_attempts == 0
     end
 
+    # #1274: a node refusing the pass (`unschedulable`: worker pods rank below CI) came back
+    # as a `{:no_node_capacity, info}` with no `:phrase`, and logging it crashed the Watchdog:
+    # the ticket sat in Merging with nobody polling its PR until a person resumed it.
+    defp refusal_hold(task_id) do
+      {:error,
+       {:no_node_capacity,
+        Arbiter.Nodes.Refusal.info(task_id, "mesaana", %{
+          reason: "unschedulable",
+          detail: "0/3 nodes are available: 2 Insufficient cpu"
+        })}}
+    end
+
+    test "a capacity refusal holds the pass: the Watchdog keeps polling, no attempt, no page" do
+      task_id = new_task_id()
+      StubConflictResolver.arm(task_id, self(), result: refusal_hold(task_id))
+      StubMerger.queue_get("!chold1", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      wpid =
+        start_watchdog(task_id, "!chold1",
+          workspace: test_workspace(),
+          auto_merge: false,
+          conflict_resolver: StubConflictResolver,
+          max_conflict_attempts: 1,
+          interval_ms: 15
+        )
+
+      for _ <- 1..3, do: assert_receive({:resolve_called, %{task_id: ^task_id}}, 1_000)
+      refute_receive {:escalate_called, ^task_id, _, _, _}, 100
+
+      assert Process.alive?(wpid)
+      state = :sys.get_state(wpid)
+      refute state.conflict_escalated
+      assert state.conflict_attempts == 0
+      assert state.conflict_holds >= 3
+    end
+
+    test "once capacity exists the held pass starts, exactly one resolver per sequence" do
+      task_id = new_task_id()
+      StubConflictResolver.arm(task_id, self(), result: refusal_hold(task_id))
+      StubMerger.queue_get("!chold2", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      wpid =
+        start_watchdog(task_id, "!chold2",
+          workspace: test_workspace(),
+          auto_merge: false,
+          conflict_resolver: StubConflictResolver,
+          max_conflict_attempts: 2,
+          interval_ms: 15
+        )
+
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+
+      StubConflictResolver.arm(task_id, self(), pid: :running)
+
+      assert_receive {:resolver_spawned, _worker}, 1_000
+      # The resolver is in flight: no second pass is asked for while it works.
+      flush_resolve_calls(task_id)
+      refute_receive {:resolver_spawned, _}, 150
+      refute_receive {:resolve_called, _}, 50
+
+      state = :sys.get_state(wpid)
+      assert state.conflict_attempts == 1
+      assert state.conflict_holds == 0
+    end
+
+    test "held past max_conflict_holds it escalates once, naming the capacity refusal" do
+      task_id = new_task_id()
+      StubConflictResolver.arm(task_id, self(), result: refusal_hold(task_id))
+      StubMerger.queue_get("!chold3", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      wpid =
+        start_watchdog(task_id, "!chold3",
+          workspace: test_workspace(),
+          auto_merge: false,
+          conflict_resolver: StubConflictResolver,
+          max_conflict_holds: 2,
+          interval_ms: 15
+        )
+
+      assert_receive {:escalate_called, ^task_id, _ws, _branch, reason}, 2_000
+      assert reason =~ "capacity refusal"
+      assert reason =~ "unschedulable"
+      assert reason =~ "mesaana"
+      refute reason =~ "exhausted"
+
+      # Paged once, then parked: it does not keep asking or keep paging.
+      flush_resolve_calls(task_id)
+      refute_receive {:escalate_called, ^task_id, _, _, _}, 150
+      refute_receive {:resolve_called, _}, 50
+      assert Process.alive?(wpid)
+      assert :sys.get_state(wpid).conflict_escalated
+    end
+
+    defp flush_resolve_calls(task_id) do
+      receive do
+        {:resolve_called, %{task_id: ^task_id}} -> flush_resolve_calls(task_id)
+      after
+        0 -> :ok
+      end
+    end
+
     test "after max_conflict_attempts rebase passes it escalates with the attempt count" do
       task_id = new_task_id()
       # A :completed resolver lingers alive in a terminal status (the real

@@ -505,6 +505,13 @@ defmodule Arbiter.Worker.Watchdog do
   # don't clear the conflict it is almost certainly semantic and needs a human.
   @default_max_conflict_attempts 2
 
+  # #1274: a conflict pass the cluster could not take (`{:error, {:no_node_capacity, _}}`: a
+  # node refused it for capacity, or none has room) is held, not an attempt, and asked again
+  # on the next poll. The hold is bounded so a cluster that never has room still pages: past
+  # this many polls in a row the Watchdog escalates once, naming the refusal. Override via opt
+  # `:max_conflict_holds`.
+  @default_max_conflict_holds 40
+
   # Bounded auto-resumes of an `{:awaiting_review_timeout, _}` failure before the
   # Watchdog stops self-healing and pages the coordinator (bd-8eheb6). Override
   # via opt `:max_auto_resumes` or workspace
@@ -553,6 +560,7 @@ defmodule Arbiter.Worker.Watchdog do
           | {:fix_pass_history, (String.t(), String.t() | nil -> non_neg_integer())}
           | {:auto_resolve_conflict, boolean()}
           | {:max_conflict_attempts, pos_integer()}
+          | {:max_conflict_holds, pos_integer()}
           | {:conflict_resolver, module()}
           | {:max_auto_resumes, non_neg_integer()}
           | {:max_resume_deferrals, non_neg_integer()}
@@ -1681,6 +1689,9 @@ defmodule Arbiter.Worker.Watchdog do
       auto_resolve_conflict: auto_resolve_conflict,
       conflict_resolver: Keyword.get(opts, :conflict_resolver, @default_conflict_resolver),
       max_conflict_attempts: max_conflict_attempts,
+      #   conflict_holds         — consecutive polls the pass was held for capacity (#1274).
+      max_conflict_holds: resolve_max_conflict_holds(opts),
+      conflict_holds: 0,
       conflict_attempts: 0,
       conflict_resolving: false,
       conflict_resolver_pid: nil,
@@ -1891,7 +1902,8 @@ defmodule Arbiter.Worker.Watchdog do
        state
        | max_conflict_attempts: state.conflict_attempts + 1,
          conflict_escalated: false,
-         conflict_no_ops: 0
+         conflict_no_ops: 0,
+         conflict_holds: 0
      }}
   end
 
@@ -4302,7 +4314,7 @@ defmodule Arbiter.Worker.Watchdog do
       {:error, {:no_node_capacity, info}} ->
         Logger.warning(
           "Worker.Watchdog: fix pass for task=#{state.task_id} mr=#{state.mr_ref} not " <>
-            "dispatched — #{info.phrase}"
+            "dispatched — #{hold_phrase(info)}"
         )
 
         reschedule(%{state | last_block_reason: :ci_failed})
@@ -4809,6 +4821,7 @@ defmodule Arbiter.Worker.Watchdog do
         %{
           note_authored_push(state)
           | conflict_attempts: attempt,
+            conflict_holds: 0,
             conflict_resolving: is_pid(pid),
             conflict_resolver_pid: if(is_pid(pid), do: pid, else: nil),
             conflict_branch: Map.get(info, :branch) || state.conflict_branch
@@ -4825,14 +4838,10 @@ defmodule Arbiter.Worker.Watchdog do
 
         state
 
-      # RW8: the primary's own worker cap is 0. Held, not failed.
+      # RW8: the primary's own worker cap is 0, or (#1274) the cluster refused the pass for
+      # capacity. Held, not failed: no attempt is spent, the next poll asks again, bounded.
       {:error, {:no_node_capacity, info}} ->
-        Logger.warning(
-          "Worker.Watchdog: conflict-resolve pass for task=#{state.task_id} " <>
-            "mr=#{state.mr_ref} not dispatched — #{info.phrase}"
-        )
-
-        state
+        hold_conflict_pass(state, info)
 
       {:error, reason} ->
         Logger.warning(
@@ -4858,7 +4867,8 @@ defmodule Arbiter.Worker.Watchdog do
            conflict_resolving: false,
            conflict_attempts: 0,
            conflict_escalated: false,
-           conflict_no_ops: 0
+           conflict_no_ops: 0,
+           conflict_holds: 0
          } = state
        ),
        do: state
@@ -4883,7 +4893,8 @@ defmodule Arbiter.Worker.Watchdog do
       teardown_resolver(state)
       | conflict_attempts: 0,
         conflict_escalated: false,
-        conflict_no_ops: 0
+        conflict_no_ops: 0,
+        conflict_holds: 0
     }
   end
 
@@ -4922,8 +4933,6 @@ defmodule Arbiter.Worker.Watchdog do
   # same channel #122 uses), falling back to the default resolver when an
   # injected one doesn't implement the optional callback. Best-effort.
   defp escalate_conflict_exhausted(state, extra) do
-    branch = state.conflict_branch || state.mr_ref || "(unknown branch)"
-
     reason =
       "auto-resolve exhausted after #{state.conflict_attempts} rebase attempt(s)" <>
         if(extra, do: " (#{inspect_short(extra)})", else: "") <>
@@ -4933,6 +4942,47 @@ defmodule Arbiter.Worker.Watchdog do
       "Worker.Watchdog: conflict auto-resolve exhausted for task=#{state.task_id} " <>
         "mr=#{state.mr_ref} after #{state.conflict_attempts} attempt(s); escalating to coordinator"
     )
+
+    page_conflict_unresolved(state, reason)
+  end
+
+  # #1274: a conflict pass the cluster would not take, poll after poll. Nothing about the
+  # conflict or the work is wrong and no rebase was attempted, so the page says the cluster is
+  # at capacity and what to do (resume once there is room), not that auto-resolve gave up.
+  defp hold_conflict_pass(state, info) do
+    holds = state.conflict_holds + 1
+
+    if holds > state.max_conflict_holds do
+      reason =
+        "the conflict pass could not start: #{hold_phrase(info)}, and the cluster still had " <>
+          "no room after #{holds - 1} polls. This is a capacity refusal, not a failed rebase " <>
+          "(no attempt was spent); run the pass again with `arb worker resume` once there is room"
+
+      Logger.warning(
+        "Worker.Watchdog: conflict pass for task=#{state.task_id} mr=#{state.mr_ref} held for " <>
+          "capacity #{holds - 1} polls in a row; escalating to coordinator"
+      )
+
+      page_conflict_unresolved(state, reason)
+      %{state | conflict_holds: holds, conflict_escalated: true}
+    else
+      Logger.warning(
+        "Worker.Watchdog: conflict-resolve pass for task=#{state.task_id} " <>
+          "mr=#{state.mr_ref} not dispatched — #{hold_phrase(info)} " <>
+          "(held #{holds}/#{state.max_conflict_holds})"
+      )
+
+      %{state | conflict_holds: holds}
+    end
+  end
+
+  # Every `{:no_node_capacity, info}` carries a `phrase`; a hold built without one still logs.
+  defp hold_phrase(%{phrase: phrase}) when is_binary(phrase), do: phrase
+  defp hold_phrase(%{message: message}) when is_binary(message), do: message
+  defp hold_phrase(_info), do: "no node capacity"
+
+  defp page_conflict_unresolved(state, reason) do
+    branch = state.conflict_branch || state.mr_ref || "(unknown branch)"
 
     case workspace_id(state) do
       ws_id when is_binary(ws_id) ->
@@ -5050,6 +5100,13 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp max_conflict_attempts_from_workspace(_), do: @default_max_conflict_attempts
+
+  defp resolve_max_conflict_holds(opts) do
+    case Keyword.get(opts, :max_conflict_holds) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_max_conflict_holds
+    end
+  end
 
   defp watch_pipeline_from_workspace(nil), do: false
 
