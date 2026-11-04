@@ -1,0 +1,11 @@
+{
+  "commands": [],
+  "output_style": "default",
+  "available_output_styles": ["default"],
+  "models": [],
+  "account": {
+    "email": "operator@example.com",
+    "organization": "Example Org",
+    "subscriptionType": "max"
+  }
+}

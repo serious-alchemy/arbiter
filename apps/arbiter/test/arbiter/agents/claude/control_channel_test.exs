@@ -53,6 +53,57 @@ defmodule Arbiter.Agents.Claude.ControlChannelTest do
     end
   end
 
+  describe "against the shapes claude 2.1.317 really answers with" do
+    test "an account without tokenSource still reads as authenticated", %{stub: stub} do
+      assert {:ok, %{account: account}} = run(stub, "cli_2_1_317")
+      refute Map.has_key?(account, "tokenSource")
+      assert ControlChannel.auth_state(account) == :authenticated
+    end
+
+    test "fetch_usage lifts the windows out of rate_limits", %{stub: stub} do
+      assert {:ok, body} =
+               ControlChannel.fetch_usage(control_command: ["sh", stub, "cli_2_1_317"], env: [])
+
+      assert body["five_hour"]["utilization"] == 42.0
+      assert body["seven_day"]["resets_at"] == "2030-01-07T00:00:00Z"
+    end
+
+    test "used_percentage / epoch resets_at windows are normalised", %{stub: stub} do
+      assert {:ok, body} =
+               ControlChannel.fetch_usage(
+                 control_command: ["sh", stub, "statusline_shape"],
+                 env: []
+               )
+
+      assert body["five_hour"]["utilization"] == 42.5
+      assert {:ok, _, _} = DateTime.from_iso8601(body["five_hour"]["resets_at"])
+    end
+
+    test "a success body with no recognisable windows is an error carrying its keys", %{
+      stub: stub
+    } do
+      assert {:error, {:usage, {:no_windows, keys}}} =
+               ControlChannel.fetch_usage(control_command: ["sh", stub, "usage_empty"], env: [])
+
+      assert keys == []
+    end
+
+    test "auth_state/1 never reads an empty or unrecognised account as logged out" do
+      assert ControlChannel.auth_state(%{}) == :unknown
+      assert ControlChannel.auth_state(%{"surprise" => 1}) == :unknown
+      assert ControlChannel.auth_state(%{"email" => "a@b.c"}) == :authenticated
+      assert ControlChannel.auth_state(%{"subscriptionType" => "pro"}) == :authenticated
+
+      assert ControlChannel.auth_state(%{"tokenSource" => "none", "email" => "a@b.c"}) ==
+               :unauthenticated
+    end
+
+    test "normalize_usage/1 passes an OAuth-shaped body through" do
+      body = ClaudeControlStub.usage_body()
+      assert ControlChannel.normalize_usage(body) == {:ok, body}
+    end
+  end
+
   describe "run/1 when the control request is not supported" do
     test "initialize answered with an unsupported error", %{stub: stub} do
       assert {:unsupported, {:control_error, msg}} = run(stub, "init_unsupported")

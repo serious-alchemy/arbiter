@@ -8,6 +8,8 @@ defmodule Arbiter.Test.ClaudeControlStub do
   | mode              | behaviour |
   |-------------------|-----------|
   | `ok`              | initialize → `tokenSource: "claude.ai"`; get_usage → `usage_body/0` |
+  | `cli_2_1_317`     | the shapes the 2026-11-03 probe of claude 2.1.317 saw: initialize → an `account` with **no** `tokenSource`; get_usage → windows under `rate_limits` (fixtures in `test/fixtures/claude_control/`) |
+  | `statusline_shape`| initialize as `cli_2_1_317`; get_usage → `rate_limits` windows as `used_percentage` + epoch-seconds `resets_at` |
   | `no_token`        | initialize → `tokenSource: "none"` |
   | `init_unsupported`| initialize → error "Unsupported control request subtype" |
   | `init_hang`       | initialize never answered |
@@ -25,8 +27,34 @@ defmodule Arbiter.Test.ClaudeControlStub do
     "seven_day" => %{"utilization" => 10.0, "resets_at" => "2030-01-07T00:00:00Z"}
   }
 
+  @fixtures Path.expand("../fixtures/claude_control", __DIR__)
+  @init_path Path.join(@fixtures, "initialize_2_1_317.json")
+  @usage_path Path.join(@fixtures, "get_usage_2_1_317.json")
+  @external_resource @init_path
+  @external_resource @usage_path
+
+  # NOTE: these two fixtures are reconstructed from the verification report on
+  # claude 2.1.317 (account without `tokenSource`; windows under `rate_limits`),
+  # not a byte-for-byte capture: the worker sandbox has no `claude` binary to
+  # probe. Replace them with a raw capture when one is available.
+  @init_2_1_317 @init_path |> File.read!() |> Jason.decode!()
+  @usage_2_1_317 @usage_path |> File.read!() |> Jason.decode!()
+
+  @statusline_usage %{
+    "rate_limits" => %{
+      "five_hour" => %{"used_percentage" => 42.5, "resets_at" => 1_893_474_000},
+      "seven_day" => %{"used_percentage" => 10.0, "resets_at" => 1_893_974_400}
+    }
+  }
+
   @doc "The body the stub's `get_usage` returns (OAuth-usage shaped)."
   def usage_body, do: @usage_body
+
+  @doc "The `initialize` response body of the `cli_2_1_317` mode."
+  def init_2_1_317, do: @init_2_1_317
+
+  @doc "The `get_usage` response body of the `cli_2_1_317` mode."
+  def usage_2_1_317, do: @usage_2_1_317
 
   @doc "Write the stub into `dir`; returns its path (run as `sh <path> <mode>`)."
   def write!(dir) do
@@ -58,6 +86,8 @@ defmodule Arbiter.Test.ClaudeControlStub do
               printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"account":{"tokenSource":"none"}}}}\\n' "$id" ;;
             init_hang)
               sleep 30 ;;
+            cli_2_1_317|statusline_shape)
+              printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":%s}}\\n' "$id" '#{Jason.encode!(@init_2_1_317)}' ;;
             *)
               printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"account":{"tokenSource":"claude.ai","subscriptionType":"max"}}}}\\n' "$id" ;;
           esac ;;
@@ -71,6 +101,10 @@ defmodule Arbiter.Test.ClaudeControlStub do
               #{error_reply("Request failed with status code 429: rate limited")} ;;
             usage_hang)
               sleep 30 ;;
+            cli_2_1_317)
+              printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":%s}}\\n' "$id" '#{Jason.encode!(@usage_2_1_317)}' ;;
+            statusline_shape)
+              printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":%s}}\\n' "$id" '#{Jason.encode!(@statusline_usage)}' ;;
             usage_empty)
               printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{}}}\\n' "$id" ;;
             *)

@@ -1025,14 +1025,41 @@ defmodule Arbiter.Quota do
     with {:ok, env} <- control_channel_env(token_source),
          true <- ControlChannel.enabled?(),
          {:ok, body} <-
-           ControlChannel.fetch_usage([env: env] ++ Keyword.get(fetch_opts, :control_channel, [])),
-         true <- usage_windows?(body) do
+           ControlChannel.fetch_usage([env: env] ++ Keyword.get(fetch_opts, :control_channel, [])) do
+      # `capture_source` reads "oauth_poll" for either path, so this line is how
+      # an operator tells the channel is actually answering (bd-a2zrh0).
+      Logger.info("Quota: usage read via control channel (get_usage)")
       {:ok, OAuthUsage.parse_usage(body)}
     else
+      # Channel off, or a token source it cannot be pointed at: the HTTP poll is
+      # simply the path, nothing to report.
+      :none ->
+        :fallback
+
+      false ->
+        :fallback
+
       other ->
-        Logger.debug("Quota: control-channel usage unavailable, using HTTP: #{inspect(other)}")
+        log_channel_fallback(other)
         :fallback
     end
+  end
+
+  # A reachable channel whose answer we cannot use is a defect (a CLI release
+  # that changed the shape — the 2.1.317 `rate_limits` nesting went unnoticed
+  # for a whole deploy), so that is a warning; a CLI that is old, silent or
+  # erroring is an expected fallback. Both are visible at the production log
+  # level, and both name the reason and, for a body, its keys.
+  defp log_channel_fallback({:error, {:usage, {:no_windows, keys}}}) do
+    Logger.warning(
+      "Quota: control-channel usage unavailable, using HTTP: get_usage answered with no " <>
+        "usage windows (no_windows, top-level keys: #{inspect(keys)}) — the CLI's response " <>
+        "shape has probably changed"
+    )
+  end
+
+  defp log_channel_fallback(other) do
+    Logger.info("Quota: control-channel usage unavailable, using HTTP: #{inspect(other)}")
   end
 
   defp control_channel_env({:quota_grant, path}),
@@ -1040,10 +1067,6 @@ defmodule Arbiter.Quota do
 
   defp control_channel_env(:operator_credentials_file), do: {:ok, []}
   defp control_channel_env(_), do: :none
-
-  # `ControlChannel.fetch_usage/1` only ever hands back a map body on `{:ok, _}`.
-  defp usage_windows?(body),
-    do: Enum.any?(["five_hour", "seven_day", "limits"], &Map.has_key?(body, &1))
 
   defp http_oauth_usage(fetch_opts, {:quota_grant, path}) do
     case GrantFile.read(path) do

@@ -110,7 +110,22 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
   @spec auth_state(map()) :: :authenticated | :unauthenticated | :unknown
   def auth_state(%{"tokenSource" => "none"}), do: :unauthenticated
   def auth_state(%{"tokenSource" => src}) when is_binary(src) and src != "", do: :authenticated
+
+  # claude 2.1.317 (operator login) answers `initialize` with an `account` that
+  # has no `tokenSource` at all — only who it is logged in as. An account that
+  # names an identity is a credential the CLI resolved, so it is authenticated;
+  # an `account` carrying none of them stays `:unknown`, never "logged out".
+  def auth_state(%{} = account) do
+    if Enum.any?(@identity_keys, &present?(Map.get(account, &1))),
+      do: :authenticated,
+      else: :unknown
+  end
+
   def auth_state(_), do: :unknown
+
+  defp present?(v) when is_binary(v), do: v != ""
+  defp present?(%{} = m), do: m != %{}
+  defp present?(_), do: false
 
   @doc "Run the exchange. See the moduledoc for `opts` and the result shape."
   @spec run(keyword()) :: result()
@@ -129,11 +144,74 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
   @spec fetch_usage(keyword()) :: {:ok, map()} | {:error, term()}
   def fetch_usage(opts \\ []) do
     case run(Keyword.put(opts, :usage, true)) do
-      {:ok, %{usage: {:ok, body}}} -> {:ok, body}
+      {:ok, %{usage: {:ok, body}}} -> usable_usage(body)
       {:ok, %{usage: other}} -> {:error, {:usage, other}}
       {:unsupported, reason} -> {:error, {:unsupported, reason}}
     end
   end
+
+  defp usable_usage(body) do
+    case normalize_usage(body) do
+      {:ok, normalized} -> {:ok, normalized}
+      {:error, reason} -> {:error, {:usage, reason}}
+    end
+  end
+
+  @doc """
+  Bring a `get_usage` success body into the `/api/oauth/usage` shape that
+  `Arbiter.Quota.OAuthUsage.parse_usage/1` reads.
+
+  claude 2.1.317 nests the windows under `rate_limits` rather than at the top
+  level, so that map is lifted (top-level keys win over nested ones). Each
+  window may report `utilization` (0–100) or `used_percentage` (0–100), and
+  `resets_at` as an ISO-8601 string or epoch seconds; both are normalised to
+  the OAuth-usage spelling. `{:error, {:no_windows, keys}}` — with the body's
+  top-level keys, so a changed shape shows up in the log — when no
+  `five_hour` / `seven_day` / `limits` is found even after that.
+  """
+  @spec normalize_usage(term()) :: {:ok, map()} | {:error, {:no_windows, [String.t()]}}
+  def normalize_usage(%{} = body) do
+    nested = body |> Map.get("rate_limits") |> account_map()
+
+    merged =
+      body
+      |> Map.delete("rate_limits")
+      |> Map.merge(nested, fn _k, outer, _inner -> outer end)
+      |> Map.new(fn {k, v} -> {k, normalize_window(v)} end)
+
+    if Enum.any?(@window_keys, &Map.has_key?(merged, &1)),
+      do: {:ok, merged},
+      else: {:error, {:no_windows, body |> Map.keys() |> Enum.sort()}}
+  end
+
+  def normalize_usage(_), do: {:error, {:no_windows, []}}
+
+  defp normalize_window(%{} = w) do
+    w
+    |> put_utilization()
+    |> put_resets_at()
+  end
+
+  defp normalize_window(other), do: other
+
+  defp put_utilization(%{"utilization" => u} = w) when is_number(u), do: w
+
+  defp put_utilization(%{"used_percentage" => u} = w) when is_number(u),
+    do: Map.put(w, "utilization", u)
+
+  defp put_utilization(w), do: w
+
+  defp put_resets_at(%{"resets_at" => at} = w) when is_integer(at) do
+    # Epoch seconds, or milliseconds when it is too large to be seconds.
+    seconds = if at > 100_000_000_000, do: div(at, 1000), else: at
+
+    case DateTime.from_unix(seconds) do
+      {:ok, dt} -> Map.put(w, "resets_at", DateTime.to_iso8601(dt))
+      _ -> w
+    end
+  end
+
+  defp put_resets_at(w), do: w
 
   # ---- version gate --------------------------------------------------------
 
