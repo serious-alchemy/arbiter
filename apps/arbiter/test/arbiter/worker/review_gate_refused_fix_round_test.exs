@@ -93,6 +93,46 @@ defmodule Arbiter.Worker.ReviewGateRefusedFixRoundTest do
     assert calls_made(calls) == 2
   end
 
+  # Issue #1270: a credential the dispatch guard refuses (here an unreadable
+  # `personal_access_tokens/self`, HTTP 403) is not a reason to park the ticket: the
+  # round is held with no worker holding a seat, and starts by itself once the guard
+  # passes (the stub's script runs out and the real start takes over).
+  test "a credential refusal holds the fix round, frees the seat, and retries once it passes",
+       ctx do
+    refusal =
+      {:git_credential_bot_token_unverifiable, "personal_access_tokens/self: HTTP 403"}
+
+    {start, calls} = stub_start([{:error, refusal}, {:error, refusal}])
+    rig = rig(ctx, "feature/rr-4")
+
+    log =
+      capture_log(fn ->
+        gate =
+          start_gate(rig, ctx,
+            session_start: start,
+            fix_refusal_max_retries: 0,
+            local_capacity_retry_ms: 100
+          )
+
+        # held: the gate is alive, parked on the credential, and no implementer run
+        # is registered (a `:starting` run would hold a seat and an in_flight entry)
+        wait_until(fn ->
+          match?(%{local_hold: %{info: %{message: m}}} when is_binary(m), :sys.get_state(gate))
+        end)
+
+        state = :sys.get_state(gate)
+        assert state.local_hold.info.message =~ "HTTP 403"
+        assert Worker.whereis(state.review_id <> "#impl#{state.round}") == nil
+
+        # the guard "passes" (script spent): the held round starts on its own
+        wait_until(fn -> calls_made(calls) >= 4 and live_impl?(gate) end)
+        assert :sys.get_state(gate).phase == :revising
+        stop_gate(gate)
+      end)
+
+    assert log =~ "git credential"
+  end
+
   # ---- helpers -----------------------------------------------------------
 
   # The first call (the reviewer) is real; then each scripted result is returned in turn

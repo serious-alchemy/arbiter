@@ -641,6 +641,22 @@ defmodule Arbiter.Worker.GitCredential do
   defp note_bot_guard(_workspace, _repo, _result), do: :ok
 
   @doc """
+  Whether `reason` (a spawn error, possibly wrapped by the callers that start a
+  session) is the `gitlab_bot_token` dispatch guard refusing the credential. Such a
+  refusal is the credential's, not the run's: nothing ran, and the same spawn works
+  once the credential does (issue #1270).
+  """
+  @spec bot_guard_refusal?(term()) :: boolean()
+  def bot_guard_refusal?({tag, inner}) when tag in [:worker_session_failed, :claude_start_failed],
+    do: bot_guard_refusal?(inner)
+
+  def bot_guard_refusal?({tag, _})
+      when tag in [:git_credential_bot_token_refused, :git_credential_bot_token_unverifiable],
+      do: true
+
+  def bot_guard_refusal?(_), do: false
+
+  @doc """
   Runs the `gitlab_bot_token` dispatch guard for `repo` without delivering anything
   (issue #1270): `doctor`, `workspace_config_set` and the repo-level credential alert
   ask what a dispatch would be told. `:ok` for a repo with no bot-token entry or one
