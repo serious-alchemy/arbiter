@@ -22,7 +22,8 @@ defmodule Arbiter.MCP.Tools.WorkspaceConfigGitCredentialsTest do
         secrets: %{"GL_BOT" => "glpat-bot"}
       })
 
-    {:ok, ws: ws, coordinator: %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}}
+    {:ok,
+     ws: ws, coordinator: %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}}
   end
 
   defp patch_entry(scope, extra \\ %{}) do
