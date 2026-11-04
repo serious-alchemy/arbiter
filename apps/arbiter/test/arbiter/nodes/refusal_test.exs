@@ -75,13 +75,48 @@ defmodule Arbiter.Nodes.RefusalTest do
       assert detail =~ "1800"
     end
 
+    test "recognises the unwrapped shapes a ReviewGate spawn returns" do
+      refused = {:remote_placement_failed, {:refused, "unschedulable", "0/3 nodes are available"}}
+
+      for error <- [refused, {:worker_session_failed, refused}] do
+        assert {:ok, %{reason: "unschedulable", detail: "0/3 nodes are available"}} =
+                 Refusal.from_start_error(error)
+      end
+
+      assert {:ok, %{reason: "placement_timeout"}} =
+               Refusal.from_start_error(
+                 {:worker_session_failed,
+                  {:remote_placement_failed, {:placement_timeout, :assign, 900}}}
+               )
+
+      assert Refusal.from_start_error({:worker_session_failed, :enoent}) == :error
+    end
+
     test "an unknown refuse reason is not trusted as one" do
       error = {:claude_start_failed, {:remote_placement_failed, {:refused, "bad_idea", nil}}}
       assert Refusal.from_start_error(error) == :error
     end
   end
 
+  describe "capacity?/1" do
+    test "only a refusal that is the cluster being full is a capacity hold" do
+      assert Refusal.capacity?(%{reason: "unschedulable", detail: nil})
+      assert Refusal.capacity?(%{reason: "no_capacity", detail: nil})
+
+      for reason <- @reasons -- ~w(unschedulable no_capacity) do
+        refute Refusal.capacity?(%{reason: reason, detail: nil}), reason
+      end
+    end
+  end
+
   describe "info/3" do
+    test "carries a phrase, as every other no_node_capacity hold does" do
+      info = Refusal.info("bd-1", "edge-1", %{reason: "unschedulable", detail: "0/3 nodes"})
+      assert is_binary(info.phrase)
+      assert info.phrase =~ "edge-1"
+      assert info.phrase =~ "unschedulable"
+    end
+
     test "is a no_node_capacity info with an operator-facing message naming the reason" do
       for reason <- @reasons do
         info = Refusal.info("bd-1", "edge-1", %{reason: reason, detail: "quota exceeded"})

@@ -453,6 +453,7 @@ defmodule Arbiter.Worker.ReviewGate do
           | {:visual_refresher, (map() -> term())}
           | {:ci_poll_ms, pos_integer() | nil}
           | {:local_capacity_retry_ms, pos_integer()}
+          | {:reviewer_refusal_max_holds, non_neg_integer()}
           | {:ci_max_polls, pos_integer() | nil}
           | {:round, pos_integer()}
           | {:rearmed, boolean()}
@@ -1297,6 +1298,12 @@ defmodule Arbiter.Worker.ReviewGate do
       # bd-dylogx: retries of this round's implementer start after a node refused it with a hold
       # reason (`Refusal`), and the bound on them.
       session_start: Keyword.get(opts, :session_start, &ClaudeSession.start/1),
+      # #1274: a reviewer start the cluster refused for capacity (`Refusal.capacity?/1`) is
+      # held and asked again on the `local_capacity_retry_ms` timer, placed afresh. The count
+      # is of refusals in the current sequence (reset when a reviewer starts); past
+      # `reviewer_refusal_max_holds` the gate parks naming the capacity refusal.
+      reviewer_refusals: 0,
+      reviewer_refusal_max_holds: Keyword.get(opts, :reviewer_refusal_max_holds, 40),
       fix_refusal_retries: 0,
       fix_refusal_max_retries: Keyword.get(opts, :fix_refusal_max_retries, 2),
       placement_opts: Keyword.get(opts, :placement_opts, []),
@@ -1575,7 +1582,8 @@ defmodule Arbiter.Worker.ReviewGate do
 
       {:error, reason} ->
         Logger.warning(
-          "ReviewGate: failed to spawn reviewer for task=#{state.task_id}: #{inspect(reason)}"
+          "ReviewGate: failed to spawn reviewer for task=#{state.task_id}: " <>
+            spawn_reason_text(reason)
         )
 
         # bd-9zuvbh: a reviewer that could not be spawned (quota gate
@@ -1588,7 +1596,7 @@ defmodule Arbiter.Worker.ReviewGate do
         # fail a run whose round-1 work was fine.
         escalate_pre_review(
           state,
-          "ReviewGate could not spawn a reviewer: #{inspect(reason)}",
+          "ReviewGate could not spawn a reviewer: #{spawn_reason_text(reason)}",
           :reviewer_failed
         )
     end
@@ -1703,6 +1711,16 @@ defmodule Arbiter.Worker.ReviewGate do
   # bd-cgdhlu: the reviewer is placed right before it spawns, so a `remote_only`
   # workspace with no node free holds the pass the way a cap of 0 does: nothing is
   # spawned, no verdict is written and no round is consumed, and a timer asks again.
+  #
+  # #1274: the same hold when the node accepted the placement and then refused the run for
+  # capacity (`launch_worker/5`): the refusal count rides in `info` so it survives the hold, and
+  # `review_node` is cleared so the retry is placed afresh (another node, or the primary, per
+  # `worker.placement`) instead of going back to the node that said no.
+  defp hold_for_placement(state, %{refusals: n} = info, resume) do
+    state = %{state | reviewer_refusals: n, review_node: nil}
+    arm_hold(state, :reviewer, info, resume)
+  end
+
   defp hold_for_placement(state, info, resume), do: arm_hold(state, :reviewer, info, resume)
 
   defp ci_gate_open(state, entry) do
@@ -3376,7 +3394,7 @@ defmodule Arbiter.Worker.ReviewGate do
         escalate_pre_review(
           state,
           "ReviewGate could not re-dispatch the round #{state.round} reviewer after its " <>
-            "node was lost: #{inspect(reason)}",
+            "node was lost: #{spawn_reason_text(reason)}",
           :reviewer_failed
         )
     end
@@ -4884,7 +4902,8 @@ defmodule Arbiter.Worker.ReviewGate do
         # an implementer to "fix" a branch nobody had found anything wrong
         # with.
         message =
-          "ReviewGate could not spawn the round #{next.round} reviewer: #{inspect(reason)}"
+          "ReviewGate could not spawn the round #{next.round} reviewer: " <>
+            spawn_reason_text(reason)
 
         next =
           record_thread(next, :system, "Round #{next.round} re-review could not start", message)
@@ -7426,7 +7445,9 @@ defmodule Arbiter.Worker.ReviewGate do
   defp launch_worker(state, id, role, prompt, command) do
     with {:ok, state} <- place_reviewer_pass(state, role) do
       try do
-        spawn_pass(state, id, role, prompt, command)
+        state
+        |> spawn_pass(id, role, prompt, command)
+        |> hold_on_capacity_refusal(state, role)
       after
         # The slot reserved on a node is the pass's only until its worker is
         # registered, where it is counted in the slot's place.
@@ -7468,6 +7489,43 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp place_reviewer_pass(state, _role), do: {:ok, state}
+
+  # #1274: the cluster refused the reviewer's start for capacity (`unschedulable`, `no_capacity`;
+  # worker pods rank below CI, so a CI burst causes it). Nothing ran and nothing is wrong with the
+  # work, so it is the same hold a `remote_only` workspace with no node free gets
+  # (`{:placement_held, info}`), not a `:reviewer_failed` park. The refused run is already ended
+  # (`end_refused_reviewer/3`). Bounded: past `reviewer_refusal_max_holds` the error becomes
+  # `{:reviewer_capacity_exhausted, text}`, which the callers park with `text`. Any other
+  # refusal (`startup_failed`, `image_unavailable`, ...) and any other error is untouched.
+  defp hold_on_capacity_refusal({:error, reason} = error, state, :reviewer) do
+    with {:ok, refusal} <- Refusal.from_start_error(reason),
+         true <- Refusal.capacity?(refusal) do
+      count = state.reviewer_refusals + 1
+      info = Refusal.info(state.task_id, refused_node_name(state.review_node), refusal)
+
+      if count > state.reviewer_refusal_max_holds,
+        do: {:error, {:reviewer_capacity_exhausted, capacity_exhausted_text(state, info, count)}},
+        else: {:error, {:placement_held, Map.put(info, :refusals, count)}}
+    else
+      _ -> error
+    end
+  end
+
+  defp hold_on_capacity_refusal(result, _state, _role), do: result
+
+  defp capacity_exhausted_text(state, info, count) do
+    "the cluster had no capacity for the round #{state.round} reviewer: #{info.phrase}, " <>
+      "#{count - 1} retries over about " <>
+      "#{div((count - 1) * state.local_capacity_retry_ms, 1000)}s all refused for capacity. " <>
+      "This is a capacity refusal, not a failure of the reviewer or the work; re-run the " <>
+      "review once the cluster has room"
+  end
+
+  defp refused_node_name(%{name: name}) when is_binary(name), do: name
+  defp refused_node_name(_), do: "the node"
+
+  defp spawn_reason_text({:reviewer_capacity_exhausted, text}), do: text
+  defp spawn_reason_text(reason), do: inspect(reason)
 
   # bd-bg87oz: where a fix round's implementer runs. Decided for every fix round (it is a
   # pass of its own, not the round's reviewer): a node with headroom when the
@@ -7646,7 +7704,8 @@ defmodule Arbiter.Worker.ReviewGate do
             denial_pending: false,
             current_prompt: prompt,
             timeout_ms: timeout_ms,
-            reviewed_sha: if(role == :reviewer, do: state.head_sha, else: state.reviewed_sha)
+            reviewed_sha: if(role == :reviewer, do: state.head_sha, else: state.reviewed_sha),
+            reviewer_refusals: if(role == :reviewer, do: 0, else: state.reviewer_refusals)
         }
 
         {:ok, mark_pass(launched, role, id)}
@@ -7702,7 +7761,7 @@ defmodule Arbiter.Worker.ReviewGate do
          {:ok, pid} <- start_worker_process(state, id, role, revision),
          :ok <-
            start_worker_session(state, pid, role, prompt, command, revision)
-           |> release_refused(pid) do
+           |> release_refused(pid, state, role) do
       _ = Worker.advance(pid, step_for(role))
       {:ok, pid}
     end
@@ -7713,15 +7772,46 @@ defmodule Arbiter.Worker.ReviewGate do
   # holding an account seat and an `in_flight` entry for as long as the credential stays
   # broken. The run never ran, so it is stopped (not failed: the id is asked again once
   # the credential works, `hold_for_credential/4`).
-  defp release_refused({:error, reason} = error, pid) do
-    if GitCredential.bot_guard_refusal?(reason) do
-      safe(fn -> Worker.stop(pid, :normal, 5_000) end)
+  defp release_refused({:error, reason} = error, pid, state, role) do
+    cond do
+      GitCredential.bot_guard_refusal?(reason) ->
+        safe(fn -> Worker.stop(pid, :normal, 5_000) end)
+
+      role == :reviewer ->
+        end_refused_reviewer(pid, state, reason)
+
+      true ->
+        :ok
     end
 
     error
   end
 
-  defp release_refused(other, _pid), do: other
+  defp release_refused(other, _pid, _state, _role), do: other
+
+  # #1274: a node refused the reviewer's run, so it never started. Its worker was registered
+  # `:starting`; left alone it keeps that run row (and an account seat) until a server restart.
+  # It is ended `interrupted` with the typed `:placement_refused` cause, the way every other
+  # refused run is (`Refusal.hold/4`): no attempt consumed, nothing escalated. Then it is
+  # stopped, because the retry registers a reviewer under the same id and a lingering finished
+  # worker would be handed back to it (`start_worker_process/4`).
+  defp end_refused_reviewer(pid, state, reason) do
+    case Refusal.from_start_error(reason) do
+      {:ok, refusal} ->
+        cause =
+          StopReason.placement_refused(
+            refused_node_name(state.review_node),
+            refusal.reason,
+            refusal[:detail]
+          )
+
+        safe(fn -> Worker.interrupt(pid, cause) end)
+        safe(fn -> Worker.stop(pid, :normal, 5_000) end)
+
+      :error ->
+        :ok
+    end
+  end
 
   # bd-40pzpj: under `most_quota` routing the task's implementer pin decides
   # (with a recorded fallback); otherwise exactly

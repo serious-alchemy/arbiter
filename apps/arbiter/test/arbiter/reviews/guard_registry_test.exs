@@ -93,6 +93,11 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "bd-cgdhlu: `{:placement_held, …}` holds the reviewer pass while a remote_only " <>
        "workspace has no node free (retry timer; no verdict, no round consumed, no " <>
        "escalation) — an operator placement choice, not a guard"},
+    {Arbiter.Worker.ReviewGate, :hold_on_capacity_refusal, 3,
+     "#1274: a reviewer start the cluster refused for capacity (`unschedulable`, " <>
+       "`no_capacity`) is held like any placement hold (`{:placement_held, …}`: retry timer, " <>
+       "no verdict, no round consumed); past `reviewer_refusal_max_holds` it parks naming the " <>
+       "capacity refusal — a bounded capacity hold, not a refusal of the work"},
     {Arbiter.Worker.ReviewGate, :launch_first_reviewer_in_checkout, 1,
      "bd-cgdhlu: hands `{:placement_held, …}` to `hold_for_placement/3` — a capacity hold, " <>
        "not a refusal of the work"},

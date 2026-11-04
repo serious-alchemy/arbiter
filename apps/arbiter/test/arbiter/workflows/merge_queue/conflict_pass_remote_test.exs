@@ -110,6 +110,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictPassRemoteTest do
                })
 
       assert info.refused == "placement_timeout"
+      # #1274: the Watchdog logs `info.phrase` for every hold; without one it crashed, and the
+      # ticket sat in Merging with no Watchdog polling its PR.
+      assert is_binary(info.phrase)
 
       pid = Worker.whereis(ctx.issue.id)
       on_exit(fn -> stop_quietly(pid) end)
