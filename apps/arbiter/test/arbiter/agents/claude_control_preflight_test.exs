@@ -58,6 +58,14 @@ defmodule Arbiter.Agents.ClaudeControlPreflightTest do
       assert Claude.auth_probe(opts(stub, "ok")) == :ok
     end
 
+    test "the real 2.1.317 shapes (no tokenSource) are an authenticated pre-flight", %{
+      stub: stub,
+      marker: marker
+    } do
+      assert Preflight.check(Claude, opts(stub, "cli_2_1_317")) == :ok
+      refute File.exists?(marker)
+    end
+
     test "Preflight.check consumes it and never runs the ping", %{stub: stub, marker: marker} do
       assert Preflight.check(Claude, opts(stub, "ok")) == :ok
       refute File.exists?(marker)

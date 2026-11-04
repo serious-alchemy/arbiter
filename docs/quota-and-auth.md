@@ -235,6 +235,37 @@ and writing one JSON `control_request` per stdin line (`initialize`, then
 validity — an expired OAuth token still reads as authenticated there. Only
 `get_usage`, which exercises the token against the API, upgrades the verdict.
 
+### Real response shapes (claude 2.1.317) and how to see which path ran
+
+The first release of this surface assumed shapes the real CLI does not send.
+A 2026-11-03 probe of claude 2.1.317 (operator login) showed:
+
+* `initialize` succeeds but `account` has **no `tokenSource`** — only identity
+  (`email`, `organization`, `subscriptionType`). `ControlChannel.auth_state/1`
+  now reads `tokenSource: "none"` → `:unauthenticated`, a `tokenSource` string
+  **or** any of those identity fields → `:authenticated`, anything else →
+  `:unknown` (never "logged out").
+* `get_usage` succeeds but the windows sit under **`rate_limits`**, not at the
+  top level. `ControlChannel.normalize_usage/1` lifts them to the
+  `/api/oauth/usage` shape and also accepts `used_percentage` for
+  `utilization` and epoch-seconds `resets_at`. A success body that still has no
+  `five_hour` / `seven_day` / `limits` is an error carrying its top-level keys.
+
+The test fixtures in `apps/arbiter/test/fixtures/claude_control/` are
+**reconstructed from that report, not a raw capture** (no `claude` binary was
+available to the author); replace them with a captured response when one is at
+hand.
+
+`capture_source` reads `oauth_poll` whichever path answered, so look at the log
+(`info`, visible in production):
+
+* `Quota: usage read via control channel (get_usage)` — the channel answered.
+* `Quota: control-channel usage unavailable, using HTTP: <reason>` — it did not
+  (`info`: old / silent / erroring CLI).
+* The same line at `warning`, `… answered with no usage windows (…top-level
+  keys: […])` — the CLI answered with a shape we cannot read: a defect to fix,
+  not an expected fallback.
+
 ### Stability, version floor, fallback
 
 `get_usage` is an **experimental** control request, and the response shapes are

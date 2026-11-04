@@ -76,6 +76,29 @@ defmodule Arbiter.Quota.ControlChannelUsageTest do
     assert ctx.seen |> File.read!() |> String.trim() == ctx.grant_dir
   end
 
+  for mode <- ~w(cli_2_1_317 statusline_shape) do
+    test "#{mode}: the shape claude 2.1.317 answers with is consumed, with no HTTP call", ctx do
+      assert {:ok, snapshot} = capture(ctx, unquote(mode))
+      assert_in_delta snapshot.utilization_5h, 0.42, 0.01
+      refute_received {:http_usage, _}
+    end
+  end
+
+  test "using the channel is logged at info; a fallback says why, at info", ctx do
+    previous = Logger.level()
+    Logger.configure(level: :info)
+    on_exit(fn -> Logger.configure(level: previous) end)
+
+    used = ExUnit.CaptureLog.capture_log([level: :info], fn -> capture(ctx, "cli_2_1_317") end)
+    assert used =~ "usage read via control channel"
+
+    fell_back =
+      ExUnit.CaptureLog.capture_log([level: :info], fn -> capture(ctx, "usage_empty") end)
+
+    assert fell_back =~ "control-channel usage unavailable"
+    assert fell_back =~ "no_windows"
+  end
+
   for mode <- ~w(no_usage init_unsupported exit usage_empty usage_429 usage_hang) do
     test "control channel answering #{mode} falls back to the HTTP poll", ctx do
       assert {:ok, snapshot} = capture(ctx, unquote(mode), timeout_ms: 300)

@@ -1,0 +1,6 @@
+{
+  "rate_limits": {
+    "five_hour": {"utilization": 42.0, "resets_at": "2030-01-01T05:00:00Z"},
+    "seven_day": {"utilization": 10.0, "resets_at": "2030-01-07T00:00:00Z"}
+  }
+}
