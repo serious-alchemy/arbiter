@@ -2427,7 +2427,9 @@ defmodule Arbiter.MCP.Catalog do
           "`credentials*` top-level keys (use `arb workspace secret` for secrets), emptying " <>
           "`repo_paths`, and `tracker.type` with no `tracker.config` (`force: true` overrides the " <>
           "last two). Returns `{workspace, config, secret_keys}` after the merge so the caller " <>
-          "can confirm the result.",
+          "can confirm the result. A write naming a `git_credentials.repos.<repo>` `gitlab_bot_token` " <>
+          "entry also runs the dispatch guard and adds `git_credential_checks` + `warnings` " <>
+          "(the write is kept; a refused token strands every dispatch for that repo).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
