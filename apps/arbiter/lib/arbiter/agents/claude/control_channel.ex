@@ -76,6 +76,8 @@ defmodule Arbiter.Agents.Claude.ControlChannel do
   @max_line_bytes 1_048_576
   @version_timeout_ms 5_000
   @cli_args ~w(-p --input-format stream-json --output-format stream-json --verbose)
+  @identity_keys ~w(email organization subscriptionType)
+  @window_keys ~w(five_hour seven_day limits)
   @unsupported_re ~r/unsupported|unknown|not supported|unrecognized|invalid.*subtype|no handler/i
 
   @type usage_result ::

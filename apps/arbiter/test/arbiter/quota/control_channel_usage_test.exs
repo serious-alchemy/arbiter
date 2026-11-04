@@ -77,7 +77,7 @@ defmodule Arbiter.Quota.ControlChannelUsageTest do
   end
 
   for mode <- ~w(cli_2_1_317 statusline_shape) do
-    test "#{mode}: the real CLI's shape is consumed, with no HTTP call", ctx do
+    test "#{mode}: the shape claude 2.1.317 answers with is consumed, with no HTTP call", ctx do
       assert {:ok, snapshot} = capture(ctx, unquote(mode))
       assert_in_delta snapshot.utilization_5h, 0.42, 0.01
       refute_received {:http_usage, _}
