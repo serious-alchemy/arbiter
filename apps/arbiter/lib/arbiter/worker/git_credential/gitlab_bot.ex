@@ -93,6 +93,19 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
     end
   end
 
+  @doc """
+  The token-only half of `check/5`: scopes, expiry and that GitLab answers
+  `personal_access_tokens/self`, with no project pinned. For an entry whose `remote`
+  is only known at spawn.
+  """
+  @spec check_token(map(), String.t(), keyword()) :: :ok | {:error, refusal()}
+  def check_token(entry, token, req_options) do
+    with :ok <- check_configured_expiry(entry.expires_at),
+         {:ok, pat} <- self_pat(entry, token, req_options) do
+      check_pat(pat)
+    end
+  end
+
   # The operator's own record of the expiry: a date in the past is enough to refuse,
   # without a round trip.
   defp check_configured_expiry(nil), do: :ok

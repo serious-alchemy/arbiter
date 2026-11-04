@@ -1531,6 +1531,27 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "bot token (GL_BOT) expires 2027-01-31"
     end
 
+    test "FAILs (not warns) when the bot token's dispatch guard would refuse" do
+      guardrail_routes(%{
+        "active" => false,
+        "rules" => 0,
+        "workspaces" => [%{"workspace" => "default", "subjects" => []}],
+        "issues" => [
+          %{
+            "kind" => "git_credential_refused",
+            "workspace" => "default",
+            "message" =>
+              "git_credentials.repos.tonic bot token (GL_BOT): every dispatch is refused, " <>
+                "the GitLab bot token could not be verified (personal_access_tokens/self: HTTP 403)"
+          }
+        ]
+      })
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[fail] guardrail profiles"
+      assert out =~ "HTTP 403"
+    end
+
     test "FAILs naming inconsistent config, without blocking readiness" do
       guardrail_routes(%{
         "active" => true,

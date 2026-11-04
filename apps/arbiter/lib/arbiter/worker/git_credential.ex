@@ -615,6 +615,38 @@ defmodule Arbiter.Worker.GitCredential do
     end
   end
 
+  @doc """
+  Runs the `gitlab_bot_token` dispatch guard for `repo` without delivering anything
+  (issue #1270): `doctor`, `workspace_config_set` and the repo-level credential alert
+  ask what a dispatch would be told. `:ok` for a repo with no bot-token entry or one
+  the guard passes; `{:error, {:git_credential_bot_token_refused, _}}` /
+  `{:error, {:git_credential_bot_token_unverifiable, _}}` is what a dispatch would
+  refuse with. A missing secret is `{:error, {:git_credential_secret_missing, name}}`.
+
+  An entry with no `remote` (the spawn's origin names it) gets the token checks only
+  (scopes, expiry, readable): its membership is checked per spawn. Options as
+  `materialize/3` (`:remote`, `:req_options`).
+  """
+  @spec verify_bot_token(map() | nil, String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def verify_bot_token(workspace, repo, opts \\ []) do
+    case plan(workspace, repo, role: :implementer) do
+      {:ok, %__MODULE__{mode: :scoped, entry: %{kind: :gitlab_bot_token} = entry}} ->
+        with {:ok, token} <- secret(workspace, entry.secret) do
+          case remote(entry, opts) do
+            {:ok, remote} ->
+              repos = Map.get(block(workspace), "repos", %{})
+              GitlabBot.check(entry, token, remote, repos, forge_req_options(opts))
+
+            {:error, _} ->
+              GitlabBot.check_token(entry, token, forge_req_options(opts))
+          end
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
   defp push_permissions(opts),
     do: if(Keyword.get(opts, :host?, false), do: @host_permissions, else: @push_permissions)
 
