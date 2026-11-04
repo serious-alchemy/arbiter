@@ -25,6 +25,7 @@ defmodule Arbiter.Worker.ReviewGateRemotePlacementTest do
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Worker.ReviewGate
+  alias Arbiter.Workers.Run
   alias Arbiter.Workers.Reconciler
 
   @probe Path.expand("../../fixtures/review_checkout_probe.sh", __DIR__)
@@ -170,6 +171,169 @@ defmodule Arbiter.Worker.ReviewGateRemotePlacementTest do
       # The reviewer read exactly the head under review.
       assert [line] = probe_lines(ctx)
       assert line =~ "head=" <> rig.head
+    end
+  end
+
+  describe "the cluster refuses the reviewer's start (#1274)" do
+    # A session that refuses the first `refusals` starts the way a cluster node does, then
+    # starts the fixture reviewer.
+    defp refusing_session(reason, refusals) do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      fun = fn opts ->
+        n = Agent.get_and_update(counter, &{&1, &1 + 1})
+
+        if n < refusals,
+          do: {:error, {:remote_placement_failed, {:refused, reason, "0/3 nodes are available"}}},
+          else: Arbiter.Worker.ClaudeSession.start(opts)
+      end
+
+      {fun, counter}
+    end
+
+    defp starts(counter), do: Agent.get(counter, & &1)
+
+    defp escalations(rig, ctx) do
+      "admiral"
+      |> Arbiter.Messages.Message.inbox(workspace_id: ctx.ws.id)
+      |> Enum.filter(&(&1.directive_ref == rig.task.id))
+    end
+
+    # The reviewer runs this gate's passes register: ids of the form `<task>#...`.
+    defp reviewer_runs(rig) do
+      prefix = rig.task.id <> "#"
+
+      Run
+      |> Ash.read!()
+      |> Enum.filter(&String.starts_with?(&1.task_id, prefix))
+    end
+
+    test "an unschedulable refusal is held and retried; the review runs once capacity exists",
+         ctx do
+      ctx = Map.put(ctx, :ws, workspace!("prefer_remote"))
+      rig = rig(ctx, "feature/rp-u1")
+      {session, counter} = refusing_session("unschedulable", 2)
+
+      gate =
+        start_gate(rig, ctx,
+          command: [@probe, ctx.log],
+          placement_opts: placement([node_row("a")]),
+          session_start: session,
+          local_capacity_retry_ms: 25
+        )
+
+      assert_gate_reports(gate, rig)
+
+      # Not parked: it was held twice, then the review ran, exactly once.
+      assert Ash.get!(Issue, rig.task.id).attention_cause != :reviewer_failed
+      assert starts(counter) == 3
+      assert passes(ctx) == 1
+      assert [%{verdict: :approve, round: 1}] = review_rounds(rig)
+    end
+
+    test "the refused starts leave no run in :starting — they end interrupted, refused", ctx do
+      ctx = Map.put(ctx, :ws, workspace!("prefer_remote"))
+      rig = rig(ctx, "feature/rp-u2")
+      {session, counter} = refusing_session("unschedulable", 2)
+
+      gate =
+        start_gate(rig, ctx,
+          command: [@probe, ctx.log],
+          placement_opts: placement([node_row("a")]),
+          session_start: session,
+          local_capacity_retry_ms: 25
+        )
+
+      assert_gate_reports(gate, rig)
+      assert starts(counter) == 3
+
+      runs = reviewer_runs(rig)
+      refute Enum.any?(runs, &(&1.state == :starting)), inspect(Enum.map(runs, & &1.state))
+
+      refused = Enum.filter(runs, &(&1.outcome == :interrupted))
+      assert length(refused) == 2
+      assert Enum.all?(refused, &(&1.stop_category == "placement_refused"))
+      # Only the third start is a reviewer that ran.
+      assert length(runs) - length(refused) == 1
+    end
+
+    test "while held it spawns nothing, writes no verdict and consumes no round", ctx do
+      ctx = Map.put(ctx, :ws, workspace!("prefer_remote"))
+      rig = rig(ctx, "feature/rp-u3")
+      {session, counter} = refusing_session("unschedulable", 1_000)
+
+      gate =
+        start_gate(rig, ctx,
+          command: [@probe, ctx.log],
+          placement_opts: placement([node_row("a")]),
+          session_start: session,
+          local_capacity_retry_ms: 60_000
+        )
+
+      wait_until(fn -> :sys.get_state(gate).local_hold != nil end)
+      held = :sys.get_state(gate)
+      assert held.local_hold.info.refused == "unschedulable"
+      assert held.reviewer_refusals == 1
+      # Placed afresh on the retry rather than pinned to the node that refused.
+      assert held.review_node == nil
+      assert starts(counter) == 1
+      assert passes(ctx) == 0
+      assert review_rounds(rig) == []
+      assert Ash.get!(Issue, rig.task.id).attention_cause == nil
+      refute Enum.any?(reviewer_runs(rig), &(&1.state == :starting))
+      stop_gate(gate)
+    end
+
+    test "retries are bounded: past the bound it parks naming the capacity refusal", ctx do
+      ctx = Map.put(ctx, :ws, workspace!("prefer_remote"))
+      rig = rig(ctx, "feature/rp-u4")
+      {session, counter} = refusing_session("unschedulable", 1_000)
+
+      gate =
+        start_gate(rig, ctx,
+          command: [@probe, ctx.log],
+          placement_opts: placement([node_row("a")]),
+          session_start: session,
+          local_capacity_retry_ms: 20,
+          reviewer_refusal_max_holds: 2
+        )
+
+      assert_gate_reports(gate, rig)
+
+      # Held twice, refused a third time: three starts, no more.
+      assert starts(counter) == 3
+      assert passes(ctx) == 0
+
+      assert Ash.get!(Issue, rig.task.id).attention_cause == :reviewer_failed
+      assert [escalation] = escalations(rig, ctx)
+      assert escalation.body =~ "capacity refusal"
+      assert escalation.body =~ "unschedulable"
+      refute escalation.body =~ "worker_session_failed"
+      refute Enum.any?(reviewer_runs(rig), &(&1.state == :starting))
+    end
+
+    test "a non-capacity refusal (startup_failed) keeps its existing behaviour: parked at once",
+         ctx do
+      ctx = Map.put(ctx, :ws, workspace!("prefer_remote"))
+      rig = rig(ctx, "feature/rp-u5")
+      {session, counter} = refusing_session("startup_failed", 1_000)
+
+      gate =
+        start_gate(rig, ctx,
+          command: [@probe, ctx.log],
+          placement_opts: placement([node_row("a")]),
+          session_start: session,
+          local_capacity_retry_ms: 20
+        )
+
+      assert_gate_reports(gate, rig)
+
+      assert starts(counter) == 1
+      assert passes(ctx) == 0
+      assert Ash.get!(Issue, rig.task.id).attention_cause == :reviewer_failed
+      assert [escalation] = escalations(rig, ctx)
+      assert escalation.body =~ "startup_failed"
+      refute Enum.any?(reviewer_runs(rig), &(&1.state == :starting))
     end
   end
 

@@ -65,7 +65,28 @@ defmodule Arbiter.Nodes.Refusal do
       ),
       do: {:ok, %{reason: "placement_timeout", detail: "#{stage} step exceeded #{ms}ms"}}
 
+  # The shapes a caller that does not wrap `ClaudeSession.start/1`'s error hands back: a
+  # ReviewGate reviewer's spawn is `{:worker_session_failed, {:remote_placement_failed, _}}`
+  # (#1274), and the raw session error carries no wrapper at all.
+  def from_start_error({:worker_session_failed, inner}), do: from_start_error(inner)
+
+  def from_start_error({:remote_placement_failed, _} = inner),
+    do: from_start_error({:claude_start_failed, inner})
+
   def from_start_error(_), do: :error
+
+  @capacity_reasons ~w(no_capacity unschedulable)
+
+  @doc """
+  Is this refusal the cluster being full (#1274)? `unschedulable` (the scheduler found no room
+  for the pod within `schedule_s`: worker pods rank below CI, so a CI burst causes it) and
+  `no_capacity` (the node's own admission said no) pass by themselves. A pass that waits and
+  asks again, placed afresh, starts once there is room. Every other reason says something about
+  the run, the image or the pod, which waiting does not change.
+  """
+  @spec capacity?(refusal()) :: boolean()
+  def capacity?(%{reason: reason}), do: reason in @capacity_reasons
+  def capacity?(_), do: false
 
   @doc """
   SI4a (§21.4): is this refusal the pull path's — a machine node that could not pull the
@@ -96,8 +117,15 @@ defmodule Arbiter.Nodes.Refusal do
       detail: refusal[:detail]
     }
 
-    Map.put(info, :message, message(task_id, node_name, refusal))
+    info
+    |> Map.put(:message, message(task_id, node_name, refusal))
+    |> Map.put(:phrase, short_phrase(node_name, refusal))
   end
+
+  # The one-line form the Watchdog and the board log for every `{:no_node_capacity, info}`;
+  # without it a refusal hold crashed the Watchdog that logged it (#1274).
+  defp short_phrase(node_name, %{reason: reason} = refusal),
+    do: "node #{node_name} refused it (#{reason}#{detail_suffix(refusal)})"
 
   defp message(task_id, node_name, %{reason: reason} = refusal) do
     "held — node #{node_name} refused #{task_id} (#{phrase(reason)}#{detail_suffix(refusal)}). " <>
