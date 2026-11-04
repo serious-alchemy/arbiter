@@ -85,6 +85,7 @@ defmodule Arbiter.Worker.GitCredential do
   """
 
   alias Arbiter.Guardrails.Config, as: GuardrailsConfig
+  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.GitCredential.GitlabBot
@@ -521,7 +522,7 @@ defmodule Arbiter.Worker.GitCredential do
       :token -> materialize_token(entry, workspace, opts)
       :github_app -> materialize_app(entry, workspace, opts)
       :gitlab_project_token -> materialize_gitlab(entry, workspace, opts, plan.read_only)
-      :gitlab_bot_token -> materialize_gitlab_bot(entry, workspace, opts)
+      :gitlab_bot_token -> materialize_gitlab_bot(entry, workspace, plan.repo, opts)
     end
   end
 
@@ -592,26 +593,98 @@ defmodule Arbiter.Worker.GitCredential do
   # bd-8ufzng: the operator's bot-user PAT is delivered as it is (nothing is minted
   # or revoked), after the dispatch guard has checked its scopes, expiry and
   # membership (`GitlabBot.check/5`). Any refusal means nothing is delivered.
-  defp materialize_gitlab_bot(entry, workspace, opts) do
-    with {:ok, token} <- secret(workspace, entry.secret),
-         {:ok, remote} <- remote(entry, opts),
-         :ok <-
-           GitlabBot.check(
-             entry,
-             token,
-             remote,
-             Map.get(block(workspace), "repos", %{}),
-             forge_req_options(opts)
-           ) do
-      {:ok,
-       %Material{
-         kind: :gitlab_bot_token,
-         token: token,
-         host: entry.host,
-         username: entry.username,
-         remote: remote,
-         api_url: entry.api_url
-       }}
+  defp materialize_gitlab_bot(entry, workspace, repo, opts) do
+    result =
+      with {:ok, token} <- secret(workspace, entry.secret),
+           {:ok, remote} <- remote(entry, opts),
+           :ok <-
+             GitlabBot.check(
+               entry,
+               token,
+               remote,
+               Map.get(block(workspace), "repos", %{}),
+               forge_req_options(opts)
+             ) do
+        {:ok,
+         %Material{
+           kind: :gitlab_bot_token,
+           token: token,
+           host: entry.host,
+           username: entry.username,
+           remote: remote,
+           api_url: entry.api_url
+         }}
+      end
+
+    note_bot_guard(workspace, repo, result)
+    result
+  end
+
+  # Issue #1270: the guard sits under every spawn, fix round and push of the repo, so
+  # its verdict is where the repo-level alert is kept. A refusal raises (or refreshes)
+  # the one alert for the repo; a pass clears it. Other failures (a missing secret, an
+  # unknown remote) are not the guard's and leave the alert alone.
+  defp note_bot_guard(%Workspace{id: ws_id}, repo, result) when is_binary(repo) do
+    case result do
+      {:ok, _material} ->
+        CoordinatorNotifier.git_credential_refused_cleared(ws_id, repo)
+
+      {:error, {tag, _} = reason}
+      when tag in [:git_credential_bot_token_refused, :git_credential_bot_token_unverifiable] ->
+        CoordinatorNotifier.git_credential_refused(ws_id, repo, format_error(reason))
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp note_bot_guard(_workspace, _repo, _result), do: :ok
+
+  @doc """
+  Whether `reason` (a spawn error, possibly wrapped by the callers that start a
+  session) is the `gitlab_bot_token` dispatch guard refusing the credential. Such a
+  refusal is the credential's, not the run's: nothing ran, and the same spawn works
+  once the credential does (issue #1270).
+  """
+  @spec bot_guard_refusal?(term()) :: boolean()
+  def bot_guard_refusal?({tag, inner}) when tag in [:worker_session_failed, :claude_start_failed],
+    do: bot_guard_refusal?(inner)
+
+  def bot_guard_refusal?({tag, _})
+      when tag in [:git_credential_bot_token_refused, :git_credential_bot_token_unverifiable],
+      do: true
+
+  def bot_guard_refusal?(_), do: false
+
+  @doc """
+  Runs the `gitlab_bot_token` dispatch guard for `repo` without delivering anything
+  (issue #1270): `doctor`, `workspace_config_set` and the repo-level credential alert
+  ask what a dispatch would be told. `:ok` for a repo with no bot-token entry or one
+  the guard passes; `{:error, {:git_credential_bot_token_refused, _}}` /
+  `{:error, {:git_credential_bot_token_unverifiable, _}}` is what a dispatch would
+  refuse with. A missing secret is `{:error, {:git_credential_secret_missing, name}}`.
+
+  An entry with no `remote` (the spawn's origin names it) gets the token checks only
+  (scopes, expiry, readable): its membership is checked per spawn. Options as
+  `materialize/3` (`:remote`, `:req_options`).
+  """
+  @spec verify_bot_token(map() | nil, String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def verify_bot_token(workspace, repo, opts \\ []) do
+    case plan(workspace, repo, role: :implementer) do
+      {:ok, %__MODULE__{mode: :scoped, entry: %{kind: :gitlab_bot_token} = entry}} ->
+        with {:ok, token} <- secret(workspace, entry.secret) do
+          case remote(entry, opts) do
+            {:ok, remote} ->
+              repos = Map.get(block(workspace), "repos", %{})
+              GitlabBot.check(entry, token, remote, repos, forge_req_options(opts))
+
+            {:error, _} ->
+              GitlabBot.check_token(entry, token, forge_req_options(opts))
+          end
+        end
+
+      _ ->
+        :ok
     end
   end
 

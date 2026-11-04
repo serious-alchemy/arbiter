@@ -1239,6 +1239,41 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   def node_upgrade_refused(_ws_id, _node, _version, _reason), do: :ok
 
+  @doc """
+  A repo's git credential refuses every dispatch, fix round and push (issue #1270).
+  One alert per `(workspace, repo)`, refreshed on each refusal (`raise_count` says
+  how many attempts it refused) rather than one attention item per ticket, and
+  cleared by `git_credential_refused_cleared/2` once the guard passes. `reason` is
+  the guard's own sentence (`GitCredential.format_error/1`). Best-effort, returns `:ok`.
+  """
+  @spec git_credential_refused(String.t() | nil, String.t() | nil, String.t()) :: :ok
+  def git_credential_refused(ws_id, repo, reason) when is_binary(ws_id) and is_binary(repo) do
+    detail =
+      "Every dispatch, fix round and push for repo #{repo} is refused until its git credential " <>
+        "passes the dispatch guard: #{reason}. Each attempt strands another ticket; fix the " <>
+        "credential (`arb server doctor` shows the same check), then work resumes. This alert " <>
+        "clears by itself once the guard passes."
+
+    raise_alert(
+      :git_credential_refused,
+      git_credential_alert_key(ws_id, repo),
+      ws_id,
+      "#{repo}: git credential refused, all work on this repo is blocked",
+      detail
+    )
+  end
+
+  def git_credential_refused(_ws_id, _repo, _reason), do: :ok
+
+  @doc "Clear a repo's refused-credential alert (issue #1270). A no-op when none is active."
+  @spec git_credential_refused_cleared(String.t() | nil, String.t() | nil) :: :ok
+  def git_credential_refused_cleared(ws_id, repo) when is_binary(ws_id) and is_binary(repo),
+    do: clear_alert(:git_credential_refused, git_credential_alert_key(ws_id, repo))
+
+  def git_credential_refused_cleared(_ws_id, _repo), do: :ok
+
+  defp git_credential_alert_key(ws_id, repo), do: "#{ws_id}:#{repo}"
+
   @doc "Clear a node's refused-upgrade alert (bd-4kvxun). A no-op when none is active."
   @spec node_upgrade_refused_cleared(String.t()) :: :ok
   def node_upgrade_refused_cleared(node_id) when is_binary(node_id),

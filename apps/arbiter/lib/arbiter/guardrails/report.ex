@@ -99,6 +99,7 @@ defmodule Arbiter.Guardrails.Report do
     subjects = attached_subjects(ws)
     tokens = token_rows(ws, expiry_opts)
     unreachable = if expiry_opts, do: GitlabBot.unreachable(ws, expiry_opts), else: []
+    refused = refused_rows(ws, expiry_opts)
 
     resolved =
       for {type, subject} <- subjects do
@@ -121,7 +122,8 @@ defmodule Arbiter.Guardrails.Report do
           binding_issues(name, block, resolved) ++
           secret_issues(ws, name, block) ++
           git_credential_issues(ws, name, rules != []) ++
-          token_issues(name, tokens) ++ unreachable_issues(name, unreachable)
+          token_issues(name, tokens, refused) ++
+          refused_issues(name, refused) ++ unreachable_issues(name, unreachable)
     }
   end
 
@@ -306,10 +308,52 @@ defmodule Arbiter.Guardrails.Report do
     end)
   end
 
-  defp token_issues(name, tokens) do
+  # A refusal already says why the token is unusable (expired, no expiry, unreadable),
+  # so the expiry warning for the same token would only repeat it, and for an
+  # unreadable token it would wrongly say "no expiry on record".
+  defp token_issues(name, tokens, refused) do
+    refused_tokens = MapSet.new(refused, &{&1.secret, &1.host})
+
     for row <- tokens,
+        not MapSet.member?(refused_tokens, {row.secret, row.host}),
         message = token_warning(row),
         do: issue(:git_credential_token_expiring, name, message)
+  end
+
+  # Issue #1270: every `gitlab_bot_token` entry whose dispatch guard would refuse right
+  # now, found by running the guard itself (`GitCredential.verify_bot_token/3`), so
+  # doctor reports what a spawn would be told, with the HTTP status or refusal reason.
+  # Only when probing (`arb doctor`'s endpoint): the posture never reaches out.
+  defp refused_rows(ws, opts) do
+    if opts && Keyword.get(opts, :probe, false) do
+      req_options = Keyword.get(opts, :req_options, [])
+
+      for {repo, %{"kind" => "gitlab_bot_token"} = entry} <-
+            ws |> GitCredential.block() |> Map.get("repos", %{}) |> map_or_empty(),
+          {:error, {tag, _} = reason} <-
+            [GitCredential.verify_bot_token(ws, to_string(repo), req_options: req_options)],
+          tag in [:git_credential_bot_token_refused, :git_credential_bot_token_unverifiable] do
+        %{
+          repo: to_string(repo),
+          secret: entry["secret"],
+          host: entry["host"] || "gitlab.com",
+          reason: reason
+        }
+      end
+    else
+      []
+    end
+  end
+
+  defp refused_issues(name, rows) do
+    for row <- rows do
+      issue(
+        :git_credential_refused,
+        name,
+        "git_credentials.repos.#{row.repo} bot token (#{row.secret}): every dispatch, fix round " <>
+          "and push for this repo is refused, " <> GitCredential.format_error(row.reason)
+      )
+    end
   end
 
   # bd-8h80lm: the configured repos the token cannot reach, named one per repo.

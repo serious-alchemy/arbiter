@@ -986,7 +986,13 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {:ok, %{"issues" => issues, "workspaces" => workspaces}} when is_list(issues) ->
         %Result{
           name: "guardrail profiles",
-          status: :warn,
+          # Issue #1270: a bot token whose dispatch guard would refuse strands every
+          # spawn, fix round and push for its repo: a fail, not a warning.
+          status:
+            if(Enum.any?(issues, &(Map.get(&1, "kind") == "git_credential_refused")),
+              do: :fail,
+              else: :warn
+            ),
           detail:
             Enum.map_join(issues, "; ", fn i ->
               "#{Map.get(i, "workspace")}: #{Map.get(i, "message")}"

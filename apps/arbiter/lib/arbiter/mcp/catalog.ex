@@ -2427,7 +2427,9 @@ defmodule Arbiter.MCP.Catalog do
           "`credentials*` top-level keys (use `arb workspace secret` for secrets), emptying " <>
           "`repo_paths`, and `tracker.type` with no `tracker.config` (`force: true` overrides the " <>
           "last two). Returns `{workspace, config, secret_keys}` after the merge so the caller " <>
-          "can confirm the result.",
+          "can confirm the result. A write naming a `git_credentials.repos.<repo>` `gitlab_bot_token` " <>
+          "entry also runs the dispatch guard and adds `git_credential_checks` + `warnings` " <>
+          "(the write is kept; a refused token strands every dispatch for that repo).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -3719,7 +3721,7 @@ defmodule Arbiter.MCP.Catalog do
           "`quota_poll_failing`, `quota_snapshot_stale` (per Claude account: quota " <>
           "accounting blind, the 5h gate failing open), `overage_alert` (per workspace " <>
           "and provider), `budget_exceeded` (per ticket) and `spend_cap` (per account: " <>
-          "80% of its dollar spend cap, or the cap reached) and `machine_derate` (per machine: it entered a hard thermal derate and takes no new work; clears when it recovers). Each carries `kind`, `key`, `subject`, " <>
+          "80% of its dollar spend cap, or the cap reached) and `machine_derate` (per machine: it entered a hard thermal derate and takes no new work; clears when it recovers) and `git_credential_refused` (per workspace and repo: the repo's git credential fails the dispatch guard, so every dispatch, fix round and push is refused; clears when the guard passes). Each carries `kind`, `key`, `subject`, " <>
           "`detail`, `owner` (always `operator`), `raised_at`, `last_raised_at`, " <>
           "`raise_count` and `cleared_at`. An alert clears by itself when its condition " <>
           "does, so the list is exactly what is still wrong. Optional `workspace`, " <>

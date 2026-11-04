@@ -352,16 +352,29 @@ defmodule Arbiter.Guardrails.ReportGitCredentialTest do
       assert message =~ "14"
     end
 
-    test "an expired token warns that it expired" do
+    # The dispatch guard refuses an expired / expiry-less token, so doctor reports the
+    # refusal (a fail), not an expiry warning.
+    test "an expired token is reported as a refusal" do
       stub_pat(in_days(-2))
-      assert [message] = messages(probe(bot_workspace!()), :git_credential_token_expiring)
+      report = probe(bot_workspace!())
+      assert [message] = messages(report, :git_credential_refused)
       assert message =~ "expired"
+      assert messages(report, :git_credential_token_expiring) == []
     end
 
-    test "a token with no expiry anywhere warns that it is unknown" do
+    test "a token with no expiry anywhere is reported as a refusal" do
       stub_pat(nil)
-      assert [message] = messages(probe(bot_workspace!()), :git_credential_token_expiring)
+      report = probe(bot_workspace!())
+      assert [message] = messages(report, :git_credential_refused)
       assert message =~ "no expiry"
+      assert messages(report, :git_credential_token_expiring) == []
+    end
+
+    test "without a probe a token with no expiry on record still only warns" do
+      report = Report.build([bot_workspace!()], rules: [])
+      assert [message] = messages(report, :git_credential_token_expiring)
+      assert message =~ "no expiry"
+      assert messages(report, :git_credential_refused) == []
     end
 
     test "without a probe the configured expires_at is used and GitLab is not asked" do
@@ -396,6 +409,36 @@ defmodule Arbiter.Guardrails.ReportGitCredentialTest do
       assert message =~ "git_credentials.repos.tonic_device"
       assert message =~ "acme/tonic_device"
       refute message =~ "repos.tonic "
+    end
+
+    test "a 403 from personal_access_tokens/self is a refusal naming the HTTP status, not a missing expiry" do
+      Req.Test.stub(@http, fn conn ->
+        conn |> Plug.Conn.put_status(403) |> Req.Test.json(%{"message" => "403 Forbidden"})
+      end)
+
+      ws = bot_workspace!(%{"remote" => "acme/tonic"})
+      report = probe(ws)
+
+      assert [message] = messages(report, :git_credential_refused)
+      assert message =~ "git_credentials.repos.tonic"
+      assert message =~ "HTTP 403"
+      # the refusal replaces the (misleading) no-expiry warning
+      assert messages(report, :git_credential_token_expiring) == []
+    end
+
+    test "a token the guard would pass raises no refusal" do
+      Req.Test.stub(@http, fn conn ->
+        case conn.request_path do
+          "/api/v4/projects" ->
+            Req.Test.json(conn, [%{"path_with_namespace" => "acme/tonic"}])
+
+          _ ->
+            Req.Test.json(conn, %{"expires_at" => in_days(60), "scopes" => ["read_api"]})
+        end
+      end)
+
+      assert messages(probe(bot_workspace!(%{"remote" => "acme/tonic"})), :git_credential_refused) ==
+               []
     end
 
     test "posture/2 stays free of network calls and of token rows" do

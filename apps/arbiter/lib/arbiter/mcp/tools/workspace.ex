@@ -199,11 +199,70 @@ defmodule Arbiter.MCP.Tools.Workspace do
              action: :patch_config,
              context: guardrail_context(scope)
            ) do
-        {:ok, updated} -> {:ok, serialize_workspace_config(updated)}
-        {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
+        {:ok, updated} ->
+          {:ok,
+           updated |> serialize_workspace_config() |> add_git_credential_checks(updated, patch)}
+
+        {:error, err} ->
+          {:error, {:invalid, Tools.ash_error_message(err)}}
       end
     end
   end
+
+  # Issue #1270: a `git_credentials.repos.<repo>` entry in the patch is run through the
+  # dispatch guard (`GitCredential.verify_bot_token/3`, the same check a spawn and
+  # `arb doctor` run) and its answer rides in the response: `git_credential_checks`
+  # (one row per bot-token repo) and `warnings` (one line per refusal). The write is
+  # kept either way: a GitLab outage must not block a config edit, but a token every
+  # dispatch would refuse is no longer found only when the first ticket is stranded.
+  defp add_git_credential_checks(data, %Workspace{} = ws, patch) do
+    repos =
+      case patch do
+        %{"git_credentials" => %{"repos" => %{} = repos}} -> Map.keys(repos)
+        _ -> []
+      end
+
+    checks =
+      for repo <- Enum.sort(repos),
+          %{"kind" => "gitlab_bot_token"} <- [
+            get_in(ws.config || %{}, ["git_credentials", "repos", repo])
+          ] do
+        git_credential_check(ws, repo)
+      end
+
+    case checks do
+      [] ->
+        data
+
+      checks ->
+        warnings =
+          for %{status: status} = check <- checks, status != "ok" do
+            "git_credentials.repos.#{check.repo}: dispatch guard #{status}: #{check.message}; " <>
+              "every dispatch, fix round and push for this repo is refused until it passes"
+          end
+
+        data |> Map.put(:git_credential_checks, checks) |> Map.put(:warnings, warnings)
+    end
+  end
+
+  defp git_credential_check(ws, repo) do
+    case Arbiter.Worker.GitCredential.verify_bot_token(ws, repo) do
+      :ok ->
+        %{repo: repo, status: "ok", message: "the dispatch guard passes"}
+
+      {:error, reason} ->
+        %{
+          repo: repo,
+          status: git_credential_status(reason),
+          message: Arbiter.Worker.GitCredential.format_error(reason)
+        }
+    end
+  end
+
+  # An unreadable answer is a refusal too: the guard fails closed on it.
+  defp git_credential_status({:git_credential_bot_token_refused, _}), do: "refused"
+  defp git_credential_status({:git_credential_bot_token_unverifiable, _}), do: "refused"
+  defp git_credential_status(_), do: "unavailable"
 
   defp config_set_input(args) do
     keyed? = Map.has_key?(args, "key")

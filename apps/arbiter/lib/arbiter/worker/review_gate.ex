@@ -4181,6 +4181,45 @@ defmodule Arbiter.Worker.ReviewGate do
   # a failure: the run never started. Ask again (placed afresh) up to a bound, under a fresh
   # worker id so the refused run's row is not reused; past the bound, or on any other error, park.
   defp retry_refused_implementer(state, reason, findings, prompt_prefix) do
+    if GitCredential.bot_guard_refusal?(reason),
+      do: hold_for_credential(state, reason, findings, prompt_prefix),
+      else: retry_refused_by_node(state, reason, findings, prompt_prefix)
+  end
+
+  # Issue #1270: the repo's git credential fails the dispatch guard, so the fix round
+  # cannot start. Parking the ticket would strand it until a person resumes it and says
+  # it is a fix round; instead the round is held like one waiting for capacity (no worker,
+  # no seat, no round consumed) and asked again on the retry timer, so it starts by itself
+  # once the credential works. The refusing guard has already raised the repo's alert.
+  defp hold_for_credential(state, reason, findings, prompt_prefix) do
+    message =
+      "the repo's git credential is refused (#{GitCredential.format_error(unwrap_start_error(reason))}); " <>
+        "the fix round starts by itself once it works"
+
+    info = %{message: message, phrase: message}
+    held = arm_hold(state, :review_fix_round, info, {:implementer, findings, prompt_prefix})
+
+    held =
+      if is_nil(state.local_hold),
+        do:
+          record_thread(
+            held,
+            :system,
+            "Round #{state.round} revise is waiting on the git credential",
+            message
+          ),
+        else: held
+
+    {:revise, %{held | phase: :revising, current_id: nil, attempt: state.attempt + 1}}
+  end
+
+  defp unwrap_start_error({tag, inner})
+       when tag in [:worker_session_failed, :claude_start_failed],
+       do: unwrap_start_error(inner)
+
+  defp unwrap_start_error(reason), do: reason
+
+  defp retry_refused_by_node(state, reason, findings, prompt_prefix) do
     case refusal_of(reason) do
       {:ok, refusal} when state.fix_refusal_retries < state.fix_refusal_max_retries ->
         retries = state.fix_refusal_retries + 1
@@ -7661,11 +7700,28 @@ defmodule Arbiter.Worker.ReviewGate do
 
     with :ok <- ensure_revision_unpaused(state, revision),
          {:ok, pid} <- start_worker_process(state, id, role, revision),
-         :ok <- start_worker_session(state, pid, role, prompt, command, revision) do
+         :ok <-
+           start_worker_session(state, pid, role, prompt, command, revision)
+           |> release_refused(pid) do
       _ = Worker.advance(pid, step_for(role))
       {:ok, pid}
     end
   end
+
+  # Issue #1270: the worker is registered `:starting` before its session is built, so a
+  # credential the dispatch guard refuses would leave that run behind with no agent:
+  # holding an account seat and an `in_flight` entry for as long as the credential stays
+  # broken. The run never ran, so it is stopped (not failed: the id is asked again once
+  # the credential works, `hold_for_credential/4`).
+  defp release_refused({:error, reason} = error, pid) do
+    if GitCredential.bot_guard_refusal?(reason) do
+      safe(fn -> Worker.stop(pid, :normal, 5_000) end)
+    end
+
+    error
+  end
+
+  defp release_refused(other, _pid), do: other
 
   # bd-40pzpj: under `most_quota` routing the task's implementer pin decides
   # (with a recorded fallback); otherwise exactly
