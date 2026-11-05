@@ -153,19 +153,49 @@ wt=$root/wt
 bundle=$root/seed.bundle
 mkdir -p "$wt" "$root/home" "$root/claude-config"
 
+# -- download with bounded retry --------------------------------------------------
+# `fetch_controller <route> <dest> <what>` downloads $channel/<route> into <dest>.
+# The controller deliberately breaks the connection when the primary breaks mid-stream
+# (it must not hand over a short bundle that looks whole), so a connection failure or a
+# 5xx is retried up to ARB_SEED_ATTEMPTS times (default 4, ARB_SEED_RETRY_SLEEP_S * n
+# between tries). A 4xx is a definitive refusal (a veto, an unknown run) and is not
+# retried. Only a curl exit of 0 with a 200 is accepted: a truncated body makes curl
+# exit non-zero, so the code is forced to 000 and the partial file is deleted. A retry
+# restarts from byte 0 (`?have=` only trims objects the receiver already holds, and a
+# fresh pod holds none). The worst case is attempts x ARB_SEED_TIMEOUT_S, deliberately
+# outside ARB_BOOT_TIMEOUT_S (that bounds only the /boot nonce wait).
+# >>> fetch_controller
+fetch_controller() {
+  route=$1 dest=$2 what=$3
+  attempts=${ARB_SEED_ATTEMPTS:-4}
+  n=0
+  while :; do
+    n=$((n + 1))
+    rm -f "$dest"
+    code=$(curl -sS --cacert "$ca_file" \
+      --cert "$run_dir/tls/control.crt" --key "$run_dir/tls/control.key" \
+      --max-time "${ARB_SEED_TIMEOUT_S:-1200}" -o "$dest" -w '%{http_code}' \
+      "$channel/$route") || code=000
+    [ "$code" != 200 ] || return 0
+    detail=$(head -c 300 "$dest" 2>/dev/null || true)
+    rm -f "$dest"
+    case $code in
+      4??) die "the $what was refused (status $code) $detail" 75 ;;
+    esac
+    if [ "$n" -ge "$attempts" ]; then
+      die "the $what was not served after $n attempts (last status $code) $detail" 75
+    fi
+    echo "arbiter seed: run ${ARB_RUN:-?}: the $what failed (status $code), retrying ($n/$attempts)" >&2
+    sleep $((n * ${ARB_SEED_RETRY_SLEEP_S:-2}))
+  done
+}
+# <<< fetch_controller
+
 # -- 4. the bundle ------------------------------------------------------------
 format=sha1
 if [ -n "$checkout" ]; then
-  code=$(curl -sS --cacert "$ca_file" \
-    --cert "$run_dir/tls/control.crt" --key "$run_dir/tls/control.key" \
-    --max-time "${ARB_SEED_TIMEOUT_S:-1200}" -o "$bundle" -w '%{http_code}' \
-    "$channel/seed.bundle") || code=000
-  if [ "$code" != 200 ]; then
-    # A refusal (a veto, an unknown run) is a small JSON body.
-    detail=$(head -c 300 "$bundle" 2>/dev/null || true)
-    rm -f "$bundle"
-    die "the seed bundle was not served (status $code) $detail" 75
-  fi
+  # A refusal (a veto, an unknown run) is a small JSON body, shown in the error.
+  fetch_controller seed.bundle "$bundle" "seed bundle"
   if head -c 256 "$bundle" | grep -aq '^@object-format=sha256'; then
     format=sha256
   fi
@@ -274,15 +304,7 @@ if [ -n "$session_path" ]; then
   dest=$root/claude-config/$session_path
   mkdir -p "$(dirname "$dest")"
   if [ ! -e "$dest" ]; then
-    code=$(curl -sS --cacert "$ca_file" \
-      --cert "$run_dir/tls/control.crt" --key "$run_dir/tls/control.key" \
-      --max-time "${ARB_SEED_TIMEOUT_S:-1200}" -o "$dest" -w '%{http_code}' \
-      "$channel/session") || code=000
-    if [ "$code" != 200 ]; then
-      detail=$(head -c 300 "$dest" 2>/dev/null || true)
-      rm -f "$dest"
-      die "the session transcript was not served (status $code) $detail" 75
-    fi
+    fetch_controller session "$dest" "session transcript"
     got=$(sha256sum "$dest" | cut -d' ' -f1)
     if [ "$got" != "$session_sha" ]; then
       rm -f "$dest"

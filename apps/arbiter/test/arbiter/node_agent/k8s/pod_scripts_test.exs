@@ -215,4 +215,81 @@ defmodule Arbiter.NodeAgent.K8s.PodScriptsEventFeedTest do
     assert out == "plain\n"
     refute File.exists?(Path.join(ctx.fake, "calls"))
   end
+
+  describe "seed fetch_controller" do
+    # Runs just the function from the rendered seed script against a stub `curl` that
+    # plays one scripted outcome per call: "<exit>:<code>:<body written to -o>".
+    defp fetch(dir, outcomes) do
+      stub_dir = Path.join(dir, "bin")
+      File.mkdir_p!(stub_dir)
+      File.write!(Path.join(dir, "outcomes"), Enum.join(outcomes, "\n") <> "\n")
+
+      File.write!(Path.join(stub_dir, "curl"), """
+      #!/bin/sh
+      n=$(cat "#{dir}/count" 2>/dev/null || echo 0)
+      n=$((n + 1))
+      echo $n >"#{dir}/count"
+      line=$(sed -n "${n}p" "#{dir}/outcomes")
+      exit_code=${line%%:*}; rest=${line#*:}; code=${rest%%:*}; body=${rest#*:}
+      while [ $# -gt 0 ]; do
+        [ "$1" != -o ] || out=$2
+        shift
+      done
+      printf '%s' "$body" >"$out"
+      printf '%s' "$code"
+      exit "$exit_code"
+      """)
+
+      File.chmod!(Path.join(stub_dir, "curl"), 0o755)
+
+      [_, fun] =
+        Regex.run(
+          ~r/# >>> fetch_controller\n(.*)# <<< fetch_controller/s,
+          PodScripts.bin()["seed"]
+        )
+
+      File.write!(Path.join(dir, "fetch.sh"), """
+      set -eu
+      die() { echo "die: $1" >&2; exit "${2:-1}"; }
+      ca_file=ca run_dir=rd channel=https://x
+      #{fun}
+      fetch_controller seed.bundle "#{dir}/dest" "seed bundle"
+      echo ok
+      """)
+
+      {out, status} =
+        System.cmd("sh", [Path.join(dir, "fetch.sh")],
+          env: [
+            {"PATH", stub_dir <> ":" <> System.get_env("PATH")},
+            {"ARB_SEED_RETRY_SLEEP_S", "0"}
+          ],
+          stderr_to_stdout: true
+        )
+
+      {out, status, String.trim(File.read!(Path.join(dir, "count")))}
+    end
+
+    test "retries a broken stream and accepts the next whole bundle", %{tmp_dir: dir} do
+      assert {out, 0, "3"} = fetch(dir, ["56:200:PARTIAL", "7:000:", "0:200:WHOLE"])
+      assert out =~ "retrying (1/4)"
+      assert File.read!(Path.join(dir, "dest")) == "WHOLE"
+    end
+
+    test "a truncated bundle (200 but curl failed) is never accepted", %{tmp_dir: dir} do
+      outcomes = List.duplicate("18:200:PARTIAL", 4)
+      assert {out, 75, "4"} = fetch(dir, outcomes)
+      assert out =~ "not served after 4 attempts"
+      refute File.exists?(Path.join(dir, "dest"))
+    end
+
+    test "a 4xx refusal is not retried", %{tmp_dir: dir} do
+      assert {out, 75, "1"} = fetch(dir, [~S(0:422:{"error":"veto"})])
+      assert out =~ "refused (status 422)"
+      assert out =~ "veto"
+    end
+
+    test "a 5xx is retried", %{tmp_dir: dir} do
+      assert {_out, 0, "2"} = fetch(dir, ["0:502:{}", "0:200:OK"])
+    end
+  end
 end
