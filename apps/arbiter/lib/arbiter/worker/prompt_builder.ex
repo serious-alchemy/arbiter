@@ -703,7 +703,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
     #{EvidenceIntegrity.worker_block()}#{permissions_section(opts)}
-    #{no_pr_job(task, kind, mcp?)}
+    #{prior_notes_section(task)}#{no_pr_job(task, kind, mcp?)}
 
     #{String.trim_trailing(AcceptanceSplit.planner_block())}
     #{completion_notes_step(task, mcp?)}
@@ -729,6 +729,24 @@ defmodule Arbiter.Worker.PromptBuilder do
     the task complete when it sees that marker.
     """
   end
+
+  # A no-PR run cut off by a preempted pod / lost node is requeued fresh
+  # (`Nodes.LostResume`); the `notes` it had written are still on the ticket.
+  defp prior_notes_section(%Issue{notes: notes}) when is_binary(notes) do
+    if String.trim(notes) == "" do
+      ""
+    else
+      """
+      Notes already on this directive, written by an earlier run (do not discard
+      them; build on them and keep what still holds):
+
+      #{notes}
+
+      """
+    end
+  end
+
+  defp prior_notes_section(_), do: ""
 
   # bd-9s9dqz: the type-specific "Your job" block of a no-PR briefing.
   defp no_pr_job(%Issue{id: id}, :research, true) do
