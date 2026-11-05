@@ -52,7 +52,7 @@ defmodule Arbiter.Nodes.Bridge.StreamTlsTest do
     end
   end
 
-  for versions <-[[:"tlsv1.3", :"tlsv1.2"], [:"tlsv1.2"]] do
+  for versions <- [[:"tlsv1.3", :"tlsv1.2"], [:"tlsv1.2"]] do
     describe "versions #{inspect(versions)}" do
       @describetag versions: versions
 
