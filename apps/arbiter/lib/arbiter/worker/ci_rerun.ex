@@ -16,6 +16,12 @@ defmodule Arbiter.Worker.CIRerun do
   re-test code the target may already have fixed. The result then carries
   `action: :synced` and no `run_id`; CI runs on the synced head.
 
+  `opts[:actor] == :worker` marks a re-run a worker asked for itself (the MCP
+  tier decides it, never an argument). It is booked against the head's shared
+  tally (`Arbiter.Worker.CiRerunBudget`, GitHub #1284) and refused with
+  `{:rerun_cap, count, limit}` once the head has had `merge.ci.max_reruns_per_sha`
+  re-runs; a coordinator's re-run is counted but never refused.
+
   Pure of any caller's authority: callers authorize the task first (MCP scope /
   `ArbiterWeb.ApiPolicy`).
   """
@@ -32,6 +38,7 @@ defmodule Arbiter.Worker.CIRerun do
           | {:no_pr, String.t()}
           | {:no_workspace, String.t()}
           | {:failed, term()}
+          | {:rerun_cap, non_neg_integer(), non_neg_integer()}
 
   @doc """
   Re-run CI for `task_id`. `opts` is the `Watchdog.rerun_ci/2` map (`:mode`,
@@ -44,6 +51,7 @@ defmodule Arbiter.Worker.CIRerun do
       {:error, :not_found} -> rerun_via_workspace(task_id, opts)
       {:error, :unsupported} -> {:error, :unsupported}
       {:error, :busy} -> {:error, :busy}
+      {:error, {:rerun_cap, _, _} = capped} -> {:error, capped}
       {:error, reason} -> {:error, {:failed, reason}}
     end
   end
@@ -59,7 +67,12 @@ defmodule Arbiter.Worker.CIRerun do
         Mergers.prepare_with_repo(workspace, issue.repo)
 
         # bd-5owt7w: a head behind its target is synced, not re-run.
-        case CiSync.rerun(adapter, pr_ref, opts, %{workspace: workspace, repo: issue.repo}) do
+        # No Watchdog, so no known head to tally the re-run against: `:actor` is
+        # only meaningful to the Watchdog's per-SHA cap and is dropped here.
+        case CiSync.rerun(adapter, pr_ref, Map.delete(opts, :actor), %{
+               workspace: workspace,
+               repo: issue.repo
+             }) do
           {:ok, result} -> {:ok, Map.merge(%{task_id: task_id, via: "workspace"}, result)}
           {:error, reason} -> {:error, {:failed, reason}}
         end
@@ -105,6 +118,12 @@ defmodule Arbiter.Worker.CIRerun do
 
   def describe_error({:no_workspace, id}, _task_id),
     do: "task #{id} has no readable workspace to resolve a merger from"
+
+  def describe_error({:rerun_cap, count, limit}, task_id),
+    do:
+      "task #{task_id}'s head has already had #{count} CI re-run(s) (limit #{limit}, " <>
+        "`merge.ci.max_reruns_per_sha`); re-running it again re-tests the same commit. " <>
+        "Fix the failing jobs and push, or ask the coordinator to re-run it"
 
   def describe_error({:failed, reason}, task_id),
     do: "CI re-run failed for #{task_id}: #{inspect(reason)}"

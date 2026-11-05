@@ -885,6 +885,8 @@ defmodule Arbiter.MCP.Tools do
       opts =
         %{mode: mode, inputs: inputs}
         |> maybe_put(:workflow, fetch_string(args, "workflow"))
+        # GitHub #1284: the tier, never an argument, says a worker asked.
+        |> maybe_put(:actor, if(scope.tier == :worker, do: :worker))
 
       case Arbiter.Worker.CIRerun.rerun(task_id, opts) do
         {:ok, result} -> {:ok, result}
@@ -901,6 +903,7 @@ defmodule Arbiter.MCP.Tools do
       :unsupported -> {:error, {:conflict, message}}
       :busy -> {:error, {:busy, message}}
       {:failed, _} -> {:error, {:internal, message}}
+      {:rerun_cap, _, _} -> {:error, {:conflict, message}}
       _no_pr_or_workspace -> {:error, {:invalid, message}}
     end
   end

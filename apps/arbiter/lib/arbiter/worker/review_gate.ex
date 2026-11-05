@@ -243,6 +243,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
+  alias Arbiter.Worker.CiRerunBudget
   alias Arbiter.Worker.CiUnrun
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ConflictAbortFindings
@@ -1932,7 +1933,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # (the wait already backs off between re-runs); a re-run that cannot be made is
   # the same escalation as one that keeps being cancelled.
   defp ci_act(state, wait, :rerun_infra, _result) do
-    case ci_rerun(state) do
+    case ci_rerun(state, wait.sha, :review_gate_cancelled) do
       :ok ->
         Logger.info(
           "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} was cancelled, not failed; " <>
@@ -2121,7 +2122,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp load_ci_failed_sets(task_id), do: ReviewCi.load_failed_sets(task_id)
 
   defp ci_rerun_once(state, wait, checks) do
-    case ci_rerun(state) do
+    case ci_rerun(state, wait.sha, :review_gate, checks) do
       :ok ->
         Logger.info(
           "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red; " <>
@@ -2360,7 +2361,30 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp ci_rerun(%{ci_ctx: ctx} = state) do
+  # GitHub #1284: the same shared per-SHA tally the Watchdog books its re-runs
+  # against (`CiRerunBudget`). A refused re-run comes back as an error, which both
+  # callers already handle: the fix path (briefed with the failing jobs) for a red
+  # head, the CI-infrastructure escalation for a cancelled one.
+  defp ci_rerun(%{ci_ctx: ctx} = state, sha, source, checks \\ []) do
+    limit = CiRerunBudget.limit(ctx.workspace, state.repo)
+
+    case CiRerunBudget.check(state.task_id, sha, limit) do
+      :ok ->
+        with :ok <- do_ci_rerun(state) do
+          CiRerunBudget.record(state.task_id, sha, source)
+          :ok
+        end
+
+      {:capped, info} ->
+        unless CiRerunBudget.noted?(state.task_id, sha),
+          do:
+            CiRerunBudget.note_capped(state.task_id, sha, info, ReviewCi.failed_job_names(checks))
+
+        {:error, "re-run cap reached (#{info.count}/#{info.limit} on this commit)"}
+    end
+  end
+
+  defp do_ci_rerun(%{ci_ctx: ctx} = state) do
     rerun = fn ->
       if Code.ensure_loaded?(ctx.adapter) and function_exported?(ctx.adapter, :rerun_ci, 2),
         do: ctx.adapter.rerun_ci(ctx.pr_ref, %{}),

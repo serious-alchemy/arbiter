@@ -133,6 +133,13 @@ defmodule Arbiter.Worker.Watchdog do
   verdict, gets a fix pass briefed with the triage evidence. Each decision is
   appended to the ticket's notes (`Arbiter.Worker.CiTriageLog`).
 
+  Those per-site bounds do not know about each other, so on one commit they add up.
+  Every automatic re-run is therefore also booked against one persisted per-SHA
+  tally (`Arbiter.Worker.CiRerunBudget`, `merge.ci.max_reruns_per_sha`, default 2,
+  GitHub #1284); at the cap no pipeline is started and the site falls through to
+  what it does for a re-run it could not make (a fix pass, or the cancelled-run
+  escalation). A new head starts the count again.
+
   ## Clearing an indefinite `:ci_failed` park (bd-5mzzww)
 
   A parked `:ci_failed` block used to have exactly one exit: push a code fix.
@@ -322,6 +329,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Tasks.PullRequest
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
+  alias Arbiter.Worker.CiRerunBudget
   alias Arbiter.Worker.CiSync
   alias Arbiter.Worker.CiTriageLog
   alias Arbiter.Worker.CiUnrun
@@ -1443,6 +1451,11 @@ defmodule Arbiter.Worker.Watchdog do
       # head is a fresh worker with a fresh Watchdog.
       authored_push_pending: false,
       last_head_sha: nil,
+      # GitHub #1284: the head the newest poll read, so a manual `ci_rerun` can be
+      # booked on (and a worker's refused at) that head's re-run tally. Separate
+      # from `last_head_sha`, which only the CI-remediation paths set and the
+      # freshness budget keys on.
+      polled_head_sha: nil,
       # bd-ch9pmk / #1614. `local_head_sha` is the branch head this worker
       # holds locally — the commit it pushed to origin immediately before
       # starting this Watchdog, and (on a ReviewGate lane) the commit the
@@ -1917,12 +1930,17 @@ defmodule Arbiter.Worker.Watchdog do
   @impl true
   def handle_call({:rerun_ci, opts}, _from, state) do
     if function_exported?(state.adapter, :rerun_ci, 2) do
+      {actor, opts} = Map.pop(opts, :actor)
+
       # bd-5owt7w: a head behind its target is synced, not re-run.
+      # GitHub #1284: a worker's own re-run is refused at the head's cap; every
+      # re-run that starts a pipeline is booked on the head's tally.
       result =
-        CiSync.rerun(state.adapter, state.mr_ref, opts, %{
-          workspace: state.workspace,
-          repo: state.repo
-        })
+        with :ok <- manual_rerun_allowed(state, actor) do
+          state.adapter
+          |> CiSync.rerun(state.mr_ref, opts, %{workspace: state.workspace, repo: state.repo})
+          |> book_manual_rerun(state, actor)
+        end
 
       Logger.info(
         "Worker.Watchdog: CI re-run requested for task=#{state.task_id} " <>
@@ -2040,6 +2058,7 @@ defmodule Arbiter.Worker.Watchdog do
     case safe_get(state) do
       {:ok, result} when is_map(result) ->
         record_status(state, result)
+        state = %{state | polled_head_sha: Map.get(result, :head_sha) || state.polled_head_sha}
         state = train_tick(state, result)
         {state, result} = probe_waiting(state, result)
         state = track_reviewed_baseline(state, result)
@@ -3370,7 +3389,7 @@ defmodule Arbiter.Worker.Watchdog do
     do: state.poll_count - poll < @cancel_rerun_grace_polls * count
 
   defp rerun_cancelled(state, rerun) do
-    case safe_rerun_ci(state) do
+    case capped_rerun_ci(state, rerun.head, :cancelled) do
       {:ok, _} ->
         Logger.warning(
           "Worker.Watchdog: CI on task=#{state.task_id} mr=#{state.mr_ref} was cancelled, " <>
@@ -3825,7 +3844,7 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp rerun_failed_on_existing_head(state, head) do
-    case safe_rerun_ci(state) do
+    case capped_rerun_ci(state, head, :hold) do
       {:ok, _} ->
         Logger.info(
           "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} CI is red on head #{head} " <>
@@ -4115,7 +4134,7 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp do_rerun_suspected_flake(state, checks, head, files, why) do
-    case safe_rerun_ci(state) do
+    case capped_rerun_ci(state, head, :known_flake, checks) do
       {:ok, _} ->
         ReviewCi.note_failed_set(
           state.task_id,
@@ -4176,7 +4195,7 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp do_rerun_triaged(state, checks, head, triage, spent) do
-    case safe_rerun_ci(state) do
+    case capped_rerun_ci(state, head, :triage, checks) do
       {:ok, _} ->
         ReviewCi.note_failed_set(
           state.task_id,
@@ -4531,6 +4550,59 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp with_full_log(check), do: check
+
+  # GitHub #1284: every automatic re-run of a head is booked against one shared,
+  # persisted per-SHA tally (`CiRerunBudget`, `merge.ci.max_reruns_per_sha`) on top
+  # of the site's own bound. At the cap nothing is started on the forge and the
+  # caller gets an error, which each site already turns into what it does for a
+  # re-run it could not make: a fix pass briefed with the failing jobs, or (for
+  # cancelled runs) the coordinator escalation. One ticket note says why.
+  defp manual_rerun_allowed(%{polled_head_sha: head} = state, :worker) do
+    limit = CiRerunBudget.limit(state.workspace, state.repo)
+
+    case CiRerunBudget.check(state.task_id, head, limit) do
+      :ok ->
+        :ok
+
+      {:capped, info} ->
+        safe(fn -> note_rerun_capped(state, head, info, nil) end)
+        {:error, {:rerun_cap, info.count, info.limit}}
+    end
+  end
+
+  defp manual_rerun_allowed(_state, _actor), do: :ok
+
+  defp book_manual_rerun({:ok, %{action: :synced}} = result, _state, _actor), do: result
+
+  defp book_manual_rerun({:ok, _} = result, state, actor) do
+    CiRerunBudget.record(state.task_id, state.polled_head_sha, actor || :manual)
+    result
+  end
+
+  defp book_manual_rerun(result, _state, _actor), do: result
+
+  defp capped_rerun_ci(state, head, source, checks \\ nil) do
+    limit = CiRerunBudget.limit(state.workspace, state.repo)
+
+    case CiRerunBudget.check(state.task_id, head, limit) do
+      :ok ->
+        with {:ok, _} = ok <- safe_rerun_ci(state) do
+          CiRerunBudget.record(state.task_id, head, source)
+          ok
+        end
+
+      {:capped, info} ->
+        safe(fn -> note_rerun_capped(state, head, info, checks) end)
+        {:error, {:rerun_cap, info.count, info.limit}}
+    end
+  end
+
+  defp note_rerun_capped(state, head, info, checks) do
+    unless CiRerunBudget.noted?(state.task_id, head) do
+      jobs = ReviewCi.failed_job_names(checks || safe_failing_checks(state))
+      CiRerunBudget.note_capped(state.task_id, head, info, jobs)
+    end
+  end
 
   defp safe_rerun_ci(%{adapter: adapter, mr_ref: mr_ref}) do
     if function_exported?(adapter, :rerun_ci, 2),
