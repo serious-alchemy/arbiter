@@ -4936,35 +4936,45 @@ defmodule Arbiter.Worker.Watchdog do
             conflict_branch: Map.get(info, :branch) || state.conflict_branch
         }
 
-      # bd-5ef587: the provider is paused — hold, neither counting an attempt
-      # nor escalating/latching, so auto-resolve resumes once it is lifted.
-      {:error, {held, _provider, phrase}}
-      when held in [:provider_paused, :provider_constraint, :guardrail_ineligible] ->
-        Logger.warning(
-          "Worker.Watchdog: conflict-resolve pass for task=#{state.task_id} " <>
-            "mr=#{state.mr_ref} not dispatched — #{phrase}"
-        )
-
-        state
-
-      # RW8: the primary's own worker cap is 0, or (#1274) the cluster refused the pass for
-      # capacity. Held, not failed: no attempt is spent, the next poll asks again, bounded.
-      {:error, {:no_node_capacity, info}} ->
-        hold_conflict_pass(state, info)
-
       {:error, reason} ->
-        Logger.warning(
-          "Worker.Watchdog: could not dispatch conflict-resolve worker for " <>
-            "task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}; escalating"
-        )
-
-        escalate_conflict_exhausted(
-          %{state | conflict_attempts: max(state.conflict_attempts, 1)},
-          reason
-        )
-
-        %{state | conflict_escalated: true}
+        handle_conflict_dispatch_error(state, reason)
     end
+  end
+
+  # bd-5ef587: the provider is paused — hold, neither counting an attempt
+  # nor escalating/latching, so auto-resolve resumes once it is lifted.
+  defp handle_conflict_dispatch_error(state, {held, _provider, phrase})
+       when held in [:provider_paused, :provider_constraint, :guardrail_ineligible] do
+    Logger.warning(
+      "Worker.Watchdog: conflict-resolve pass for task=#{state.task_id} " <>
+        "mr=#{state.mr_ref} not dispatched — #{phrase}"
+    )
+
+    state
+  end
+
+  # RW8: the primary's own worker cap is 0, or (#1274) the cluster refused the pass for
+  # capacity. Held, not failed: no attempt is spent, the next poll asks again, bounded.
+  defp handle_conflict_dispatch_error(state, {:no_node_capacity, info}),
+    do: hold_conflict_pass(state, info)
+
+  # #1279: the ticket's own worker is still live, so no resolver ran. Not an attempt:
+  # hold and ask again next poll, bounded by the same `max_conflict_holds`.
+  defp handle_conflict_dispatch_error(state, {:task_worker_live, info}),
+    do: hold_conflict_pass(state, {:task_worker_live, info})
+
+  defp handle_conflict_dispatch_error(state, reason) do
+    Logger.warning(
+      "Worker.Watchdog: could not dispatch conflict-resolve worker for " <>
+        "task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}; escalating"
+    )
+
+    escalate_conflict_exhausted(
+      %{state | conflict_attempts: max(state.conflict_attempts, 1)},
+      reason
+    )
+
+    %{state | conflict_escalated: true}
   end
 
   # Conflict cleared (or never present): tear down any lingering resolver worker
@@ -5062,10 +5072,7 @@ defmodule Arbiter.Worker.Watchdog do
     holds = state.conflict_holds + 1
 
     if holds > state.max_conflict_holds do
-      reason =
-        "the conflict pass could not start: #{hold_phrase(info)}, and the cluster still had " <>
-          "no room after #{holds - 1} polls. This is a capacity refusal, not a failed rebase " <>
-          "(no attempt was spent); run the pass again with `arb worker resume` once there is room"
+      reason = hold_page_reason(info, holds - 1)
 
       Logger.warning(
         "Worker.Watchdog: conflict pass for task=#{state.task_id} mr=#{state.mr_ref} held for " <>
@@ -5085,7 +5092,29 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
+  defp hold_page_reason({:task_worker_live, info}, polls) do
+    "the conflict pass could not start: the ticket's own worker is still live " <>
+      "(#{live_worker_phrase(info)}) after #{polls} polls. No resolver ran and no attempt " <>
+      "was spent; once that worker finishes, run the pass again with `arb worker resume`"
+  end
+
+  defp hold_page_reason(info, polls) do
+    "the conflict pass could not start: #{hold_phrase(info)}, and the cluster still had " <>
+      "no room after #{polls} polls. This is a capacity refusal, not a failed rebase " <>
+      "(no attempt was spent); run the pass again with `arb worker resume` once there is room"
+  end
+
+  defp live_worker_phrase(%{} = info) do
+    key = Map.get(info, :registry_key) || Map.get(info, :task_id) || "unknown"
+    "worker #{key}, state #{inspect(Map.get(info, :state))}"
+  end
+
+  defp live_worker_phrase(_), do: "worker state unknown"
+
   # Every `{:no_node_capacity, info}` carries a `phrase`; a hold built without one still logs.
+  defp hold_phrase({:task_worker_live, info}),
+    do: "ticket worker still live (#{live_worker_phrase(info)})"
+
   defp hold_phrase(%{phrase: phrase}) when is_binary(phrase), do: phrase
   defp hold_phrase(%{message: message}) when is_binary(message), do: message
   defp hold_phrase(_info), do: "no node capacity"
