@@ -12,6 +12,8 @@ defmodule Arbiter.NodeAgent.PodChannel.Upstream do
   on the primary (`Arbiter.Nodes.Checkout`), exactly as for a machine node.
   """
 
+  require Logger
+
   alias Arbiter.NodeAgent.Config
 
   @pull_timeout_ms 120_000
@@ -51,18 +53,20 @@ defmodule Arbiter.NodeAgent.PodChannel.Upstream do
       )
 
     Process.delete(:pod_seed_started)
-    seed_result(Req.get(request), conn, run)
+    seed_result(Req.get(request), conn, run, route)
   end
 
-  defp seed_result({:ok, %Req.Response{status: 200} = resp}, conn, _run),
+  defp seed_result({:ok, %Req.Response{status: 200} = resp}, conn, _run, _route),
     do: finish_seed(resp, conn)
 
-  defp seed_result({:ok, %Req.Response{status: status, body: body}}, conn, _run),
+  defp seed_result({:ok, %Req.Response{status: status, body: body}}, conn, _run, _route),
     do: relay(conn, status, body)
 
-  defp seed_result({:error, reason}, conn, run) do
+  defp seed_result({:error, reason}, conn, run, route) do
     if Process.get(:pod_seed_started) do
-      raise "pod channel: seed stream for #{run} broke: #{inspect(reason)}"
+      message = "pod channel: #{route} stream for #{run} broke: #{inspect(reason)}"
+      Logger.error(message)
+      raise message
     else
       relay(conn, 502, ~s({"error":"primary_unreachable"}))
     end

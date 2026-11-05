@@ -201,7 +201,7 @@ defmodule Arbiter.NodeAgent.K8s.PodRuntimeTest do
 
     test "the controller relays the refusal and the seed exits 75 naming it", ctx do
       assert {out, 75} = sh("seed", ctx.env)
-      assert out =~ "the session transcript was not served (status 404)"
+      assert out =~ "the session transcript was refused (status 404)"
       assert_received {:primary, :session, "run-1"}
     end
   end
