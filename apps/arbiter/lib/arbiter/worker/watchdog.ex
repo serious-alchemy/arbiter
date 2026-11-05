@@ -4936,40 +4936,45 @@ defmodule Arbiter.Worker.Watchdog do
             conflict_branch: Map.get(info, :branch) || state.conflict_branch
         }
 
-      # bd-5ef587: the provider is paused — hold, neither counting an attempt
-      # nor escalating/latching, so auto-resolve resumes once it is lifted.
-      {:error, {held, _provider, phrase}}
-      when held in [:provider_paused, :provider_constraint, :guardrail_ineligible] ->
-        Logger.warning(
-          "Worker.Watchdog: conflict-resolve pass for task=#{state.task_id} " <>
-            "mr=#{state.mr_ref} not dispatched — #{phrase}"
-        )
-
-        state
-
-      # RW8: the primary's own worker cap is 0, or (#1274) the cluster refused the pass for
-      # capacity. Held, not failed: no attempt is spent, the next poll asks again, bounded.
-      {:error, {:no_node_capacity, info}} ->
-        hold_conflict_pass(state, info)
-
-      # #1279: the ticket's own worker is still live, so no resolver ran. Not an attempt:
-      # hold and ask again next poll, bounded by the same `max_conflict_holds`.
-      {:error, {:task_worker_live, info}} ->
-        hold_conflict_pass(state, {:task_worker_live, info})
-
       {:error, reason} ->
-        Logger.warning(
-          "Worker.Watchdog: could not dispatch conflict-resolve worker for " <>
-            "task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}; escalating"
-        )
-
-        escalate_conflict_exhausted(
-          %{state | conflict_attempts: max(state.conflict_attempts, 1)},
-          reason
-        )
-
-        %{state | conflict_escalated: true}
+        handle_conflict_dispatch_error(state, reason)
     end
+  end
+
+  # bd-5ef587: the provider is paused — hold, neither counting an attempt
+  # nor escalating/latching, so auto-resolve resumes once it is lifted.
+  defp handle_conflict_dispatch_error(state, {held, _provider, phrase})
+       when held in [:provider_paused, :provider_constraint, :guardrail_ineligible] do
+    Logger.warning(
+      "Worker.Watchdog: conflict-resolve pass for task=#{state.task_id} " <>
+        "mr=#{state.mr_ref} not dispatched — #{phrase}"
+    )
+
+    state
+  end
+
+  # RW8: the primary's own worker cap is 0, or (#1274) the cluster refused the pass for
+  # capacity. Held, not failed: no attempt is spent, the next poll asks again, bounded.
+  defp handle_conflict_dispatch_error(state, {:no_node_capacity, info}),
+    do: hold_conflict_pass(state, info)
+
+  # #1279: the ticket's own worker is still live, so no resolver ran. Not an attempt:
+  # hold and ask again next poll, bounded by the same `max_conflict_holds`.
+  defp handle_conflict_dispatch_error(state, {:task_worker_live, info}),
+    do: hold_conflict_pass(state, {:task_worker_live, info})
+
+  defp handle_conflict_dispatch_error(state, reason) do
+    Logger.warning(
+      "Worker.Watchdog: could not dispatch conflict-resolve worker for " <>
+        "task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}; escalating"
+    )
+
+    escalate_conflict_exhausted(
+      %{state | conflict_attempts: max(state.conflict_attempts, 1)},
+      reason
+    )
+
+    %{state | conflict_escalated: true}
   end
 
   # Conflict cleared (or never present): tear down any lingering resolver worker
