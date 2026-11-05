@@ -3888,7 +3888,10 @@ defmodule Arbiter.MCP.Catalog do
           "workflow_dispatch — the only mode that can carry `inputs` such as force_deploy). " <>
           "A head BEHIND its target branch is synced (merge.sync_strategy) instead of re-run, " <>
           "and the result says `action: synced` (bd-5owt7w). " <>
-          "A worker may re-run its own ticket's CI; a coordinator must name `task_id`.",
+          "A worker may re-run its own ticket's CI; a coordinator must name `task_id`. " <>
+          "A worker's re-run is refused once the head commit has had " <>
+          "`merge.ci.max_reruns_per_sha` re-runs (default 2; automatic and worker re-runs " <>
+          "all count): fix the failing jobs and push instead (GitHub #1284).",
       input_schema: %{
         "type" => "object",
         "properties" => %{

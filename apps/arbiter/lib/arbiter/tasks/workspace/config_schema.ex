@@ -146,6 +146,12 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                             ci.triage_rerun_budget (non-negative integer, default 2; 0 = off) is how
                             many times per head the Watchdog re-runs a CI failure it triages as infra
                             or tests outside the diff before spawning a fix pass (GitHub #1144).
+                            ci.max_reruns_per_sha (non-negative integer, default 2; 0 = no automatic
+                            re-runs) caps ALL automatic CI re-runs of one head SHA across every site
+                            (Watchdog flake/triage/cancelled/hold re-runs, the review gate's, a
+                            worker's own ci_rerun). At the cap no pipeline is started: the head goes
+                            to a fix pass naming the failing jobs (cancelled runs: a coordinator
+                            escalation), with one ticket note. A new commit starts again (GitHub #1284).
       require_up_to_date    bool — (bd-5z9yvb) before merging an approved PR, if its head lacks
                             the target tip, Arbiter syncs the branch once (update-branch), waits
                             for CI green on the synced head, then merges. Forge-independent: it

@@ -71,7 +71,7 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.ReviewGate, :ci_act, 4,
      "bd-8o35da: `{:error, :ci_in_progress}` from the CI re-run means the head's latest " <>
        "run/pipeline is unfinished; the gate keeps waiting (no verdict, no fix round, no escalation)"},
-    {Arbiter.Worker.ReviewGate, :ci_rerun, 1,
+    {Arbiter.Worker.ReviewGate, :do_ci_rerun, 1,
      "bd-8o35da: passes the adapter's `{:error, :ci_in_progress}` through as a wait signal — " <>
        "nothing is refused"},
     {Arbiter.Worker.ReviewGate, :ci_infra, 2,
@@ -340,8 +340,8 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     test "every guard in the design doc's §2 inventory has exactly one row" do
       doc_ids = inventory_ids()
 
-      assert length(doc_ids) == 69,
-             "expected §2's 69 inventory rows, parsed #{length(doc_ids)} — has the doc's " <>
+      assert length(doc_ids) == 70,
+             "expected §2's 70 inventory rows, parsed #{length(doc_ids)} — has the doc's " <>
                "table shape changed?"
 
       missing = doc_ids -- GuardRegistry.doc_refs()

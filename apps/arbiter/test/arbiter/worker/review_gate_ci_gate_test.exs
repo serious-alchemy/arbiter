@@ -342,6 +342,56 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       stop_gate(gate)
     end
 
+    # GitHub #1284: the Watchdog's re-runs and the gate's draw on one per-SHA tally.
+    test "a head the cap says has been re-run enough goes straight to the fix path", ctx do
+      ws =
+        new_ws(%{
+          "review" => %{"required" => true, "require_ci_green" => true},
+          "merge" => %{"ci" => %{"max_reruns_per_sha" => 1}}
+        })
+
+      ctx = %{ctx | ws: ws}
+      rig = rig(ctx, "feature/ci-rerun-cap")
+      {:ok, 1} = Arbiter.Worker.CiRerunBudget.record(rig.task.id, rig.head, :known_flake)
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed, :success])
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"]
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      refute remote_head(ctx, rig) == rig.head
+      assert StubMerger.ci_reruns() == []
+      notes = Ash.get!(Issue, rig.task.id).notes || ""
+      assert notes =~ "re-run cap reached on head #{rig.head}"
+      assert notes =~ "unit tests"
+      stop_gate(gate)
+    end
+
+    test "the gate's one re-run is booked on the SHA tally", ctx do
+      rig = rig(ctx, "feature/ci-rerun-book")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed, :running, :success])
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert [_] = StubMerger.ci_reruns()
+      assert Arbiter.Worker.CiRerunBudget.count(rig.task.id, rig.head) == 1
+    end
+
     test "a head that already failed the same job set is not re-run by the next gate", ctx do
       rig = rig(ctx, "feature/ci-dedupe")
 
