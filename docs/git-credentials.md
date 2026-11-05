@@ -14,7 +14,7 @@ Arbiter cannot create these for you. For each repo workers push to, pick one:
 | `deploy_key` | An SSH keypair (`ssh-keygen -t ed25519 -N '' -f key`), added as a **deploy key with write access** on that one repo (GitHub: Settings → Deploy keys → Allow write access; GitLab: Repository settings → Deploy keys → Grant write permissions). One key per repo: both forges refuse to reuse a key across repos. | The **private** key as a workspace secret |
 | `github_app` | A GitHub App with *Repository permissions*: Contents **read & write**, Pull requests **read & write**, Issues **read & write**, Metadata read (nothing under *Account* permissions, no *Administration*). Install it on the repos only (not "all repositories"). Note the App id, the installation id (the number in the installation's URL) and generate a private key (`.pem`). | The `.pem` as a workspace secret, plus the two ids |
 | `gitlab_project_token` | A **parent** GitLab personal access token (scope `api`) of a Maintainer or Owner of the one project, ideally a dedicated service-account user. Arbiter mints the token a worker holds from it, per run (see "GitLab" below). | The parent token as a workspace secret |
-| `gitlab_bot_token` | **GitLab Free tier** (project access tokens need Premium). A dedicated **bot user**, Developer on the target projects and nothing else, and a personal access token for it (`read_api` + `read_repository` + `write_repository`, with an expiry). Weaker than `gitlab_project_token`: see "GitLab Free tier" below. | The bot's PAT as a workspace secret |
+| `gitlab_bot_token` | **GitLab Free tier** (project access tokens need Premium). A dedicated **bot user** (identity-verified on GitLab.com: pipelines run as the pushing user, see below), Developer on the target projects and nothing else, and a personal access token for it (`read_api` + `read_repository` + `write_repository`, with an expiry). Weaker than `gitlab_project_token`: see "GitLab Free tier" below. | The bot's PAT as a workspace secret |
 | `token` | A **fine-grained** GitHub personal access token limited to the one repo (Contents + Pull requests + Issues read/write), or a GitLab **project** access token (role Developer, scopes `api`/`write_repository`). A **classic** GitHub PAT is refused: it reaches every repo its owner does. | The token as a workspace secret |
 
 A GitHub App is the most useful kind on GitHub: Arbiter mints a fresh installation token
@@ -258,6 +258,38 @@ refusal, never a delivery):
 Each refusal says why (`the GitLab bot token was refused: it carries scope(s) api; only
 read_api, read_repository, write_repository are allowed ...`) and no worker runs on the
 operator's credential instead.
+
+### The bot user must pass identity verification (bd-7eve8a)
+
+**On GitLab.com a pipeline runs as the user who pushed.** A `gitlab_bot_token` bot
+user is that user for every branch Arbiter pushes, so GitLab judges the *bot* when it
+decides whether to run CI. A GitLab.com account that has not passed
+[identity verification](https://docs.gitlab.com/security/identity_verification/) (email, and
+for riskier accounts a phone number or a credit card) is refused CI: every pipeline its
+pushes trigger is **created `failed` with zero jobs**. GraphQL carries the reason
+(`failureReason`: "The pipeline failed due to the user not being verified.";
+`errorMessages`: "Identity verification is required in order to run CI jobs"); the REST
+pipeline shows only `status: failed`, `started_at: null`, `yaml_errors: null` and an empty
+jobs list. So **verify the bot account on GitLab.com (sign in as it and complete the
+prompts) before enabling `gitlab_bot_token`**, and check that a pipeline from one of its
+pushes actually runs jobs.
+
+**Arbiter cannot see this in advance.** The dispatch guard and `arb server doctor`
+check scopes, expiry and membership, and no GitLab API call exposes a user's identity
+verification state to the token (`GET /user` returns `confirmed_at` and
+`two_factor_enabled`, not a verification status; the Users API documents no such field,
+and GitLab's identity-verification page documents no API for it), so Arbiter adds no
+heuristic for it. It is found after the fact, from the first pipeline:
+
+* A failed pipeline with **no jobs** is not a code failure. The Watchdog and the
+  ReviewGate dispatch **no fix pass**, spend no attempt, and record **no flake**; they
+  raise an attention item (a `merge_blocked` escalation to the coordinator) with GitLab's
+  `failureReason` / `errorMessages`, the user the pipeline ran as, and the
+  `git_credentials.repos.<repo>` credential in use, so you can roll the credential back
+  to one whose user is verified.
+* The ReviewGate then lets the reviewer run the tests ("CI did not gate this review"), as
+  it does for a cancelled run.
+* A `ci_rerun` or a new push that produces a pipeline *with* jobs resumes the normal path.
 
 ### Fine-grained personal access tokens (bd-8h80lm)
 

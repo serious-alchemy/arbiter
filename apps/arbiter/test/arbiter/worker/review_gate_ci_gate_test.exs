@@ -248,6 +248,42 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] != "request_changes"
     end
 
+    # bd-7eve8a: GitLab failed the head's pipeline at creation with no jobs (the
+    # pushing user is not identity-verified). Not a code failure: no re-run, no
+    # fix round, and when the head later reads green it is NOT a flake.
+    test "a zero-job failed pipeline is no flake and no fix round, and it raises attention",
+         ctx do
+      rig = rig(ctx, "feature/ci-unrun")
+
+      StubMerger.set_unrun_pipeline(@pr, %{
+        pipeline_id: 99,
+        user: "seriousalchemy",
+        failure_reason: "The pipeline failed due to the user not being verified.",
+        error_messages: "Identity verification is required in order to run CI jobs",
+        verification?: true
+      })
+
+      # red (zero jobs), then a later pipeline on the same head goes green.
+      forge = start_forge(ctx, rig, [:failed])
+
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn ->
+        Enum.any?(gate_messages(ctx, rig), &(&1.body =~ "user not being verified"))
+      end)
+
+      set_pipeline(forge, [:success])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert StubMerger.ci_reruns() == []
+
+      assert FlakeEvent |> Ash.read!() |> Enum.filter(&(&1.task_id == rig.task.id)) == []
+
+      # No fix round: the implementer fixture would have committed.
+      assert remote_head(ctx, rig) == rig.head
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] != "request_changes"
+    end
+
     # bd-8o35da (emr-7f0ljf): a red earlier pipeline, then the head's newest
     # pipeline is still running. The re-run is refused as :ci_in_progress; that is
     # "wait for CI", never a real failure — no fix round, no park.

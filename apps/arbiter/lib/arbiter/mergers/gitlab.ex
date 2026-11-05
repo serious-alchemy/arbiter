@@ -485,6 +485,14 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   @impl true
+  def unrun_pipeline(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      fetch_unrun_pipeline(cfg, iid)
+    end
+  end
+
+  @impl true
   def ci_job_artifacts(mr_ref, job_name, _opts) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref),
@@ -1775,6 +1783,103 @@ defmodule Arbiter.Mergers.Gitlab do
   # queued/transient — safer to keep deferring on an unknown status than to
   # risk attempting a merge GitLab isn't ready for.
   defp map_pipeline_status(_), do: :pending
+
+  # ---- A failed pipeline that never ran a job -------------------------------
+  #
+  # GitLab fails a pipeline at creation when it refuses to run it: the pushing
+  # user is not identity-verified, a quota is spent, the YAML does not parse. The
+  # pipeline is `failed` with no jobs at all, so there is no check to brief a fix
+  # pass with and no code change can clear it. The REST pipeline carries none of
+  # the reason (`started_at: null`, `yaml_errors: null`); only GraphQL's
+  # `failureReason` / `errorMessages` do, so they are read from there, best
+  # effort — a GraphQL failure still reports the unrun pipeline, without a reason.
+  defp fetch_unrun_pipeline(cfg, iid) do
+    with {:ok, pipelines} <- mr_pipelines(cfg, iid),
+         %{"id" => id, "status" => "failed"} = pipeline <- newest_head_pipeline(pipelines),
+         {:ok, []} <- pipeline_jobs(cfg, id) do
+      {:ok, unrun_info(cfg, pipeline)}
+    else
+      {:error, _} = err -> err
+      _ -> {:ok, nil}
+    end
+  end
+
+  # The newest pipeline on the MR's current head (the newest pipeline's sha).
+  defp newest_head_pipeline([%{} = latest | _] = pipelines) do
+    head = Map.get(latest, "sha")
+    Enum.find(pipelines, &(Map.get(&1, "sha") in [nil, head]))
+  end
+
+  defp newest_head_pipeline(_), do: nil
+
+  defp unrun_info(cfg, pipeline) do
+    id = Map.get(pipeline, "id")
+    rest = rest_pipeline(cfg, id)
+    gql = graphql_pipeline(cfg, Map.get(pipeline, "iid"))
+    reason = gql["failureReason"]
+    messages = error_messages_text(gql["errorMessages"])
+
+    %{
+      pipeline_id: id,
+      sha: Map.get(pipeline, "sha"),
+      user: get_in(rest, ["user", "username"]) || get_in(gql, ["user", "username"]),
+      failure_reason: reason,
+      error_messages: messages,
+      yaml_errors: rest["yaml_errors"],
+      verification?: verification_text?(reason) or verification_text?(messages)
+    }
+  end
+
+  defp verification_text?(text) when is_binary(text), do: text =~ ~r/verif/i
+  defp verification_text?(_), do: false
+
+  defp rest_pipeline(cfg, id) do
+    case request(cfg, :get, "/pipelines/#{id}", []) |> handle_json() do
+      {:ok, %{} = body} -> body
+      _ -> %{}
+    end
+  end
+
+  @pipeline_reason_query """
+  query($path: ID!, $iid: ID!) {
+    project(fullPath: $path) {
+      pipeline(iid: $iid) {
+        failureReason
+        errorMessages { nodes { content } }
+        user { username }
+      }
+    }
+  }
+  """
+
+  defp graphql_pipeline(cfg, iid) when not is_nil(iid) do
+    with {:ok, path} <- resolve_project_path(cfg),
+         {:ok, %{"data" => %{"project" => %{"pipeline" => %{} = pipeline}}}} <-
+           cfg
+           |> build_client("https://#{cfg.host}/api")
+           |> Client.request(:post, "/graphql",
+             json: %{
+               "query" => @pipeline_reason_query,
+               "variables" => %{"path" => path, "iid" => to_string(iid)}
+             }
+           )
+           |> handle_json() do
+      pipeline
+    else
+      _ -> %{}
+    end
+  end
+
+  defp graphql_pipeline(_cfg, _iid), do: %{}
+
+  defp error_messages_text(%{"nodes" => nodes}) when is_list(nodes),
+    do: nodes |> Enum.map(& &1["content"]) |> Enum.filter(&is_binary/1) |> blank_to_nil()
+
+  defp error_messages_text(text) when is_binary(text), do: blank_to_nil([text])
+  defp error_messages_text(_), do: nil
+
+  defp blank_to_nil([]), do: nil
+  defp blank_to_nil(parts), do: Enum.join(parts, "; ")
 
   # Fetch the latest failed pipeline for the MR, collect its failing jobs, and
   # return a normalized `failing_check` list for the fix-pass briefing. Returns
