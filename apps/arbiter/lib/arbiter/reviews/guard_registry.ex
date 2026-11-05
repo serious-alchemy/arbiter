@@ -28,7 +28,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
 
     * `:id` — the registry's own name for the guard.
     * `:doc_ref` — the §2 inventory id (`"G1"`, `"W7"`, `"M3"`, …). Every one of
-      §2's 60 rows appears here exactly once.
+      §2's 70 rows appears here exactly once.
     * `:class` — `:a`–`:f`, per §5.3. `:class_source` is `:doc` when §5.3 names
       the guard explicitly and `:inferred` when it does not; every `:inferred`
       row carries a `:class_note` giving the reasoning.
@@ -1055,6 +1055,32 @@ defmodule Arbiter.Reviews.GuardRegistry do
       summary:
         "an `unknown` coverage answer waits, bounded, then parks and pages once — with the " <>
           "`auto_merge` poll ceiling lifted so the park cannot decay into a re-review"
+    },
+    %{
+      id: :ci_rerun_sha_cap,
+      doc_ref: "W24",
+      class: :e,
+      class_source: :inferred,
+      class_note:
+        "GitHub #1284. Not in §5.3's table. W22, the triage re-runs, the cancelled-run " <>
+          "re-runs, the hold re-run and the ReviewGate's CI-wait re-run are each bounded " <>
+          "alone and add up on one commit; this is the one shared per-SHA bound over them. " <>
+          "Class E's shape: a refused re-run fails open to what each site already does for a " <>
+          "re-run it could not make (a fix pass briefed with the failing jobs, or the " <>
+          "cancelled-run escalation), once per head with one ticket note.",
+      bound: {:attempts, {:config, :max_reruns_per_sha}},
+      episode: {:task, :mr_ref, :head_sha},
+      terminal: :escalated_once,
+      sites: [
+        {Watchdog, :capped_rerun_ci, 4},
+        {Watchdog, :manual_rerun_allowed, 2},
+        {ReviewGate, :ci_rerun, 4}
+      ],
+      anchors: ["max_reruns_per_sha", "CiRerunBudget"],
+      summary:
+        "automatic CI re-runs (and a worker's own ci_rerun) of one head SHA are capped across " <>
+          "every site by a persisted per-SHA tally; at the cap no pipeline is started and the " <>
+          "head goes to a fix pass naming the failing jobs, or the cancelled-run escalation"
     },
     %{
       id: :queue_baseline_precedence,
