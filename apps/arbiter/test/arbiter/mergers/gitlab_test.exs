@@ -1800,6 +1800,105 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
   end
 
+  describe "unrun_pipeline/1 (a failed pipeline with no jobs)" do
+    @unrun_pipelines_path "/api/v4/projects/12345/merge_requests/42/pipelines"
+    @unrun_pipeline_path "/api/v4/projects/12345/pipelines/99"
+    @unrun_jobs_path "/api/v4/projects/12345/pipelines/99/jobs"
+    @unrun_project_path "/api/v4/projects/12345"
+
+    defp unrun_stub(opts) do
+      jobs = Keyword.get(opts, :jobs, [])
+      status = Keyword.get(opts, :status, "failed")
+      graphql = Keyword.get(opts, :graphql)
+      test_pid = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", @unrun_pipelines_path} ->
+            Req.Test.json(conn, [
+              %{"id" => 99, "iid" => 7, "sha" => "abc123", "status" => status}
+            ])
+
+          {"GET", @unrun_jobs_path} ->
+            Req.Test.json(conn, jobs)
+
+          {"GET", @unrun_pipeline_path} ->
+            Req.Test.json(conn, %{
+              "id" => 99,
+              "status" => status,
+              "started_at" => nil,
+              "yaml_errors" => nil,
+              "user" => %{"username" => "seriousalchemy"}
+            })
+
+          {"GET", @unrun_project_path} ->
+            Req.Test.json(conn, %{"path_with_namespace" => "grp/proj"})
+
+          {"POST", "/api/graphql"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:graphql, Jason.decode!(body)})
+
+            case graphql do
+              nil -> conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+              data -> Req.Test.json(conn, data)
+            end
+        end
+      end)
+    end
+
+    @unverified_graphql %{
+      "data" => %{
+        "project" => %{
+          "pipeline" => %{
+            "failureReason" => "The pipeline failed due to the user not being verified.",
+            "errorMessages" => %{
+              "nodes" => [
+                %{"content" => "Identity verification is required in order to run CI jobs"}
+              ]
+            },
+            "user" => %{"username" => "seriousalchemy"}
+          }
+        }
+      }
+    }
+
+    test "names GitLab's failureReason, errorMessages and the pushing user" do
+      unrun_stub(graphql: @unverified_graphql)
+
+      assert {:ok, info} = Gitlab.unrun_pipeline(@ref)
+      assert info.pipeline_id == 99
+      assert info.sha == "abc123"
+      assert info.user == "seriousalchemy"
+      assert info.failure_reason == "The pipeline failed due to the user not being verified."
+      assert info.error_messages =~ "Identity verification is required"
+      assert info.verification? == true
+
+      assert_received {:graphql, %{"variables" => %{"path" => "grp/proj", "iid" => "7"}}}
+    end
+
+    test "still reports the zero-job pipeline when the GraphQL read fails" do
+      unrun_stub([])
+
+      assert {:ok, info} = Gitlab.unrun_pipeline(@ref)
+      assert info.pipeline_id == 99
+      assert info.user == "seriousalchemy"
+      assert info.failure_reason == nil
+      assert info.verification? == false
+    end
+
+    test "a failed pipeline with real failed jobs is not an unrun pipeline" do
+      unrun_stub(jobs: [%{"id" => 55, "name" => "rspec", "status" => "failed"}])
+
+      assert {:ok, nil} = Gitlab.unrun_pipeline(@ref)
+    end
+
+    test "a pipeline that is not failed is not an unrun pipeline" do
+      unrun_stub(status: "success")
+
+      assert {:ok, nil} = Gitlab.unrun_pipeline(@ref)
+    end
+  end
+
   describe "failing_check_logs/1" do
     @pipelines_path "/api/v4/projects/12345/merge_requests/42/pipelines"
     @pipeline_id 99

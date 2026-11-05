@@ -274,6 +274,22 @@ defmodule Arbiter.Test.StubMerger do
     {:ok, checks}
   end
 
+  @doc """
+  Set the `unrun_pipeline/1` answer for `ref`: a map for "the head's pipeline
+  failed with no jobs" (what the forge refused it for), absent for the usual `nil`.
+  """
+  def set_unrun_pipeline(ref, info) when is_map(info) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [Access.key(:unrun_pipelines, %{}), ref], info) end)
+    :ok
+  end
+
+  @impl true
+  def unrun_pipeline(ref) do
+    ensure_started()
+    {:ok, Agent.get(@name, fn s -> s |> Map.get(:unrun_pipelines, %{}) |> Map.get(ref) end)}
+  end
+
   # ---- CI-skip / trigger (bd-4y9dno) ---------------------------------------
 
   @doc "The mechanism `ci_skip_mechanism/1` reports (default `nil`: the stub does not skip CI)."

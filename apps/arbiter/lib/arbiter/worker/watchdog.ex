@@ -323,6 +323,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.CiSync
+  alias Arbiter.Worker.CiUnrun
   alias Arbiter.Worker.CiTriageLog
   alias Arbiter.Worker.MergeFreshness
   alias Arbiter.Worker.MergeProbe
@@ -1621,6 +1622,8 @@ defmodule Arbiter.Worker.Watchdog do
       # re-ran, the untouched tests that failed, the poll it ran on, and
       # whether the head has read pending since. One per head.
       flake_rerun: nil,
+      # bd-7eve8a: `{head, pipeline_id}` of the zero-job pipeline already escalated.
+      unrun_noted: nil,
       # The deterministic triage's re-runs on one head (#1144): `%{head, count,
       # poll, seen_pending}`; `ci_triage_budget` caps `count` per head.
       ci_triage_rerun: nil,
@@ -3625,19 +3628,53 @@ defmodule Arbiter.Worker.Watchdog do
     else
       head = Map.get(result, :head_sha)
 
-      # bd-5owt7w: nothing below (visual refresh, flake re-run, fix pass) is
-      # worth an attempt while the target is red or the head lacks the target.
-      case ci_remediation_gate(state, result, head) do
-        {:halt, reply} ->
-          reply
-
-        {:go, state} ->
-          case visual_step(state, result, head) do
-            {:refreshed, state} -> reschedule(%{state | last_block_reason: :ci_failed})
-            {:wait, state} -> reschedule(%{state | last_block_reason: :ci_failed})
-            {:skip, state} -> resolve_ci_failed_by_fix(state, head)
-          end
+      # bd-7eve8a: a pipeline the forge refused to run (failed, zero jobs) is no
+      # code failure; nothing below (sync, re-run, fix pass) can clear it.
+      case unrun_pipeline_step(state, head) do
+        {:unrun, state} -> reschedule(%{state | last_block_reason: :ci_failed})
+        :ran -> resolve_ci_failed_ran(result, state, head)
       end
+    end
+  end
+
+  defp resolve_ci_failed_ran(result, state, head) do
+    # bd-5owt7w: nothing below (visual refresh, flake re-run, fix pass) is
+    # worth an attempt while the target is red or the head lacks the target.
+    case ci_remediation_gate(state, result, head) do
+      {:halt, reply} ->
+        reply
+
+      {:go, state} ->
+        case visual_step(state, result, head) do
+          {:refreshed, state} -> reschedule(%{state | last_block_reason: :ci_failed})
+          {:wait, state} -> reschedule(%{state | last_block_reason: :ci_failed})
+          {:skip, state} -> resolve_ci_failed_by_fix(state, head)
+        end
+    end
+  end
+
+  # bd-7eve8a: asked once per poll of a red head, before any remediation is spent.
+  # The attention item is raised once per head (`unrun_noted`); later polls on the
+  # same head only wait, so the lane resumes by itself when a pipeline with jobs
+  # appears (a `ci_rerun` or a push by a user GitLab will run CI for).
+  defp unrun_pipeline_step(state, head) do
+    case CiUnrun.read(state.adapter, state.mr_ref) do
+      nil ->
+        :ran
+
+      info ->
+        state =
+          if state.unrun_noted == {head, Map.get(info, :pipeline_id)} do
+            state
+          else
+            safe(fn ->
+              CiUnrun.escalate(snapshot(state), state.mr_ref, info, state.workspace, state.repo)
+            end)
+
+            %{state | unrun_noted: {head, Map.get(info, :pipeline_id)}}
+          end
+
+        {:unrun, state}
     end
   end
 

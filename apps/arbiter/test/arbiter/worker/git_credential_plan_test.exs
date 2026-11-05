@@ -11,6 +11,28 @@ defmodule Arbiter.Worker.GitCredentialPlanTest do
 
   @key_entry %{"kind" => "deploy_key", "key_secret" => "TONIC_DEPLOY_KEY"}
 
+  describe "describe_credential/2" do
+    test "names the repo's entry, its kind and its secret" do
+      workspace =
+        ws(%{"repos" => %{"vstim" => %{"kind" => "gitlab_bot_token", "secret" => "GITLAB_BOT"}}})
+
+      assert GitCredential.describe_credential(workspace, "vstim") ==
+               "git_credentials.repos.vstim (gitlab_bot_token, secret GITLAB_BOT)"
+    end
+
+    test "an entry with no secret names just the kind" do
+      workspace = ws(%{"repos" => %{"vstim" => @key_entry}})
+
+      assert GitCredential.describe_credential(workspace, "vstim") ==
+               "git_credentials.repos.vstim (deploy_key)"
+    end
+
+    test "nil when the repo has no entry or there is no workspace" do
+      assert GitCredential.describe_credential(ws(%{"repos" => %{}}), "vstim") == nil
+      assert GitCredential.describe_credential(nil, "vstim") == nil
+    end
+  end
+
   describe "plan/3" do
     test "an install with no guardrails and no git_credentials block is unenforced (legacy behaviour)" do
       assert {:ok, %GitCredential{mode: :unenforced}} =

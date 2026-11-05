@@ -415,6 +415,75 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
     end
   end
 
+  describe "ci_pipeline_not_run/4 (a failed pipeline that ran no job)" do
+    @unverified %{
+      pipeline_id: 99,
+      sha: "abc123",
+      user: "seriousalchemy",
+      failure_reason: "The pipeline failed due to the user not being verified.",
+      error_messages: "Identity verification is required in order to run CI jobs",
+      verification?: true
+    }
+
+    test "carries GitLab's reason, the pushing user and the credential for a verification refusal" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.ci_pipeline_not_run(
+                 %{task_id: task_id, workspace_id: ws},
+                 "!42",
+                 @unverified,
+                 credential: "git_credentials.repos.vstim (gitlab_bot_token, secret GITLAB_BOT)"
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.subject =~ task_id
+      assert escalation.subject =~ "CI did not run"
+      body = escalation.body
+      assert body =~ "The pipeline failed due to the user not being verified."
+      assert body =~ "Identity verification is required in order to run CI jobs"
+      assert body =~ "seriousalchemy"
+      assert body =~ "gitlab_bot_token"
+      assert body =~ "not identity-verified"
+      assert body =~ "no fix pass"
+    end
+
+    test "without a verification reason it still names GitLab's words and omits the verification advice" do
+      ws = uniq("ws")
+
+      info = %{
+        pipeline_id: 5,
+        failure_reason: "config_error",
+        error_messages: nil,
+        user: nil,
+        verification?: false
+      }
+
+      assert :ok =
+               CoordinatorNotifier.ci_pipeline_not_run(
+                 %{task_id: uniq("bd"), workspace_id: ws},
+                 "!1",
+                 info
+               )
+
+      assert [%{body: body}] = Message.inbox("admiral", workspace_id: ws)
+      assert body =~ "config_error"
+      refute body =~ "identity-verified"
+    end
+
+    test "a repeat for the same task escalates once while the first is outstanding" do
+      ws = uniq("ws")
+      snapshot = %{task_id: uniq("bd"), workspace_id: ws}
+
+      for _ <- 1..3 do
+        assert :ok = CoordinatorNotifier.ci_pipeline_not_run(snapshot, "!42", @unverified)
+      end
+
+      assert [_only_one] = Message.inbox("admiral", workspace_id: ws)
+    end
+  end
+
   describe "merge_blocked/3 dedupe + backoff (bd-brwx7w)" do
     defp merge_escalations(ws), do: Message.inbox("admiral", workspace_id: ws)
 

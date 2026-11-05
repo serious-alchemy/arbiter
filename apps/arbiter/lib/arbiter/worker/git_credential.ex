@@ -159,6 +159,33 @@ defmodule Arbiter.Worker.GitCredential do
   def configured?(workspace), do: block(workspace) != %{}
 
   @doc """
+  One line naming the credential a repo's pushes go out under — its
+  `git_credentials.repos.<repo>` entry, kind and secret name — for a message
+  that has to tell the coordinator what to roll back. `nil` when there is none.
+  """
+  @spec describe_credential(map() | nil, String.t() | nil) :: String.t() | nil
+  def describe_credential(workspace, repo) when is_binary(repo) do
+    case workspace |> block() |> Map.get("repos", %{}) |> map_or_empty() |> Map.get(repo) do
+      %{"kind" => kind} = entry when is_binary(kind) ->
+        detail =
+          case entry["secret"] do
+            secret when is_binary(secret) and secret != "" -> "#{kind}, secret #{secret}"
+            _ -> kind
+          end
+
+        "git_credentials.repos.#{repo} (#{detail})"
+
+      _ ->
+        nil
+    end
+  end
+
+  def describe_credential(_workspace, _repo), do: nil
+
+  defp map_or_empty(%{} = map), do: map
+  defp map_or_empty(_), do: %{}
+
+  @doc """
   Whether a scoped credential is *required* for a spawn: always, except under the
   `:git_credential_unenforced` test/development knob, where only a guarded install
   or a workspace with a `git_credentials` block requires one.

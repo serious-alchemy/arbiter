@@ -326,6 +326,35 @@ defmodule Arbiter.Mergers.Merger do
   @callback failing_check_logs(mr_ref) :: {:ok, [failing_check()]} | {:error, term()}
 
   @typedoc """
+  A failed pipeline that never ran a job, as `unrun_pipeline/1` reports it:
+  the forge refused to run it (the pushing user is unverified, a quota, a bad
+  config), so there is no failing check and no code change can clear it.
+
+    * `:pipeline_id` / `:sha` — the pipeline and the head it ran on.
+    * `:user` — the user the pipeline ran as (the pusher), when known.
+    * `:failure_reason` / `:error_messages` — the forge's own words for why
+      (GitLab GraphQL `failureReason` / `errorMessages`); nil when unreadable.
+    * `:verification?` — the forge's reason is about verifying the user.
+  """
+  @type unrun_pipeline :: %{
+          required(:pipeline_id) => term(),
+          optional(:sha) => String.t() | nil,
+          optional(:user) => String.t() | nil,
+          optional(:failure_reason) => String.t() | nil,
+          optional(:error_messages) => String.t() | nil,
+          optional(:verification?) => boolean()
+        }
+
+  @doc """
+  Whether the PR's newest pipeline on its current head is `failed` with **no
+  jobs** at all. `{:ok, unrun_pipeline()}` when it is; `{:ok, nil}` for anything
+  else (green, pending, or failed with real failed jobs). Callers treat a hit as
+  not a code failure: no fix pass, no flake record, and an attention item with
+  the forge's reason. Optional; an adapter without it never reports one.
+  """
+  @callback unrun_pipeline(mr_ref) :: {:ok, unrun_pipeline() | nil} | {:error, term()}
+
+  @typedoc """
   What `ci_job_artifacts/3` reads off the MR's latest pipeline (bd-9obzu9):
   its `:sha`, every `:failed_jobs` name (allowed failures excluded), and the
   named job's artifacts `:archive` (a zip, raw bytes).
@@ -782,6 +811,7 @@ defmodule Arbiter.Mergers.Merger do
                       update_branch: 2,
                       ancestor?: 3,
                       failing_check_logs: 1,
+                      unrun_pipeline: 1,
                       rerun_ci: 2,
                       ci_skip_mechanism: 1,
                       trigger_pipeline: 2,

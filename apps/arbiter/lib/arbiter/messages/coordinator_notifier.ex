@@ -981,6 +981,67 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   @doc """
+  Raise the attention item for a pipeline the forge refused to run (a GitLab
+  pipeline `failed` with zero jobs): it is not a code failure, so no fix pass was
+  dispatched and nothing is recorded as a flake. `info` is the adapter's
+  `unrun_pipeline/1` map — the forge's own `:failure_reason` / `:error_messages`,
+  the `:user` the pipeline ran as, and `:verification?` when the reason is about
+  verifying that user. `opts[:credential]` names the credential the pushes go
+  out under, so the coordinator knows what to roll back.
+
+  Raised as a `:merge_blocked` escalation, deduped like `merge_blocked/4`: one per
+  outstanding episode. Best-effort, returns `:ok`.
+  """
+  @spec ci_pipeline_not_run(map(), String.t() | nil, map(), keyword()) :: :ok
+  def ci_pipeline_not_run(snapshot, mr_ref, info, opts \\ []) when is_map(info) do
+    escalate_event(:merge_blocked, snapshot, fn task_id ->
+      if duplicate_block_escalation?(snapshot.workspace_id, task_id, :ci_not_run) do
+        :skip
+      else
+        {block_subject(task_id, :ci_not_run), ci_not_run_body(task_id, mr_ref, info, opts)}
+      end
+    end)
+  end
+
+  defp ci_not_run_body(task_id, mr_ref, info, opts) do
+    credential = Keyword.get(opts, :credential)
+    user = Map.get(info, :user)
+
+    [
+      "#{title_for(task_id)}: the forge refused to run CI. The head's pipeline " <>
+        "#{Map.get(info, :pipeline_id)} failed with no jobs, so no check failed and no fix pass " <>
+        "was dispatched (a fix pass could not change this).",
+      mr_ref && "PR/MR: #{mr_ref}",
+      info[:sha] && "Head: #{info[:sha]}",
+      "Forge reason: #{info[:failure_reason] || "(not readable — GitLab's GraphQL did not answer)"}",
+      info[:error_messages] && "Forge messages: #{info[:error_messages]}",
+      user && "Pipeline ran as: #{user} (GitLab runs a pipeline as the user who pushed)",
+      credential && "Credential in use: #{credential}",
+      ci_not_run_advice(info, user, credential),
+      "This escalation is raised once per episode — it will not repeat while it is " <>
+        "outstanding in the inbox. The Watchdog keeps polling; a push or `ci_rerun` that " <>
+        "produces a pipeline with jobs resumes the normal path."
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp ci_not_run_advice(%{verification?: true}, user, credential) do
+    "Remediation: #{user || "the pushing user"} is not identity-verified on GitLab, which " <>
+      "GitLab.com requires before it runs CI jobs. Verify that user on GitLab" <>
+      if(credential,
+        do: ", or roll back #{credential} so pushes go out as a verified user",
+        else: ""
+      ) <>
+      ", then `ci_rerun` (or push) to get a pipeline."
+  end
+
+  defp ci_not_run_advice(_info, _user, _credential) do
+    "Remediation: read the forge reason above — it is about the pipeline or the pushing user, " <>
+      "not this diff. Fix that, then `ci_rerun` (or push) to get a pipeline."
+  end
+
+  @doc """
   Raise a quota-overage spend crossing as a system alert (bd-7cd38f,
   bd-7gt8rm).
 
@@ -2225,6 +2286,9 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp block_label(:conflict), do: "merge conflict with the base branch"
   defp block_label(:behind_base), do: "branch is behind the base branch"
   defp block_label(:ci_failed), do: "CI checks are failing"
+
+  defp block_label(:ci_not_run),
+    do: "CI did not run: the forge refused to run the pipeline (no jobs)"
 
   defp block_label(:ci_cancelled),
     do: "CI infrastructure: checks were cancelled, not failed"
