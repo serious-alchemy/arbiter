@@ -190,7 +190,11 @@ defmodule Arbiter.Nodes.Bridge.Stream do
   defp send_bytes(%{transport: :ssl, sock: sock}, bytes), do: :ssl.send(sock, bytes)
 
   defp half_close(%{transport: :tcp, sock: sock}), do: :gen_tcp.shutdown(sock, :write)
-  defp half_close(%{transport: :ssl, sock: sock}), do: :ssl.shutdown(sock, :write)
+  # `:ssl.shutdown(sock, :write)` is only a TCP FIN: no TLS `close_notify`, so the
+  # peer's socat raises a fatal alert and an orderly close became `bridge.reset`.
+  # `:read_write` sends the `close_notify` first. Reading stops with it, which is
+  # what already happened once the peer's child exited after our FIN.
+  defp half_close(%{transport: :ssl, sock: sock}), do: :ssl.shutdown(sock, :read_write)
 
   defp notify(%{owner: owner, id: id}, event), do: send(owner, {:bridge_stream, id, event})
 

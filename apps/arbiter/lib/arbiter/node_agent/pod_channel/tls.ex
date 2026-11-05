@@ -39,9 +39,9 @@ defmodule Arbiter.NodeAgent.PodChannel.Tls do
           do: [:"tlsv1.2"],
           else: [:"tlsv1.3", :"tlsv1.2"]
         ),
-      # TLS 1.3 NewSessionTicket records after the handshake coincide with
-      # socat's decode_error alert on :9443; tickets are never resumed here
-      # (`reuse_sessions: false`), so do not send them.
+      # Tickets are never resumed here (`reuse_sessions: false`), so do not send
+      # them. (socat's `decode_error` alert on :9443 was not caused by tickets:
+      # it was a half-close with no TLS `close_notify`; see `Bridge.Stream`.)
       session_tickets: :disabled,
       reuse_sessions: false,
       honor_cipher_order: true
