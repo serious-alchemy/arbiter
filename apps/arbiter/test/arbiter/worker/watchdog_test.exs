@@ -1589,6 +1589,92 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert :sys.get_state(wpid).conflict_escalated
     end
 
+    defp live_worker_refusal(task_id) do
+      {:error,
+       {:task_worker_live,
+        %{
+          task_id: task_id,
+          registry_key: task_id,
+          requested_key: task_id,
+          pid: self(),
+          state: :working
+        }}}
+    end
+
+    test "a task_worker_live refusal holds the pass: no attempt, no page (#1279)" do
+      task_id = new_task_id()
+      StubConflictResolver.arm(task_id, self(), result: live_worker_refusal(task_id))
+      StubMerger.queue_get("!clive1", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      wpid =
+        start_watchdog(task_id, "!clive1",
+          workspace: test_workspace(),
+          auto_merge: false,
+          conflict_resolver: StubConflictResolver,
+          max_conflict_attempts: 1,
+          interval_ms: 15
+        )
+
+      for _ <- 1..3, do: assert_receive({:resolve_called, %{task_id: ^task_id}}, 1_000)
+      refute_receive {:escalate_called, ^task_id, _, _, _}, 100
+
+      state = :sys.get_state(wpid)
+      refute state.conflict_escalated
+      assert state.conflict_attempts == 0
+      assert state.conflict_holds >= 3
+    end
+
+    test "once the live worker finishes the resolver is dispatched without operator action (#1279)" do
+      task_id = new_task_id()
+      StubConflictResolver.arm(task_id, self(), result: live_worker_refusal(task_id))
+      StubMerger.queue_get("!clive2", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      wpid =
+        start_watchdog(task_id, "!clive2",
+          workspace: test_workspace(),
+          auto_merge: false,
+          conflict_resolver: StubConflictResolver,
+          max_conflict_attempts: 2,
+          interval_ms: 15
+        )
+
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+
+      StubConflictResolver.arm(task_id, self(), pid: :running)
+      assert_receive {:resolver_spawned, _worker}, 1_000
+
+      state = :sys.get_state(wpid)
+      assert state.conflict_attempts == 1
+      assert state.conflict_holds == 0
+      refute state.conflict_escalated
+    end
+
+    test "a worker live past the bound ends in one page naming the live worker (#1279)" do
+      task_id = new_task_id()
+      StubConflictResolver.arm(task_id, self(), result: live_worker_refusal(task_id))
+      StubMerger.queue_get("!clive3", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      wpid =
+        start_watchdog(task_id, "!clive3",
+          workspace: test_workspace(),
+          auto_merge: false,
+          conflict_resolver: StubConflictResolver,
+          max_conflict_holds: 2,
+          interval_ms: 15
+        )
+
+      assert_receive {:escalate_called, ^task_id, _ws, _branch, reason}, 2_000
+      assert reason =~ "still live"
+      assert reason =~ "working"
+      refute reason =~ "exhausted"
+
+      flush_resolve_calls(task_id)
+      refute_receive {:escalate_called, ^task_id, _, _, _}, 150
+      assert :sys.get_state(wpid).conflict_escalated
+      assert :sys.get_state(wpid).conflict_attempts == 0
+    end
+
     defp flush_resolve_calls(task_id) do
       receive do
         {:resolve_called, %{task_id: ^task_id}} -> flush_resolve_calls(task_id)
