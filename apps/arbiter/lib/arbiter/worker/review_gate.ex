@@ -243,6 +243,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
+  alias Arbiter.Worker.CiUnrun
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ConflictAbortFindings
   alias Arbiter.Worker.ContainerSpawn
@@ -1877,9 +1878,18 @@ defmodule Arbiter.Worker.ReviewGate do
   # nothing is approved yet, so the new head is still reviewed once CI is green.
   # Anything else falls through to the red-CI handling unchanged.
   defp ci_act(state, wait, action, result) when action in [:rerun, :fix] and is_map(result) do
-    case ci_visual_step(state, wait, result) do
-      {:refreshed, state, wait} -> {:wait, ci_schedule(state, wait)}
-      :skip -> ci_act_red(state, wait, action, result)
+    # bd-7eve8a: a head the forge refused to run (failed, zero jobs) is no code
+    # failure — checked before a visual refresh, a re-run or a fix round is spent
+    # on it, and before a later green could be taken for a flake.
+    case ci_unrun_step(state) do
+      {:unrun, info} ->
+        ci_unrun(state, wait, info)
+
+      :ran ->
+        case ci_visual_step(state, wait, result) do
+          {:refreshed, state, wait} -> {:wait, ci_schedule(state, wait)}
+          :skip -> ci_act_red(state, wait, action, result)
+        end
     end
   end
 
@@ -2009,6 +2019,39 @@ defmodule Arbiter.Worker.ReviewGate do
     else
       ci_fix(state, wait, checks, not is_nil(wait.rerun))
     end
+  end
+
+  defp ci_unrun_step(%{ci_ctx: ctx} = state) do
+    read = fn -> CiUnrun.read(ctx.adapter, ctx.pr_ref) end
+
+    case ReviewCi.call(ctx.workspace, state.repo, read) do
+      {:ok, %{} = info} -> {:unrun, info}
+      _ -> :ran
+    end
+  end
+
+  # The forge would not run the head's CI, so CI cannot vouch for it either way.
+  # An attention item carries the forge's reason; the wait ends without a re-run,
+  # a fix round or a flake record, and the reviewer runs the tests (the same
+  # exit as an infrastructure failure).
+  defp ci_unrun(state, wait, info) do
+    ci_log_leave(state, wait, "the forge refused to run the pipeline (no jobs)")
+
+    safe(fn ->
+      CiUnrun.escalate(
+        %{task_id: state.task_id, workspace_id: state.workspace_id},
+        state.ci_ctx.pr_ref,
+        info,
+        state.ci_ctx.workspace,
+        state.repo
+      )
+    end)
+
+    reason =
+      "the forge refused to run the head's pipeline (it failed with no jobs): " <>
+        "#{Map.get(info, :failure_reason) || "reason not readable"}."
+
+    {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
   end
 
   defp ci_visual_step(state, wait, result) do

@@ -323,8 +323,8 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.CiSync
-  alias Arbiter.Worker.CiUnrun
   alias Arbiter.Worker.CiTriageLog
+  alias Arbiter.Worker.CiUnrun
   alias Arbiter.Worker.MergeFreshness
   alias Arbiter.Worker.MergeProbe
   alias Arbiter.Worker.MergeTrain
