@@ -107,7 +107,7 @@ defmodule Arbiter.Worker.WatchdogCiRerunCapTest do
     wait_until(fn -> StubMerger.get_count("!rc1") >= 6 end)
 
     assert length(reruns("!rc1")) == 1
-    assert CiRerunBudget.count(t.id, "h1") == 1
+    wait_until(fn -> CiRerunBudget.count(t.id, "h1") == 1 end)
     assert StubFixPassDispatcher.call_count() >= 1
 
     args = StubFixPassDispatcher.last_args()
@@ -130,8 +130,9 @@ defmodule Arbiter.Worker.WatchdogCiRerunCapTest do
 
     wait_until(fn -> length(reruns("!rc2")) == 1 end)
 
+    wait_until(fn -> CiRerunBudget.count(t.id, "h1") == 1 end)
+    wait_until(fn -> StubMerger.get_count("!rc2") >= 3 end)
     assert StubFixPassDispatcher.call_count() == 0
-    assert CiRerunBudget.count(t.id, "h1") == 1
     refute notes(t) =~ "re-run cap reached"
   end
 
@@ -157,7 +158,7 @@ defmodule Arbiter.Worker.WatchdogCiRerunCapTest do
     wait_until(fn -> StubFixPassDispatcher.call_count() >= 2 end)
 
     assert length(reruns("!rc3")) == 2
-    assert CiRerunBudget.count(t.id, "h2") == 1
+    wait_until(fn -> CiRerunBudget.count(t.id, "h2") == 1 end)
     assert CiRerunBudget.count(t.id, "h1") == 0
   end
 
