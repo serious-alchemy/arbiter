@@ -323,7 +323,13 @@ defmodule Arbiter.NodeAgent.PodChannel.PodServerTest do
     test "a primary that breaks off mid-bundle is not passed off as a whole bundle", ctx do
       %{files: files} = Kit.boot!(ctx.runs, Kit.spec!("broken-run"), @loopback)
 
-      assert {:error, _} = request_result(ctx, :get, "/seed.bundle", files, "control", [])
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, _} = request_result(ctx, :get, "/seed.bundle", files, "control", [])
+          Process.sleep(200)
+        end)
+
+      assert log =~ "pod channel: seed.bundle stream for broken-run broke:"
     end
 
     test "relays the primary's refusal (a veto) rather than a bundle", ctx do
