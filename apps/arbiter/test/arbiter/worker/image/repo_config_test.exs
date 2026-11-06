@@ -18,7 +18,8 @@ defmodule Arbiter.Worker.Image.RepoConfigTest do
     pull_credentials_ref: nil,
     pull_credentials_level: nil,
     public_ok: false,
-    seed: :primary
+    seed: :primary,
+    seed_env: %{}
   }
 
   describe "resolve/2" do
@@ -26,6 +27,22 @@ defmodule Arbiter.Worker.Image.RepoConfigTest do
       for workspace <- [nil, %{config: %{}}, %{config: nil}, ws(%{})] do
         assert RepoConfig.resolve(workspace, "vstim") == @defaults
       end
+    end
+
+    test "image.seed_env keeps string pairs and drops the rest" do
+      workspace =
+        ws(%{
+          "repos" => %{
+            "vstim" => %{
+              "image" => %{"seed_env" => %{"DATABASE_URL" => "ecto://x", "N" => 5, "bad" => [1]}}
+            }
+          }
+        })
+
+      assert RepoConfig.resolve(workspace, "vstim").seed_env == %{
+               "DATABASE_URL" => "ecto://x",
+               "N" => "5"
+             }
     end
 
     test "a per-repo block is read, with the atoms the pipeline matches on" do
@@ -52,7 +69,8 @@ defmodule Arbiter.Worker.Image.RepoConfigTest do
                pull_credentials_ref: nil,
                pull_credentials_level: nil,
                public_ok: false,
-               seed: :image
+               seed: :image,
+               seed_env: %{}
              }
 
       assert RepoConfig.resolve(workspace, "other") == @defaults

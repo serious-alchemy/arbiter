@@ -611,6 +611,12 @@ defmodule Arbiter.Tasks.Workspace.ConfigSchema do
                                          (CI seeded /opt/arbiter/seed and labelled the
                                          image arbiter.seed-lock=<sha256 of mix.lock>;
                                          a stale lock falls back to primary) or "none"
+                        seed_env         map of non-secret KEY: value strings added to the
+                                         deps seed job's environment (bd-175f0r). The seed
+                                         job runs with the host env scrubbed; the image's
+                                         own declared ENV keys are carried automatically,
+                                         so use this for keys config/runtime.exs needs
+                                         that the image does not declare. Never put secrets here.
                       Images always go to <registry>/<repo>/worker, one repository per
                       repo; there is no shared <registry>/worker.
                       Registry resolves repo -> workspace -> the install-wide
