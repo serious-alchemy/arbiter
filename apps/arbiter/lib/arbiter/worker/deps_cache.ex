@@ -76,6 +76,7 @@ defmodule Arbiter.Worker.DepsCache do
   @mix_home "mix_home"
   @seed_timeout_ms 30 * 60_000
   @git_timeout_ms 60_000
+  @reserved_env ~w(PATH LANG MIX_ENV HEX_HOME MIX_HOME HOME)
 
   # Hex and rebar are installed per run into the scratch HOME; the image carries
   # only Elixir. Both envs, because workers compile in `test` and some in `dev`.
@@ -238,13 +239,15 @@ defmodule Arbiter.Worker.DepsCache do
         name: name,
         network: :pasta,
         unset_env: true,
-        env: [
-          {"PATH", Keyword.get(opts, :seed_path, @seed_path)},
-          {"LANG", "C.UTF-8"},
-          {"MIX_ENV", "test"},
-          {"HEX_HOME", Path.join(home, ".hex")},
-          {"MIX_HOME", Path.join(home, ".mix")}
-        ],
+        env:
+          extra_env(key.image_tag, opts) ++
+            [
+              {"PATH", Keyword.get(opts, :seed_path, @seed_path)},
+              {"LANG", "C.UTF-8"},
+              {"MIX_ENV", "test"},
+              {"HEX_HOME", Path.join(home, ".hex")},
+              {"MIX_HOME", Path.join(home, ".mix")}
+            ],
         timeout: Keyword.get(opts, :timeout, @seed_timeout_ms)
       )
 
@@ -252,6 +255,40 @@ defmodule Arbiter.Worker.DepsCache do
       {:ok, {_out, 0}} -> :ok
       {:ok, {out, status}} -> {:error, {:seed_failed, status, tail(out)}}
       {:error, reason} -> {:error, {:seed_failed, reason}}
+    end
+  end
+
+  # The seed job's `--unsetenv-all` drops the image's own `ENV`; put the image's declared
+  # keys back (a repo's `config/runtime.exs` may need e.g. `DATABASE_URL` to load) and add
+  # the repo's configured non-secret `image.seed_env`. Host env is never carried. The
+  # allowlist above wins over both: it is listed last and `podman -e` takes the last value.
+  defp extra_env(image_tag, opts) do
+    configured =
+      opts
+      |> Keyword.get(:seed_env, %{})
+      |> Enum.map(fn {k, v} -> {to_string(k), to_string(v)} end)
+
+    (image_env(image_tag, opts) ++ configured)
+    |> Enum.reject(fn {k, _} -> k in @reserved_env end)
+    |> Enum.uniq_by(&elem(&1, 0))
+  end
+
+  defp image_env(image_tag, opts) do
+    podman = Keyword.get(opts, :podman) || "podman"
+    args = ["image", "inspect", "--format", "{{json .Config.Env}}", image_tag]
+
+    with {out, 0} <-
+           Container.cmd(Keyword.take(opts, [:runner]), podman, args,
+             timeout: @git_timeout_ms,
+             stderr_to_stdout: false
+           ),
+         {:ok, list} when is_list(list) <- Jason.decode(String.trim(out)) do
+      for entry <- list,
+          is_binary(entry),
+          [k, v] <- [String.split(entry, "=", parts: 2)],
+          do: {k, v}
+    else
+      _ -> []
     end
   end
 
