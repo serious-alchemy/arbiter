@@ -66,7 +66,7 @@ defmodule ArbiterCli.Cmd.SecretInventory do
     end)
   end
 
-  @doc "The reference scheme of a pointer (`\"aws-sm\"` …), or `\"invalid\"` when unrecognised."
+  @doc "The reference scheme of a pointer (aws-sm, aws-ssm, file), or invalid when unrecognised."
   @spec scheme(String.t()) :: String.t()
   def scheme(ref) do
     Enum.find(@schemes, "invalid", &String.starts_with?(ref, &1 <> ":"))

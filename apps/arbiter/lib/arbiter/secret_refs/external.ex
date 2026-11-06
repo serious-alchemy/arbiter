@@ -55,7 +55,7 @@ defmodule Arbiter.SecretRefs.External do
   @spec external?(term()) :: boolean()
   def external?(ref), do: parse(ref) != :error
 
-  @doc "The scheme name of an external ref (`\"aws-sm\"`, `\"aws-ssm\"`, `\"file\"`), or nil."
+  @doc "The scheme name of an external ref (aws-sm, aws-ssm or file), or nil."
   @spec scheme_name(term()) :: String.t() | nil
   def scheme_name(ref) when is_binary(ref) do
     Enum.find_value(@schemes, fn {prefix, _} ->
