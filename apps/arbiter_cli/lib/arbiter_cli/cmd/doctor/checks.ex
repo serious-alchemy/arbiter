@@ -1780,13 +1780,16 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
 
-      {:ok, %{"repos" => repos}} when is_list(repos) ->
-        %Result{
-          name: "merge routing",
-          status: :ok,
-          detail: routing_summary(repos),
-          blocks_readiness: false
-        }
+      {:ok, %{"repos" => repos} = body} when is_list(repos) ->
+        gitlab_budget_result(
+          %Result{
+            name: "merge routing",
+            status: :ok,
+            detail: routing_summary(repos),
+            blocks_readiness: false
+          },
+          Map.get(body, "gitlab_budget")
+        )
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("merge routing", err)
@@ -1795,6 +1798,22 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         unknown_result("merge routing", other)
     end
   end
+
+  # bd-dpimvl: the GitLab per-user rate limit is shared with the operator's
+  # `glab`; surface the last 429 (and remaining budget when GitLab sends
+  # RateLimit-* headers) on the merge-routing line. Informational: a warn.
+  defp gitlab_budget_result(result, %{"severity" => "warn", "detail" => detail}) do
+    %{
+      result
+      | status: :warn,
+        detail: result.detail <> "; GitLab: " <> detail,
+        hint:
+          "Arbiter and `glab` share one GitLab per-user rate limit; Arbiter backs off " <>
+            "after a 429, but consider a dedicated bot token for polling."
+    }
+  end
+
+  defp gitlab_budget_result(result, _budget), do: result
 
   defp routing_summary([]), do: "no workspace repos to route"
 

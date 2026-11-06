@@ -102,6 +102,7 @@ defmodule ArbiterWeb.Api.ServerController do
   alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Agents.Gemini.ModelCheck
   alias Arbiter.Guardrails
+  alias Arbiter.Mergers.Gitlab.Budget, as: GitlabBudget
   alias Arbiter.Mergers.RoutingCheck
   alias Arbiter.Worker.CliFetcher.Status, as: CliStatus
   alias Arbiter.Worker.Egress.SelfTest
@@ -245,7 +246,12 @@ defmodule ArbiterWeb.Api.ServerController do
 
   def merge_routing(conn, _params) do
     repos = Enum.map(RoutingCheck.report(), &routing_entry/1)
-    json(conn, %{repos: repos, problems: Enum.filter(repos, & &1.problem)})
+
+    json(conn, %{
+      repos: repos,
+      problems: Enum.filter(repos, & &1.problem),
+      gitlab_budget: GitlabBudget.doctor_check()
+    })
   end
 
   defp routing_entry(entry) do

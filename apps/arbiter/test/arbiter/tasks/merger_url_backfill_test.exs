@@ -9,9 +9,7 @@ defmodule Arbiter.Tasks.MergerUrlBackfillTest do
     System.put_env(@env_var, "tok")
     on_exit(fn -> System.delete_env(@env_var) end)
 
-    for {:gitlab_project_path, _, _} = key <- Enum.map(:persistent_term.get(), &elem(&1, 0)) do
-      :persistent_term.erase(key)
-    end
+    Arbiter.Mergers.Gitlab.Budget.reset()
 
     :ok
   end

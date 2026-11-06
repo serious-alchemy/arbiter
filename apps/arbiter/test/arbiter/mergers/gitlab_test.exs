@@ -21,9 +21,7 @@ defmodule Arbiter.Mergers.GitlabTest do
       "default_reviewers" => [7]
     })
 
-    for {:gitlab_project_path, _, _} = key <- Enum.map(:persistent_term.get(), &elem(&1, 0)) do
-      :persistent_term.erase(key)
-    end
+    Arbiter.Mergers.Gitlab.Budget.reset()
 
     on_exit(fn ->
       Config.clear()
@@ -1436,11 +1434,18 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert log =~ "12345"
     end
 
-    test "does not cache a failed lookup" do
+    test "caches a failed lookup for a short TTL instead of re-requesting it" do
       stub(fn conn -> Plug.Conn.send_resp(conn, 500, "boom") end)
       ExUnit.CaptureLog.capture_log(fn -> assert Gitlab.link_for(@ref) == "" end)
 
+      # Within the TTL a recovered API is not consulted again, and nothing is
+      # logged a second time.
       stub(fn conn -> Req.Test.json(conn, %{"path_with_namespace" => "g/p"}) end)
+
+      log = ExUnit.CaptureLog.capture_log(fn -> assert Gitlab.link_for(@ref) == "" end)
+      refute log =~ "path_with_namespace"
+
+      Arbiter.Mergers.Gitlab.Budget.reset()
       assert Gitlab.link_for(@ref) == "https://gitlab.com/g/p/-/merge_requests/42"
     end
 
