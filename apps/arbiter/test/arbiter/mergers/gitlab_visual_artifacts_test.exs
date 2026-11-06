@@ -18,9 +18,7 @@ defmodule Arbiter.Mergers.GitlabVisualArtifactsTest do
       "default_target_branch" => "main"
     })
 
-    for {:gitlab_project_path, _, _} = key <- Enum.map(:persistent_term.get(), &elem(&1, 0)) do
-      :persistent_term.erase(key)
-    end
+    Arbiter.Mergers.Gitlab.Budget.reset()
 
     on_exit(fn ->
       Config.clear()
