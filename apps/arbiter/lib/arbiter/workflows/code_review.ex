@@ -341,6 +341,17 @@ defmodule Arbiter.Workflows.CodeReview do
     # than trusting local bookkeeping, which can be stale or bypassed (e.g. a
     # forced re-dispatch that never updated the engagement record).
     cond do
+      # #1291: our earlier approval still counts under the base branch's rules
+      # (ReviewPatrol set `approval_stands`), so another APPROVE is a redundant
+      # stacked approval. Only a blocking verdict is posted.
+      redundant_approval?(verdict, state) ->
+        Logger.info(
+          "CodeReview: earlier approval still stands — not posting another approval " <>
+            "for mr_ref=#{mr_ref}"
+        )
+
+        {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, false)}
+
       same_sha_already_verdicted?(adapter, mr_ref, pr_head_sha(state)) ->
         Logger.info(
           "CodeReview: skipping duplicate verdict — adapter's latest own review already " <>
@@ -388,6 +399,9 @@ defmodule Arbiter.Workflows.CodeReview do
   end
 
   def run_step(:verdict, _state), do: {:error, {:bad_state, "verdict: unknown mode"}}
+
+  defp redundant_approval?(:approve, state), do: Map.get(state, :approval_stands) == true
+  defp redundant_approval?(_verdict, _state), do: false
 
   # ---- scope resolution / consumer trace ---------------------------------
 

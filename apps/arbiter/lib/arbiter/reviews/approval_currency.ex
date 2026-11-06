@@ -61,6 +61,21 @@ defmodule Arbiter.Reviews.ApprovalCurrency do
     end
   end
 
+  @doc """
+  Whether we hold an approval the base branch no longer counts because of a
+  later push: our latest verdict is APPROVED, yet the forge's decision is
+  `REVIEW_REQUIRED` (e.g. `require_last_push_approval: true`) and the approval
+  is not at the head. `false` when unknown.
+  """
+  @spec stale_after_push?(module(), String.t()) :: boolean()
+  def stale_after_push?(adapter, mr_ref) do
+    Code.ensure_loaded(adapter)
+
+    self_approved?(adapter, mr_ref) and not approved_at_head?(adapter, mr_ref) and
+      function_exported?(adapter, :review_decision, 1) and
+      match?({:ok, "REVIEW_REQUIRED"}, safe(fn -> adapter.review_decision(mr_ref) end))
+  end
+
   defp self_approved?(adapter, mr_ref) do
     Code.ensure_loaded(adapter)
 
