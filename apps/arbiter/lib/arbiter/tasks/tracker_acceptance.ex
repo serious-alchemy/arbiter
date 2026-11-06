@@ -34,7 +34,7 @@ defmodule Arbiter.Tasks.TrackerAcceptance do
 
   @spec derive(module(), map()) :: {:acceptance, String.t()} | {:waived, String.t()}
   def derive(adapter, issue_map) do
-    description = adapter.extract_description(issue_map)
+    description = scrub(adapter.extract_description(issue_map))
 
     case checklist(adapter, issue_map, description) do
       [_ | _] = items ->
@@ -47,6 +47,14 @@ defmodule Arbiter.Tasks.TrackerAcceptance do
         end
     end
   end
+
+  # `u`-flagged regexes raise ArgumentError on invalid UTF-8; replace bad
+  # bytes with U+FFFD so derivation is total.
+  defp scrub(text) when is_binary(text) do
+    if String.valid?(text), do: text, else: String.replace_invalid(text)
+  end
+
+  defp scrub(other), do: other
 
   defp checklist(adapter, issue_map, description) do
     native =
