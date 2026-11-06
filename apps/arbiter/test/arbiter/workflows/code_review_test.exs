@@ -1327,6 +1327,43 @@ defmodule Arbiter.Workflows.CodeReviewTest do
     end
   end
 
+  describe "run_step(:verdict, ...) — approval_stands (#1291)" do
+    setup do
+      Process.register(self(), :verdict_test_pid)
+      :ok
+    end
+
+    test "an :approve verdict is not posted when our earlier approval still stands" do
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.VerdictSpy,
+        mr_ref: "#1",
+        findings: [],
+        approval_stands: true
+      }
+
+      assert {:ok, %{verdict: :approve, verdict_posted: false}} =
+               CodeReview.run_step(:verdict, state)
+
+      refute_received {:submitted, _, _, _}
+    end
+
+    test "a :request_changes verdict is still posted when our earlier approval stands" do
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.VerdictSpy,
+        mr_ref: "#1",
+        findings: [%{severity: :error, file: "a.ex", line: 1, message: "boom"}],
+        approval_stands: true
+      }
+
+      assert {:ok, %{verdict: :request_changes, verdict_posted: true}} =
+               CodeReview.run_step(:verdict, state)
+
+      assert_received {:submitted, "#1", :request_changes, _body}
+    end
+  end
+
   # bd-3948ey: one verdict per SHA — before posting, the :verdict step checks
   # the adapter's own latest verdict review against the PR's current head. If
   # they match, we've already verdicted this exact commit (regardless of
