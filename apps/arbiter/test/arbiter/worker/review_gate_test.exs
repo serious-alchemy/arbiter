@@ -5706,10 +5706,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # The reviewer ran on the resolved head.
       runs = Ash.read!(Arbiter.Workers.Run)
       assert Enum.any?(runs, &(&1.task_id == ReviewGate.reviewer_task_id(task.id)))
-
-      # Resolved: origin/main is now an ancestor of the branch.
-      assert {_, 0} =
-               git(["merge-base", "--is-ancestor", "origin/main", "feature/conflict"], sub_wt)
+      # Resolved: the branch now carries the target's "fleet readme" commit (a merge).
+      {log, 0} = git(["log", "--format=%s", "feature/conflict"], sub_wt)
+      assert log =~ "fleet readme"
+      assert log =~ "Merge remote-tracking branch"
 
       # No REQUEST_CHANGES round was recorded for the conflict.
       rounds = task_rounds(task)
