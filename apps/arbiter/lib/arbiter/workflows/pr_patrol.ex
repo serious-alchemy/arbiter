@@ -509,9 +509,11 @@ defmodule Arbiter.Workflows.PRPatrol do
   defp merge_owns_ci?(pr_number, state, reason, extra_protocol) do
     case GateActivity.authoring_task(state.workspace_id, to_string(pr_number), state.repo) do
       %Issue{id: task_id, state: task_state} = task ->
+        recipient = if workerless_owner?(task), do: "the coordinator", else: "it"
+
         Logger.info(
           "PRPatrol: not filing a CI follow-up for #{state.repo}##{pr_number} — " <>
-            "task #{task_id} (#{task_state}) owns the PR; mailing it the CI summary"
+            "task #{task_id} (#{task_state}) owns the PR; mailing #{recipient} the CI summary"
         )
 
         mail_owner(task, pr_number, state, reason, extra_protocol)
@@ -526,18 +528,27 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   # One unread mailbox note per PR: patrol re-ticks every interval and
   # the same red CI must not stack up duplicates in the ticket's inbox.
-  defp mail_owner(%Issue{id: task_id}, pr_number, state, reason, extra_protocol) do
+  defp mail_owner(%Issue{id: task_id} = task, pr_number, state, reason, extra_protocol) do
     subject = "CI failing on #{state.repo} PR ##{pr_number}"
+    workerless? = workerless_owner?(task)
+    recipient = if workerless?, do: Message.coordinator_ref(), else: task_id
+
+    note =
+      if workerless? do
+        "Ticket #{task_id} owns the PR but is Merging with no live worker, so nothing " <>
+          "reads its mailbox and no follow-up was filed; act on it (resume the ticket " <>
+          "or fix the CI).\n\n"
+      else
+        "This ticket owns the PR, so no follow-up task was filed; handle it here.\n\n"
+      end
 
     body =
-      "PRPatrol saw #{state.repo} PR ##{pr_number} trigger: #{reason}. " <>
-        "This ticket owns the PR, so no follow-up task was filed; handle it here.\n\n" <>
-        extra_protocol
+      "PRPatrol saw #{state.repo} PR ##{pr_number} trigger: #{reason}. " <> note <> extra_protocol
 
     already_sent? =
       Message
       |> Ash.Query.filter(
-        to_ref == ^task_id and from_ref == "pr-patrol" and
+        to_ref == ^recipient and task_ref == ^task_id and from_ref == "pr-patrol" and
           subject == ^subject and is_nil(read_at) and is_nil(cleared_at)
       )
       |> Ash.read!()
@@ -545,7 +556,7 @@ defmodule Arbiter.Workflows.PRPatrol do
 
     if not already_sent? do
       Message.send_mail(%{
-        to_ref: task_id,
+        to_ref: recipient,
         from_ref: "pr-patrol",
         workspace_id: state.workspace_id,
         task_ref: task_id,
@@ -563,6 +574,11 @@ defmodule Arbiter.Workflows.PRPatrol do
 
       :ok
   end
+
+  # A Merging ticket's PR is owned by its Watchdog, which has no mailbox; with
+  # no live worker either, mail addressed to the ticket is never read.
+  defp workerless_owner?(%Issue{id: task_id, state: :merging}), do: Worker.whereis(task_id) == nil
+  defp workerless_owner?(_task), do: false
 
   defp fix_pass_running?(task_id) do
     case Worker.whereis(task_id) do
