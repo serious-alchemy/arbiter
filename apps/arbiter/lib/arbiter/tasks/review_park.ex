@@ -70,6 +70,7 @@ defmodule Arbiter.Tasks.ReviewPark do
           | :commit_gate_uncommitted
           | :commit_gate_prepush_failed
           | :empty_diff
+          | :conflict_unresolved
           | :empty_net_diff
           | :head_not_pushed
           | :needs_operator_push
@@ -95,7 +96,10 @@ defmodule Arbiter.Tasks.ReviewPark do
     commit_gate_prepush_failed:
       "a fix round's worker.pre_push_checks stayed red past the send-back cap, so its " <>
         "head was not pushed",
-    empty_diff: "the target branch has already absorbed this branch's commits (G2)",
+    conflict_unresolved:
+      "the branch conflicts with its target and the gate's conflict-resolve pass did not clear it",
+    empty_diff: "the target branch has already absorbed
+ this branch's commits (G2)",
     empty_net_diff:
       "the branch has commits ahead of the target but they contribute no net change — " <>
         "most often already-squashed commits plus a merge of the target back in (G20)",
@@ -127,6 +131,7 @@ defmodule Arbiter.Tasks.ReviewPark do
       "fix round produced no changes after resolving findings without a file change",
     commit_gate_uncommitted: "implementer left uncommitted work",
     commit_gate_prepush_failed: "fix round's pre-push checks are red; head not pushed",
+    conflict_unresolved: "the branch conflicts with its target and could not be resolved",
     empty_diff: "the target branch already absorbed these commits",
     empty_net_diff: "the branch's commits contribute no net change against the target",
     head_not_pushed: "the branch is not pushed and could not be",

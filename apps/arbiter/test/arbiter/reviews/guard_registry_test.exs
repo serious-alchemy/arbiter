@@ -34,6 +34,13 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Workflows.PRPatrol, :mail_owner, 5,
      "bd-8ztyal: mails the CI summary to the ticket that owns the PR instead of filing a " <>
        "follow-up; informational, deduped to one unread note per PR, nothing is refused"},
+    # --- review_gate.ex ---
+    {Arbiter.Worker.ReviewGate, :finish_conflict_pass, 1,
+     "bd-7m4c5m: a conflict-resolve pass that left the branch conflicting parks the gate once " <>
+       "as a conflict; passes are capped at @max_conflict_passes and book no review round"},
+    {Arbiter.Worker.ReviewGate, :escalate_conflict, 2,
+     "bd-7m4c5m: the single conflict-specific escalation after a failed conflict-resolve pass; " <>
+       "records no REQUEST_CHANGES verdict and spends no review round"},
     # --- merge_queue.ex ---
     {Arbiter.Workflows.MergeQueue, :safe_notify_freshness_blocked, 3,
      "bd-5z9yvb: pages the coordinator once per head when the merge-time freshness sync is " <>

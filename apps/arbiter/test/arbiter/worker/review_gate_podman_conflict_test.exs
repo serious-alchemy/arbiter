@@ -26,11 +26,11 @@ defmodule Arbiter.Worker.ReviewGatePodmanConflictTest do
   alias Arbiter.Test.GitFixture
   alias Arbiter.Test.StubFixRoundDispatcher
   alias Arbiter.Worker
-  alias Arbiter.Worker.ConflictAbortFindings
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.ReviewGate
 
   @reviewer Path.expand("../../fixtures/review_verdict.sh", __DIR__)
+  @revise_merge_target Path.expand("../../fixtures/revise_merge_target.sh", __DIR__)
   @shared Enum.map_join(1..12, "", &"shared line #{&1}\n")
   @mr "owner/repo#772"
   @branch "feature/podman-conflict"
@@ -90,57 +90,32 @@ defmodule Arbiter.Worker.ReviewGatePodmanConflictTest do
     })
   end
 
-  test "the conflict round gets origin/<target>, merges it, and the resolved head is reviewed",
+  test "the conflict pass gets origin/<target>, merges it, and the resolved head is reviewed",
        ctx do
-    # 1. The gate finds the conflict before any reviewer runs and rejects.
+    # bd-7m4c5m: the gate finds the conflict before any reviewer runs and starts a
+    # conflict-resolve pass (the author's side played by the fixture: the container's
+    # offline `git merge origin/main`), recording no REQUEST_CHANGES verdict.
     author = start_author(ctx)
-    gate = start_gate(ctx, author, command: [@reviewer, "REQUEST_CHANGES"])
+
+    gate =
+      start_gate(ctx, author,
+        command: [@reviewer, "APPROVE"],
+        revise_command: [@revise_merge_target]
+      )
+
     assert_stops(gate)
 
-    assert [%Round{verdict: :request_changes, findings: findings}] = rounds(ctx.task.id)
-    assert ConflictAbortFindings.escalation?(findings)
-
-    assert ConflictAbortFindings.head_of(findings) ==
-             GitFixture.git!(ctx.clone, ["rev-parse", "HEAD"])
-
-    # 2. The author's fix round is dispatched, with the target ref already in
-    #    its clone: the host fetched it (the container could not).
-    wait_until(fn -> StubFixRoundDispatcher.dispatch_count() == 1 end)
-    assert [%{conflict: true, target_branch: "main"}] = StubFixRoundDispatcher.dispatches()
-    assert StubFixRoundDispatcher.escalations() == []
+    # The host fetched the target ref into the clone for the pass.
     assert GitFixture.git!(ctx.clone, ["rev-parse", "origin/main"]) == ctx.forge_tip
-
-    # 3. What the container then does, offline: merge it, resolve, commit.
-    assert {_, 1} =
-             System.cmd("git", ["-C", ctx.clone, "merge", "--no-edit", "origin/main"],
-               stderr_to_stdout: true
-             )
-
-    File.write!(
-      Path.join(ctx.clone, "shared.ex"),
-      String.replace(@shared, "shared line 4", "shared line 4 (main + feature)")
-    )
-
-    GitFixture.git!(ctx.clone, ["add", "shared.ex"])
-    GitFixture.git!(ctx.clone, ["commit", "-q", "--no-edit"])
     resolved = GitFixture.git!(ctx.clone, ["rev-parse", "HEAD"])
+    refute resolved == ctx.approved
 
-    # 4. The re-run gate reaches a verdict on the resolved head: a scoped
-    #    conflict review, and its APPROVE.
-    stop_author(author)
-    author2 = start_author(ctx)
-    gate2 = start_gate(ctx, author2, command: [@reviewer, "APPROVE"])
-
-    wait_until(fn -> Enum.any?(rounds(ctx.task.id), &(&1.role == :conflict_review)) end)
-
-    assert %Round{verdict: :approve} =
-             Enum.find(rounds(ctx.task.id), &(&1.role == :conflict_review))
-
-    wait_until(fn -> Enum.any?(Coverage.for_mr(@mr), &(&1.head_sha == resolved)) end)
-    assert_stops(gate2)
-
-    # No second conflict rejection, no escalation: one round, resolved.
-    assert StubFixRoundDispatcher.dispatch_count() == 1
+    # A conflict is not a review verdict: no REQUEST_CHANGES round, the resolved
+    # head is reviewed and approved, and nothing was escalated.
+    rs = rounds(ctx.task.id)
+    refute Enum.any?(rs, &(&1.verdict == :request_changes))
+    assert Enum.any?(rs, &(&1.verdict == :approve))
+    assert Enum.any?(Coverage.for_mr(@mr), &(&1.head_sha == resolved))
     assert StubFixRoundDispatcher.escalations() == []
   end
 
