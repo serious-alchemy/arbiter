@@ -35,8 +35,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Backup do
   """
 
   alias ArbiterCli.Cmd.{ReleaseDeploy.ReleaseFiles, Start}
-  alias ArbiterCli.SecretInventory
   alias ArbiterCli.Output
+  alias ArbiterCli.SecretInventory
 
   @sqlite_magic "SQLite format 3\0"
   @default_retain 5
