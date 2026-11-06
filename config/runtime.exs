@@ -113,7 +113,7 @@ end
 if config_env() == :prod and not agent? do
   secret_key_base =
     secret_or_ref.("SECRET_KEY_BASE") ||
-      raise "environment variable SECRET_KEY_BASE (or SECRET_KEY_BASE_REF) is missing."
+      raise "environment variable SECRET_KEY_BASE is missing (set SECRET_KEY_BASE, or SECRET_KEY_BASE_REF to a secret-manager pointer)."
 
   # The dashboard's auth model is "a loopback peer is trusted; there is no
   # login" (see ArbiterWeb.Loopback) — bind loopback-only by default
@@ -149,7 +149,7 @@ if config_env() == :dev and not agent? do
   secret_key_base =
     secret_or_ref.("SECRET_KEY_BASE") ||
       raise """
-      environment variable SECRET_KEY_BASE (or SECRET_KEY_BASE_REF) is missing.
+      environment variable SECRET_KEY_BASE is missing (set SECRET_KEY_BASE, or SECRET_KEY_BASE_REF to a secret-manager pointer).
 
       Generate one with `mix phx.gen.secret` and add it to .arbiter.env:
         SECRET_KEY_BASE=<generated-value>

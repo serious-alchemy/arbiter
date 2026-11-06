@@ -9,7 +9,7 @@ defmodule ArbiterCli.Cmd.Doctor.SecretsAtRest do
   database it protects), so those — and an inline value a `*_REF` pointer
   already shadows, and a pointer with an unrecognised scheme — are a `warn`.
   Other inline provider tokens are listed but do not warn. Values are never
-  read into the report; see `ArbiterCli.Cmd.SecretInventory`.
+  read into the report; see `ArbiterCli.SecretInventory`.
 
   Tests (and `CliCase`, through `Process.get(:bd2_secrets_probe)`) override the
   host's env file with an env map, or `:absent`.
@@ -17,7 +17,7 @@ defmodule ArbiterCli.Cmd.Doctor.SecretsAtRest do
 
   alias ArbiterCli.Cmd.Doctor.Checks.Result
   alias ArbiterCli.Cmd.ReleaseDeploy.ReleaseFiles
-  alias ArbiterCli.Cmd.SecretInventory
+  alias ArbiterCli.SecretInventory
 
   @name "secrets at rest"
 

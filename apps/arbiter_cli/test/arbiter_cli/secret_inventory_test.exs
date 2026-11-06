@@ -1,7 +1,7 @@
-defmodule ArbiterCli.Cmd.SecretInventoryTest do
+defmodule ArbiterCli.SecretInventoryTest do
   use ExUnit.Case, async: true
 
-  alias ArbiterCli.Cmd.SecretInventory
+  alias ArbiterCli.SecretInventory
 
   defp state(entries, name), do: Enum.find(entries, &(&1.name == name))
 

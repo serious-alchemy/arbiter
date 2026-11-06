@@ -1,4 +1,4 @@
-defmodule ArbiterCli.Cmd.SecretInventory do
+defmodule ArbiterCli.SecretInventory do
   @moduledoc """
   Which of arbiter's secrets sit **inline** in the service's environment and
   which are **references** to an external secret manager (`NAME_REF=aws-sm:…`,

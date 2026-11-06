@@ -5,7 +5,7 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
 
   alias ArbiterCli.Client
   alias ArbiterCli.Cmd.InstallService.{Systemctl, Unit}
-  alias ArbiterCli.Cmd.SecretInventory
+  alias ArbiterCli.SecretInventory
   alias ArbiterCli.Output
 
   def emit_installed(:json, scope, path, root, linger, secrets, log_paths) do

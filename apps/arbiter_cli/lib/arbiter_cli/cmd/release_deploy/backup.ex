@@ -34,7 +34,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Backup do
   the swap-to-restart gap, seconds.
   """
 
-  alias ArbiterCli.Cmd.{ReleaseDeploy.ReleaseFiles, SecretInventory, Start}
+  alias ArbiterCli.Cmd.{ReleaseDeploy.ReleaseFiles, Start}
+  alias ArbiterCli.SecretInventory
   alias ArbiterCli.Output
 
   @sqlite_magic "SQLite format 3\0"
