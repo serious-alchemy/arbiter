@@ -245,7 +245,12 @@ defmodule ArbiterWeb.Api.ServerController do
 
   def merge_routing(conn, _params) do
     repos = Enum.map(RoutingCheck.report(), &routing_entry/1)
-    json(conn, %{repos: repos, problems: Enum.filter(repos, & &1.problem)})
+
+    json(conn, %{
+      repos: repos,
+      problems: Enum.filter(repos, & &1.problem),
+      gitlab_budget: Arbiter.Mergers.Gitlab.Budget.doctor_check()
+    })
   end
 
   defp routing_entry(entry) do

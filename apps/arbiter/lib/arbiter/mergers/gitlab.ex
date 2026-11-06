@@ -66,7 +66,7 @@ defmodule Arbiter.Mergers.Gitlab do
   alias Arbiter.Mergers.CILogExcerpt
   alias Arbiter.Mergers.CIQueue
   alias Arbiter.Mergers.CIRerun
-  alias Arbiter.Mergers.Gitlab.{Config, Error}
+  alias Arbiter.Mergers.Gitlab.{Budget, Config, Error}
 
   @stub_name Arbiter.Mergers.Gitlab.HTTP
 
@@ -1354,8 +1354,8 @@ defmodule Arbiter.Mergers.Gitlab do
   # Resolves a project_id to a valid browser URL path (namespace/project).
   # A non-numeric project_id is already a path. A numeric one is looked up via
   # the API (`path_with_namespace`) and the result cached durably in
-  # `:persistent_term`, keyed by host + project_id, so it is shared across
-  # processes. Failures are never cached and never fall back to the numeric id:
+  # `Budget` (host + project_id; failures negatively cached with a TTL), shared across
+  # processes. Never falls back to the numeric id:
   # `https://<host>/<digits>/-/merge_requests/N` is a 404.
   defp resolve_project_path(cfg) do
     project_id = to_string(cfg.project_id)
@@ -1367,26 +1367,21 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   defp resolve_numeric_project_path(cfg, project_id) do
-    cache_key = {:gitlab_project_path, cfg.host, project_id}
-
-    case :persistent_term.get(cache_key, nil) do
-      path when is_binary(path) ->
+    case Budget.path_lookup(cfg.host, project_id, fn -> fetch_project_path(cfg) end) do
+      {:ok, path} ->
         {:ok, path}
 
-      nil ->
-        case fetch_project_path(cfg) do
-          {:ok, path} ->
-            :persistent_term.put(cache_key, path)
-            {:ok, path}
+      {:error, _reason, :cached} ->
+        :error
 
-          {:error, reason} ->
-            Logger.warning(
-              "GitLab: could not resolve path_with_namespace for project #{project_id} " <>
-                "on #{cfg.host} (#{inspect(reason)}); not building a numeric-id MR link"
-            )
+      {:error, reason, :fresh} ->
+        Logger.warning(
+          "GitLab: could not resolve path_with_namespace for project #{project_id} " <>
+            "on #{cfg.host} (#{inspect(reason)}); not building a numeric-id MR link " <>
+            "(failure cached; not logged again until it expires)"
+        )
 
-            :error
-        end
+        :error
     end
   end
 
@@ -2135,7 +2130,10 @@ defmodule Arbiter.Mergers.Gitlab do
       base_url: base_url,
       headers: headers(cfg),
       errors: error_spec(),
-      stub: {:gitlab_http_stub, @stub_name}
+      stub: {:gitlab_http_stub, @stub_name},
+      gate: fn {method, url}, fun ->
+        Budget.gate(cfg.host, Budget.site(method, url), fun)
+      end
     )
   end
 

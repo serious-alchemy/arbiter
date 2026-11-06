@@ -379,6 +379,19 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
 
   # bd-73zv62: `arb server doctor` lists each repo's effective merge strategy and
   # flags a forge strategy on a checkout with no `origin` remote.
+  describe "GET /api/server/merge_routing gitlab_budget" do
+    test "reports the last 429 for a rate-limited host", %{conn: conn} do
+      alias Arbiter.Mergers.Gitlab.Budget
+      Budget.reset()
+      Budget.gate("gl.doctor.test", "GET /x", fn -> {:ok, %Req.Response{status: 429}} end)
+      on_exit(&Budget.reset/0)
+
+      resp = conn |> get("/api/server/merge_routing") |> json_response(200)
+      assert resp["gitlab_budget"]["severity"] == "warn"
+      assert resp["gitlab_budget"]["detail"] =~ "last 429"
+    end
+  end
+
   describe "GET /api/server/merge_routing" do
     @tag :tmp_dir
     test "reports each repo's effective strategy and flags a remote-less forge repo", %{
