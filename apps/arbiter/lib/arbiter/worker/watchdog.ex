@@ -3482,7 +3482,7 @@ defmodule Arbiter.Worker.Watchdog do
           streak < state.transient_block_polls ->
         state
 
-      state.last_block_reason == reason and park_heartbeat_due?(state) ->
+      state.last_block_reason == reason and park_heartbeat_due?(state, reason) ->
         polls = state.poll_count - state.last_block_escalated_poll
 
         Logger.warning(
@@ -3523,9 +3523,19 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  defp park_heartbeat_due?(%{park_heartbeat_polls: n}) when not is_integer(n) or n <= 0, do: false
+  # bd-789ehp (#1196): on a human-merge lane nothing else acts on a red CI, so a
+  # persisting `:ci_failed` block re-pages the coordinator on the same cadence as
+  # the exhausted auto-resolve path (`escalation_cadence/1`), not the 12h heartbeat.
+  defp park_heartbeat_due?(%{auto_merge: false} = state, reason)
+       when reason in [:ci_failed, :ci_failed_external] do
+    state.poll_count - state.last_block_escalated_poll >= escalation_cadence(state)
+  end
 
-  defp park_heartbeat_due?(state),
+  defp park_heartbeat_due?(%{park_heartbeat_polls: n}, _reason)
+       when not is_integer(n) or n <= 0,
+       do: false
+
+  defp park_heartbeat_due?(state, _reason),
     do: state.poll_count - state.last_block_escalated_poll >= state.park_heartbeat_polls
 
   # The reason a `:ci_failed` block is *escalated and parked* under: a worker's

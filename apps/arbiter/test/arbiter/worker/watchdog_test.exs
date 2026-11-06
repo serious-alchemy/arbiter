@@ -3543,6 +3543,68 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  describe "ci_failed re-raise on a human-merge lane (bd-789ehp / #1196)" do
+    defp reraise_count(log), do: length(String.split(log, "still parked (ci_failed)")) - 1
+
+    test "re-pages on the escalation cadence (30 polls by default) while the block persists" do
+      StubMerger.queue_get("!cf1", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(new_task_id(), "!cf1",
+            auto_merge: false,
+            interval_ms: 15,
+            max_polls: :infinity,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> StubMerger.get_count("!cf1") >= 70 end, 5_000)
+        end)
+
+      assert reraise_count(log) >= 2
+    end
+
+    test "does not re-page before the escalation cadence has elapsed" do
+      StubMerger.queue_get("!cf2", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(new_task_id(), "!cf2",
+            auto_merge: false,
+            interval_ms: 15,
+            max_polls: :infinity,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> StubMerger.get_count("!cf2") >= 10 end, 3_000)
+        end)
+
+      assert log =~ "merge blocked (ci_failed)"
+      assert reraise_count(log) == 0
+    end
+
+    test "stops re-paging once the block clears" do
+      StubMerger.queue_get("!cf3", [
+        %{status: :open, approved: true, block_reason: :ci_failed},
+        %{status: :open, approved: true, block_reason: nil}
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(new_task_id(), "!cf3",
+            auto_merge: false,
+            interval_ms: 15,
+            max_polls: :infinity,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> StubMerger.get_count("!cf3") >= 70 end, 5_000)
+        end)
+
+      assert reraise_count(log) == 0
+    end
+  end
+
   # bd-dxgris / #1493 — the reviewed-SHA guard on the Watchdog's own merge
   # path. Both captured production incidents went through this retry loop, so
   # an adapter-level unit test is not enough: these drive `safe_merge/1`.
