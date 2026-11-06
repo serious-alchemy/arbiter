@@ -16,7 +16,9 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Backup do
   live WAL-mode database) and `PRAGMA integrity_check` on the *copy*, exiting
   non-zero if either fails. The eval needs the service's environment
   (`runtime.exs` raises without `SECRET_KEY_BASE`), so `<data-home>/arbiter.env`
-  is passed through. Snapshots land in `<data-home>/snapshots/` as
+  is passed through (read, never copied: each snapshot gets only a
+  `.env-fingerprint.json` sidecar of key names and hash prefixes, see
+  `fingerprint_path/1`). Snapshots land in `<data-home>/snapshots/` as
   `arbiter-pre-<tag>-<utc>.sqlite3`; the newest `retain/0` are kept.
 
   ## Restoring it
@@ -32,7 +34,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Backup do
   the swap-to-restart gap, seconds.
   """
 
-  alias ArbiterCli.Cmd.{ReleaseDeploy.ReleaseFiles, Start}
+  alias ArbiterCli.Cmd.{ReleaseDeploy.ReleaseFiles, SecretInventory, Start}
   alias ArbiterCli.Output
 
   @sqlite_magic "SQLite format 3\0"
@@ -117,8 +119,35 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Backup do
         {:error, "database backup at #{dest} is not an SQLite file; discarded it"}
 
       true ->
+        write_env_fingerprint(dest)
         {:ok, %{path: dest, bytes: File.stat!(dest).size, db: db}}
     end
+  end
+
+  @doc """
+  The sidecar written next to a snapshot: `<snapshot>.env-fingerprint.json`.
+
+  A deploy snapshot never copies `arbiter.env` (it holds secrets, and a copy is
+  one more file for a host secret scanner to flag). It records each key name
+  with a short SHA-256 prefix of its value instead, so a later redeploy can show
+  the environment did not change without the values ever being stored.
+  """
+  @spec fingerprint_path(String.t()) :: String.t()
+  def fingerprint_path(snapshot), do: snapshot <> ".env-fingerprint.json"
+
+  defp write_env_fingerprint(dest) do
+    body = %{
+      "recorded_at" => DateTime.to_iso8601(DateTime.utc_now()),
+      "note" => "key names and sha256 prefixes only; values are never stored",
+      "env" =>
+        env_file()
+        |> SecretInventory.fingerprint()
+        |> Enum.map(&%{"key" => &1.key, "sha256" => &1.sha256})
+    }
+
+    # Best effort: the fingerprint is an aid, never a reason to abort a deploy.
+    _ = File.write(fingerprint_path(dest), Jason.encode!(body, pretty: true))
+    :ok
   end
 
   # ---- restore ---------------------------------------------------------------
@@ -217,6 +246,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Backup do
       path = Path.join(dir, name)
       _ = File.rm(path <> "-wal")
       _ = File.rm(path <> "-shm")
+      _ = File.rm(fingerprint_path(path))
       File.rm(path) == :ok
     end)
   end

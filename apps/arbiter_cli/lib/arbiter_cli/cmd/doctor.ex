@@ -55,7 +55,10 @@ defmodule ArbiterCli.Cmd.Doctor do
       the worker temp dir, the worker memory cap and the spawn canary.
     * security posture — bind address, anonymous `/api` refused, dashboard
       login, Erlang distribution loopback-only with an owner-only cookie,
-      workspace safe-default categories, guardrail profiles.
+      secrets at rest (which of the cloak key, `SECRET_KEY_BASE` and provider
+      tokens are inline in `arbiter.env` and which are `*_REF` pointers to a
+      secret manager; a `warn` while a boot secret is inline), workspace
+      safe-default categories, guardrail profiles.
   """
 
   alias ArbiterCli.ArgParser

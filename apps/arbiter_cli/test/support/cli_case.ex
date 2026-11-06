@@ -45,6 +45,10 @@ defmodule ArbiterCli.CliCase do
         # files; point it at nothing so doctor verdicts stay hermetic.
         Process.put(:bd2_distribution_probe, proc_net: [], epmd_port: nil, cookie_paths: [])
 
+        # The secrets-at-rest check reads the host's `arbiter.env`; point it at
+        # nothing so doctor verdicts stay hermetic.
+        Process.put(:bd2_secrets_probe, :absent)
+
         # `arb restart` refuses to signal anything when an `arbiter.service`
         # unit file exists on disk (bd-3t973v); never read the host's unit
         # dirs from a test.

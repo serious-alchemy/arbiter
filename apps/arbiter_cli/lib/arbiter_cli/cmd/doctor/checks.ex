@@ -6,7 +6,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   """
 
   alias ArbiterCli.{Client, OperatorSocket, SchedulerState, Workspace}
-  alias ArbiterCli.Cmd.Doctor.{Distribution, Scope}
+  alias ArbiterCli.Cmd.Doctor.{Distribution, Scope, SecretsAtRest}
   alias ArbiterCli.Cmd.Start
 
   defmodule Result do
@@ -98,6 +98,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       {"anonymous_api", :security, nil, :always, plain(&check_anonymous_api/0)},
       {"dashboard_auth", :security, nil, :always, plain(&check_dashboard_auth/0)},
       {"erlang_distribution", :security, nil, :always, plain(&Distribution.check/0)},
+      {"secrets_at_rest", :security, nil, :always, plain(&SecretsAtRest.check/0)},
       {"safe_default_categories", :security, nil, :always, plain(&check_security_defaults/0)},
       {"guardrails", :security, nil, :always, plain(&check_guardrails/0)}
     ]

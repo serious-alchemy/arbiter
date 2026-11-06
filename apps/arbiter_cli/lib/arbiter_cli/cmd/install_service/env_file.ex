@@ -25,8 +25,25 @@ defmodule ArbiterCli.Cmd.InstallService.EnvFile do
     ARBITER_CLOAK_KEY
   )
 
+  # Pointers into an external secret manager (`aws-sm:…`, `aws-ssm:…`,
+  # `file:…`), forwarded the same way. They are not secrets themselves, and
+  # they are why the env file can hold no secret value: a secret whose
+  # `<NAME>_REF` is set in the installing shell is never captured inline.
+  @captured_refs ~w(
+    GITHUB_TOKEN_REF
+    ANTHROPIC_API_KEY_REF
+    ANTHROPIC_API_KEY_2_REF
+    GEMINI_API_KEY_REF
+    GOOGLE_GENAI_API_KEY_REF
+    ARBITER_CLOAK_KEY_REF
+    ARBITER_CLOAK_KEY_OLD_REF
+    SECRET_KEY_BASE_REF
+    AWS_REGION
+    AWS_PROFILE
+  )
+
   @doc """
-  Forward any of `@captured_secrets` set in the current environment into
+  Forward any of `@captured_secrets` (and `@captured_refs` pointers) set in the current environment into
   `<arbiter_home>/arbiter.env`, preserving any keys already present. Returns
   `{:written, path, keys}` listing the keys captured, or `{:none, path}` when
   the environment carries none of them.
@@ -36,13 +53,15 @@ defmodule ArbiterCli.Cmd.InstallService.EnvFile do
   def capture_secrets(arbiter_home) do
     path = Path.join(arbiter_home, "arbiter.env")
 
-    captured =
-      Enum.flat_map(@captured_secrets, fn key ->
-        case System.get_env(key) do
-          v when is_binary(v) and v != "" -> [{key, v}]
-          _ -> []
-        end
-      end)
+    refs = captured_pairs(@captured_refs)
+    referenced = MapSet.new(refs, fn {k, _} -> k end)
+
+    inline =
+      @captured_secrets
+      |> Enum.reject(&MapSet.member?(referenced, &1 <> "_REF"))
+      |> captured_pairs()
+
+    captured = inline ++ refs
 
     case captured do
       [] ->
@@ -53,6 +72,15 @@ defmodule ArbiterCli.Cmd.InstallService.EnvFile do
         write_env_file(path, render_env_entries(merged))
         {:written, path, Enum.map(pairs, &elem(&1, 0))}
     end
+  end
+
+  defp captured_pairs(keys) do
+    Enum.flat_map(keys, fn key ->
+      case System.get_env(key) do
+        v when is_binary(v) and v != "" -> [{key, v}]
+        _ -> []
+      end
+    end)
   end
 
   @doc """

@@ -108,6 +108,36 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.BackupTest do
       assert env["FOO"] == "bar baz"
     end
 
+    test "records key names and hash prefixes of the env file, never its values",
+         %{home: home, release_dir: rd, db: db} do
+      File.write!(db, @magic)
+
+      File.write!(
+        Path.join(home, "arbiter.env"),
+        "SECRET_KEY_BASE=super-secret-value-123\nARBITER_CLOAK_KEY_REF=aws-sm:prod/arbiter#k\n"
+      )
+
+      backup_runner()
+
+      assert {:ok, %{path: path}} = Backup.take(rd, "v2")
+
+      sidecar = Backup.fingerprint_path(path)
+      raw = File.read!(sidecar)
+      refute raw =~ "super-secret-value-123"
+      refute File.ls!(Path.dirname(path)) |> Enum.any?(&(&1 =~ "arbiter.env"))
+
+      assert %{"env" => env} = Jason.decode!(raw)
+      keys = Enum.map(env, & &1["key"])
+      assert keys == ["ARBITER_CLOAK_KEY_REF", "SECRET_KEY_BASE"]
+
+      expected =
+        :crypto.hash(:sha256, "super-secret-value-123")
+        |> Base.encode16(case: :lower)
+        |> binary_part(0, 8)
+
+      assert Enum.find(env, &(&1["key"] == "SECRET_KEY_BASE"))["sha256"] == expected
+    end
+
     test "a failing eval aborts with an error and leaves no snapshot",
          %{home: home, release_dir: rd, db: db} do
       File.write!(db, @magic)

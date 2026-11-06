@@ -5,6 +5,7 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
 
   alias ArbiterCli.Client
   alias ArbiterCli.Cmd.InstallService.{Systemctl, Unit}
+  alias ArbiterCli.Cmd.SecretInventory
   alias ArbiterCli.Output
 
   def emit_installed(:json, scope, path, root, linger, secrets, log_paths) do
@@ -23,6 +24,7 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
       linger: to_string(linger),
       env_file: env_path,
       secrets_captured: captured,
+      secrets_at_rest: at_rest_report(env_path),
       status_cmd: Systemctl.status_cmd(scope),
       logs_cmd: Systemctl.logs_cmd(scope),
       base_url: Client.base_url(),
@@ -50,6 +52,7 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
     IO.puts("  unit:   #{path}")
     IO.puts("  starts: #{Client.base_url()} at boot")
     IO.puts(secrets_note(secrets))
+    IO.puts(at_rest_note(elem(secrets, 1)))
     IO.puts("")
     IO.puts(linger_note(scope, linger))
     IO.puts("Check it with:")
@@ -107,6 +110,43 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
     "  secrets: none found in the environment — set GITHUB_TOKEN (and any\n" <>
       "           ANTHROPIC_API_KEY / GEMINI_API_KEY) then re-run, or add them\n" <>
       "           to #{path} yourself."
+  end
+
+  # Which secrets in the env file are inline values and which are `*_REF`
+  # pointers to a secret manager. Names and schemes only, never a value.
+  defp at_rest_entries(env_path),
+    do: env_path |> SecretInventory.env_from_file() |> SecretInventory.classify()
+
+  defp at_rest_report(env_path) do
+    entries = at_rest_entries(env_path)
+
+    %{
+      inline: for(%{name: n, state: s} <- entries, s in [:inline, :shadowed], do: n),
+      references:
+        for(
+          %{name: n, state: s, scheme: sch} <- entries,
+          s in [:ref, :shadowed],
+          do: "#{n} (#{sch})"
+        ),
+      inline_boot_secrets: SecretInventory.inline_boot_secrets(entries)
+    }
+  end
+
+  defp at_rest_note(env_path) do
+    entries = at_rest_entries(env_path)
+    base = "  at rest: " <> SecretInventory.summary(entries)
+
+    case SecretInventory.inline_boot_secrets(entries) do
+      [] ->
+        base
+
+      inline ->
+        base <>
+          "\n           " <>
+          Enum.join(inline, ", ") <>
+          " sit inline in the env file; set <NAME>_REF=aws-sm:<id>#<key> (or aws-ssm:/file:)\n" <>
+          "           and remove the value to keep it off this disk. See docs/secrets-at-rest.md."
+    end
   end
 
   defp linger_note(:system, _), do: "Enabled at boot via the system manager."

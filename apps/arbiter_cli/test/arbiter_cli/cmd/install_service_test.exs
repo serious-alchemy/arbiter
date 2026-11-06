@@ -243,6 +243,66 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
     end
   end
 
+  describe "EnvFile.capture_secrets/1 with secret-manager references" do
+    setup do
+      vars = ~w(GITHUB_TOKEN GITHUB_TOKEN_REF ARBITER_CLOAK_KEY ARBITER_CLOAK_KEY_REF)
+      prev = Map.new(vars, &{&1, System.get_env(&1)})
+
+      on_exit(fn ->
+        Enum.each(prev, fn
+          {var, nil} -> System.delete_env(var)
+          {var, value} -> System.put_env(var, value)
+        end)
+      end)
+
+      Enum.each(vars, &System.delete_env/1)
+      :ok
+    end
+
+    test "forwards pointers and never writes the inline value of a referenced secret", %{
+      arbiter_home: arbiter_home
+    } do
+      System.put_env("ARBITER_CLOAK_KEY_REF", "aws-sm:prod/arbiter#cloak")
+      System.put_env("ARBITER_CLOAK_KEY", "inline-cloak-key-must-not-be-written")
+      System.put_env("GITHUB_TOKEN", "ghp_inline_token_value")
+
+      assert {:written, path, keys} = InstallService.EnvFile.capture_secrets(arbiter_home)
+
+      assert "ARBITER_CLOAK_KEY_REF" in keys
+      refute "ARBITER_CLOAK_KEY" in keys
+      assert "GITHUB_TOKEN" in keys
+
+      contents = File.read!(path)
+      assert contents =~ "ARBITER_CLOAK_KEY_REF=aws-sm:prod/arbiter#cloak"
+      refute contents =~ "inline-cloak-key-must-not-be-written"
+    end
+
+    test "the install report names inline values and references, without values", %{
+      arbiter_home: arbiter_home
+    } do
+      System.put_env("ARBITER_CLOAK_KEY_REF", "aws-sm:prod/arbiter#cloak")
+      System.put_env("GITHUB_TOKEN", "ghp_inline_token_value")
+      secrets = InstallService.EnvFile.capture_secrets(arbiter_home)
+
+      out =
+        ExUnit.CaptureIO.capture_io(fn ->
+          InstallService.Formatter.emit_installed(
+            :text,
+            :user,
+            "/u/x",
+            arbiter_home,
+            :enabled,
+            secrets,
+            nil
+          )
+        end)
+
+      assert out =~ "inline: GITHUB_TOKEN"
+      assert out =~ "ARBITER_CLOAK_KEY (aws-sm)"
+      refute out =~ "ghp_inline_token_value"
+    end
+  end
+
   describe "install (system scope)" do
     test "uses the system manager and docker ordering", %{unit_dir: dir} do
       record_cmds()

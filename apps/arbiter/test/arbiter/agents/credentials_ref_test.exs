@@ -26,6 +26,7 @@ defmodule Arbiter.Agents.CredentialsRefTest do
       assert {:env_unset, @env_var} = CredentialsRef.resolve("env:" <> @env_var, %{})
     end
   end
+
   describe "resolve/2 — external secret-manager refs" do
     setup do
       dir = Path.join(System.tmp_dir!(), "credref-#{System.unique_integer([:positive])}")
