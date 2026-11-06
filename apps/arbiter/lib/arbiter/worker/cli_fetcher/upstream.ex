@@ -112,12 +112,12 @@ defmodule Arbiter.Worker.CliFetcher.Upstream do
     end
   end
 
-  @doc "Headers for GitHub requests; `GITHUB_TOKEN`, when set, authenticates a private repo."
+  @doc "Headers for GitHub requests; `GITHUB_TOKEN` (or the pointer `GITHUB_TOKEN_REF`), when set, authenticates a private repo."
   @spec github_headers() :: [{String.t(), String.t()}]
   def github_headers do
     base = [{"accept", "application/vnd.github+json"}, {"x-github-api-version", "2022-11-28"}]
 
-    case System.get_env("GITHUB_TOKEN") do
+    case Arbiter.SecretRefs.External.env_value("GITHUB_TOKEN") do
       token when is_binary(token) and token != "" ->
         [{"authorization", "Bearer " <> token} | base]
 

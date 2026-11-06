@@ -26,6 +26,52 @@ defmodule Arbiter.Agents.CredentialsRefTest do
       assert {:env_unset, @env_var} = CredentialsRef.resolve("env:" <> @env_var, %{})
     end
   end
+  describe "resolve/2 — external secret-manager refs" do
+    setup do
+      dir = Path.join(System.tmp_dir!(), "credref-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      %{tmp_dir: dir}
+    end
+
+    test "file: resolves like env:/secret:", %{tmp_dir: dir} do
+      path = Path.join(dir, "tok")
+      File.write!(path, "file-token\n")
+      assert {:ok, "file-token"} = CredentialsRef.resolve("file:" <> path, %{})
+    end
+
+    test "a failing external ref is tagged, carries the pointer, and never a value", %{
+      tmp_dir: dir
+    } do
+      ref = "file:" <> Path.join(dir, "missing")
+
+      assert {:external_error, ^ref, {:file, :enoent}} = CredentialsRef.resolve(ref, %{})
+
+      msg = CredentialsRef.describe_failure({:external_error, ref, {:file, :enoent}})
+      assert msg =~ ref
+    end
+
+    test "env:NAME falls through to NAME_REF, which wins over an inline NAME", %{tmp_dir: dir} do
+      path = Path.join(dir, "tok")
+      File.write!(path, "from-pointer")
+      System.put_env(@env_var <> "_REF", "file:" <> path)
+      on_exit(fn -> System.delete_env(@env_var <> "_REF") end)
+
+      assert {:ok, "from-pointer"} = CredentialsRef.resolve("env:" <> @env_var, %{})
+
+      System.put_env(@env_var, "inline")
+      assert {:ok, "from-pointer"} = CredentialsRef.resolve("env:" <> @env_var, %{})
+    end
+
+    test "a bad NAME_REF is an external error, not a silent fall-back to NAME" do
+      System.put_env(@env_var, "inline")
+      System.put_env(@env_var <> "_REF", "not-a-pointer")
+      on_exit(fn -> System.delete_env(@env_var <> "_REF") end)
+
+      assert {:external_error, "not-a-pointer", :invalid_ref} =
+               CredentialsRef.resolve("env:" <> @env_var, %{})
+    end
+  end
 
   describe "resolve/2 — secret:" do
     test "resolves from embedded secrets" do

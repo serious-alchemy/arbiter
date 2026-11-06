@@ -227,6 +227,9 @@ defmodule Arbiter.Mergers.Gitlab.Config do
       {:secret_not_found, key} ->
         {:error, config_missing("GitLab secret #{inspect(key)} is not set on the workspace")}
 
+      {:external_error, _ref, _reason} = failure ->
+        {:error, config_missing(CredentialsRef.describe_failure(failure))}
+
       :missing ->
         {:error, config_missing("GitLab config missing \"credentials_ref\"")}
     end

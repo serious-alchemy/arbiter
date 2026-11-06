@@ -96,6 +96,10 @@ defmodule Arbiter.Application do
     auto_start? = Keyword.get(opts, :auto_start?, MergeQueueSupervisor.auto_start?())
 
     [
+      # In-memory TTL cache for externally-resolved secrets (`aws-sm:` / `aws-ssm:`
+      # / `file:` refs). First, so the Vault's own boot-time key lookup is cached
+      # and its value joins the redaction set. See Arbiter.SecretRefs.External.
+      Arbiter.SecretRefs.Cache,
       Arbiter.Repo,
       # Cloak vault for encrypting workspace secrets at rest. Started early (it
       # has no deps) and resolves ARBITER_CLOAK_KEY in its init — a missing key

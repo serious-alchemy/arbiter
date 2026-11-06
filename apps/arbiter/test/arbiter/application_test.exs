@@ -90,6 +90,8 @@ defmodule Arbiter.ApplicationTest do
 
       allowed_before = [
         Arbiter.Repo,
+        # In-memory ETS cache for externally-resolved secrets; never reads the Repo.
+        Arbiter.SecretRefs.Cache,
         Arbiter.Vault,
         DNSCluster,
         Phoenix.PubSub.Supervisor,

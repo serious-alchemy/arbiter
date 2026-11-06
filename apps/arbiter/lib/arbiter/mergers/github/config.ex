@@ -253,6 +253,9 @@ defmodule Arbiter.Mergers.Github.Config do
         {:error,
          config_missing("GitHub merger secret #{inspect(key)} is not set on the workspace")}
 
+      {:external_error, _ref, _reason} = failure ->
+        {:error, config_missing(CredentialsRef.describe_failure(failure))}
+
       :missing ->
         {:error, config_missing("GitHub merger config missing \"credentials_ref\"")}
     end

@@ -12,6 +12,14 @@ defmodule Arbiter.Agents.CredentialsRef do
 
     * `"secret:KEY"` — looks up `KEY` in the active workspace's encrypted
       `secrets` map (stored at rest via `ash_cloak`, see `Arbiter.Vault`).
+    * `"aws-sm:ID[#json-key]"`, `"aws-ssm:NAME"`, `"file:PATH"` — an external
+      secret-manager pointer, fetched lazily and cached in memory only (see
+      `Arbiter.SecretRefs.External`), so the token never sits on arbiter's disk.
+
+  `"env:NAME"` additionally honours a `NAME_REF` environment variable holding
+  one of those pointers (e.g. `GITHUB_TOKEN_REF=aws-sm:prod/gh#token`), which
+  wins over an inline `NAME`; so the default `env:GITHUB_TOKEN` ref works with
+  an `EnvironmentFile` that carries only the pointer.
 
   ## How secrets reach the resolver
 
@@ -29,6 +37,7 @@ defmodule Arbiter.Agents.CredentialsRef do
   `{:secret_not_found, key}`.
   """
 
+  alias Arbiter.SecretRefs.External
   alias Arbiter.Tasks.Workspace
 
   @secrets_key :__arbiter_secrets__
@@ -39,12 +48,16 @@ defmodule Arbiter.Agents.CredentialsRef do
     * `{:ok, value}` — resolved to a non-empty string.
     * `{:env_unset, name}` — an `env:` ref whose variable is unset/empty.
     * `{:secret_not_found, key}` — a `secret:` ref with no matching workspace secret.
+    * `{:external_error, ref, reason}` — an external pointer (`aws-sm:` …, or an
+      `env:NAME` whose `NAME_REF` is set) that could not be fetched. Carries the
+      pointer and a coarse reason, never a value; `describe_failure/1` renders it.
     * `:missing` — no ref configured (nil / empty / non-string).
   """
   @type result ::
           {:ok, String.t()}
           | {:env_unset, String.t()}
           | {:secret_not_found, String.t()}
+          | {:external_error, String.t(), term()}
           | :missing
 
   @doc """
@@ -75,9 +88,10 @@ defmodule Arbiter.Agents.CredentialsRef do
   def resolve(ref, raw \\ %{})
 
   def resolve("env:" <> name, _raw) do
-    case System.get_env(name) do
-      v when is_binary(v) and v != "" -> {:ok, v}
-      _ -> {:env_unset, name}
+    case External.env_or_ref(name) do
+      {:ok, v} -> {:ok, v}
+      :unset -> {:env_unset, name}
+      {:error, ref, reason} -> {:external_error, ref, reason}
     end
   end
 
@@ -88,8 +102,29 @@ defmodule Arbiter.Agents.CredentialsRef do
     end
   end
 
-  def resolve(literal, _raw) when is_binary(literal) and literal != "", do: {:ok, literal}
+  def resolve(ref, _raw) when is_binary(ref) and ref != "" do
+    # An external secret-manager pointer (`aws-sm:`, `aws-ssm:`, `file:`), else
+    # a literal token.
+    if External.external?(ref) do
+      case External.resolve(ref) do
+        {:ok, v} -> {:ok, v}
+        {:error, reason} -> {:external_error, ref, reason}
+      end
+    else
+      {:ok, ref}
+    end
+  end
+
   def resolve(_other, _raw), do: :missing
+
+  @doc """
+  A secret-free message for an `{:external_error, ref, reason}` result.
+  """
+  @spec describe_failure({:external_error, String.t(), term()}) :: String.t()
+  def describe_failure({:external_error, ref, reason}) do
+    "secret reference #{inspect(ref)} could not be resolved: " <>
+      External.describe_error(reason)
+  end
 
   @doc """
   Resolve a `credentials_ref` directly against a `Workspace` struct.

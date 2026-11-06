@@ -235,6 +235,9 @@ defmodule Arbiter.Trackers.Gitlab.Config do
         {:error,
          config_missing("GitLab tracker secret #{inspect(key)} is not set on the workspace")}
 
+      {:external_error, _ref, _reason} = failure ->
+        {:error, config_missing(CredentialsRef.describe_failure(failure))}
+
       :missing ->
         {:error, config_missing("GitLab tracker config missing \"credentials_ref\"")}
     end
