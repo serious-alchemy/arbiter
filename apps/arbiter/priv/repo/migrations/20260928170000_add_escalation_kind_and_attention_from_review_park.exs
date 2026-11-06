@@ -32,7 +32,7 @@ defmodule Arbiter.Repo.Migrations.AddEscalationKindAndAttentionFromReviewPark do
   @park_reasons ~w(inconclusive reviewer_failed reviewer_timeout verdict_guard_exhausted
                    commit_gate_no_changes commit_gate_no_changes_after_non_file_fix
                    commit_gate_uncommitted commit_gate_prepush_failed empty_diff empty_net_diff head_not_pushed needs_operator_push
-                   resume_blocked review_rerun)
+                   resume_blocked review_rerun conflict_unresolved)
 
   def up do
     alter table(:messages) do
