@@ -905,7 +905,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       bound: {:polls, {:config, :default_park_heartbeat_polls}},
       episode: {:task, :mr_ref, :block_reason},
       terminal: :parked,
-      sites: [{Watchdog, :park_heartbeat_due?, 1}],
+      sites: [{Watchdog, :park_heartbeat_due?, 2}],
       anchors: ["@default_park_heartbeat_polls"],
       summary: "one heartbeat re-page for a long park, not silence and not a storm"
     },
