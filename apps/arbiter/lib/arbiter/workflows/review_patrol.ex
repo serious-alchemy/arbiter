@@ -287,7 +287,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   The issue's third named signature — "more than N verdict rounds on the
   engagement regardless of SHA" — is deliberately NOT a third arm here; it is
-  the pre-existing `review_capped?/2` / `handle_review_cap/2` path (reusing
+  the pre-existing `review_capped?/2` / `handle_review_cap/4` path (reusing
   `review.rounds`), which escalates and freezes the engagement the same way
   this breaker does, just via its own `review_cap_escalated` flag rather than
   `circuit_breaker_tripped`.
@@ -969,7 +969,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         nil
 
       review_capped?(engagement, workspace) ->
-        handle_review_cap(engagement, workspace)
+        handle_review_cap(engagement, workspace, adapter, pr)
 
       true ->
         gate_on_relevance(engagement, pr, adapter, workspace, repo_name)
@@ -998,11 +998,11 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # (bd-4po0nv). `claim_review_cap_escalation/1` closes that window: it flips
   # the flag false->true via a single atomic `UPDATE ... WHERE` statement, so
   # only the caller that actually performs the flip proceeds to escalate.
-  defp handle_review_cap(%Issue{review_cap_escalated: true} = _engagement, _workspace), do: nil
+  defp handle_review_cap(%Issue{review_cap_escalated: true}, _workspace, _adapter, _pr), do: nil
 
-  defp handle_review_cap(%Issue{} = engagement, workspace) do
+  defp handle_review_cap(%Issue{} = engagement, workspace, adapter, pr) do
     if claim_review_cap_escalation(engagement) do
-      escalate_review_cap(engagement, workspace)
+      escalate_review_cap(engagement, workspace, last_push_note(engagement, adapter, pr))
 
       Logger.info(
         "ReviewPatrol: engagement #{engagement.id} hit the review cap " <>
@@ -1049,13 +1049,13 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   # Best-effort human-facing escalation when a PR hits the review cap. A
   # mailbox hiccup never breaks the tick.
-  defp escalate_review_cap(%Issue{workspace_id: ws_id} = engagement, _workspace)
+  defp escalate_review_cap(%Issue{workspace_id: ws_id} = engagement, _workspace, note)
        when is_binary(ws_id) do
     body =
       "ReviewPatrol has posted #{engagement.review_count} re-review(s) on PR " <>
         "##{engagement.source_pr} and hit the configured review cap. No further " <>
         "automatic re-reviews will be posted; the PR likely needs human " <>
-        "intervention (e.g. a recurring finding that keeps re-triggering)."
+        "intervention (e.g. a recurring finding that keeps re-triggering)." <> note
 
     _ =
       safe(fn ->
@@ -1072,7 +1072,21 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     :ok
   end
 
-  defp escalate_review_cap(_engagement, _workspace), do: :ok
+  defp escalate_review_cap(_engagement, _workspace, _note), do: :ok
+
+  # #1291: when we hold an earlier approval of ours that the base branch no
+  # longer counts (`reviewDecision` REVIEW_REQUIRED after a push), the PR is
+  # blocked only on a fresh approval for the new head. Say so, so the operator
+  # knows a single approval unblocks it. Empty when that is not the situation.
+  defp last_push_note(%Issue{source_pr: source_pr}, adapter, pr) do
+    if ApprovalCurrency.stale_after_push?(adapter, source_pr) do
+      " The base branch requires approval of the most recent push " <>
+        "(require_last_push_approval): head #{Map.get(pr, :head_sha)} has no approval from " <>
+        "this identity, and a single approval on it unblocks the PR."
+    else
+      ""
+    end
+  end
 
   defp max_reviews(%Workspace{config: config}) do
     case get_in(config || %{}, ["review_patrol", "max_reviews"]) do
@@ -1511,6 +1525,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       # completeness against a partial diff.
       incremental_review: true,
       check_runner: dedupe_runner(prior_keys, settled),
+      # #1291: our earlier approval still counts under the base branch rules, so
+      # this round must not stack another APPROVE (CodeReview :verdict step).
+      approval_stands: ApprovalCurrency.current?(adapter, engagement.source_pr),
       # bd-9rdwe4 (#1017 gap G5): a re-review never spawns through
       # `Arbiter.Worker` — this is its only prompt-persistence choke-point,
       # keyed on the engagement (an `Issue` row, not a Reviews.Record).

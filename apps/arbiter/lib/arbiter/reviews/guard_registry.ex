@@ -905,7 +905,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       bound: {:polls, {:config, :default_park_heartbeat_polls}},
       episode: {:task, :mr_ref, :block_reason},
       terminal: :parked,
-      sites: [{Watchdog, :park_heartbeat_due?, 1}],
+      sites: [{Watchdog, :park_heartbeat_due?, 2}],
       anchors: ["@default_park_heartbeat_polls"],
       summary: "one heartbeat re-page for a long park, not silence and not a storm"
     },
@@ -1322,8 +1322,8 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :frozen,
       sites: [
         {ReviewPatrol, :review_capped?, 2},
-        {ReviewPatrol, :handle_review_cap, 2},
-        {ReviewPatrol, :escalate_review_cap, 2}
+        {ReviewPatrol, :handle_review_cap, 4},
+        {ReviewPatrol, :escalate_review_cap, 3}
       ],
       anchors: ["@default_max_reviews"],
       summary: "bounded review spend on one PR, then frozen behind one escalation"

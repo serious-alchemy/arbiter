@@ -364,6 +364,15 @@ defmodule Arbiter.Worker.Dispatch do
         hold_spawned_worker(task, worker_pid)
         held
 
+      # A pinned toolchain this host cannot provide fails identically on every
+      # attempt, so it is neither a crash (which keeps its scheduler seat and parks
+      # on `resume`) nor a Ready-queue hold (Autopilot would retry forever). The
+      # worker is stopped without a failed run, freeing its seat, and the ticket
+      # goes back to the backlog until the pin or the host changes.
+      {:error, {:claude_start_failed, {:toolchain_unavailable, _}}} = err ->
+        park_unstartable_worker(task, worker_pid)
+        err
+
       {:error, reason} = err ->
         # K12 (A3): a node that refuses the run (`refuse{no_capacity | unschedulable |
         # image_unavailable | bad_spec | service_not_ready}`, `Refusal.reasons/0`) has
@@ -429,6 +438,21 @@ defmodule Arbiter.Worker.Dispatch do
     with {:ok, %Issue{state: state} = task} when state in [:active, :merging] <-
            Ash.get(Issue, task_id) do
       Ash.update(task, %{}, action: :requeue)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp park_unstartable_worker(%Issue{id: task_id}, worker_pid) do
+    if is_pid(worker_pid), do: Worker.stop(worker_pid, :normal, 5_000)
+
+    with {:ok, %Issue{state: state} = task} when state in [:active, :merging] <-
+           Ash.get(Issue, task_id) do
+      Ash.update(task, %{}, action: :return_to_backlog)
     end
 
     :ok
