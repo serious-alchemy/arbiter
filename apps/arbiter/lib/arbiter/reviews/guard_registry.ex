@@ -1322,8 +1322,8 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :frozen,
       sites: [
         {ReviewPatrol, :review_capped?, 2},
-        {ReviewPatrol, :handle_review_cap, 2},
-        {ReviewPatrol, :escalate_review_cap, 2}
+        {ReviewPatrol, :handle_review_cap, 4},
+        {ReviewPatrol, :escalate_review_cap, 3}
       ],
       anchors: ["@default_max_reviews"],
       summary: "bounded review spend on one PR, then frozen behind one escalation"

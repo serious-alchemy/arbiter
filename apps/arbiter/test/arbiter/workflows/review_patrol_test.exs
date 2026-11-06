@@ -630,6 +630,56 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert ReviewPatrol.state(name).last_declined == [eng.id]
     end
 
+    test "#1291: approval still counted by the base (reviewDecision APPROVED) + code push → re-reviews but never posts another APPROVE",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 430, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([])
+      diff = wide_diff("lib/a.ex")
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+      rereview_stub_with_reviews(430, "newsha", diff, reviews, "botreviewer", [], "APPROVED")
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:compare, _path}
+      refute_receive {:submit_review, _}
+      assert reload(eng).last_reviewed_sha == "newsha"
+    end
+
+    test "#1291: base requires a fresh approval (reviewDecision REVIEW_REQUIRED) + code push → one APPROVE per new head",
+         %{ws: ws} do
+      engagement(ws, 431, %{
+        review_automation: :auto,
+        last_reviewed_sha: "oldsha",
+        posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+      })
+
+      put_invoker([])
+      diff = wide_diff("lib/a.ex")
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+
+      rereview_stub_with_reviews(
+        431,
+        "newsha",
+        diff,
+        reviews,
+        "botreviewer",
+        [],
+        "REVIEW_REQUIRED"
+      )
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, %{"event" => "APPROVE"}}
+    end
+
     test "sticky approval: operator re-requested for review + formatting-only push → overrides, re-reviews",
          %{ws: ws} do
       eng =
@@ -1344,6 +1394,43 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
       assert length(escalations) == 1
       assert hd(escalations).subject =~ "review cap"
+    end
+
+    test "#1291: at the cap on a PR blocked only on a last-push approval, the escalation names the branch rule",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 413, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")],
+          review_count: 3
+        })
+
+      diff = wide_diff("lib/a.ex")
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+
+      rereview_stub_with_reviews(
+        413,
+        "newsha",
+        diff,
+        reviews,
+        "botreviewer",
+        [],
+        "REVIEW_REQUIRED"
+      )
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      [escalation] =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "coordinator" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert escalation.body =~ "require_last_push_approval"
+      assert escalation.body =~ "newsha"
     end
 
     test "past the cap and already escalated, subsequent ticks do nothing (no re-escalation)",
