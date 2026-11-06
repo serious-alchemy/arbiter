@@ -49,6 +49,17 @@ defmodule Arbiter.Worker.ToolchainTest do
       assert Toolchain.parse("") == {:ok, :none}
     end
 
+    test "erlang ref:OTP-x.y.z is the plain release x.y.z" do
+      assert {:ok, %{erlang: "27.3.3", otp: "27", elixir: "1.18.3"}} =
+               Toolchain.parse("erlang ref:OTP-27.3.3\nelixir 1.18.3-otp-27\n")
+    end
+
+    test "erlang ref: branches and shas are still refused" do
+      for bad <- ["ref:master", "ref:maint-27", "ref:0123abcd", "ref:OTP-27.3.3-rc1", "ref:OTP-"] do
+        assert {:error, {:unsupported_pin, "erlang", ^bad}} = Toolchain.parse("erlang #{bad}\n")
+      end
+    end
+
     test "a pin that is not a plain version is refused, not ignored" do
       for bad <- ["system", "latest", "ref:main", "path:/opt/elixir", "1.x"] do
         assert {:error, {:unsupported_pin, "elixir", ^bad}} = Toolchain.parse("elixir #{bad}\n")
