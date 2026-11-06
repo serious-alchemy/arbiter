@@ -344,7 +344,7 @@ defmodule Arbiter.Workflows.CodeReview do
       # #1291: our earlier approval still counts under the base branch's rules
       # (ReviewPatrol set `approval_stands`), so another APPROVE is a redundant
       # stacked approval. Only a blocking verdict is posted.
-      verdict == :approve and Map.get(state, :approval_stands) == true ->
+      redundant_approval?(verdict, state) ->
         Logger.info(
           "CodeReview: earlier approval still stands — not posting another approval " <>
             "for mr_ref=#{mr_ref}"
@@ -399,6 +399,9 @@ defmodule Arbiter.Workflows.CodeReview do
   end
 
   def run_step(:verdict, _state), do: {:error, {:bad_state, "verdict: unknown mode"}}
+
+  defp redundant_approval?(:approve, state), do: Map.get(state, :approval_stands) == true
+  defp redundant_approval?(_verdict, _state), do: false
 
   # ---- scope resolution / consumer trace ---------------------------------
 
