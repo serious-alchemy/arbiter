@@ -1091,6 +1091,12 @@ defmodule Arbiter.Worker.ReviewGate do
       # this is what keeps `record_round/5`'s rows distinguishable across a fix
       # round instead of reading as a duplicate round 1..N.
       fix_round_attempt: Keyword.get(opts, :fix_round_attempt, 0),
+      # bd-7m4c5m: conflict-resolve passes spent at gate entry / between rounds,
+      # counted apart from review rounds; `conflict_pass?` while one is in flight and
+      # `conflict_pass_head` the branch head it started from (no movement = no progress).
+      conflict_passes: 0,
+      conflict_pass?: false,
+      conflict_pass_head: nil,
       # The implementer<->reviewer thread, oldest-first. Each entry:
       # %{round:, role: :reviewer | :implementer | :system, subject:, body:}.
       # Mirrors the durable mailbox rows; the source for the escalation payload.
@@ -1472,16 +1478,82 @@ defmodule Arbiter.Worker.ReviewGate do
     # conflict escalation instead of being reviewed stale.
     case prepare_branch_for_review(state) do
       {:error, {:conflict, escalation}} ->
-        Logger.warning(
-          "ReviewGate: branch `#{state.branch}` conflicts with `#{state.target_branch}` " <>
-            "for task=#{state.task_id}; escalating instead of reviewing a stale base"
-        )
-
-        escalate_pre_review(state, escalation)
+        state |> start_conflict_pass(escalation) |> continue_reply()
 
       {:ok, state} ->
         spawn_reviewer_after_update(state)
     end
+  end
+
+  # bd-7m4c5m: a branch that conflicts with its target before (or between) review
+  # rounds is not a review verdict. The gate's own implementer gets a bounded
+  # conflict-resolve pass (`@max_conflict_passes`, counted apart from review
+  # rounds and recorded as nothing), then the resolved head is reviewed. Only a pass
+  # that fails to clear the conflict escalates, once, as a conflict.
+  @max_conflict_passes 2
+  @conflict_pass_note """
+  THIS IS A CONFLICT-RESOLVE PASS, not a review round. The branch conflicts with its
+  target: merge `origin/<target>` into the branch (fetch it first), resolve every
+  conflict honoring this task's intent, run the tests, COMMIT the merge, and finish.
+  Do not rebut; the conflict must be resolved by a commit on this branch.
+
+  """
+
+  @doc "How many conflict-resolve passes one gate may spend, apart from review rounds."
+  @spec max_conflict_passes() :: pos_integer()
+  def max_conflict_passes, do: @max_conflict_passes
+
+  defp start_conflict_pass(%{conflict_passes: n} = state, escalation)
+       when n < @max_conflict_passes do
+    Logger.warning(
+      "ReviewGate: branch `#{state.branch}` conflicts with `#{state.target_branch}` for " <>
+        "task=#{state.task_id}; conflict-resolve pass #{n + 1}/#{@max_conflict_passes}"
+    )
+
+    state = %{
+      state
+      | conflict_passes: n + 1,
+        conflict_pass?: true,
+        conflict_pass_head: current_head_sha(state),
+        phase: :revising
+    }
+
+    launch_implementer(state, escalation, @conflict_pass_note)
+  end
+
+  defp start_conflict_pass(state, escalation), do: {:done, escalate_conflict(state, escalation)}
+
+  # The pass is over: stop its worker and look at the branch again. Cleared -> review
+  # it; still conflicting -> another bounded pass if the head moved, else escalate.
+  defp finish_conflict_pass(state) do
+    stop_worker(state)
+    before_head = state.conflict_pass_head
+    state = %{state | conflict_pass?: false, phase: :reviewing, current_id: nil, lines: []}
+
+    case prepare_branch_for_review(state) do
+      {:ok, state} ->
+        state |> spawn_reviewer_after_update() |> conflict_resume_result()
+
+      {:error, {:conflict, escalation}} ->
+        if current_head_sha(state) == before_head,
+          do: {:done, escalate_conflict(state, escalation)},
+          else: state |> start_conflict_pass(escalation) |> conflict_resume_result()
+    end
+  end
+
+  defp conflict_resume_result({:stop, _reason, state}), do: {:done, state}
+  defp conflict_resume_result({:noreply, state}), do: {:continue, state}
+
+  defp conflict_resume_result({tag, state}) when tag in [:continue, :revise],
+    do: {:continue, state}
+
+  defp conflict_resume_result({:done, state}), do: {:done, state}
+
+  # The conflict could not be cleared: park once with a conflict-specific reason.
+  # Not a REQUEST_CHANGES verdict, so no round row is recorded for it.
+  defp escalate_conflict(state, escalation) do
+    report(state, {:parked, :conflict_unresolved, escalation})
+    %{state | reported?: true}
   end
 
   defp spawn_reviewer_after_update(state) do
@@ -1704,7 +1776,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp hold_marker(%{held_marked?: true} = state), do: state
 
   defp hold_marker(state) do
-    id = implementer_task_id(state.review_id, state.round)
+    id = implementer_task_id(state.review_id, impl_round_key(state))
     marker = state |> ReviewPass.marker(:revising, id, state.timeout_ms) |> Map.put(:held, true)
     safe(fn -> ReviewPass.put(state.task_id, marker) end)
     %{state | pass_marked?: true, held_marked?: true}
@@ -4228,7 +4300,7 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp launch_implementer_now(state, findings, prompt_prefix) do
-    impl_id = refusal_retry_id(implementer_task_id(state.review_id, state.round), state)
+    impl_id = refusal_retry_id(implementer_task_id(state.review_id, impl_round_key(state)), state)
 
     with {:ok, placed} <- place_fix_round(%{state | phase: :revising}),
          {:ok, state} <-
@@ -4315,7 +4387,9 @@ defmodule Arbiter.Worker.ReviewGate do
             "(#{refusal.reason}#{detail}); retrying #{retries}/#{state.fix_refusal_max_retries}"
         )
 
-        stale = refusal_retry_id(implementer_task_id(state.review_id, state.round), state)
+        stale =
+          refusal_retry_id(implementer_task_id(state.review_id, impl_round_key(state)), state)
+
         safe(fn -> stale |> Worker.whereis() |> stop_if_pid() end)
         launch_implementer_now(%{state | fix_refusal_retries: retries}, findings, prompt_prefix)
 
@@ -4516,6 +4590,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp finish_revise(state, opts \\ [])
 
   defp finish_revise(%{reported?: true} = state, _opts), do: {:done, state}
+  defp finish_revise(%{conflict_pass?: true} = state, _opts), do: finish_conflict_pass(state)
 
   defp finish_revise(state, opts) do
     response = revise_response(state, opts)
@@ -8676,6 +8751,10 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # The implementer id for a given round's revision: distinct per round.
   defp implementer_task_id(review_id, round), do: review_id <> "#impl#{round}"
+
+  # A conflict-resolve pass gets its own id (`#implc<n>`), never a review round's.
+  defp impl_round_key(%{conflict_pass?: true, conflict_passes: n}), do: "c#{n}"
+  defp impl_round_key(%{round: round}), do: round
 
   # The synthetic id for a reviewer pass respawned after a timeout: distinct per
   # attempt so it registers its own worker / run row and never collides with the

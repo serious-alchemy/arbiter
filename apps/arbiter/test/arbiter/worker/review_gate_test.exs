@@ -52,6 +52,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @unaddressed Path.expand("../../fixtures/review_unaddressed_finding.sh", __DIR__)
   @disposition_check Path.expand("../../fixtures/review_disposition_check.sh", __DIR__)
   @revise Path.expand("../../fixtures/revise.sh", __DIR__)
+  @revise_merge_target Path.expand("../../fixtures/revise_merge_target.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
   @revise_commit_dotfile Path.expand("../../fixtures/revise_commit_dotfile.sh", __DIR__)
   @revise_commit_once Path.expand("../../fixtures/revise_commit_once.sh", __DIR__)
@@ -5585,6 +5586,70 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
   end
 
+  defp task_rounds(task) do
+    require Ash.Query
+
+    Arbiter.ReviewGate.Round
+    |> Ash.Query.filter(task_id == ^task.id)
+    |> Ash.read!()
+  end
+
+  # A branch cut from origin/main that edits README.md, with origin/main then
+  # advanced to edit the same file differently: a textual conflict. The author is
+  # parked waiting on the review gate.
+  defp conflict_rig(repo, ws) do
+    remote = Path.join(Path.dirname(repo), "remote-conflict.git")
+    {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+    {_, 0} = git(["remote", "set-url", "origin", remote], repo)
+    {_, 0} = git(["push", "-q", "origin", "main"], repo)
+
+    task = new_task(ws)
+    branch = "feature/conflict"
+    sub_wt = Path.join(Path.dirname(repo), "conflict-wt")
+
+    on_exit(fn ->
+      _ = System.cmd("git", ["-C", repo, "worktree", "remove", "--force", sub_wt])
+      File.rm_rf!(sub_wt)
+      File.rm_rf!(remote)
+    end)
+
+    {_, 0} =
+      System.cmd("git", ["-C", repo, "worktree", "add", sub_wt, "-b", branch, "origin/main"],
+        stderr_to_stdout: true
+      )
+
+    File.write!(Path.join(sub_wt, "README.md"), "branch version\n")
+    {_, 0} = git(["add", "README.md"], sub_wt)
+    {_, 0} = git(["commit", "-q", "-m", "branch readme"], sub_wt)
+
+    File.write!(Path.join(repo, "README.md"), "fleet version\n")
+    {_, 0} = git(["add", "README.md"], repo)
+    {_, 0} = git(["commit", "-q", "-m", "fleet readme"], repo)
+    {_, 0} = git(["push", "-q", "origin", "main"], repo)
+
+    meta = %{
+      branch: branch,
+      repo_path: repo,
+      target_branch: "main",
+      merge_title: "Merge #{task.id}",
+      review_required: true,
+      review_spawn: false
+    }
+
+    {:ok, author} =
+      Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+    on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
+    :ok = Worker.advance(author, :claude)
+    send(author, {:__claude_session_done__, "arb done"})
+
+    wait_until(fn ->
+      match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
+    end)
+
+    %{task: task, author: author, wt: sub_wt}
+  end
+
   describe "stale-base defence (bd-ased52)" do
     # The reviewer must diff against the merge-base, not the moving target tip,
     # so a target that advanced mid-run can't be mis-attributed to the branch.
@@ -5611,69 +5676,14 @@ defmodule Arbiter.Worker.ReviewGateTest do
              "review_prompt must warn against the two-dot diff that leaks target commits"
     end
 
-    # A branch that conflicts with the advanced target must escalate (a conflict escalation)
-    # rather than be reviewed against a stale base — and the reviewer must never
-    # be spawned (mirrors the #97 abort-on-conflict posture).
-    test "a branch that conflicts with an advanced target escalates before the reviewer spawns",
+    # bd-7m4c5m: a branch that conflicts with the advanced target at gate entry gets
+    # a conflict-resolve pass (the gate's implementer, separate from review rounds),
+    # NOT a recorded REQUEST_CHANGES verdict and not an escalation. The resolved
+    # head is then reviewed.
+    test "a conflicting branch gets a conflict-resolve pass, then the resolved head is reviewed",
          %{repo: repo, ws: ws} do
-      # Give the repo an origin remote and push main, so update_from_target can
-      # fetch + merge origin/main. init_repo already added origin (origin.git), so
-      # point it at this test's bare conflict repo instead.
-      remote = Path.join(Path.dirname(repo), "remote-conflict.git")
-      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
-      {_, 0} = git(["remote", "set-url", "origin", remote], repo)
-      {_, 0} = git(["push", "-q", "origin", "main"], repo)
+      %{task: task, author: author, wt: sub_wt} = conflict_rig(repo, ws)
 
-      task = new_task(ws)
-      branch = "feature/conflict"
-
-      sub_wt = Path.join(Path.dirname(repo), "conflict-wt")
-
-      on_exit(fn ->
-        _ = System.cmd("git", ["-C", repo, "worktree", "remove", "--force", sub_wt])
-        File.rm_rf!(sub_wt)
-        File.rm_rf!(remote)
-      end)
-
-      # Branch cut from origin/main; it edits README.md and commits.
-      {_, 0} =
-        System.cmd("git", ["-C", repo, "worktree", "add", sub_wt, "-b", branch, "origin/main"],
-          stderr_to_stdout: true
-        )
-
-      File.write!(Path.join(sub_wt, "README.md"), "branch version\n")
-      {_, 0} = git(["add", "README.md"], sub_wt)
-      {_, 0} = git(["commit", "-q", "-m", "branch readme"], sub_wt)
-
-      # The target advances mid-run, editing the SAME file differently → conflict.
-      File.write!(Path.join(repo, "README.md"), "fleet version\n")
-      {_, 0} = git(["add", "README.md"], repo)
-      {_, 0} = git(["commit", "-q", "-m", "fleet readme"], repo)
-      {_, 0} = git(["push", "-q", "origin", "main"], repo)
-
-      # Park the author on the review gate (review_spawn: false, no
-      # worktree_path so the worker commit gate skips).
-      meta = %{
-        branch: branch,
-        repo_path: repo,
-        target_branch: "main",
-        merge_title: "Merge #{task.id}",
-        review_required: true,
-        review_spawn: false
-      }
-
-      {:ok, author} =
-        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
-
-      on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
-      :ok = Worker.advance(author, :claude)
-      send(author, {:__claude_session_done__, "arb done"})
-
-      wait_until(fn ->
-        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
-      end)
-
-      # The reviewer command must NEVER run — the gate escalates on conflict first.
       {:ok, _gate} =
         ReviewGate.start(
           author: author,
@@ -5681,47 +5691,94 @@ defmodule Arbiter.Worker.ReviewGateTest do
           workspace_id: ws.id,
           repo: "trib/repo",
           worktree_path: sub_wt,
-          branch: branch,
+          branch: "feature/conflict",
           target_branch: "main",
           command: [@reviewer, "APPROVE"],
-          timeout_ms: 5_000
+          revise_command: [@revise_merge_target],
+          timeout_ms: 8_000
+        )
+
+      wait_until(
+        fn -> Worker.state(author).state == :finished end,
+        15_000
+      )
+
+      # The reviewer ran on the resolved head.
+      runs = Ash.read!(Arbiter.Workers.Run)
+      assert Enum.any?(runs, &(&1.task_id == ReviewGate.reviewer_task_id(task.id)))
+
+      # Resolved: origin/main is now an ancestor of the branch.
+      assert {_, 0} =
+               git(["merge-base", "--is-ancestor", "origin/main", "feature/conflict"], sub_wt)
+
+      # No REQUEST_CHANGES round was recorded for the conflict.
+      rounds = task_rounds(task)
+      refute Enum.any?(rounds, &(&1.verdict == :request_changes))
+      assert Enum.any?(rounds, &(&1.verdict == :approve))
+    end
+
+    test "a resolve pass that leaves the branch conflicting escalates once, as a conflict",
+         %{repo: repo, ws: ws} do
+      %{task: task, author: author, wt: sub_wt} = conflict_rig(repo, ws)
+
+      {:ok, _gate} =
+        ReviewGate.start(
+          author: author,
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "trib/repo",
+          worktree_path: sub_wt,
+          branch: "feature/conflict",
+          target_branch: "main",
+          command: [@reviewer, "APPROVE"],
+          revise_command: [@revise_commit],
+          timeout_ms: 8_000
         )
 
       wait_until(
         fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(author)) end,
-        6_000
+        15_000
       )
 
       snap = Worker.state(author)
-      assert snap.meta.failure_reason == :review_gate_rejected
-      assert snap.meta.review_gate_findings =~ "conflicts with its target"
-      assert snap.meta.review_gate_findings =~ "README.md"
+      assert snap.meta.park_reason == :conflict_unresolved
+      refute snap.meta.failure_reason == :review_gate_rejected
 
-      # The branch was NOT merged and the worktree is clean (merge aborted).
-      assert merge_commit_count(repo) == 0
-      assert {:ok, false} = Arbiter.Worker.Worktree.has_uncommitted?(sub_wt)
-
-      # The reviewer was never spawned: no #review run row exists.
-      review_id = ReviewGate.reviewer_task_id(task.id)
+      # No reviewer, no REQUEST_CHANGES round (the conflict is not a review verdict).
       runs = Ash.read!(Arbiter.Workers.Run)
+      refute Enum.any?(runs, &(&1.task_id == ReviewGate.reviewer_task_id(task.id)))
+      refute Enum.any?(task_rounds(task), &(&1.verdict == :request_changes))
+    end
 
-      refute Enum.any?(runs, &(&1.task_id == review_id)),
-             "the reviewer must NOT run when the branch conflicts with its target"
+    test "conflict passes are bounded and do not consume review rounds", %{repo: repo, ws: ws} do
+      %{task: task, author: author, wt: sub_wt} = conflict_rig(repo, ws)
 
-      # bd-dp7hiw: a conflict escalation reports as REQUEST_CHANGES and the
-      # task note points at `review_gate_rounds_list` for the full findings —
-      # so a round row must exist for THIS pre-review escalation too, or that
-      # pointer resolves to nothing for a task rejected before a reviewer ever ran.
-      require Ash.Query
+      {:ok, gate} =
+        ReviewGate.start(
+          author: author,
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "trib/repo",
+          worktree_path: sub_wt,
+          branch: "feature/conflict",
+          target_branch: "main",
+          command: [@reviewer, "APPROVE"],
+          revise_command: [@revise_commit],
+          timeout_ms: 8_000
+        )
 
-      [round] =
-        Arbiter.ReviewGate.Round
-        |> Ash.Query.filter(task_id == ^task.id)
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 15_000
+
+      impl_runs =
+        Arbiter.Workers.Run
         |> Ash.read!()
+        |> Enum.filter(&String.contains?(&1.task_id, "#impl"))
 
-      assert round.role == :review
-      assert round.verdict == :request_changes
-      assert round.findings =~ "conflicts with its target"
+      assert impl_runs != []
+      assert length(impl_runs) <= ReviewGate.max_conflict_passes()
+      assert Enum.all?(impl_runs, &String.contains?(&1.task_id, "#implc"))
+      assert Enum.all?(task_rounds(task), &(&1.round <= 1))
     end
 
     # bd-8slhrb: a branch that is merely BEHIND (no conflict) must be reviewed
