@@ -24,7 +24,9 @@ defmodule Arbiter.Worker.Toolchain do
   message}}`, and the caller refuses the run with it. There is no fallback to
   `/usr/local/bin/elixir` or a mise shim: not installed and not installable, an
   install that reports another runtime, a pin that is not a plain version
-  (`system`, `latest`, `ref:…`, `path:…`), all fail. A worktree with no
+  (`system`, `latest`, `ref:<branch|sha>`, `path:…`), all fail. An erlang
+  `ref:OTP-X.Y.Z` pin is the git tag of release X.Y.Z and is normalised to the
+  plain version `X.Y.Z`. A worktree with no
   `elixir`/`erlang` pin is the only case that leaves `PATH` alone.
 
   The pin is read from the worktree's own `.tool-versions`, so a branch that
@@ -90,9 +92,18 @@ defmodule Arbiter.Worker.Toolchain do
 
   defp erlang_pin(nil), do: {:ok, nil}
 
+  # `ref:OTP-X.Y.Z` is the asdf-erlang / mise way to build the git tag of
+  # release X.Y.Z, so it normalises to the plain version. Any other `ref:`
+  # (branch, SHA) is a moving target and stays unsupported.
   defp erlang_pin(value) do
-    if Regex.match?(@erlang_re, value),
-      do: {:ok, value},
+    plain =
+      case Regex.run(~r/\Aref:OTP-(.+)\z/, value) do
+        [_, version] -> version
+        nil -> value
+      end
+
+    if Regex.match?(@erlang_re, plain),
+      do: {:ok, plain},
       else: {:error, {:unsupported_pin, "erlang", value}}
   end
 
