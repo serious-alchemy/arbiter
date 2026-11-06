@@ -5,6 +5,14 @@ defmodule Arbiter.Tasks.TrackerAcceptanceTest do
   alias Arbiter.Trackers.{GitHub, Shortcut}
 
   describe "derive/2" do
+    test "invalid UTF-8 inside a checkbox line does not raise and keeps valid lines" do
+      body = "- [ ] **M-8** The workspace delete (tras\xE2\x80 bad\n- [ ] good one\n- [x] another"
+      assert {:acceptance, text} = TrackerAcceptance.derive(GitHub, %{"body" => body})
+      assert text =~ "- [ ] good one"
+      assert text =~ "- [ ] another"
+      assert text =~ "M-8"
+    end
+
     test "Shortcut story tasks become a checklist" do
       story = %{
         "description" => "Some prose",
