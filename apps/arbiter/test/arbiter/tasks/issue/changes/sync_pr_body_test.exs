@@ -113,6 +113,13 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncPrBodyTest do
   test "API error: failure recorded on the ticket, update still succeeds, one credential only" do
     ws = gitlab_ws()
     t = ticket(ws, %{pr_ref: "!42"})
+    # attention is only raised on a live (open) ticket
+    t =
+      t
+      |> Ash.Changeset.for_update(:update, %{})
+      |> Ash.Changeset.force_change_attribute(:state, :active)
+      |> Ash.update!()
+
     stub(Arbiter.Mergers.Gitlab.HTTP, self(), 403, %{"message" => "403 Forbidden"})
 
     assert {:ok, updated} = set_body(t, "body")
