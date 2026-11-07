@@ -438,6 +438,30 @@ defmodule Arbiter.Worker.Image.PublisherTest do
       assert List.last(result.layers).ref == result.ref
     end
 
+    test "seed files are made world-readable before the COPY, never writable by others",
+         %{opts: opts, ctx: ctx, cache: cache} do
+      # Hex tarballs leave e.g. LICENSE 0600; a pod init copying as another uid hit
+      # `cp: cannot open ... Permission denied`.
+      File.mkdir_p!(Path.join(cache, "deps/cachex"))
+      lic = Path.join(cache, "deps/cachex/LICENSE")
+      bin = Path.join(cache, "deps/cachex/run.sh")
+      sub = Path.join(cache, "deps/cachex/priv")
+      File.mkdir_p!(sub)
+      File.write!(lic, "MIT")
+      File.write!(bin, "#!/bin/sh")
+      File.chmod!(lic, 0o600)
+      File.chmod!(bin, 0o700)
+      File.chmod!(sub, 0o700)
+
+      assert {:ok, _} = Publisher.ensure_ready(ctx, opts)
+
+      import Bitwise
+      mode = fn p -> File.stat!(p).mode &&& 0o777 end
+      assert mode.(lic) == 0o644
+      assert mode.(bin) == 0o755
+      assert mode.(sub) == 0o755
+    end
+
     test "a seed layer that cannot be built is best-effort: the CLI layer still publishes",
          %{opts: opts, ctx: ctx} do
       opts = Keyword.put(opts, :deps_ensure, fn _, _, _, _ -> {:error, :no_lockfile} end)
