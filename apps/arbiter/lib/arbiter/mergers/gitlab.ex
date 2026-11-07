@@ -943,6 +943,15 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   @impl true
+  def update_description(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      request(cfg, :put, "/merge_requests/#{iid}", json: %{"description" => body})
+      |> handle_ok()
+    end
+  end
+
+  @impl true
   def add_comment(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref) do

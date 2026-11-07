@@ -318,6 +318,19 @@ defmodule Arbiter.Mergers do
   end
 
   @doc """
+  Replace the PR/MR description on the forge with `body` through `adapter`.
+  `{:error, :unsupported}` when the adapter has no `update_description/2`.
+  """
+  @spec update_description(adapter, String.t(), String.t()) :: :ok | {:error, term()}
+  def update_description(adapter, mr_ref, body) when is_atom(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :update_description, 2) do
+      adapter.update_description(mr_ref, body)
+    else
+      {:error, :unsupported}
+    end
+  end
+
+  @doc """
   Calls `adapter.open/4`, retrying when the failure is a 409/422 "an open
   PR/MR already exists for this branch" (bd-636thc).
 
