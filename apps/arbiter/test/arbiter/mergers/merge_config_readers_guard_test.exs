@@ -52,6 +52,8 @@ defmodule Arbiter.Mergers.MergeConfigReadersGuardTest do
     "apps/arbiter/lib/arbiter/mergers/forge_repos.ex" => "on each repo's effective merge block",
     "apps/arbiter/lib/arbiter/worker.ex" => "resolve_merger/2 scopes to the run's repo first",
     "apps/arbiter/lib/arbiter/tasks/pull_request.ex" => "watch_opts/1 scopes to the PR's repo",
+    "apps/arbiter/lib/arbiter/tasks/issue/changes/sync_pr_body.ex" =>
+      "scopes to the ticket's repo first",
     "apps/arbiter/lib/arbiter/reviews/external_review.ex" =>
       "prepare/1 and greenlight/1 scope to the PR's repo first",
     "apps/arbiter/lib/arbiter/tasks/workspace.ex" => "defines merger_strategy/1",
