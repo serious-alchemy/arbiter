@@ -278,7 +278,8 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
             Enum.map_join(artifacts, "", fn a -> "COPY #{a}/ #{@seed_dest}/#{a}/\n" end) <>
             stamp_copy(dir)
 
-        with :ok <- build(local, containerfile, dir, work, opts),
+        with :ok <- make_readable(dir, artifacts),
+             :ok <- build(local, containerfile, dir, work, opts),
              {:ok, layer} <- push(local, repository, tag, :seed, cfg, opts) do
           {Map.put(layer, :local, local),
            %{status: :pushed, reason: seed_note(plan), excluded: excluded}}
@@ -288,6 +289,32 @@ defmodule Arbiter.Worker.Image.Publisher.Pipeline do
 
       {:skip, reason} ->
         skipped(reason, excluded)
+    end
+  end
+
+  # `COPY` keeps source modes, and hex tarballs leave files such as `LICENSE` 0600. A pod
+  # init step copying the seed as another uid then failed with `cp: cannot open ...:
+  # Permission denied`. Grant read (and search/execute where the owner has it) to group and
+  # other on everything shipped; nothing is ever made writable and no bit is removed.
+  defp make_readable(dir, artifacts) do
+    Enum.each(artifacts ++ [@stamp], fn a -> widen(Path.join(dir, a)) end)
+  rescue
+    e in File.Error -> {:error, {:seed_chmod_failed, e.path, e.reason}}
+  end
+
+  defp widen(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory, mode: mode}} ->
+        File.chmod!(path, Bitwise.band(Bitwise.bor(mode, 0o755), 0o7777))
+        path |> File.ls!() |> Enum.each(&widen(Path.join(path, &1)))
+        :ok
+
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        grant = if Bitwise.band(mode, 0o100) != 0, do: 0o755, else: 0o644
+        File.chmod!(path, Bitwise.band(Bitwise.bor(mode, grant), 0o7777))
+
+      _ ->
+        :ok
     end
   end
 
