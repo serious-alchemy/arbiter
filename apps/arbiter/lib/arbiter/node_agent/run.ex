@@ -83,7 +83,7 @@ defmodule Arbiter.NodeAgent.Run do
   }
 
   alias Arbiter.Nodes.StdoutFrame
-  alias Arbiter.Worker.{Container, DepsCache, Image, TestServices}
+  alias Arbiter.Worker.{Container, DepsCache, DepsSeedWatch, Image, TestServices}
   alias Arbiter.Worker.ReleaseEnv
 
   require Logger
@@ -718,21 +718,34 @@ defmodule Arbiter.NodeAgent.Run do
 
   # Today's path: a networked seed job in the run's image, keyed by the checkout's own lock.
   defp seed_job(seed, spec, shadow, seed_opts) do
-    case seed.(shadow, run_image(spec.image), seed_opts) do
+    image = run_image(spec.image)
+    repo = repo_label(spec)
+
+    case seed.(shadow, image, seed_opts) do
       {:ok, _summary} ->
+        DepsSeedWatch.succeeded(repo, image)
         exclude_deps(shadow)
 
       {:error, :no_lockfile} ->
         :ok
 
       {:error, reason} ->
-        Logger.warning(
-          "NodeAgent.Run: no deps cache for run #{spec.run}: #{inspect(reason, limit: 10)}"
-        )
-
-        :ok
+        DepsSeedWatch.failed(repo, image, reason)
+        no_egress_refusal(spec, reason)
     end
   end
+
+  # bd-175f0r: a run with `network: none` cannot fetch deps for itself. With no seed layer
+  # and a failed seed job it would start an agent on an uncompilable checkout, so it is
+  # refused here, naming the missing seed. A run with network falls back to fetching.
+  defp no_egress_refusal(%RunSpec{network: :none, run: run}, reason) do
+    {:error, {:unschedulable, {:no_deps_seed, run, DepsSeedWatch.first_line(reason)}}}
+  end
+
+  defp no_egress_refusal(_spec, _reason), do: :ok
+
+  defp repo_label(%RunSpec{labels: %{"repo" => repo}}) when is_binary(repo), do: repo
+  defp repo_label(_spec), do: nil
 
   defp deps_seeder(opts) do
     enabled? =

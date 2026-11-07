@@ -179,6 +179,35 @@ defmodule Arbiter.Worker.DepsCacheTest do
       assert length(runs()) == 2
     end
 
+    test "the image's declared ENV and configured seed_env reach the seed job; host env does not",
+         ctx do
+      System.put_env("ARB_DEPS_HOST_LEAK", "leak")
+      on_exit(fn -> System.delete_env("ARB_DEPS_HOST_LEAK") end)
+
+      runner = fn podman, args, opts ->
+        case args do
+          ["image", "inspect" | _] ->
+            {Jason.encode!(["DATABASE_URL=ecto://x/y", "PATH=/img/bin", "MIX_ENV=prod"]), 0}
+
+          _ ->
+            ctx.runner.(podman, args, opts)
+        end
+      end
+
+      opts = Keyword.merge(ctx.opts, runner: runner, seed_env: %{"EXTRA_KEY" => "extra"})
+      assert {:ok, %{seeded?: true}} = DepsCache.ensure(ctx.checkout, "main", @image_a, opts)
+
+      args = List.first(runs())
+      assert "--unsetenv-all" in args
+      assert "DATABASE_URL=ecto://x/y" in args
+      assert "EXTRA_KEY=extra" in args
+      # the allowlist wins over the image's own PATH / MIX_ENV
+      assert "MIX_ENV=test" in args
+      refute "MIX_ENV=prod" in args
+      refute "PATH=/img/bin" in args
+      refute Enum.any?(args, &String.contains?(&1, "ARB_DEPS_HOST_LEAK"))
+    end
+
     test "a failed seed leaves no cache and the next call retries", ctx do
       failing = fn _podman, args, _ ->
         if match?(["run" | _], args), do: {"hex: boom", 1}, else: {"", 0}

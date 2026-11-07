@@ -64,7 +64,8 @@ defmodule Arbiter.Worker.Image.RepoConfig do
           pull_credentials_ref: String.t() | nil,
           pull_credentials_level: :repo | :workspace | nil,
           public_ok: boolean(),
-          seed: :primary | :image | :none
+          seed: :primary | :image | :none,
+          seed_env: %{optional(String.t()) => String.t()}
         }
 
   @doc "The `image.source` values, as the config spells them."
@@ -136,9 +137,21 @@ defmodule Arbiter.Worker.Image.RepoConfig do
       pull_credentials_ref: string(image["pull_credentials_ref"]),
       pull_credentials_level: nil,
       public_ok: image["public_ok"] == true,
-      seed: enum(image["seed"], @seeds, :primary)
+      seed: enum(image["seed"], @seeds, :primary),
+      seed_env: seed_env(image["seed_env"])
     }
   end
+
+  # `image.seed_env`: non-secret literals handed to the deps seed job (bd-175f0r).
+  defp seed_env(%{} = env) do
+    for {k, v} <- env,
+        is_binary(k),
+        is_binary(v) or is_number(v),
+        into: %{},
+        do: {k, to_string(v)}
+  end
+
+  defp seed_env(_), do: %{}
 
   defp enum(value, allowed, default) when is_binary(value),
     do: Map.get(allowed, value, default)
