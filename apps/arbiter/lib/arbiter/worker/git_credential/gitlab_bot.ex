@@ -59,6 +59,7 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
            | {:resources, [String.t()]}
            | {:granular_permissions, [String.t()]}
            | {:granular_boundary, [String.t()]}
+           | {:rejected, 401 | 403}
            | :not_reachable
            | :no_expiry
            | :expired
@@ -85,11 +86,16 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
   """
   @spec check(map(), String.t(), String.t(), map(), keyword()) :: :ok | {:error, refusal()}
   def check(entry, token, remote, repos, req_options) do
-    with :ok <- check_configured_expiry(entry.expires_at),
-         {:ok, pat} <- self_pat(entry, token, req_options),
-         :ok <- check_pat(pat),
-         {:ok, reach} <- reach(entry, token, pat, req_options) do
-      check_reach(reach, allowed_projects(entry, remote, repos), remote)
+    allowed = allowed_projects(entry, remote, repos)
+
+    with :ok <- check_configured_expiry(entry.expires_at) do
+      verified({:full, remote, Enum.sort(allowed)}, entry, token, fn ->
+        with {:ok, pat} <- self_pat(entry, token, req_options),
+             :ok <- check_pat(pat),
+             {:ok, reach} <- reach(entry, token, pat, req_options) do
+          check_reach(reach, allowed, remote)
+        end
+      end)
     end
   end
 
@@ -100,10 +106,89 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
   """
   @spec check_token(map(), String.t(), keyword()) :: :ok | {:error, refusal()}
   def check_token(entry, token, req_options) do
-    with :ok <- check_configured_expiry(entry.expires_at),
-         {:ok, pat} <- self_pat(entry, token, req_options) do
-      check_pat(pat)
+    with :ok <- check_configured_expiry(entry.expires_at) do
+      verified(:token, entry, token, fn ->
+        with {:ok, pat} <- self_pat(entry, token, req_options), do: check_pat(pat)
+      end)
     end
+  end
+
+  @default_backoff_ms [5_000, 15_000]
+  # Short on purpose: a revoked or narrowed token is caught within this long.
+  @default_cache_ttl_ms :timer.minutes(5)
+
+  @doc """
+  The verification retry/cache policy (`config :arbiter, :gitlab_bot_verify`):
+  `:backoff_ms` is the wait before each retry of an *unverifiable* answer (timeout,
+  transport error, 5xx, 429), so `length + 1` attempts in all (default `#{inspect(@default_backoff_ms)}`,
+  about 20s of waiting); `:cache_ttl_ms` is how long a *passing* verification is reused
+  (default #{div(@default_cache_ttl_ms, 60_000)} minutes; `0` disables the cache).
+  """
+  @spec verify_policy() :: %{backoff_ms: [non_neg_integer()], cache_ttl_ms: non_neg_integer()}
+  def verify_policy do
+    config = Application.get_env(:arbiter, :gitlab_bot_verify, [])
+
+    %{
+      backoff_ms: Keyword.get(config, :backoff_ms, @default_backoff_ms),
+      cache_ttl_ms: Keyword.get(config, :cache_ttl_ms, @default_cache_ttl_ms)
+    }
+  end
+
+  @cache_table {__MODULE__, :verified}
+
+  @doc "Forgets every cached passing verification."
+  @spec clear_cache() :: :ok
+  def clear_cache do
+    :persistent_term.erase(@cache_table)
+    :ok
+  end
+
+  # Only `:ok` is cached (keyed on a hash of the token, so a rotated token is checked
+  # afresh); a refusal or an unverifiable answer never is. An unverifiable answer is
+  # retried with the policy's backoff before it is returned; a refusal (including a
+  # 401/403 rejection) is returned at once.
+  defp verified(scope, entry, token, fun) do
+    %{backoff_ms: backoff, cache_ttl_ms: ttl} = verify_policy()
+    key = {:crypto.hash(:sha256, token), api(entry), scope}
+    now = System.monotonic_time(:millisecond)
+
+    if ttl > 0 and cached?(key, now) do
+      :ok
+    else
+      with :ok <- attempt(fun, backoff) do
+        if ttl > 0, do: remember(key, now + ttl, now)
+        :ok
+      end
+    end
+  end
+
+  defp attempt(fun, backoff) do
+    case fun.() do
+      {:error, {:git_credential_bot_token_unverifiable, _}} = error ->
+        case backoff do
+          [wait | rest] ->
+            Process.sleep(wait)
+            attempt(fun, rest)
+
+          [] ->
+            error
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp cached?(key, now) do
+    case Map.get(:persistent_term.get(@cache_table, %{}), key) do
+      expires when is_integer(expires) -> expires > now
+      _ -> false
+    end
+  end
+
+  defp remember(key, expires, now) do
+    live = for {k, e} <- :persistent_term.get(@cache_table, %{}), e > now, into: %{}, do: {k, e}
+    :persistent_term.put(@cache_table, Map.put(live, key, expires))
   end
 
   # The operator's own record of the expiry: a date in the past is enough to refuse,
@@ -268,6 +353,10 @@ defmodule Arbiter.Worker.GitCredential.GitlabBot do
     case get(entry, token, "/personal_access_tokens/self", [], req_options) do
       {:ok, %Req.Response{status: 200, body: %{} = pat}} ->
         {:ok, pat}
+
+      # A real rejection of the token: never retried, never cached, never softened.
+      {:ok, %Req.Response{status: status}} when status in [401, 403] ->
+        refused({:rejected, status})
 
       {:ok, %Req.Response{status: status}} ->
         unverifiable("personal_access_tokens/self: HTTP #{status}")

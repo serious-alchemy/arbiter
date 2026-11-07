@@ -50,13 +50,13 @@ defmodule Arbiter.Worker.GitCredentialRefusalAlertTest do
     end)
 
     for _ <- 1..3 do
-      assert {:error, {:git_credential_bot_token_unverifiable, _}} = materialize(ws)
+      assert {:error, {:git_credential_bot_token_refused, {:rejected, 403}}} = materialize(ws)
     end
 
     assert [alert] = alerts(ws)
     assert alert.key == "#{ws.id}:vstim"
     assert alert.subject =~ "vstim"
-    assert alert.detail =~ "HTTP 403"
+    assert alert.detail =~ "rejected the token (HTTP 403)"
     assert alert.detail =~ "vstim"
     assert alert.raise_count == 3
   end

@@ -361,12 +361,13 @@ defmodule Arbiter.Worker.GitCredentialGitlabBotTest do
     end
 
     test "an API failure fails closed: the token is unverifiable, never delivered" do
-      stub_gitlab(pat_status: 401)
+      stub_gitlab(pat_status: 502)
 
       assert {:error, {:git_credential_bot_token_unverifiable, _} = error} =
                materialize(workspace())
 
       assert GitCredential.format_error(error) =~ "could not be verified"
+      assert GitCredential.format_error(error) =~ "retrying"
 
       Req.Test.stub(@http, fn conn -> Req.Test.transport_error(conn, :econnrefused) end)
 

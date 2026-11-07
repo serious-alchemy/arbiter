@@ -504,3 +504,7 @@ config :arbiter, :ruling_resume, :sync
 # test so no suite run drives a host's installed CLI (or its login); the tests
 # of the channel itself turn it on and point it at a stub CLI.
 config :arbiter, Arbiter.Agents.Claude.ControlChannel, enabled: false
+
+# #1305: no real waiting between bot-token verification retries, and no cross-test
+# reuse of a passing verification (the retry tests opt in with their own values).
+config :arbiter, :gitlab_bot_verify, backoff_ms: [0, 0], cache_ttl_ms: 0

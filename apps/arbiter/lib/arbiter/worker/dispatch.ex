@@ -383,8 +383,17 @@ defmodule Arbiter.Worker.Dispatch do
             Refusal.hold(task, worker_pid, refused_node_name(opts), refusal)
 
           :error ->
-            fail_spawned_worker(worker_pid, reason)
-            image_publish_error(task, reason) || err
+            # #1305: the bot-token guard could not CHECK the token (timeout / 5xx / 429
+            # past its retries). Nothing ran and the same spawn passes once GitLab
+            # answers: a hold like the capacity refusal, not a crash. The worker is
+            # stopped without a failed run and the ticket goes back to Ready.
+            if GitCredential.bot_guard_transient?(reason) do
+              hold_spawned_worker(task, worker_pid)
+              err
+            else
+              fail_spawned_worker(worker_pid, reason)
+              image_publish_error(task, reason) || err
+            end
         end
     end
   end
