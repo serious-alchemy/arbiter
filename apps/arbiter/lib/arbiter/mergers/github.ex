@@ -1332,6 +1332,15 @@ defmodule Arbiter.Mergers.Github do
   end
 
   @impl true
+  def update_description(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      request(cfg, :patch, "/repos/#{owner}/#{repo}/pulls/#{number}", json: %{"body" => body})
+      |> expect_ok()
+    end
+  end
+
+  @impl true
   def add_comment(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do

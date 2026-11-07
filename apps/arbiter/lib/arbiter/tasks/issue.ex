@@ -345,6 +345,9 @@ defmodule Arbiter.Tasks.Issue do
       # Best-effort; no-op when neither field changed or no tracker.
       change {Arbiter.Tasks.Issue.Changes.SyncFields, []}
 
+      # A `pr_body` edit after the PR/MR exists reaches the forge description.
+      change {Arbiter.Tasks.Issue.Changes.SyncPrBody, []}
+
       change after_action(fn changeset, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
 

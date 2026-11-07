@@ -254,6 +254,10 @@ defmodule Arbiter.Mergers.Merger do
   @callback merge(mr_ref, expected_sha :: String.t() | nil) :: :ok | {:error, term()}
   @callback close(mr_ref) :: :ok | {:error, term()}
   @callback add_comment(mr_ref, body :: String.t()) :: :ok | {:error, term()}
+  # Replace the PR/MR description with `body` (GitLab `PUT /merge_requests/:iid`
+  # `description`; GitHub `PATCH /pulls/:n` `body`) using the merger's own
+  # credential. Optional — see `Arbiter.Mergers.update_description/3`.
+  @callback update_description(mr_ref, body :: String.t()) :: :ok | {:error, term()}
   @callback request_review(mr_ref, reviewers :: [term()]) :: :ok | {:error, term()}
   @callback link_for(mr_ref) :: String.t()
 
@@ -807,6 +811,7 @@ defmodule Arbiter.Mergers.Merger do
   @callback trigger_pipeline(mr_ref, opts :: map()) :: {:ok, map()} | {:error, term()}
 
   @optional_callbacks prepare: 2,
+                      update_description: 2,
                       update_branch: 1,
                       update_branch: 2,
                       ancestor?: 3,
