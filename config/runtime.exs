@@ -98,10 +98,22 @@ jail_unmask =
 
 config :arbiter, :worker_jail_unmask, jail_unmask
 
+# A boot-time secret given inline (`NAME`) or as a pointer (`NAME_REF`:
+# `aws-sm:<id>[#json-key]`, `aws-ssm:<name>` or `file:<path>`, resolved by
+# `Arbiter.SecretRefs.External`; the pointer wins). It only calls into the
+# resolver when a pointer is set, so an inline-only install never depends on it,
+# and an unresolvable pointer raises, failing the boot as a missing value does.
+secret_or_ref = fn name ->
+  case System.get_env(name <> "_REF") do
+    ref when ref in [nil, ""] -> System.get_env(name)
+    _ref -> Arbiter.SecretRefs.External.env_or_ref!(name)
+  end
+end
+
 if config_env() == :prod and not agent? do
   secret_key_base =
-    System.get_env("SECRET_KEY_BASE") ||
-      raise "environment variable SECRET_KEY_BASE is missing."
+    secret_or_ref.("SECRET_KEY_BASE") ||
+      raise "environment variable SECRET_KEY_BASE is missing (set SECRET_KEY_BASE, or SECRET_KEY_BASE_REF to a secret-manager pointer)."
 
   # The dashboard's auth model is "a loopback peer is trusted; there is no
   # login" (see ArbiterWeb.Loopback) — bind loopback-only by default
@@ -135,9 +147,9 @@ end
 
 if config_env() == :dev and not agent? do
   secret_key_base =
-    System.get_env("SECRET_KEY_BASE") ||
+    secret_or_ref.("SECRET_KEY_BASE") ||
       raise """
-      environment variable SECRET_KEY_BASE is missing.
+      environment variable SECRET_KEY_BASE is missing (set SECRET_KEY_BASE, or SECRET_KEY_BASE_REF to a secret-manager pointer).
 
       Generate one with `mix phx.gen.secret` and add it to .arbiter.env:
         SECRET_KEY_BASE=<generated-value>

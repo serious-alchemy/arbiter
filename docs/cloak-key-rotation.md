@@ -106,3 +106,12 @@ Rotating from generation N to N+1:
 - This rotates the *storage* key only. Rotating the underlying provider
   credential itself (e.g. a fresh `claude setup-token` grant) is a separate,
   manual operator action — see `docs/provider-account-design.md` §7.6.
+
+## Keeping the keys out of the env file
+
+`ARBITER_CLOAK_KEY` and `ARBITER_CLOAK_KEY_OLD` can be given as secret-manager
+pointers (`ARBITER_CLOAK_KEY_REF`, `ARBITER_CLOAK_KEY_OLD_REF`, e.g.
+`aws-sm:prod/arbiter#cloak_key`), so the env file holds no key material. The
+rotation steps are the same — update the secret behind each pointer instead of
+the env file — and `ARBITER_CLOAK_KEY_GENERATION` stays an inline number. See
+`docs/secrets-at-rest.md`.

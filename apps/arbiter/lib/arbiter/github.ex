@@ -422,13 +422,13 @@ defmodule Arbiter.GitHub do
   end
 
   defp fetch_token!(opts) do
-    case Keyword.get(opts, :token) || System.get_env("GITHUB_TOKEN") do
+    case Keyword.get(opts, :token) || Arbiter.SecretRefs.External.env_value("GITHUB_TOKEN") do
       token when is_binary(token) and token != "" ->
         token
 
       _ ->
         raise ArgumentError,
-              "Arbiter.GitHub: no token supplied (set GITHUB_TOKEN env var " <>
+              "Arbiter.GitHub: no token supplied (set GITHUB_TOKEN or GITHUB_TOKEN_REF " <>
                 "or pass opts[:token])"
     end
   end

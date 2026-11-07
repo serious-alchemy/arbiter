@@ -56,6 +56,30 @@ defmodule Arbiter.VaultTest do
       assert Vault.key!() == cfg_key
     end
 
+    test "ARBITER_CLOAK_KEY_REF resolves the key from a pointer and wins over an inline value" do
+      key = :crypto.strong_rand_bytes(32)
+      path = Path.join(System.tmp_dir!(), "vault-ref-#{System.unique_integer([:positive])}")
+      File.write!(path, Base.encode64(key) <> "\n")
+
+      System.put_env("ARBITER_CLOAK_KEY", Base.encode64(:crypto.strong_rand_bytes(32)))
+      System.put_env("ARBITER_CLOAK_KEY_REF", "file:" <> path)
+
+      on_exit(fn ->
+        System.delete_env("ARBITER_CLOAK_KEY_REF")
+        File.rm(path)
+      end)
+
+      assert Vault.key!() == key
+    end
+
+    test "an unresolvable ARBITER_CLOAK_KEY_REF fails loudly, naming the pointer only" do
+      System.put_env("ARBITER_CLOAK_KEY_REF", "file:/nonexistent/cloak-key")
+      on_exit(fn -> System.delete_env("ARBITER_CLOAK_KEY_REF") end)
+
+      error = assert_raise RuntimeError, fn -> Vault.key!() end
+      assert error.message =~ "ARBITER_CLOAK_KEY_REF=file:/nonexistent/cloak-key"
+    end
+
     test "raises a clear error when no key is configured" do
       System.delete_env("ARBITER_CLOAK_KEY")
       Application.put_env(:arbiter, Vault, [])

@@ -126,6 +126,86 @@ defmodule Arbiter.Tasks.WorkspaceSecretsTest do
       Arbiter.Trackers.Shortcut.Config.clear()
     end
 
+    test "a tracker adapter resolves an aws-sm: ref through the secret manager" do
+      alias Arbiter.Trackers.Shortcut.Config
+
+      stub = Arbiter.Tasks.WorkspaceSecretsTest.AwsSm
+      prev = Application.get_env(:arbiter, Arbiter.SecretRefs.External)
+
+      Application.put_env(:arbiter, Arbiter.SecretRefs.External,
+        req_options: [plug: {Req.Test, stub}, retry: false]
+      )
+
+      aws_env = %{
+        "AWS_ACCESS_KEY_ID" => "AKIDEXAMPLE",
+        "AWS_SECRET_ACCESS_KEY" => "secretexample",
+        "AWS_REGION" => "us-east-1"
+      }
+
+      saved = Map.new(aws_env, fn {k, _} -> {k, System.get_env(k)} end)
+      Enum.each(aws_env, fn {k, v} -> System.put_env(k, v) end)
+      Arbiter.SecretRefs.Cache.clear()
+
+      Req.Test.stub(stub, fn conn ->
+        Req.Test.json(conn, %{"SecretString" => ~s({"token":"sct_from_aws_sm"})})
+      end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "sec-aws-sm",
+          config: %{
+            "tracker" => %{
+              "type" => "shortcut",
+              "config" => %{"credentials_ref" => "aws-sm:prod/shortcut#token"}
+            }
+          }
+        })
+
+      Config.put_active(ws)
+      assert {:ok, %{token: "sct_from_aws_sm"}} = Config.resolve()
+
+      # The pointer is what the workspace stores; the value is never persisted
+      # or serialised, and stays in the redaction set while cached.
+      assert ws.config["tracker"]["config"]["credentials_ref"] == "aws-sm:prod/shortcut#token"
+      refute inspect(ws.config) =~ "sct_from_aws_sm"
+      assert Arbiter.Redaction.redact("t=sct_from_aws_sm", []) == "t=[REDACTED]"
+
+      on_exit(fn ->
+        Arbiter.SecretRefs.Cache.clear()
+
+        Enum.each(saved, fn {k, v} ->
+          if v, do: System.put_env(k, v), else: System.delete_env(k)
+        end)
+
+        if prev,
+          do: Application.put_env(:arbiter, Arbiter.SecretRefs.External, prev),
+          else: Application.delete_env(:arbiter, Arbiter.SecretRefs.External)
+      end)
+    after
+      Arbiter.Trackers.Shortcut.Config.clear()
+    end
+
+    test "an unreachable aws-sm: ref surfaces as config_missing naming the pointer, not a value" do
+      alias Arbiter.Trackers.Shortcut.Config
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "sec-file-missing",
+          config: %{
+            "tracker" => %{
+              "type" => "shortcut",
+              "config" => %{"credentials_ref" => "file:/nonexistent/shortcut-token"}
+            }
+          }
+        })
+
+      Config.put_active(ws)
+      assert {:error, %{kind: :config_missing, message: msg}} = Config.resolve()
+      assert msg =~ "file:/nonexistent/shortcut-token"
+    after
+      Arbiter.Trackers.Shortcut.Config.clear()
+    end
+
     test "env: refs continue to work unchanged" do
       alias Arbiter.Trackers.Shortcut.Config
 

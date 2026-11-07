@@ -325,7 +325,7 @@ defmodule Arbiter.Release.UpdateCheck do
     base = [{"accept", "application/vnd.github+json"}, {"x-github-api-version", "2022-11-28"}]
     base = if etag, do: [{"if-none-match", etag} | base], else: base
 
-    case env("GITHUB_TOKEN") do
+    case Arbiter.SecretRefs.External.env_value("GITHUB_TOKEN") do
       nil -> base
       token -> [{"authorization", "Bearer #{token}"} | base]
     end

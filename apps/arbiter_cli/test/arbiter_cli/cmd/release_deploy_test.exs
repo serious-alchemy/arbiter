@@ -1805,9 +1805,16 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
 
       {_out, _err, 0} = capture(fn -> ReleaseDeploy.run([]) end)
 
-      names = snapshots |> File.ls!() |> Enum.sort()
+      files = snapshots |> File.ls!() |> Enum.sort()
+      # Each snapshot may carry an `.env-fingerprint.json` sidecar; count the
+      # snapshots themselves, and check no sidecar outlives its snapshot.
+      names = Enum.filter(files, &String.ends_with?(&1, ".sqlite3"))
       assert length(names) == 2
       assert Enum.any?(names, &String.contains?(&1, "arbiter-pre-#{@vsn}-"))
+
+      for sidecar <- files -- names do
+        assert String.replace_suffix(sidecar, ".env-fingerprint.json", "") in names
+      end
     end
   end
 

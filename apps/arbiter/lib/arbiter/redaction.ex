@@ -54,7 +54,9 @@ defmodule Arbiter.Redaction do
   @spec redact(String.t(), [String.t() | nil]) :: String.t()
   @spec redact(term(), [String.t() | nil]) :: term()
   def redact(text, secret_values) when is_binary(text) and is_list(secret_values) do
-    secret_values
+    # Values resolved from an external secret manager (`aws-sm:` …) are always
+    # part of the set, whoever the caller is — see `Arbiter.SecretRefs.External`.
+    (secret_values ++ Arbiter.SecretRefs.External.cached_values())
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
     |> Enum.uniq()
     # Longest first: if "SEC" and "SECRETLONG" are both secret, redacting the

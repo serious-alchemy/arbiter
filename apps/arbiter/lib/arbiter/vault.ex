@@ -8,6 +8,12 @@ defmodule Arbiter.Vault do
 
       ARBITER_CLOAK_KEY="$(openssl rand -base64 32)"
 
+  To keep the key out of the env file (and every copy of it), set a pointer
+  instead — `ARBITER_CLOAK_KEY_REF=aws-sm:prod/arbiter#cloak_key` (also
+  `aws-ssm:` / `file:`; see `Arbiter.SecretRefs.External`). The pointer wins
+  over an inline value, and `ARBITER_CLOAK_KEY_OLD_REF` does the same for the
+  retired key. An unresolvable pointer aborts the boot, as a missing key does.
+
   The vault is a `GenServer` in the supervision tree; `init/1` resolves the key
   via `key!/0` and **raises** when it is missing or malformed, so the server
   refuses to boot rather than start with no encryption key. Tests inject a key
@@ -50,6 +56,8 @@ defmodule Arbiter.Vault do
   """
 
   use Cloak.Vault, otp_app: :arbiter
+
+  alias Arbiter.SecretRefs.External
 
   @impl GenServer
   def init(config) do
@@ -155,6 +163,10 @@ defmodule Arbiter.Vault do
         (.arbiter.env or ~/.arbiter/arbiter.env):
 
             ARBITER_CLOAK_KEY="$(openssl rand -base64 32)"
+
+        or point at a secret manager instead, so the env file holds no secret:
+
+            ARBITER_CLOAK_KEY_REF="aws-sm:prod/arbiter#cloak_key"
         """
 
       raw ->
@@ -183,17 +195,20 @@ defmodule Arbiter.Vault do
     end
   end
 
+  # Inline `ARBITER_CLOAK_KEY`, or a pointer in `ARBITER_CLOAK_KEY_REF`
+  # (`aws-sm:` / `aws-ssm:` / `file:`, see `Arbiter.SecretRefs.External`). A
+  # pointer that cannot be resolved raises here, so the boot fails loudly.
   defp raw_key do
-    case System.get_env("ARBITER_CLOAK_KEY") do
-      v when is_binary(v) and v != "" -> v
-      _ -> Application.get_env(:arbiter, __MODULE__)[:key]
+    case External.env_or_ref!("ARBITER_CLOAK_KEY") do
+      nil -> Application.get_env(:arbiter, __MODULE__)[:key]
+      v -> v
     end
   end
 
   defp raw_old_key do
-    case System.get_env("ARBITER_CLOAK_KEY_OLD") do
-      v when is_binary(v) and v != "" -> v
-      _ -> Application.get_env(:arbiter, __MODULE__)[:old_key]
+    case External.env_or_ref!("ARBITER_CLOAK_KEY_OLD") do
+      nil -> Application.get_env(:arbiter, __MODULE__)[:old_key]
+      v -> v
     end
   end
 

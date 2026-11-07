@@ -198,7 +198,7 @@ defmodule Arbiter.Release.SelfDeploy do
   end
 
   defp scrub(text) do
-    case System.get_env("GITHUB_TOKEN") do
+    case Arbiter.SecretRefs.External.env_value("GITHUB_TOKEN") do
       token when is_binary(token) and byte_size(token) >= 8 ->
         String.replace(text, token, "[redacted]")
 
