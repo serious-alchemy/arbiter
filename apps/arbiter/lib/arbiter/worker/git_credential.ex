@@ -684,6 +684,20 @@ defmodule Arbiter.Worker.GitCredential do
   def bot_guard_refusal?(_), do: false
 
   @doc """
+  Whether `reason` is the guard being unable to *check* the bot token (timeout, transport,
+  5xx, 429) after its retries, as opposed to GitLab rejecting it. Nothing ran and the same
+  dispatch passes once GitLab answers, so the caller defers it (requeue / hold) rather than
+  failing the run (#1305).
+  """
+  @spec bot_guard_transient?(term()) :: boolean()
+  def bot_guard_transient?({tag, inner})
+      when tag in [:worker_session_failed, :claude_start_failed],
+      do: bot_guard_transient?(inner)
+
+  def bot_guard_transient?({:git_credential_bot_token_unverifiable, _}), do: true
+  def bot_guard_transient?(_), do: false
+
+  @doc """
   Runs the `gitlab_bot_token` dispatch guard for `repo` without delivering anything
   (issue #1270): `doctor`, `workspace_config_set` and the repo-level credential alert
   ask what a dispatch would be told. `:ok` for a repo with no bot-token entry or one
@@ -1121,8 +1135,8 @@ defmodule Arbiter.Worker.GitCredential do
 
   def format_error({:git_credential_bot_token_unverifiable, why}),
     do:
-      "the GitLab bot token could not be verified (#{why}); refusing to deliver an unchecked " <>
-        "token or fall back to the operator's credential"
+      "the GitLab bot token could not be verified (#{why}); retrying. Nothing is delivered " <>
+        "until it can be checked, and the operator's credential is never used instead"
 
   def format_error({:git_credential_token_too_broad, scopes}),
     do:
@@ -1142,6 +1156,11 @@ defmodule Arbiter.Worker.GitCredential do
     do: "could not stage the scoped git credential: #{inspect(reason)}"
 
   def format_error(other), do: "scoped git credential unavailable: #{inspect(other)}"
+
+  defp bot_refusal({:rejected, status}),
+    do:
+      "GitLab rejected the token (HTTP #{status}); it is revoked, expired or lacks access. " <>
+        "Fix the credential; nothing is delivered and the operator credential is not used"
 
   defp bot_refusal({:scopes, extra}),
     do:

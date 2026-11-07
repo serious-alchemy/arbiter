@@ -83,6 +83,41 @@ defmodule Arbiter.Worker.DispatchRefusalTest do
     end
   end
 
+  # #1305: the bot-token guard could not CHECK the token (timeout past its retries). That is
+  # not the run's failure: the card goes back to Ready and is dispatched again once GitLab
+  # answers, with no failed run and no escalation. A real rejection still fails the spawn.
+  test "an unverifiable bot token defers the dispatch: back in Ready, no failed run, no escalation",
+       %{task: task, ws: ws, sandbox: sandbox} do
+    assert {:error, {:git_credential_bot_token_unverifiable, _}} =
+             dispatch(
+               task,
+               {:git_credential_bot_token_unverifiable, "personal_access_tokens/self: timeout"}
+             )
+             |> unwrap_start_failed()
+
+    if pid = Worker.whereis(task.id), do: TestSandbox.own!(sandbox, pid)
+    assert %{state: :queued} = Ash.get!(Issue, task.id)
+    refute latest_run(task.id) && latest_run(task.id).outcome == :failed
+
+    assert [] =
+             Message.inbox("admiral", workspace_id: ws.id)
+             |> Enum.filter(&(&1.directive_ref == task.id))
+  end
+
+  test "a rejected bot token still fails the spawn (not deferred)", %{
+    task: task,
+    sandbox: sandbox
+  } do
+    assert {:error, {:claude_start_failed, {:git_credential_bot_token_refused, {:rejected, 403}}}} =
+             dispatch(task, {:git_credential_bot_token_refused, {:rejected, 403}})
+
+    if pid = Worker.whereis(task.id), do: TestSandbox.own!(sandbox, pid)
+    refute match?(%{state: :queued}, Ash.get!(Issue, task.id))
+  end
+
+  defp unwrap_start_failed({:error, {:claude_start_failed, inner}}), do: {:error, inner}
+  defp unwrap_start_failed(other), do: other
+
   test "a placement timeout (bd-3jjt3p) holds the card like a refusal: no spawn_failed, no escalation",
        %{task: task, ws: ws, sandbox: sandbox} do
     :ok = Placement.reserve(task.id, "node-1")
