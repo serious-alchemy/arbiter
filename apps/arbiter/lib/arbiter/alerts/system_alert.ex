@@ -32,6 +32,7 @@ defmodule Arbiter.Alerts.SystemAlert do
     :budget_exceeded,
     :credential_expired,
     :deploy_failing,
+    :deps_seed_failing,
     :git_credential_refused,
     :machine_derate,
     :node_upgrade_refused,

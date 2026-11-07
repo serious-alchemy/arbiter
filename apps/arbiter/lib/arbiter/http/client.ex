@@ -218,6 +218,12 @@ defmodule Arbiter.Http.Client do
   defp gated(%__MODULE__{gate: gate}, full_opts) when is_function(gate, 1),
     do: gate.(fn -> Req.request(full_opts) end)
 
+  # An arity-2 gate also receives `{method, url}` so it can attribute the call.
+  defp gated(%__MODULE__{gate: gate}, full_opts) when is_function(gate, 2) do
+    meta = {Keyword.get(full_opts, :method), Keyword.get(full_opts, :url)}
+    gate.(meta, fn -> Req.request(full_opts) end)
+  end
+
   defp stub_opts(%__MODULE__{stub: nil}), do: []
 
   defp stub_opts(%__MODULE__{stub: {env_key, stub_name}}) do

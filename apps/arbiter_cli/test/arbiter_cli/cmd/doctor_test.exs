@@ -2286,6 +2286,22 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "default/mesaana: direct"
     end
 
+    test "warns with the last 429 time when GitLab rate-limited Arbiter" do
+      budget = %{
+        "severity" => "warn",
+        "summary" => "GitLab rate limit hit",
+        "detail" => "gitlab.com: remaining 0, last 429 2026-11-06T10:00:00Z"
+      }
+
+      stub_routes(
+        routing_routes(%{"repos" => [@arbiter_ok], "problems" => [], "gitlab_budget" => budget})
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "merge routing"))
+      assert result.status == :warn
+      assert result.detail =~ "last 429 2026-11-06T10:00:00Z"
+    end
+
     test "fails on a remote-less repo under a forge strategy, with the fix" do
       flagged = %{
         "workspace" => "default",

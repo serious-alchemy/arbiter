@@ -138,6 +138,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.CliSet
   alias Arbiter.Worker.Container
   alias Arbiter.Worker.DepsCache
+  alias Arbiter.Worker.DepsSeedWatch
   alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.GateEnv
   alias Arbiter.Worker.GitCredential
@@ -549,11 +550,17 @@ defmodule Arbiter.Worker.ContainerSpawn do
           nil
 
         true ->
+          seed_env =
+            Image.RepoConfig.resolve(
+              Keyword.get(opts, :workspace),
+              Keyword.get(opts, :repo)
+            ).seed_env
+
           fn worktree, image ->
             DepsCache.seed_worktree(
               worktree,
               image,
-              [home: home] ++ Keyword.take(opts, [:workspace, :repo, :podman])
+              [home: home, seed_env: seed_env] ++ Keyword.take(opts, [:workspace, :repo, :podman])
             )
           end
 
@@ -563,6 +570,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
     with seed when is_function(seed) <- seed,
          {:ok, summary} <- seed.(worktree, image) do
+      DepsSeedWatch.succeeded(seed_repo(opts), image)
       summary
     else
       nil ->
@@ -572,10 +580,21 @@ defmodule Arbiter.Worker.ContainerSpawn do
         nil
 
       {:error, reason} ->
-        Logger.warning("ContainerSpawn: no deps cache for #{worktree}: #{inspect(reason)}")
+        DepsSeedWatch.failed(seed_repo(opts), image, reason,
+          workspace_id: workspace_id(Keyword.get(opts, :workspace))
+        )
+
         nil
     end
   end
+
+  defp seed_repo(opts), do: opts |> Keyword.get(:repo) |> repo_label()
+  defp repo_label(repo) when is_binary(repo), do: repo
+  defp repo_label(nil), do: nil
+  defp repo_label(repo), do: inspect(repo)
+
+  defp workspace_id(%{id: id}) when is_binary(id), do: id
+  defp workspace_id(_), do: nil
 
   # The test services (`Arbiter.Worker.TestServices`, P10) start last: nothing
   # after them can fail, so a refused prepare never leaves a pod behind. A repo

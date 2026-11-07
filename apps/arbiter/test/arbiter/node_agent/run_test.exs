@@ -1049,7 +1049,7 @@ defmodule Arbiter.NodeAgent.RunTest do
       refute_received :layer_tried
     end
 
-    test "a seed that fails does not refuse the run: the worker fetches for itself",
+    test "a seed that fails does not refuse a run that has network: the worker fetches for itself",
          %{opts: opts, stub: stub} do
       opts =
         Keyword.merge(opts,
@@ -1058,9 +1058,33 @@ defmodule Arbiter.NodeAgent.RunTest do
           checkout_fun: &fake_checkout/3
         )
 
-      assert {:ok, "dc2"} = Runs.assign(checkout_spec("dc2"), opts)
+      spec =
+        spec("dc2", %{
+          "checkout" => %{"branch" => "feature/x", "read_only" => true},
+          "network" => "pasta"
+        })
+
+      assert {:ok, "dc2"} = Runs.assign(spec, opts)
       wait_event("dc2", "exit")
       assert File.exists?(Path.join(stub, "run.argv"))
+    end
+
+    test "a seed that fails refuses a run with no egress, naming the missing seed",
+         %{opts: opts, stub: stub} do
+      opts =
+        Keyword.merge(opts,
+          deps_cache: true,
+          deps_fun: fn _, _, _ ->
+            {:error, {:seed_failed, 1, "** (RuntimeError) DATABASE_URL is not set"}}
+          end,
+          checkout_fun: &fake_checkout/3
+        )
+
+      assert {:ok, "dc9"} = Runs.assign(checkout_spec("dc9"), opts)
+      assert %{"reason" => "unschedulable", "detail" => detail} = wait_event("dc9", "run.refused")
+      assert detail =~ "no_deps_seed"
+      assert detail =~ "DATABASE_URL is not set"
+      refute File.exists?(Path.join(stub, "run.argv"))
     end
 
     test "a run with no checkout, or with the cache switched off, seeds nothing", %{opts: opts} do

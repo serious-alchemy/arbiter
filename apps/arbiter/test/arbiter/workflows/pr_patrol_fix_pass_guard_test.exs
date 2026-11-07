@@ -311,6 +311,31 @@ defmodule Arbiter.Workflows.PRPatrolFixPassGuardTest do
     assert follow_ups() == []
   end
 
+  # bd-789ehp / #1196: a Merging ticket has no live worker, so mail to it is never
+  # read. The CI summary goes to the coordinator mailbox instead, once.
+  test "a Merging ticket with no live worker: CI summary routed to the coordinator, once",
+       %{ws: ws} do
+    task = authored_task(ws)
+    _ = put_state!(task, :merging, pr_ref: "owner/repo#424")
+    assert Worker.whereis(task.id) == nil
+    Req.Test.stub(@stub_name, ci_failing_stub())
+    StubResumeDeferrer.reset()
+
+    name = start_patrol(ws)
+    :ok = PRPatrol.tick(name)
+    :ok = PRPatrol.tick(name)
+
+    assert follow_ups() == []
+    assert owner_mail(task.id) |> Enum.filter(&(&1.from_ref == "pr-patrol")) == []
+
+    assert [%Message{task_ref: task_ref}] =
+             Message.coordinator_ref()
+             |> owner_mail()
+             |> Enum.filter(&(&1.from_ref == "pr-patrol"))
+
+    assert task_ref == task.id
+  end
+
   # bd-cfucyv: the ReviewGate's CI wait keeps the ticket stored `:active` (the
   # board column reads "merging / awaiting_ci"), with no live run once a restart
   # has taken the author. The ci_wait marker is what says the gate owns the CI.
