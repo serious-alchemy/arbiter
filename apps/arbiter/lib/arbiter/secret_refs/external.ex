@@ -381,7 +381,6 @@ defmodule Arbiter.SecretRefs.External do
 
   defp transport_reason(%{reason: reason}) when is_atom(reason), do: reason
   defp transport_reason(%{__struct__: mod}), do: mod
-  defp transport_reason(_), do: :unknown
 
   defp region_for(id, opts) do
     case Regex.run(~r/^arn:[^:]*:[^:]*:([a-z0-9-]+):/, id) do
