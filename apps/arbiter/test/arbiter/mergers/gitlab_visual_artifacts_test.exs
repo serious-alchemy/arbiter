@@ -80,6 +80,46 @@ defmodule Arbiter.Mergers.GitlabVisualArtifactsTest do
       assert Enum.sort(failed) == ["unit", "visual"]
     end
 
+    test "a canceled visual job is :job_not_failed and no artifact request is made" do
+      stub(fn conn ->
+        case conn.request_path do
+          @pipelines ->
+            json(conn, [%{"id" => 200, "sha" => "headsha", "status" => "failed"}])
+
+          "/api/v4/projects/12345/pipelines/200/jobs" ->
+            json(conn, [
+              %{"id" => 2, "name" => "visual", "status" => "canceled"},
+              %{"id" => 4, "name" => "unit", "status" => "failed"}
+            ])
+
+          "/api/v4/projects/12345/jobs/2/artifacts" ->
+            flunk("artifacts requested for a canceled visual job")
+        end
+      end)
+
+      assert {:error, :job_not_failed} = Gitlab.ci_job_artifacts(@ref, "visual", %{})
+    end
+
+    test "canceled siblings are not reported as failed jobs" do
+      stub(fn conn ->
+        case conn.request_path do
+          @pipelines ->
+            json(conn, [%{"id" => 200, "sha" => "headsha", "status" => "failed"}])
+
+          "/api/v4/projects/12345/pipelines/200/jobs" ->
+            json(conn, [
+              %{"id" => 2, "name" => "visual", "status" => "failed"},
+              %{"id" => 4, "name" => "unit", "status" => "canceled"}
+            ])
+
+          "/api/v4/projects/12345/jobs/2/artifacts" ->
+            Plug.Conn.resp(conn, 200, "Z")
+        end
+      end)
+
+      assert {:ok, %{failed_jobs: ["visual"]}} = Gitlab.ci_job_artifacts(@ref, "visual", %{})
+    end
+
     test "no pipeline, or no artifacts, is an error rather than an empty archive" do
       stub(fn conn -> json(conn, []) end)
       assert {:error, :no_pipeline} = Gitlab.ci_job_artifacts(@ref, "visual", %{})

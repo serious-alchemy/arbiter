@@ -257,6 +257,17 @@ defmodule Arbiter.Worker.VisualBaselinesTest do
     assert git(origin, ["rev-parse", "refs/heads/feature/x"]) == head
   end
 
+  test "a visual job that did not fail (canceled) is skipped, not an unreadable artifact", %{
+    ctx: ctx,
+    origin: origin,
+    head: head
+  } do
+    Application.put_env(:arbiter, :visual_fake_forge_artifacts, {:error, :job_not_failed})
+
+    assert {:skip, :visual_job_not_failed} = VisualBaselines.refresh(ctx)
+    assert git(origin, ["rev-parse", "refs/heads/feature/x"]) == head
+  end
+
   test "artifacts from a pipeline of another commit are not used", %{
     ctx: ctx,
     origin: origin,

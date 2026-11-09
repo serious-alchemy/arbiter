@@ -167,6 +167,9 @@ defmodule Arbiter.Worker.VisualBaselines do
       {:ok, _} ->
         {:skip, :no_artifacts}
 
+      {:error, :job_not_failed} ->
+        {:skip, :visual_job_not_failed}
+
       {:error, reason} ->
         {:skip, {:artifacts_unreadable, reason}}
     end
