@@ -498,7 +498,11 @@ defmodule Arbiter.Mergers.Gitlab do
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, [latest | _]} <- mr_pipelines(cfg, iid) |> no_pipeline(),
          {:ok, jobs} <- pipeline_jobs(cfg, Map.get(latest, "id")) do
-      failed = Enum.filter(jobs, &failing_job?/1)
+      # Only genuinely `failed` jobs: under fail-fast CI (`auto_cancel:
+      # on_job_failure: all`) a cancelled job never uploaded artifacts and is
+      # collateral, not a failure (#1312). `failing_job?/1` is left alone for
+      # its other callers.
+      failed = Enum.filter(jobs, &genuinely_failed_job?/1)
 
       with %{"id" => job_id} <- Enum.find(failed, &(Map.get(&1, "name") == job_name)),
            {:ok, archive} <- job_artifacts(cfg, job_id) do
@@ -1945,6 +1949,9 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   # A job allowed to fail never blocks the pipeline, so it is not a failing check.
+  defp genuinely_failed_job?(job),
+    do: Map.get(job, "status") == "failed" and Map.get(job, "allow_failure") != true
+
   defp failing_job?(job),
     do: Map.get(job, "status") in @failing_job_statuses and Map.get(job, "allow_failure") != true
 
