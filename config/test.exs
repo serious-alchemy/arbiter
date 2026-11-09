@@ -332,6 +332,10 @@ config :arbiter, :quota_grant_refresher, enabled: false
 # never raise alerts from whatever snapshots a test happens to seed.
 config :arbiter, :quota_staleness_watch, enabled: false
 
+# The CI backpressure timer would poll (and log) against the shared sandbox from
+# a process no test owns; its own test starts an instance with `interval_ms: :never`.
+config :arbiter, :ci_backpressure_refresher, enabled: false
+
 # The budget server's tests start their own instance with injected inputs.
 config :arbiter, :quota_budget_server, enabled: false
 

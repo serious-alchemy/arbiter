@@ -379,6 +379,9 @@ defmodule Arbiter.Application do
         Arbiter.Reports.Cache,
         # The forge-poll memo behind the per-repo CI backpressure gate (#1126).
         Arbiter.Board.CiBackpressure.Cache,
+        # Polls every gated repo's CI queue on a timer, card queued or not, so the
+        # first card after a quiet spell finds a fresh reading.
+        Arbiter.Board.CiBackpressure.Refresher,
         # Memoizes the host's minted GitHub App tokens (bd-bsmkfu).
         Arbiter.Worker.HostCredential.Cache,
         # The egress proxy's grant cache, registry and per-run supervisor

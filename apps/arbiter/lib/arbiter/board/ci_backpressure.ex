@@ -24,8 +24,17 @@ defmodule Arbiter.Board.CiBackpressure do
   workflow runs that are `queued` for a pull request (`Merger.ci_queue/0`).
   `poll/2` reads it through the repo's own merger; `Cache` memoizes it for
   #{div(60_000, 1000)}s (`:interval_ms`), so the board's many readers cost one
-  forge call per repo per interval. A poll that fails is logged and **fails
-  open**: no hold, never a stalled repo.
+  forge call per repo per interval. `Refresher` also polls every gated repo on
+  a timer, whether or not a card is queued, so the first card promoted after a
+  quiet spell finds a fresh reading rather than a stale one.
+
+  A card is never waved through on *no information*: with no reading yet (first
+  poll in flight), or after a failed poll, a fresh dispatch is held for a tick.
+  A forge that stays unreadable for `Cache.max_failures/0` polls in a row is
+  logged and **fails open**: no hold, never a stalled repo.
+
+  Every change of decision (held, released) is logged once per repo at info,
+  naming the pending count and the oldest pending age.
 
   ## Effect
 
@@ -50,6 +59,8 @@ defmodule Arbiter.Board.CiBackpressure do
   alias Arbiter.Mergers.ForgeRepos
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Workspace
+
+  require Logger
 
   @interval_ms 60_000
 
@@ -183,12 +194,73 @@ defmodule Arbiter.Board.CiBackpressure do
 
   defp verdict({_ws_id, repo} = key, gates, now, opts) do
     {ws, limits} = Map.fetch!(gates, key)
+    decide(ws, repo, limits, now, opts)
+  end
 
-    case read(ws, repo, opts) do
-      {:ok, signal, _at} -> evaluate(limits, signal, now)
-      :unknown -> :ok
+  # What the scheduler's gate says about one repo right now, and the one place a
+  # decision is logged. A fresh dispatch waits (`{:hold, reason}`) while the queue
+  # has not been read yet, and for the first failed polls; it fails open only when
+  # the forge stays unreadable (`Cache.max_failures/0` polls in a row).
+  defp decide(ws, repo, limits, now, opts) do
+    gate = gate(read(ws, repo, opts), limits, now)
+    note(ws, repo, gate)
+
+    case gate do
+      {:held, detail} -> {:hold, detail}
+      {:waiting, reason} -> {:hold, reason}
+      {:clear, _detail} -> :ok
+      :open -> :ok
     end
   end
+
+  defp gate({:ok, signal, _at}, limits, now) do
+    detail = detail(signal.pending, age_minutes(signal, now))
+
+    case evaluate(limits, signal, now) do
+      :ok -> {:clear, detail}
+      {:hold, detail} -> {:held, detail}
+    end
+  end
+
+  defp gate({:error, failures}, _limits, _now) do
+    if failures >= Cache.max_failures(),
+      do: :open,
+      else: {:waiting, "CI queue read failed, retrying (#{failures} of #{Cache.max_failures()})"}
+  end
+
+  defp gate(:unknown, _limits, _now), do: {:waiting, "awaiting a CI queue reading"}
+
+  # A hold and its release are logged once each (per repo, on a change of state),
+  # at info, naming the repo and the pending count and oldest age. Nothing is
+  # logged for a repo that has only ever been clear.
+  defp note(ws, repo, gate) do
+    {state, detail} = state(gate)
+
+    case Cache.note_state({ws.id, repo}, state) do
+      :same -> :ok
+      {:changed, previous} -> log_change(previous, state, "#{ws.name}/#{repo}", detail)
+    end
+  end
+
+  defp state({:held, detail}), do: {:held, detail}
+  defp state({:waiting, reason}), do: {:waiting, reason}
+  defp state({:clear, detail}), do: {:clear, detail}
+  defp state(:open), do: {:open, nil}
+
+  defp log_change(_previous, :held, label, detail) do
+    Logger.info("CiBackpressure: holding new dispatches for #{label}: CI saturated (#{detail})")
+  end
+
+  defp log_change(_previous, :waiting, label, reason) do
+    Logger.info("CiBackpressure: holding new dispatches for #{label} for a tick: #{reason}")
+  end
+
+  defp log_change(previous, :clear, label, detail) when previous in [:held, :waiting, :open] do
+    Logger.info("CiBackpressure: released #{label}: CI queue below its limits (#{detail})")
+  end
+
+  # The forge stayed unreadable: the cache has already warned; no second line.
+  defp log_change(_previous, _state, _label, _detail), do: :ok
 
   defp read(ws, repo, opts) do
     poller = Keyword.get(opts, :poller, &poll/2)
@@ -203,12 +275,30 @@ defmodule Arbiter.Board.CiBackpressure do
   end
 
   @doc """
+  Reads the CI queue of every gated repo in `workspaces` — whether or not a card
+  is queued for it — so the cache is warm when the next card is promoted, and a
+  hold or its release is logged when it happens rather than when a card next
+  asks. Same options as `holds/3`. The `Refresher` calls it on a timer.
+  """
+  @spec refresh([Workspace.t()], keyword()) :: :ok
+  def refresh(workspaces, opts \\ []) when is_list(workspaces) do
+    now = Keyword.get(opts, :now) || DateTime.utc_now()
+
+    for ws <- workspaces, {repo, limits} <- limits(ws) do
+      decide(ws, repo, limits, now, opts)
+    end
+
+    :ok
+  end
+
+  @doc """
   `repo`'s gate in `workspace` right now: `:ok`, or `{:hold, detail}` when its
   CI queue is over the configured limits. The speculative merge train
   (bd-6dyva0) asks it before testing more than its front car, so a saturated
   runner pool is not handed K pipelines at once. Reads the same cached poll as
   `holds/3` (same options), and fails open: an ungated repo, a poll not read
-  yet or a failed one is `:ok`.
+  yet or a failed one is `:ok` (the merge train is not a fresh dispatch, so it never
+  waits for a reading).
   """
   @spec verdict(Workspace.t() | nil, String.t() | nil, keyword()) :: :ok | {:hold, String.t()}
   def verdict(workspace, repo, opts \\ [])
@@ -223,7 +313,7 @@ defmodule Arbiter.Board.CiBackpressure do
           {:ok, signal, _at} ->
             evaluate(limits, signal, Keyword.get(opts, :now) || DateTime.utc_now())
 
-          :unknown ->
+          _unread ->
             :ok
         end
     end
@@ -280,7 +370,7 @@ defmodule Arbiter.Board.CiBackpressure do
           checked_at: checked_at
         })
 
-      :unknown ->
+      _unread ->
         Map.merge(base, %{
           pending: nil,
           oldest_pending_min: nil,

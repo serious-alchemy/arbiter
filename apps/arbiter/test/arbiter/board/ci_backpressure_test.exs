@@ -9,6 +9,7 @@ defmodule Arbiter.Board.CiBackpressureTest do
   import ExUnit.CaptureLog
 
   alias Arbiter.Board.CiBackpressure
+  alias Arbiter.Board.CiBackpressure.Cache
   alias Arbiter.Tasks.Workspace
 
   @now ~U[2026-10-29 12:00:00Z]
@@ -165,26 +166,40 @@ defmodule Arbiter.Board.CiBackpressureTest do
       assert Agent.get(counter, & &1) == 2
     end
 
-    test "a failed poll fails open with a logged warning" do
+    test "a failed poll holds for a tick, then fails open after the bounded retries, logged" do
       ws = workspace!()
       poller = fn _ws, _repo -> {:error, :timeout} end
+      o = Keyword.put(opts(poller), :interval_ms, 0)
+      card = [issue("t-1", ws)]
 
       log =
         capture_log([level: :warning], fn ->
-          assert CiBackpressure.holds([ws], [issue("t-1", ws)], opts(poller)) == %{}
+          # The first failures are not a licence to dispatch: the card waits.
+          for _ <- 1..(Cache.max_failures() - 1) do
+            assert %{"t-1" => {:hold, _}} = CiBackpressure.holds([ws], card, o)
+          end
+
+          # The forge stays unreadable: fail open, as before.
+          assert CiBackpressure.holds([ws], card, o) == %{}
         end)
 
       assert log =~ "CiBackpressure"
       assert log =~ "failing open"
     end
 
-    test "a poller that raises fails open too" do
+    test "a poller that raises is retried, then fails open too" do
       ws = workspace!()
       poller = fn _ws, _repo -> raise "forge is down" end
+      o = Keyword.put(opts(poller), :interval_ms, 0)
 
       log =
         capture_log([level: :warning], fn ->
-          assert CiBackpressure.holds([ws], [issue("t-1", ws)], opts(poller)) == %{}
+          results =
+            for _ <- 1..Cache.max_failures(),
+                do: CiBackpressure.holds([ws], [issue("t-1", ws)], o)
+
+          assert List.last(results) == %{}
+          assert Enum.all?(Enum.drop(results, -1), &match?(%{"t-1" => {:hold, _}}, &1))
         end)
 
       assert log =~ "failing open"
@@ -204,6 +219,107 @@ defmodule Arbiter.Board.CiBackpressureTest do
       end)
 
       assert Agent.get(counter, & &1) == 1
+    end
+
+    test "a repo with no reading yet holds its card for a tick instead of failing open" do
+      ws = workspace!()
+      test = self()
+
+      poller = fn _ws, _repo ->
+        send(test, {:polled, self()})
+        {:ok, %{pending: 9, oldest_at: DateTime.add(@now, -90 * 60, :second)}}
+      end
+
+      o = [poller: poller, async: true, now: @now]
+
+      assert %{"t-1" => {:hold, _}} = CiBackpressure.holds([ws], [issue("t-1", ws)], o)
+      assert_receive {:polled, task}
+      ref = Process.monitor(task)
+      assert_receive {:DOWN, ^ref, :process, ^task, _}
+
+      # The reading has landed: the hold now names the real counts.
+      assert %{"t-1" => {:hold, "9 pending, oldest 90m"}} =
+               CiBackpressure.holds([ws], [issue("t-1", ws)], o)
+    end
+
+    test "verdict/3 (the merge train) still fails open with no reading" do
+      ws = workspace!()
+      poller = fn _ws, _repo -> {:error, :timeout} end
+
+      capture_log(fn ->
+        assert CiBackpressure.verdict(ws, "vstim", opts(poller)) == :ok
+      end)
+    end
+  end
+
+  describe "refresh/2 (the timer poll for repos with no queued card)" do
+    test "reads the queue of every gated repo, so a later promote finds a fresh reading" do
+      ws = workspace!()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      assert :ok = CiBackpressure.refresh([ws], opts(forge(9, 96, counter)))
+      assert Agent.get(counter, & &1) == 1
+
+      # A card is promoted later: no second poll, and the card is held on the reading.
+      never = fn _ws, _repo -> flunk("must not poll again within the interval") end
+      o = [poller: never, async: true, now: @now]
+
+      assert %{"t-1" => {:hold, "9 pending, oldest 96m"}} =
+               CiBackpressure.holds([ws], [issue("t-1", ws)], o)
+    end
+
+    test "does not poll an ungated repo" do
+      ws = workspace!(nil)
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+      assert :ok = CiBackpressure.refresh([ws], opts(forge(9, 5, counter)))
+      assert Agent.get(counter, & &1) == 0
+    end
+  end
+
+  describe "hold logging" do
+    setup do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+    end
+
+    test "a hold and its release each log one info line, once per state change" do
+      ws = workspace!()
+      o = fn n, age -> Keyword.put(opts(forge(n, age)), :interval_ms, 0) end
+      card = [issue("t-1", ws)]
+
+      held =
+        capture_log([level: :info], fn ->
+          for _ <- 1..3, do: CiBackpressure.holds([ws], card, o.(6, 96))
+        end)
+
+      assert [line] = String.split(held, "\n", trim: true)
+      assert line =~ "vstim"
+      assert line =~ "6 pending"
+      assert line =~ "oldest 96m"
+      assert line =~ "[info]"
+
+      released =
+        capture_log([level: :info], fn ->
+          for _ <- 1..3, do: CiBackpressure.holds([ws], card, o.(2, 5))
+        end)
+
+      assert [line] = String.split(released, "\n", trim: true)
+      assert line =~ "vstim"
+      assert line =~ "2 pending"
+      assert line =~ "oldest 5m"
+      assert line =~ "released"
+    end
+
+    test "a repo that was never held logs nothing" do
+      ws = workspace!()
+
+      log =
+        capture_log([level: :info], fn ->
+          CiBackpressure.holds([ws], [issue("t-1", ws)], opts(forge(1, 1)))
+        end)
+
+      assert log == ""
     end
   end
 
