@@ -56,11 +56,12 @@ defmodule Arbiter.Board.AutopilotCiBackpressureTest do
     )
   end
 
-  defp start_autopilot(ws, forge, issues) do
+  defp start_autopilot(ws, forge, issues, backpressure \\ []) do
     test = self()
 
     # `interval_ms: 0` re-polls on every board read, so a drained queue is seen at once.
     poller = fn _ws, _repo ->
+      send(test, {:polled, self()})
       {:ok, %{pending: Agent.get(forge, & &1), oldest_at: DateTime.add(@now, -600, :second)}}
     end
 
@@ -73,7 +74,8 @@ defmodule Arbiter.Board.AutopilotCiBackpressureTest do
         slots_total: 3,
         quota: :ok,
         now: @now,
-        ci_backpressure: [poller: poller, async: false, now: @now, interval_ms: 0]
+        ci_backpressure:
+          Keyword.merge([poller: poller, async: false, now: @now, interval_ms: 0], backpressure)
       )
       |> Snapshot.load()
     end
@@ -131,6 +133,37 @@ defmodule Arbiter.Board.AutopilotCiBackpressureTest do
 
     Agent.update(ctx.forge, fn _ -> 1 end)
     assert {:ok, "t-vstim"} = Autopilot.tick(pid)
+  end
+
+  test "with no prior poll (:unknown) and a saturated forge, the first tick holds the card",
+       ctx do
+    pid =
+      start_autopilot(ctx.ws, ctx.forge, [issue("t-vstim", ctx.ws, %{})],
+        async: true,
+        interval_ms: 0
+      )
+
+    # Tick 1: nothing has been read yet, so the gate has no basis to wave the card through.
+    assert {:idle, _} = Autopilot.tick(pid) |> idle()
+    refute_receive {:dispatched, _}, 50
+    wait_for_poll()
+
+    # Tick 2: the reading (8 pending, over the limit of 4) is in, and still holds it.
+    Agent.update(ctx.forge, fn _ -> 1 end)
+    assert {:idle, _} = Autopilot.tick(pid) |> idle()
+    refute_receive {:dispatched, _}, 50
+    wait_for_poll()
+
+    # Tick 3: the queue has drained below the threshold, so the card goes.
+    assert {:ok, "t-vstim"} = Autopilot.tick(pid)
+    assert_receive {:dispatched, "t-vstim"}
+  end
+
+  # Waits for the background poll the previous tick started to land in the cache.
+  defp wait_for_poll do
+    assert_receive {:polled, task}
+    ref = Process.monitor(task)
+    assert_receive {:DOWN, ^ref, :process, ^task, _}
   end
 
   # `tick/1` answers `:idle` (or `{:idle, detail}`) when nothing was promoted.

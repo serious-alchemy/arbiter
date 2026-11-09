@@ -13,10 +13,18 @@ defmodule Arbiter.Board.CiBackpressure.Cache do
       and, in the default `async` mode, the poll runs in a task under
       `Arbiter.TaskSupervisor`, so a slow forge never blocks a board read. The
       reader gets the previous outcome meanwhile (`:unknown` before the first
-      poll lands);
-    * a failed poll is stored too, so a forge that is down is asked once per
-      interval, not once per read. It reads `:unknown`, which the gate treats
-      as "not saturated" (fail open), with a logged warning.
+      poll lands, and also when the previous reading is older than
+      `:max_stale_ms`, #{div(300_000, 1000)}s by default: a reading that old says nothing about the
+      queue now);
+    * a failed poll is stored too, as `{:error, failures}` — the count of
+      consecutive failures — so a forge that is down is asked once per retry
+      interval (the shorter of the poll interval and `:retry_ms`), not once
+      per read. The gate holds a fresh dispatch for the earlier
+      failures and fails open on the `max_failures/0`-th (a forge that stays
+      down must not stall a repo), logging a warning each time.
+
+  `note_state/2` is the gate's small memory of what it last decided per key, so
+  a hold and its release are each logged once, not on every board read.
 
   A claim older than #{div(120_000, 1000)}s is taken over, so a poller that was
   killed mid-flight cannot wedge the key. If the table is not up (the cache is
@@ -28,10 +36,16 @@ defmodule Arbiter.Board.CiBackpressure.Cache do
 
   @table __MODULE__
   @claim_ttl_ms 120_000
+  @max_stale_ms 300_000
+  @retry_ms 10_000
+  @max_failures 3
 
   @type key :: {String.t() | nil, String.t()}
   @type signal :: %{pending: non_neg_integer(), oldest_at: DateTime.t() | nil}
-  @type outcome :: {:ok, signal(), DateTime.t()} | :unknown
+  @type outcome ::
+          {:ok, signal(), DateTime.t()}
+          | {:error, pos_integer()}
+          | :unknown
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -43,26 +57,68 @@ defmodule Arbiter.Board.CiBackpressure.Cache do
   end
 
   @doc """
+  How many consecutive failed polls it takes before the gate stops holding and
+  fails open.
+  """
+  @spec max_failures() :: pos_integer()
+  def max_failures, do: @max_failures
+
+  @doc """
   The outcome for `key`, polling with `poll` (a 0-arity function returning
   `{:ok, signal}` or `{:error, reason}`) when the entry is older than
-  `interval_ms`. Options: `:async` (default `true`) and `:label`, the text a
-  failed poll's warning names.
+  `interval_ms`. Options: `:async` (default `true`), `:label`, the text a
+  failed poll's warning names, `:retry_ms` (how soon a failed poll is asked
+  again, default #{div(10_000, 1000)}s) and `:max_stale_ms` (how old a reading may be and
+  still be served while it refreshes).
+
+  Returns `{:ok, signal, at}`, `{:error, failures}` (the last poll failed; this
+  is the count of consecutive failures) or `:unknown` (no usable reading).
   """
   @spec fetch(key(), non_neg_integer(), (-> {:ok, signal()} | {:error, term()}), keyword()) ::
           outcome()
   def fetch(key, interval_ms, poll, opts \\ []) do
     now = now_ms()
 
-    case :ets.lookup(@table, key) do
-      [{^key, outcome, at}] when now - at < interval_ms ->
-        outcome
+    entry = :ets.lookup(@table, key)
 
-      entry ->
-        previous = previous(entry)
-        refresh(key, poll, opts, previous)
+    if fresh?(entry, now, interval_ms, opts) do
+      [{_key, outcome, _at}] = entry
+      outcome
+    else
+      refresh(key, poll, opts, previous(entry, now, opts))
     end
   rescue
     ArgumentError -> :unknown
+  end
+
+  @doc """
+  Records the state the gate just decided for `key` and says whether it changed:
+  `:same`, or `{:changed, previous}` (`nil` the first time). Lets the caller log
+  a hold and its release once each.
+  """
+  @spec note_state(key(), atom()) :: :same | {:changed, atom() | nil}
+  def note_state(key, state) do
+    slot = {:state, key}
+
+    if :ets.insert_new(@table, {slot, state}) do
+      {:changed, nil}
+    else
+      case :ets.lookup(@table, slot) do
+        [{^slot, ^state}] -> :same
+        [{^slot, prior}] -> swap_state(slot, prior, state)
+        [] -> note_state(key, state)
+      end
+    end
+  rescue
+    ArgumentError -> :same
+  end
+
+  # Compare-and-swap, so two readers racing on the same change log it once.
+  defp swap_state(slot, prior, state) do
+    case :ets.select_replace(@table, [{{slot, prior}, [], [{:const, {slot, state}}]}]) do
+      1 -> {:changed, prior}
+      _ -> :same
+    end
   end
 
   @doc "Drops every entry. Safe to call before the table exists."
@@ -74,8 +130,24 @@ defmodule Arbiter.Board.CiBackpressure.Cache do
     ArgumentError -> :ok
   end
 
-  defp previous([{_key, outcome, _at}]), do: outcome
-  defp previous([]), do: :unknown
+  defp fresh?([{_key, outcome, at}], now, interval_ms, opts),
+    do: now - at < freshness(outcome, interval_ms, opts)
+
+  defp fresh?([], _now, _interval_ms, _opts), do: false
+
+  defp freshness({:error, _}, interval_ms, opts),
+    do: min(interval_ms, Keyword.get(opts, :retry_ms, @retry_ms))
+
+  defp freshness(_outcome, interval_ms, _opts), do: interval_ms
+
+  # What a reader is handed while a refresh runs. A failed poll stays a failed
+  # poll; a good reading only while it is recent enough to mean something.
+  defp previous([{_key, {:ok, _, _} = outcome, at}], now, opts) do
+    if now - at >= Keyword.get(opts, :max_stale_ms, @max_stale_ms), do: :unknown, else: outcome
+  end
+
+  defp previous([{_key, outcome, _at}], _now, _opts), do: outcome
+  defp previous([], _now, _opts), do: :unknown
 
   defp refresh(key, poll, opts, previous) do
     cond do
@@ -97,34 +169,50 @@ defmodule Arbiter.Board.CiBackpressure.Cache do
   end
 
   defp run(key, poll, opts) do
-    outcome = outcome(poll, Keyword.get(opts, :label, inspect(key)))
+    outcome = outcome(poll, Keyword.get(opts, :label, inspect(key)), failures(key) + 1)
     :ets.insert(@table, {key, outcome, now_ms()})
     outcome
   after
     release(key)
   end
 
-  defp outcome(poll, label) do
+  # The consecutive failures so far: the count a stored `{:error, n}` carries.
+  defp failures(key) do
+    case :ets.lookup(@table, key) do
+      [{^key, {:error, n}, _at}] -> n
+      _ -> 0
+    end
+  end
+
+  defp outcome(poll, label, failures) do
     case poll.() do
       {:ok, %{pending: pending} = signal} when is_integer(pending) ->
         {:ok, signal, DateTime.utc_now()}
 
       other ->
-        fail_open(label, other)
+        failed(label, other, failures)
     end
   rescue
-    e -> fail_open(label, Exception.message(e))
+    e -> failed(label, Exception.message(e), failures)
   catch
-    kind, reason -> fail_open(label, {kind, reason})
+    kind, reason -> failed(label, {kind, reason}, failures)
   end
 
-  defp fail_open(label, reason) do
-    Logger.warning(
-      "CiBackpressure: could not read the CI queue for #{label}, failing open " <>
-        "(no hold): #{inspect(reason)}"
-    )
+  defp failed(label, reason, failures) do
+    if failures >= @max_failures do
+      Logger.warning(
+        "CiBackpressure: could not read the CI queue for #{label} (#{failures} failed polls " <>
+          "in a row), failing open (no hold): #{inspect(reason)}"
+      )
+    else
+      Logger.warning(
+        "CiBackpressure: could not read the CI queue for #{label} (failed poll #{failures} of " <>
+          "#{@max_failures}), holding new dispatches until it is read or the retries run " <>
+          "out: #{inspect(reason)}"
+      )
+    end
 
-    :unknown
+    {:error, failures}
   end
 
   defp claim(key) do

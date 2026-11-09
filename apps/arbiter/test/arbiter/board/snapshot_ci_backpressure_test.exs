@@ -125,12 +125,18 @@ defmodule Arbiter.Board.SnapshotCiBackpressureTest do
     assert Enum.any?(board.in_progress, &(&1.id == "t-run"))
   end
 
-  test "a failed forge poll fails open: the card is dispatched" do
+  test "a forge that stays unreadable holds the card for a tick or two, then fails open" do
     ws = workspace!(@gated)
     poller = fn _ws, _repo -> {:error, :timeout} end
+    opts = [ci_backpressure: [poller: poller, async: false, now: @now, interval_ms: 0]]
+    load = fn -> ready(load(ws, [issue("t-1", ws)], poller, opts)) end
 
     ExUnit.CaptureLog.capture_log(fn ->
-      assert %{"t-1" => %{state: :next}} = ready(load(ws, [issue("t-1", ws)], poller))
+      for _ <- 1..(Arbiter.Board.CiBackpressure.Cache.max_failures() - 1) do
+        assert %{"t-1" => %{state: :blocked, hold: {:ci_saturated, _}}} = load.()
+      end
+
+      assert %{"t-1" => %{state: :next}} = load.()
     end)
   end
 end
