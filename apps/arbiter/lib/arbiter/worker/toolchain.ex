@@ -32,6 +32,27 @@ defmodule Arbiter.Worker.Toolchain do
   The pin is read from the worktree's own `.tool-versions`, so a branch that
   bumps the runtime is gated on the runtime it bumps to.
 
+  ## One Mix home per toolchain
+
+  Hex is compiled BEAM, and adjacent OTP majors cannot share it: OTP 29 refuses
+  an OTP-27 Hex (`please re-compile this module with an Erlang/OTP 29
+  compiler`), and OTP 27 cannot load an OTP-29 one. Mix keeps its archives in
+  `$MIX_HOME/archives`, which on a host is `~/.mix/archives` for every run, so
+  whichever run last ran `mix local.hex` decided which repos could use Hex
+  (GitHub #1299). A pinned run therefore also gets its own `MIX_HOME`,
+  `<base>/otp-<major>` (`<base>/elixir-<version>` when the pin names no OTP
+  major), and Hex and Rebar are installed there once per toolchain
+  (`mix local.hex --force`, `mix local.rebar --force` on the pinned `PATH`),
+  single-flight: concurrent first runs on one pin queue on a lock, and the
+  later ones find it seeded. `HEX_HOME` is left alone: the package cache does
+  not depend on the runtime. A seed that fails (offline host) is logged and not
+  recorded, the run still starts, and the next run on that toolchain tries
+  again. An unpinned worktree keeps the host's `MIX_HOME`.
+
+  The seed is the only writer: workers are denied `mix local.hex`,
+  `mix local.rebar` and `mix archive.install|uninstall`
+  (`Arbiter.Agents.Claude.Security`, `:no_outside_writes`).
+
   ## Options (all for tests, except where noted)
 
     * `:roots` — install roots to search, each laid out `<root>/<tool>/<version>/bin`
@@ -40,7 +61,14 @@ defmodule Arbiter.Worker.Toolchain do
     * `:provision?` — default `config :arbiter, :worker_toolchain_provision` (`true`).
     * `:provision` — `([\"erlang@29.1.1\", …] -> :ok | {:error, term})`, default `mise install`.
     * `:runner` — `(path -> {output, status})` running `elixir --version`.
+    * `:mix_base` — the dir holding one Mix home per toolchain (default `config
+      :arbiter, :worker_toolchain_mix_base`, else `~/.mix/toolchains`).
+    * `:seed` — `(mix_home, path -> :ok | {:error, term})` installing Hex and
+      Rebar into a Mix home; default runs `mix local.hex`/`local.rebar`.
+      `config :arbiter, :worker_toolchain_mix_seed, false` turns seeding off.
   """
+
+  require Logger
 
   alias Arbiter.Worker.ReleaseEnv
 
@@ -48,6 +76,8 @@ defmodule Arbiter.Worker.Toolchain do
   @erlang_re ~r/\A\d+(\.\d+){0,3}\z/
   @install_timeout_ms :timer.minutes(30)
   @verify_timeout_ms 60_000
+  @seed_timeout_ms :timer.minutes(5)
+  @seeded_marker ".arbiter-seeded"
 
   @type pins :: %{
           elixir: String.t() | nil,
@@ -119,7 +149,9 @@ defmodule Arbiter.Worker.Toolchain do
   @doc """
   `env` (a list of `{name, value}` pairs) with `PATH` prefixed by the pinned
   toolchain's bin dirs, for a host run in `worktree`; `env` unchanged when the
-  worktree pins nothing. The base `PATH` is `env`'s own, else the server's.
+  worktree pins nothing. The base `PATH` is `env`'s own, else the server's. A
+  pinned worktree also gets `MIX_HOME` set to its toolchain's own Mix home,
+  seeded with Hex and Rebar (see the moduledoc).
   """
   @spec env(String.t(), [{String.t(), String.t() | false}], keyword()) ::
           {:ok, [{String.t(), String.t() | false}]} | {:error, unavailable()}
@@ -132,7 +164,12 @@ defmodule Arbiter.Worker.Toolchain do
         with {:ok, dirs} <- locate(pins, opts),
              path = Enum.join(dirs ++ [base_path(env)], ":"),
              :ok <- verify(pins, path, opts) do
-          {:ok, List.keystore(env, "PATH", 0, {"PATH", path})}
+          mix_home = mix_home(pins, path, opts)
+
+          {:ok,
+           env
+           |> List.keystore("PATH", 0, {"PATH", path})
+           |> List.keystore("MIX_HOME", 0, {"MIX_HOME", mix_home})}
         end
 
       {:error, {:unsupported_pin, tool, value}} ->
@@ -280,6 +317,88 @@ defmodule Arbiter.Worker.Toolchain do
 
       {:exit, reason} ->
         {:error, inspect(reason)}
+    end
+  end
+
+  # -- the toolchain's own Mix home ------------------------------------------------
+
+  # Keyed by OTP major: Hex (and every archive) is compiled BEAM, valid for the
+  # major it was built on. A pin that names no OTP major runs on whatever OTP
+  # the host has, so it is keyed by the Elixir it pins instead.
+  defp mix_home(pins, path, opts) do
+    key = if pins.otp, do: "otp-#{pins.otp}", else: "elixir-#{pins.elixir_dir}"
+    mix_home = Path.join(mix_base(opts), key)
+    ensure_seeded(mix_home, path, opts)
+    mix_home
+  end
+
+  defp mix_base(opts) do
+    case Keyword.get(opts, :mix_base) || Application.get_env(:arbiter, :worker_toolchain_mix_base) do
+      base when is_binary(base) and base != "" -> base
+      _ -> Path.join([System.get_env("HOME") || System.user_home() || "/", ".mix", "toolchains"])
+    end
+  end
+
+  defp seed?(opts),
+    do:
+      Keyword.has_key?(opts, :seed) or
+        Application.get_env(:arbiter, :worker_toolchain_mix_seed, true)
+
+  defp ensure_seeded(mix_home, path, opts) do
+    marker = Path.join(mix_home, @seeded_marker)
+
+    if seed?(opts) and not File.exists?(marker) do
+      seed = Keyword.get(opts, :seed, &mix_seed/2)
+
+      # Single-flight across runs on this node, like `provision`: the lock is the
+      # Mix home, and a caller that waited finds the marker when it gets the lock.
+      :global.trans(
+        {{__MODULE__, :seed, mix_home}, self()},
+        fn -> seed_once(mix_home, marker, path, seed) end,
+        [node()],
+        :infinity
+      )
+    end
+
+    :ok
+  end
+
+  defp seed_once(mix_home, marker, path, seed) do
+    with false <- File.exists?(marker),
+         :ok <- File.mkdir_p(mix_home),
+         :ok <- seed.(mix_home, path),
+         :ok <- File.write(marker, "") do
+      :ok
+    else
+      true ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Toolchain: could not seed Hex/Rebar into #{mix_home}: #{reason_text(reason)}; " <>
+            "runs on this toolchain start without them and the next one retries"
+        )
+
+        :error
+    end
+  end
+
+  defp mix_seed(mix_home, path) do
+    task =
+      Task.async(fn ->
+        ReleaseEnv.cmd(
+          "sh",
+          ["-c", "mix local.hex --force && mix local.rebar --force"],
+          env: [{"PATH", path}, {"MIX_HOME", mix_home}],
+          stderr_to_stdout: true
+        )
+      end)
+
+    case Task.yield(task, @seed_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {_, 0}} -> :ok
+      {:ok, {output, status}} -> {:error, "mix local.hex/rebar exited #{status}: #{tail(output)}"}
+      nil -> {:error, "mix local.hex/rebar timed out"}
+      {:exit, reason} -> {:error, inspect(reason)}
     end
   end
 
