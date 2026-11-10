@@ -358,7 +358,10 @@ defmodule Arbiter.Worker.ToolchainTest do
         |> Enum.map(fn {:ok, result} -> result end)
 
       assert Enum.all?(results, &match?({:ok, _}, &1))
-      assert results |> Enum.map(fn {:ok, env} -> mix_home(env) end) |> Enum.uniq() |> length() == 1
+
+      assert results |> Enum.map(fn {:ok, env} -> mix_home(env) end) |> Enum.uniq() |> length() ==
+               1
+
       assert Agent.get(counter, & &1) == 1
     end
 
