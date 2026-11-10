@@ -155,6 +155,9 @@ defmodule Arbiter.Agents.SecurityPolicy do
     * `:no_force_push`      — `git push --force` / `-f`.
     * `:no_secret_reads`    — reading `.env`, private keys, `~/.ssh`, cloud creds.
     * `:no_outside_writes`  — writing to sensitive paths outside the worktree.
+      Also `mix local.hex`, `mix local.rebar` and `mix archive.install|uninstall`
+      (Claude adapter): Mix's archives are machine-wide, and one worker replacing
+      Hex swapped it under every other run on the host (#1299).
     * `:no_pr_create`       — opening a PR/MR from the worker (`gh pr create`,
       `glab mr create`). The MergeQueue owns PR creation; a worker that opens its
       own PR produces a duplicate on the wrong base (bd-53xrmi).

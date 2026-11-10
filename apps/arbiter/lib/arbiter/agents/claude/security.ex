@@ -165,6 +165,17 @@ defmodule Arbiter.Agents.Claude.Security do
   # prevention relies on `sandbox.filesystem: :worktree` scoping (the agent is
   # only handed its worktree as cwd and no extra `--add-dir`); these rules are
   # the explicit floor for the highest-value targets.
+  #
+  # #1299: Mix's archives dir (Hex, Rebar) is machine-wide state too, and Hex is
+  # compiled BEAM, valid for one OTP major. One worker's `mix local.hex --force`
+  # replaced the Hex every other run on the host loaded, so the mix tasks that
+  # write archives are denied. `Arbiter.Worker.Toolchain` seeds each pinned
+  # toolchain's own Mix home; a worker that needs a different Hex asks the
+  # operator. Two spellings per task: the bare prefix, and the `*` form that
+  # also catches `timeout 300 mix local.hex` and `cd x && mix local.hex` (it
+  # needs the space before `mix`, so a commit message quoting it is not hit).
+  @mix_archive_tasks ~w(local.hex local.rebar archive.install archive.uninstall)
+
   defp expand_category(:no_outside_writes) do
     [
       "Edit(/etc/**)",
@@ -172,7 +183,8 @@ defmodule Arbiter.Agents.Claude.Security do
       "Edit(~/.ssh/**)",
       "Edit(~/.claude/**)",
       "Edit(~/.config/**)"
-    ]
+    ] ++
+      Enum.flat_map(@mix_archive_tasks, &["Bash(mix #{&1}:*)", "Bash(* mix #{&1}*)"])
   end
 
   # Worker-opened PRs/MRs. The MergeQueue owns PR creation (bd-53xrmi); a worker

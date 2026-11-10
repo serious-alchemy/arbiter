@@ -164,6 +164,34 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       refute Enum.any?(rules, &(&1 =~ "gh pr comment"))
     end
 
+    # #1299: Mix's archives dir is machine-wide state. One worker's
+    # `mix local.hex --force` replaced the Hex every other run on the host loaded.
+    test "no_outside_writes denies the mix commands that rewrite shared archives" do
+      rules = Security.deny_rules(policy())
+
+      for task <- ~w(local.hex local.rebar archive.install archive.uninstall) do
+        assert "Bash(mix #{task}:*)" in rules
+        # behind a wrapper or a `cd … &&`, as the observed `timeout 300 mix local.hex --force`
+        assert "Bash(* mix #{task}*)" in rules
+      end
+
+      refute Enum.any?(rules, &(&1 =~ "mix deps"))
+    end
+
+    test "the mix archive denies are carried by the --settings document under bypass" do
+      assert ["--settings", json] = Security.settings_argv(policy())
+      assert "Bash(* mix local.hex*)" in Jason.decode!(json)["permissions"]["deny"]
+    end
+
+    test "excluding no_outside_writes drops the mix archive denies" do
+      rules =
+        Security.deny_rules(
+          policy(%{"permissions" => %{"safe_defaults_exclude" => ["no_outside_writes"]}})
+        )
+
+      refute Enum.any?(rules, &(&1 =~ "mix local.hex"))
+    end
+
     test "no_ci_watch denies polling CI from the shell" do
       rules = Security.deny_rules(policy())
 
