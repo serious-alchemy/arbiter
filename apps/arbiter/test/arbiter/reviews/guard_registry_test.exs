@@ -237,6 +237,9 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker, :fail, 2,
      "the public sink every failure arrives at, not a guard of its own"},
     {Arbiter.Worker, :fail_stopped, 2, "records an externally stopped worker"},
+    {Arbiter.Worker, :notify_stopped, 2,
+     "#1299: pages the coordinator with the addressed worker_stopped escalation for a stopped " <>
+       "run (an operator-wait stop parks on its permission request instead); not a review/merge guard"},
     {Arbiter.Worker, :park_now, 2,
      "G19: a guardrail tier's spend cap stops a runaway live run (`SpendPatrol`); G18: a " <>
        "subject suspended after a critical guardrail event has its live runs parked " <>
