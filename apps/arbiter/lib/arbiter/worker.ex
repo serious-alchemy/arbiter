@@ -4456,7 +4456,7 @@ defmodule Arbiter.Worker do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
 
-    reason = stop_reason_for(session, exit_status, output_lines)
+    reason = refine_operator_wait(state, stop_reason_for(session, exit_status, output_lines))
 
     # bd-8lq2g7: name the subordinate pass in the log line too — "worker for
     # task=X stopped" reads as the task's own worker dying when it was a
@@ -4479,12 +4479,47 @@ defmodule Arbiter.Worker do
 
     new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
     record_run_finished(new_state)
-    Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
+    notify_stopped(new_state, reason)
     broadcast_lifecycle(:updated, new_state)
     broadcast_worker_failed(new_state)
     return_pass_ticket(new_state)
     new_state
   end
+
+  # #1299: a run that stopped to wait on the operator is parked on what it asked
+  # for. `worker_stopped` would record `run_crashed` over the
+  # `:permission_requested` cause the request already raised, and that cause is
+  # what tells the operator a resume cannot work until they act.
+  defp notify_stopped(%State{} = state, %{category: :awaiting_operator} = reason) do
+    case Arbiter.Tasks.Attention.raise_cause(state.task_id, :permission_requested, reason.summary) do
+      {:ok, _} ->
+        :ok
+
+      {:error, why} ->
+        Logger.warning(
+          "Worker: task=#{state.task_id} could not park on its permission request: #{inspect(why)}"
+        )
+    end
+  end
+
+  defp notify_stopped(%State{} = state, reason),
+    do: Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(state), reason)
+
+  # #1299: an `:exited_without_done` whose own ticket run has permission requests
+  # pending is not an early quit: the worker asked and stopped to wait. Only the
+  # ticket's author run (not a reviewer or a fix/conflict pass) is refined.
+  defp refine_operator_wait(%State{} = state, %{category: :exited_without_done} = reason) do
+    with true <- ticket_run?(state),
+         [_ | _] = pending <- Arbiter.Tasks.Permissions.pending(%{id: state.task_id}) do
+      Arbiter.Worker.StopReason.awaiting_operator(pending)
+    else
+      _ -> reason
+    end
+  rescue
+    _ -> reason
+  end
+
+  defp refine_operator_wait(_state, reason), do: reason
 
   # bd-5uqs30: a run on a node that exits cleanly without `arb done` is the one stop
   # whose cause lives in its stream (a cluster canary lost the sentinel with the agent's
@@ -6538,7 +6573,7 @@ defmodule Arbiter.Worker do
   end
 
   defp do_maybe_resume_continuation(%State{} = state, session) do
-    reason = classify_stop(session)
+    reason = refine_operator_wait(state, classify_stop(session))
 
     case quota_stop_hold(state, reason) do
       {:held, held_state} -> held_state

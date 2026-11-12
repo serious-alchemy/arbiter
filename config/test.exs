@@ -512,3 +512,8 @@ config :arbiter, Arbiter.Agents.Claude.ControlChannel, enabled: false
 # #1305: no real waiting between bot-token verification retries, and no cross-test
 # reuse of a passing verification (the retry tests opt in with their own values).
 config :arbiter, :gitlab_bot_verify, backoff_ms: [0, 0], cache_ttl_ms: 0
+
+# #1299: a pinned host run gets its own Mix home, seeded with `mix local.hex`
+# (network) on first use. No suite run installs Hex into a real home; the
+# toolchain tests that cover seeding pass their own `:seed`.
+config :arbiter, :worker_toolchain_mix_seed, false

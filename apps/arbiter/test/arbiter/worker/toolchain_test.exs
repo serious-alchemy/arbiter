@@ -96,11 +96,13 @@ defmodule Arbiter.Worker.ToolchainTest do
       ebin = install!(root, "elixir", "1.17.3")
       wt = worktree(tmp, "elixir 1.17.3\n")
 
-      assert {:ok, [{"PATH", path}]} =
+      assert {:ok, env} =
                Toolchain.env(wt, [],
                  roots: [root],
                  runner: runner(version_output("1.17.3", "27"))
                )
+
+      assert {"PATH", path} = List.keyfind(env, "PATH", 0)
 
       assert String.starts_with?(path, ebin <> ":")
     end
@@ -134,12 +136,14 @@ defmodule Arbiter.Worker.ToolchainTest do
         :ok
       end
 
-      assert {:ok, [{"PATH", path}]} =
+      assert {:ok, env} =
                Toolchain.env(wt, [{"PATH", "/usr/bin"}],
                  roots: [root],
                  provision: provision,
                  runner: runner(version_output("1.20.4", "29"))
                )
+
+      assert {"PATH", path} = List.keyfind(env, "PATH", 0)
 
       assert_received {:provision, ["erlang@29.1.1", "elixir@1.20.4-otp-29"]}
       assert path =~ "elixir/1.20.4-otp-29/bin"
@@ -221,13 +225,163 @@ defmodule Arbiter.Worker.ToolchainTest do
       ebin = install!(asdf, "elixir", "1.20.4")
       wt = worktree(tmp, "elixir 1.20.4\n")
 
-      assert {:ok, [{"PATH", path}]} =
+      assert {:ok, env} =
                Toolchain.env(wt, [{"PATH", "/usr/bin"}],
                  roots: [empty, asdf],
                  runner: runner(version_output("1.20.4", "29"))
                )
 
+      assert {"PATH", path} = List.keyfind(env, "PATH", 0)
+
       assert String.starts_with?(path, ebin <> ":")
+    end
+  end
+
+  describe "env/3 Mix home (one archives dir per toolchain)" do
+    defp pinned_env(tmp, name, tool_versions, otp, opts) do
+      root = Path.join(tmp, "installs")
+      installs = installs_for(tool_versions)
+      for {tool, version} <- installs, do: install!(root, tool, version)
+      {"elixir", elixir_dir} = List.keyfind(installs, "elixir", 0)
+      elixir = elixir_dir |> String.split("-") |> hd()
+      dir = Path.join(tmp, name)
+      File.mkdir_p!(dir)
+      File.write!(Path.join(dir, ".tool-versions"), tool_versions)
+
+      opts =
+        Keyword.merge(
+          [
+            roots: [root],
+            mix_base: Path.join(tmp, "mix"),
+            seed: fn _mix_home, _path -> :ok end,
+            runner: runner(version_output(elixir, otp))
+          ],
+          opts
+        )
+
+      Toolchain.env(dir, [{"PATH", "/usr/bin"}], opts)
+    end
+
+    defp installs_for(text) do
+      for line <- String.split(text, "\n", trim: true),
+          [tool, version] <- [String.split(line)],
+          do: {tool, version}
+    end
+
+    defp mix_home(env), do: env |> List.keyfind("MIX_HOME", 0) |> elem(1)
+
+    test "an OTP 27 pin and an OTP 29 pin get different archive dirs", %{tmp_dir: tmp} do
+      assert {:ok, env27} =
+               pinned_env(tmp, "a", "erlang 27.3.3\nelixir 1.18.3-otp-27\n", "27", [])
+
+      assert {:ok, env29} =
+               pinned_env(tmp, "b", "erlang 29.1.1\nelixir 1.20.4-otp-29\n", "29", [])
+
+      assert mix_home(env27) == Path.join([tmp, "mix", "otp-27"])
+      assert mix_home(env29) == Path.join([tmp, "mix", "otp-29"])
+      refute mix_home(env27) == mix_home(env29)
+    end
+
+    test "two pins on the same OTP major share one Mix home", %{tmp_dir: tmp} do
+      assert {:ok, a} = pinned_env(tmp, "a", "erlang 27.3.3\nelixir 1.18.3-otp-27\n", "27", [])
+      assert {:ok, b} = pinned_env(tmp, "b", "erlang 27.1.2\nelixir 1.18.3-otp-27\n", "27", [])
+      assert mix_home(a) == mix_home(b)
+    end
+
+    test "an unpinned run keeps today's behaviour: no MIX_HOME, no seeding", %{tmp_dir: tmp} do
+      env = [{"PATH", "/usr/bin"}]
+
+      assert {:ok, ^env} =
+               Toolchain.env(worktree(tmp, nil), env,
+                 mix_base: Path.join(tmp, "mix"),
+                 seed: fn _, _ -> flunk("seeded an unpinned run") end
+               )
+
+      refute File.exists?(Path.join(tmp, "mix"))
+    end
+
+    test "an elixir-only pin with no OTP major is keyed by the elixir version", %{tmp_dir: tmp} do
+      assert {:ok, env} = pinned_env(tmp, "a", "elixir 1.18.3\n", "27", [])
+      assert mix_home(env) == Path.join([tmp, "mix", "elixir-1.18.3"])
+    end
+
+    test "seeds Hex and Rebar with the pinned PATH and the toolchain's Mix home", %{tmp_dir: tmp} do
+      test_pid = self()
+
+      seed = fn mix_home, path ->
+        send(test_pid, {:seeded, mix_home, path})
+        :ok
+      end
+
+      assert {:ok, env} =
+               pinned_env(tmp, "a", "erlang 29.1.1\nelixir 1.20.4-otp-29\n", "29", seed: seed)
+
+      assert_received {:seeded, seeded_home, seeded_path}
+      assert seeded_home == mix_home(env)
+      assert {"PATH", ^seeded_path} = List.keyfind(env, "PATH", 0)
+    end
+
+    test "a toolchain that is already seeded is not seeded again", %{tmp_dir: tmp} do
+      counter = start_supervised!({Agent, fn -> 0 end})
+
+      seed = fn _home, _path ->
+        Agent.update(counter, &(&1 + 1))
+        :ok
+      end
+
+      for name <- ["a", "b", "c"] do
+        assert {:ok, _} =
+                 pinned_env(tmp, name, "erlang 29.1.1\nelixir 1.20.4-otp-29\n", "29", seed: seed)
+      end
+
+      assert Agent.get(counter, & &1) == 1
+    end
+
+    test "concurrent first runs on one pin seed exactly once (single-flight)", %{tmp_dir: tmp} do
+      counter = start_supervised!({Agent, fn -> 0 end})
+
+      seed = fn _home, _path ->
+        Agent.update(counter, &(&1 + 1))
+        # Hold the lock long enough that every other caller is queued behind it.
+        Process.sleep(50)
+        :ok
+      end
+
+      tool_versions = "erlang 29.1.1\nelixir 1.20.4-otp-29\n"
+
+      results =
+        1..8
+        |> Task.async_stream(
+          fn n -> pinned_env(tmp, "wt#{n}", tool_versions, "29", seed: seed) end,
+          timeout: :infinity
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+
+      assert results |> Enum.map(fn {:ok, env} -> mix_home(env) end) |> Enum.uniq() |> length() ==
+               1
+
+      assert Agent.get(counter, & &1) == 1
+    end
+
+    test "a failed seed does not refuse the run, and is retried by the next one",
+         %{tmp_dir: tmp} do
+      counter = start_supervised!({Agent, fn -> 0 end})
+
+      seed = fn _home, _path ->
+        Agent.update(counter, &(&1 + 1))
+        {:error, "offline"}
+      end
+
+      for name <- ["a", "b"] do
+        assert {:ok, env} =
+                 pinned_env(tmp, name, "erlang 29.1.1\nelixir 1.20.4-otp-29\n", "29", seed: seed)
+
+        assert mix_home(env) == Path.join([tmp, "mix", "otp-29"])
+      end
+
+      assert Agent.get(counter, & &1) == 2
     end
   end
 

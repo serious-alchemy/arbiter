@@ -189,6 +189,8 @@ defmodule Arbiter.Loop.FailureClassifier do
     # soft-deny. The policy did its job; nothing about the agent's work is
     # implied, so it is operational (a policy/allowlist question).
     permission_denied: {:operational, :permission_denied},
+    # #1299: the run asked the operator for something and stopped to wait for it.
+    awaiting_operator: {:operational, :awaiting_operator},
     # bd-2s755v: the CLI's account rejected its `-m` model before any work.
     model_unavailable: {:operational, :model_unavailable},
     # Commit-gate parks (bd-apwfmy). Not `StopReason` categories — the

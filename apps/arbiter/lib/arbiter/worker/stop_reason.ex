@@ -123,6 +123,15 @@ defmodule Arbiter.Worker.StopReason do
       not from the output tail. Resumable: the conversation is intact and the
       remediation is a `--conversation` resume telling the model the command
       was denied.
+    * `:awaiting_operator` — a *refinement* of `:exited_without_done` (#1299),
+      never produced by `classify/3` itself: the run asked for a permission
+      (`permission_request`), got "recorded, not granted", and exited cleanly
+      rather than carry on without it. The environment must change before any
+      run can succeed, so a resume (or a re-dispatch) just repeats the exit.
+      `Arbiter.Worker` builds it via `awaiting_operator/1` from the ticket's
+      pending permission requests; the run is parked on that request
+      (`:permission_requested` attention), not failed as `run_crashed`, and is
+      not auto-resumed.
     * `:stalled` — no exit at all; the subprocess is alive within the watchdog
       window (caller passes `exit_status: nil`). The summary distinguishes a
       wholly silent subprocess from one that was mid-flight: "produced no
@@ -240,6 +249,7 @@ defmodule Arbiter.Worker.StopReason do
           | :async_wait_abandoned
           | :sentinel_in_tool_output
           | :permission_denied
+          | :awaiting_operator
           | :stalled
           | :preflight_timeout
           | :missing_worktree
@@ -1391,6 +1401,9 @@ defmodule Arbiter.Worker.StopReason do
         :permission_denied ->
           "strict permission policy denied a command (agy ended the turn)"
 
+        :awaiting_operator ->
+          "stopped awaiting the operator (a permission request is pending)"
+
         :stalled ->
           "stalled (no output)"
 
@@ -1452,6 +1465,27 @@ defmodule Arbiter.Worker.StopReason do
         "Not an agent failure: the workspace's `:strict` permissions do not allow it. " <>
           "The session is resumed in place and told not to retry; if the command is " <>
           "genuinely needed, add a `permissions.allow` rule for it.",
+      exit_status: 0,
+      signal: nil
+    }
+  end
+
+  @doc """
+  The `:awaiting_operator` stop (#1299): a run that asked for `pending`
+  permissions and exited cleanly without `arb done`. The worker explained what
+  it needed and stopped; it is waiting on a person, so it is not a crash.
+  """
+  @spec awaiting_operator([String.t()]) :: t()
+  def awaiting_operator(pending) when is_list(pending) do
+    %__MODULE__{
+      category: :awaiting_operator,
+      summary:
+        "agent stopped without `arb done` because it is waiting on a permission request " <>
+          "that was recorded, not granted (#{Enum.join(pending, ", ")})",
+      remediation:
+        "Not a crash, and a resume would only repeat it: the environment has to change " <>
+          "first. Grant or deny the pending permission (or fix whatever the worker " <>
+          "reported it needed), then resume or re-dispatch the ticket.",
       exit_status: 0,
       signal: nil
     }
