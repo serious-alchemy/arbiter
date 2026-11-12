@@ -1768,8 +1768,24 @@ defmodule Arbiter.Mergers.Github do
         number = String.to_integer(number)
 
         case derive_owner_repo(opts) do
-          {:ok, {owner, repo}} -> {:ok, build_mr_ref(:embedded, owner, repo, number)}
-          :none -> {:ok, build_mr_ref(:bare, nil, nil, number)}
+          {:ok, {owner, repo}} ->
+            {:ok, build_mr_ref(:embedded, owner, repo, number)}
+
+          :none ->
+            {:ok, build_mr_ref(:bare, nil, nil, number)}
+
+          {:error, %Error{} = err} ->
+            # A checkout was named but its origin can't be read: refuse rather
+            # than review whatever repo the workspace config points at (bd-96d5z4).
+            {:error,
+             %Error{
+               err
+               | kind: :validation_failed,
+                 message:
+                   "could not determine the GitHub owner/repo of the checkout at " <>
+                     "#{opts.repo_path} (#{err.message}); refusing to guess which repo PR " <>
+                     "#{number} belongs to — pass the full PR URL"
+             }}
         end
 
       true ->
@@ -1826,7 +1842,7 @@ defmodule Arbiter.Mergers.Github do
   defp derive_owner_repo(%{repo_path: path}) when is_binary(path) and path != "" do
     case RepoResolver.from_remote(path) do
       {:ok, {_owner, _repo}} = ok -> ok
-      {:error, _} -> :none
+      {:error, _} = err -> err
     end
   end
 

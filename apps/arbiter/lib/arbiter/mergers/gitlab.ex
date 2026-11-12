@@ -149,7 +149,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @impl true
   def get(mr_ref) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       case cfg
            |> request(:get, "/merge_requests/#{iid}", [])
@@ -422,7 +422,7 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   defp rebase_branch(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       # A 409 means the rebase can't be applied cleanly (conflict); the queue
       # treats that as non-fatal and lets the next get/1 poll surface the
@@ -433,7 +433,7 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   defp merge_branch(mr_ref, workspace, repo) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, mr} <- request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json(),
          {:ok, branch, target} <- mr_branches(mr) do
@@ -478,7 +478,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @impl true
   def failing_check_logs(mr_ref) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       fetch_failing_check_logs(cfg, iid)
     end
@@ -486,7 +486,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @impl true
   def unrun_pipeline(mr_ref) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       fetch_unrun_pipeline(cfg, iid)
     end
@@ -494,7 +494,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @impl true
   def ci_job_artifacts(mr_ref, job_name, _opts) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, [latest | _]} <- mr_pipelines(cfg, iid) |> no_pipeline(),
          {:ok, jobs} <- pipeline_jobs(cfg, Map.get(latest, "id")) do
@@ -521,7 +521,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @impl true
   def last_green_job_sha(mr_ref, job_name, _opts) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, pipelines} <- mr_pipelines(cfg, iid) do
       pipelines
@@ -554,7 +554,7 @@ defmodule Arbiter.Mergers.Gitlab do
     requested = Map.get(opts, :mode) || :auto
 
     with :ok <- check_rerun_mode(inputs, requested),
-         {:ok, cfg} <- Config.resolve(),
+         {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, mr} <- request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json(),
          {:ok, pipelines} <- head_pipelines(cfg, iid, Map.get(mr, "sha")),
@@ -593,7 +593,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @impl true
   def trigger_pipeline(mr_ref, _opts) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, started} <-
            request(cfg, :post, "/merge_requests/#{iid}/pipelines", json: %{})
@@ -857,7 +857,7 @@ defmodule Arbiter.Mergers.Gitlab do
   # reviewer ever saw.
   def merge(mr_ref, expected_sha)
       when is_binary(mr_ref) and is_binary(expected_sha) and expected_sha != "" do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       merge_with_sha(cfg, iid, expected_sha)
     end
@@ -869,7 +869,7 @@ defmodule Arbiter.Mergers.Gitlab do
   # merges whatever head the forge reports right now. Callers reach this only
   # on paths with no MR head to race against; see `Arbiter.Mergers.ReviewedSha`.
   def merge(mr_ref, _expected_sha) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       case request(cfg, :get, "/merge_requests/#{iid}", []) do
         {:ok, %Req.Response{status: status, body: mr_body}} when status in 200..299 ->
@@ -939,7 +939,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @impl true
   def close(mr_ref) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       request(cfg, :put, "/merge_requests/#{iid}", json: %{"state_event" => "close"})
       |> handle_ok()
@@ -948,7 +948,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @impl true
   def update_description(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       request(cfg, :put, "/merge_requests/#{iid}", json: %{"description" => body})
       |> handle_ok()
@@ -957,7 +957,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @impl true
   def add_comment(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       request(cfg, :post, "/merge_requests/#{iid}/notes", json: %{"body" => body})
       |> handle_ok()
@@ -966,7 +966,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @impl true
   def request_review(mr_ref, reviewers) when is_binary(mr_ref) and is_list(reviewers) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       request(cfg, :put, "/merge_requests/#{iid}", json: %{"reviewer_ids" => reviewers})
       |> handle_ok()
@@ -975,7 +975,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @impl true
   def link_for(mr_ref) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, path} <- resolve_project_path(cfg) do
       "https://#{cfg.host}/#{path}/-/merge_requests/#{iid}"
@@ -985,19 +985,23 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   @impl true
-  def ref_for_pr(pr, _opts) when is_binary(pr) do
+  def ref_for_pr(pr, opts) when is_binary(pr) and is_map(opts) do
     pr = String.trim(pr)
 
     cond do
-      # Full forge URL: https://<host>/<group>/<project>/-/merge_requests/<iid>
-      m = Regex.run(~r{/-/merge_requests/(\d+)}, pr) ->
-        [_, iid] = m
-        {:ok, ref_for(iid)}
+      # Full forge URL: https://<host>/<group>[/<sub>...]/<project>/-/merge_requests/<iid>.
+      # The URL's own project path is embedded in the ref so the review reads
+      # THAT project, never the workspace's configured one (bd-96d5z4).
+      m = Regex.run(~r{^(?:https?://[^/\s]+/)?(.+?)/-/merge_requests/(\d+)}, pr) ->
+        [_, path, iid] = m
+        {:ok, qualified_ref(path, iid)}
 
-      # Bare iid or GitLab's own "!<iid>" shorthand.
+      # Bare iid or GitLab's own "!<iid>" shorthand: the project comes from the
+      # named repo's checkout origin remote; with no checkout the ref stays
+      # unqualified (the workspace's configured project).
       m = Regex.run(~r/^!?(\d+)$/, pr) ->
         [_, iid] = m
-        {:ok, ref_for(iid)}
+        bare_ref(iid, opts)
 
       true ->
         {:error,
@@ -1006,16 +1010,69 @@ defmodule Arbiter.Mergers.Gitlab do
            status: nil,
            message:
              "could not parse #{inspect(pr)} as a GitLab MR reference — expected an MR URL " <>
-               "(…/-/merge_requests/N), a bare iid, or \"!N\". The MR is resolved within the " <>
-               "workspace's configured project_id.",
+               "(…/-/merge_requests/N), a bare iid, or \"!N\". A bare iid is resolved within " <>
+               "the named repo's origin project (or the workspace's configured project_id).",
            raw: pr
          }}
     end
   end
 
+  defp bare_ref(iid, %{repo_path: path}) when is_binary(path) and path != "" do
+    case project_path_from_remote(path) do
+      {:ok, project} ->
+        {:ok, qualified_ref(project, iid)}
+
+      :error ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message:
+             "could not determine the GitLab project of the repo checkout at #{path} " <>
+               "(no readable `origin` remote); refusing to guess which project MR !#{iid} " <>
+               "belongs to — pass the full MR URL",
+           raw: path
+         }}
+    end
+  end
+
+  defp bare_ref(iid, _opts), do: {:ok, ref_for(iid)}
+
+  # `group/sub/project` from an origin URL (scp-style or scheme://).
+  defp project_path_from_remote(repo_path) do
+    case System.cmd("git", ["-C", repo_path, "remote", "get-url", "origin"],
+           stderr_to_stdout: true
+         ) do
+      {out, 0} -> parse_remote_project(String.trim(out))
+      _ -> :error
+    end
+  rescue
+    ErlangError -> :error
+  end
+
+  @doc false
+  def parse_remote_project(url) when is_binary(url) do
+    cond do
+      m = Regex.run(~r{^[^@\s/]+@[^:\s/]+:(.+?)(?:\.git)?/?$}, url) ->
+        clean_project(m)
+
+      m = Regex.run(~r{^[a-z+]+://(?:[^@/\s]+@)?[^/\s]+/(.+?)(?:\.git)?/?$}, url) ->
+        clean_project(m)
+
+      true ->
+        :error
+    end
+  end
+
+  defp clean_project([_, path]) do
+    if String.contains?(path, "/"), do: {:ok, path}, else: :error
+  end
+
+  defp qualified_ref(path, iid), do: path <> ref_for(iid)
+
   @impl true
   def get_diff(mr_ref, opts) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       {path, req_opts} =
         case diff_range(opts) do
@@ -1131,7 +1188,7 @@ defmodule Arbiter.Mergers.Gitlab do
   @impl true
   def post_inline_comment(mr_ref, finding, _opts)
       when is_binary(mr_ref) and is_map(finding) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       %{severity: sev, file: file, line: line, message: msg} = finding
       body = "**#{sev |> Atom.to_string() |> String.upcase()}** at `#{file}:#{line}`: #{msg}"
@@ -1144,7 +1201,7 @@ defmodule Arbiter.Mergers.Gitlab do
   @impl true
   def submit_review(mr_ref, verdict, body, _opts)
       when is_binary(mr_ref) and verdict in [:approve, :request_changes] do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       case verdict do
         :approve ->
@@ -1205,7 +1262,7 @@ defmodule Arbiter.Mergers.Gitlab do
   # ignored. Each open discussion is normalized to a `t:review_thread/0`.
   @impl true
   def list_open_review_threads(mr_ref) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, discussions} <-
            request(cfg, :get, "/merge_requests/#{iid}/discussions", params: [per_page: 100])
@@ -1222,7 +1279,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @spec self_approved?(String.t()) :: {:ok, boolean()} | {:error, term()}
   def self_approved?(mr_ref) when is_binary(mr_ref) do
-    with {:ok, cfg} <- Config.resolve(),
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, approvals} <-
            request(cfg, :get, "/merge_requests/#{iid}/approvals", [])
@@ -1325,14 +1382,15 @@ defmodule Arbiter.Mergers.Gitlab do
 
     cond do
       String.starts_with?(s, "http://") or String.starts_with?(s, "https://") ->
-        case Regex.run(~r{/-/merge_requests/(\d+)}, s) do
-          [_, iid] -> {:ok, ref_for(iid)}
+        case Regex.run(~r{^https?://[^/\s]+/(.+?)/-/merge_requests/(\d+)}, s) do
+          [_, path, iid] -> {:ok, qualified_ref(path, iid)}
           _ -> :error
         end
 
-      match?([_, _], Regex.run(~r/^!(\d+)$/, s)) ->
-        [_, iid] = Regex.run(~r/^!(\d+)$/, s)
-        {:ok, ref_for(iid)}
+      # "!42" or project-qualified "group/proj!42"
+      m = Regex.run(~r/^(?:(.+?))?!(\d+)$/, s) ->
+        [_, path, iid] = m
+        if path == "", do: {:ok, ref_for(iid)}, else: {:ok, qualified_ref(path, iid)}
 
       Regex.match?(~r/^\d+$/, s) ->
         {:ok, ref_for(s)}
@@ -1444,9 +1502,28 @@ defmodule Arbiter.Mergers.Gitlab do
 
   defp recheck_phantom_conflict(response, _cfg, _iid), do: response
 
+  # Config for the project an `mr_ref` names: the workspace's host + token, with
+  # the project overridden by the ref's own project path when it carries one
+  # (bd-96d5z4). Unqualified refs keep the configured project_id.
+  defp cfg_for_ref(mr_ref) do
+    with {:ok, cfg} <- Config.resolve() do
+      case parse_ref(mr_ref) do
+        {:ok, ref} ->
+          case String.split(ref, "!", parts: 2) do
+            ["", _] -> {:ok, cfg}
+            [path, _] -> {:ok, %{cfg | project_id: path}}
+          end
+
+        :error ->
+          {:ok, cfg}
+      end
+    end
+  end
+
   defp iid_from_ref(ref) do
     case parse_ref(ref) do
-      {:ok, "!" <> iid} ->
+      {:ok, ref} ->
+        [_, iid] = String.split(ref, "!", parts: 2)
         {:ok, iid}
 
       :error ->
@@ -2135,7 +2212,9 @@ defmodule Arbiter.Mergers.Gitlab do
 
   # Project-scoped client: prepends /api/v4/projects/:project_id to `path`.
   defp client(cfg),
-    do: build_client(cfg, "https://#{cfg.host}/api/v4/projects/#{cfg.project_id}")
+    do: build_client(cfg, "https://#{cfg.host}/api/v4/projects/#{encode_project(cfg.project_id)}")
+
+  defp encode_project(id), do: id |> to_string() |> URI.encode(&URI.char_unreserved?/1)
 
   # Root client: prepends /api/v4 to `path` (for `GET /user`, which is not
   # scoped to a project).

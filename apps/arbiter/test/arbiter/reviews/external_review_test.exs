@@ -75,6 +75,93 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert prepared.mr_ref == "acme/apex_auth_server#394"
     end
 
+    test "a named repo with no checkout is refused, never falling back (bd-96d5z4)" do
+      ws = github_ws("er-unresolved-repo")
+
+      assert {:error, {:repo_unresolved, "ghost"}} =
+               ExternalReview.prepare(pr: "30", repo: "ghost", workspace: ws.name)
+
+      assert ExternalReview.describe_error({:repo_unresolved, "ghost"}) =~ "refusing to fall back"
+    end
+
+    test "github: a bare number with an unreadable origin is refused" do
+      dir = Path.join(System.tmp_dir!(), "er-noorigin-#{:erlang.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "er-gh-noorigin",
+          prefix: uniq_prefix(),
+          config: %{
+            "repo_paths" => %{"w" => dir},
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      assert {:error, %{kind: :validation_failed}} =
+               ExternalReview.prepare(pr: "30", repo: "w", workspace: ws.name)
+    end
+
+    test "gitlab: bare number + repo key != forge slug resolves the repo's origin project" do
+      System.put_env(@env_var, "tok")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      repo = tmp_git_repo("git@gitlab.com:emricare/tonic-device.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "er-gl-key",
+          prefix: uniq_prefix(),
+          config: %{
+            "repo_paths" => %{"tonic_device" => repo, "tonic" => "/nonexistent/tonic"},
+            "default_repo" => "tonic",
+            "merge" => %{
+              "strategy" => "gitlab",
+              "config" => %{
+                "host" => "gitlab.com",
+                "project_id" => "emricare/tonic",
+                "credentials_ref" => "env:#{@env_var}"
+              }
+            }
+          }
+        })
+
+      assert {:ok, prepared} =
+               ExternalReview.prepare(pr: "30", repo: "tonic_device", workspace: ws.name)
+
+      assert prepared.mr_ref == "emricare/tonic-device!30"
+      assert prepared.link == "https://gitlab.com/emricare/tonic-device/-/merge_requests/30"
+    end
+
+    test "gitlab: a full MR URL for another project keeps that project" do
+      System.put_env(@env_var, "tok")
+      on_exit(fn -> System.delete_env(@env_var) end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "er-gl-url",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{
+              "strategy" => "gitlab",
+              "config" => %{
+                "host" => "gitlab.com",
+                "project_id" => "emricare/tonic",
+                "credentials_ref" => "env:#{@env_var}"
+              }
+            }
+          }
+        })
+
+      url = "https://gitlab.com/emricare/tonic-device/-/merge_requests/30"
+      assert {:ok, prepared} = ExternalReview.prepare(pr: url, workspace: ws.name)
+      assert prepared.mr_ref == "emricare/tonic-device!30"
+      assert prepared.link == url
+    end
+
     test "the :direct merge strategy has no external-PR support" do
       {:ok, ws} =
         Ash.create(Workspace, %{

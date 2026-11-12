@@ -3264,11 +3264,13 @@ defmodule Arbiter.Mergers.GithubTest do
       assert {:ok, "acme/apex_auth_server#394"} = Github.ref_for_pr("394", %{repo_path: repo})
     end
 
-    test "a bare number with an unresolvable repo_path falls back to a bare ref" do
+    test "a bare number with an unresolvable repo_path is refused, not guessed (bd-96d5z4)" do
       dir = Path.join(System.tmp_dir!(), "no-remote-#{:erlang.unique_integer([:positive])}")
       File.mkdir_p!(dir)
       on_exit(fn -> File.rm_rf!(dir) end)
-      assert {:ok, "#9"} = Github.ref_for_pr("9", %{repo_path: dir})
+
+      assert {:error, %Error{kind: :validation_failed}} =
+               Github.ref_for_pr("9", %{repo_path: dir})
     end
 
     test "an unparseable identifier returns a validation error" do

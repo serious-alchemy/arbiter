@@ -142,6 +142,7 @@ defmodule Arbiter.Reviews.ExternalReview do
          strategy = Workspace.merger_strategy(workspace),
          :ok <- ensure_supports_external(adapter, strategy),
          repo_path = resolve_repo_path(workspace, Map.get(opts, :repo)),
+         :ok <- ensure_repo_resolved(Map.get(opts, :repo), repo_path, pr),
          :ok <- Mergers.prepare(workspace),
          {:ok, mr_ref} <- adapter.ref_for_pr(pr, %{repo_path: repo_path}) do
       {:ok,
@@ -259,6 +260,12 @@ defmodule Arbiter.Reviews.ExternalReview do
         "configure a hosted MR provider (github/gitlab) under config[\"merge\"][\"strategy\"]"
 
   def describe_error({:workspace, msg}) when is_binary(msg), do: msg
+
+  def describe_error({:repo_unresolved, repo}),
+    do:
+      "repo #{inspect(repo)} has no local checkout in this workspace's repo_paths, so PR " <>
+        "references cannot be resolved against it; refusing to fall back to another repo " <>
+        "(bd-96d5z4). Fix repo_paths or pass the full PR/MR URL without `repo`."
 
   def describe_error({:already_approved, ref}),
     do:
@@ -1891,6 +1898,19 @@ defmodule Arbiter.Reviews.ExternalReview do
   # The one omitted-workspace rule (`Arbiter.Tasks.Workspaces`, `:write`): a
   # named workspace (id or name), else the sole workspace, else a refusal that
   # lists the candidates — never the one that happens to be named `default`.
+  # A named `repo` must map to a checkout: its origin remote is what resolves a
+  # bare PR number. Never fall back to another repo / the workspace default
+  # (bd-96d5z4).
+  defp ensure_repo_resolved(repo, nil, pr) when is_binary(repo) and repo != "" do
+    # A full URL / owner/repo slug is self-describing; only a bare number needs
+    # the checkout to say which project it belongs to.
+    if Regex.match?(~r/^[#!]?\d+$/, String.trim(pr)),
+      do: {:error, {:repo_unresolved, repo}},
+      else: :ok
+  end
+
+  defp ensure_repo_resolved(_repo, _path, _pr), do: :ok
+
   defp resolve_workspace(ref) do
     case Workspaces.resolve_workspace(nil, ref, mode: :write) do
       {:ok, %Workspace{} = ws} -> {:ok, ws}

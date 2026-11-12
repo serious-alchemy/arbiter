@@ -1656,7 +1656,7 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
 
     test "accepts a full GitLab MR URL" do
-      assert {:ok, "!42"} =
+      assert {:ok, "grp/proj!42"} =
                Gitlab.parse_ref("https://gitlab.com/grp/proj/-/merge_requests/42")
     end
 
@@ -1787,9 +1787,63 @@ defmodule Arbiter.Mergers.GitlabTest do
 
   # ref_for_pr/2 — construct an mr_ref for an external MR (bd-d4ealy).
   describe "ref_for_pr/2" do
-    test "parses an MR URL into a !iid ref" do
-      assert {:ok, "!7"} =
+    test "parses an MR URL into a project-qualified ref" do
+      assert {:ok, "group/proj!7"} =
                Gitlab.ref_for_pr("https://gitlab.com/group/proj/-/merge_requests/7", %{})
+
+      assert {:ok, "a/b/proj!7"} =
+               Gitlab.ref_for_pr("https://gitlab.com/a/b/proj/-/merge_requests/7", %{})
+    end
+
+    test "a full MR URL fetches THAT project's diff, not the workspace default (bd-96d5z4)" do
+      stub(fn conn ->
+        assert conn.request_path =~ "/api/v4/projects/other"
+        assert conn.request_path =~ "proj"
+        refute conn.request_path =~ "/projects/#{@project}/"
+        assert conn.request_path =~ "/merge_requests/7/changes"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "changes" => [
+            %{"old_path" => "a.ex", "new_path" => "a.ex", "diff" => "@@ -1 +1 @@\n-a\n+b\n"}
+          ]
+        })
+      end)
+
+      {:ok, ref} = Gitlab.ref_for_pr("https://gitlab.com/other/proj/-/merge_requests/7", %{})
+      assert {:ok, diff} = Gitlab.get_diff(ref, %{})
+      assert diff =~ "+b"
+      assert Gitlab.link_for(ref) == "https://gitlab.com/other/proj/-/merge_requests/7"
+    end
+
+    test "a bare iid with a repo_path resolves to the checkout's origin project (key != slug)" do
+      dir = Path.join(System.tmp_dir!(), "gl-origin-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      {_, 0} = System.cmd("git", ["init", "-q", dir])
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          dir,
+          "remote",
+          "add",
+          "origin",
+          "git@gitlab.com:emricare/tonic-device.git"
+        ])
+
+      assert {:ok, "emricare/tonic-device!30"} = Gitlab.ref_for_pr("30", %{repo_path: dir})
+      assert {:ok, "emricare/tonic-device!30"} = Gitlab.ref_for_pr("!30", %{repo_path: dir})
+    end
+
+    test "a bare iid with a repo_path whose origin can't be read is refused" do
+      dir = Path.join(System.tmp_dir!(), "gl-noorigin-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      assert {:error, %Error{kind: :validation_failed}} =
+               Gitlab.ref_for_pr("30", %{repo_path: dir})
     end
 
     test "parses a bare iid" do
