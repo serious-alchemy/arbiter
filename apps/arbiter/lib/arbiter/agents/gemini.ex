@@ -14,6 +14,7 @@ defmodule Arbiter.Agents.Gemini do
 
   @behaviour Arbiter.Agents.Agent
 
+  alias Arbiter.Agents.ArgvGuard
   alias Arbiter.Agents.Gemini.Config
   alias Arbiter.Agents.Gemini.ConfigDir
   alias Arbiter.Agents.Gemini.ModelCatalog
@@ -186,6 +187,12 @@ defmodule Arbiter.Agents.Gemini do
 
   defp jail_blocker_message(reason) when is_binary(reason), do: reason
 
+  # bd-2idusd: oversize-prompt delivery (see `wrap_delivery/3`).
+  @inline_script ~s(exec "$@" < /dev/null)
+  @stdin_script ~s(f="$1"; shift; exec "$@" < "$f")
+  @prompt_tmp_prefix "arb_prompt_"
+  @stdin_stub "The full task instructions are provided on stdin. Follow them exactly."
+
   @no_keyring_message "agy needs a keyring (D-Bus) or its own login on this host"
 
   @impl true
@@ -196,7 +203,8 @@ defmodule Arbiter.Agents.Gemini do
     case resolve_executable() do
       {:ok, {type, exec}} ->
         policy = security_policy(opts)
-        inner = build_argv(type, exec, prompt, opts, policy)
+        oversize? = byte_size(prompt) > ArgvGuard.max_arg_strlen()
+        inner = build_argv(type, exec, if(oversize?, do: @stdin_stub, else: prompt), opts, policy)
 
         # The jail sits between `sh` and the CLI, so the element before `-p`
         # is still the CLI and `splice_prompt/2` (resume, nudge) is unchanged.
@@ -204,7 +212,7 @@ defmodule Arbiter.Agents.Gemini do
         # upstream `gemini` (which `maybe_jail/4` never wraps) included.
         with {:ok, _sandbox} <- Sandbox.module(policy),
              {:ok, command} <- maybe_jail(type, inner, opts, policy) do
-          {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | command]}
+          wrap_delivery(command, prompt, oversize?)
         end
 
       {:error, _} = err ->
@@ -545,6 +553,56 @@ defmodule Arbiter.Agents.Gemini do
   # (test fixtures / custom commands).
   @doc false
   def splice_prompt(argv, insert) when is_list(argv) and is_list(insert) do
+    with {:ok, spliced} <- splice_inline(inline_argv(argv), insert) do
+      redeliver(spliced)
+    end
+  end
+
+  # A stdin-delivery argv (`sh -c <stdin script> sh <tmp> cmd…`) is turned back
+  # into the inline shape before the prompt slot is swapped.
+  defp inline_argv(["sh", "-c", @stdin_script, "sh", _tmp | command]),
+    do: ["sh", "-c", @inline_script, "sh" | command]
+
+  defp inline_argv(argv), do: argv
+
+  # After a splice, an oversize prompt moves to stdin again.
+  defp redeliver(argv) do
+    with idx when is_integer(idx) <- Enum.find_index(argv, &(&1 == "-p")),
+         prompt when is_binary(prompt) <- Enum.at(argv, idx + 1),
+         true <- byte_size(prompt) > ArgvGuard.max_arg_strlen(),
+         ["sh", "-c", @inline_script, "sh" | command] <- argv do
+      wrap_delivery(List.replace_at(command, idx - 3, @stdin_stub), prompt, true)
+    else
+      _ -> {:ok, argv}
+    end
+  end
+
+  # bd-2idusd: prompts over MAX_ARG_STRLEN go to a temp file fed on stdin (the
+  # gemini CLI appends `-p` text to stdin input); argv carries only a stub.
+  defp wrap_delivery(command, _prompt, false),
+    do: {:ok, ["sh", "-c", @inline_script, "sh" | command]}
+
+  defp wrap_delivery(command, prompt, true) do
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        @prompt_tmp_prefix <> Integer.to_string(System.unique_integer([:positive])) <> ".txt"
+      )
+
+    case File.write(tmp, prompt) do
+      :ok -> {:ok, ["sh", "-c", @stdin_script, "sh", tmp | command]}
+      {:error, reason} -> {:error, {:prompt_tmpfile_failed, reason}}
+    end
+  end
+
+  @doc false
+  def prompt_tmpfile(["sh", "-c", @stdin_script, "sh", path | _]) when is_binary(path) do
+    if String.starts_with?(Path.basename(path), @prompt_tmp_prefix), do: path
+  end
+
+  def prompt_tmpfile(_), do: nil
+
+  defp splice_inline(argv, insert) do
     case Enum.find_index(argv, &(&1 == "-p")) do
       nil ->
         {:error, :no_print_slot}

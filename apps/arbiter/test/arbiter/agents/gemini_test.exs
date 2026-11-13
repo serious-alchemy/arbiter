@@ -1434,6 +1434,83 @@ defmodule Arbiter.Agents.GeminiTest do
     end
   end
 
+  describe "oversize prompts go over stdin, not argv (bd-2idusd)" do
+    @max_arg 131_072
+
+    setup do
+      tmp =
+        Path.join(System.tmp_dir!(), "arbiter-gemini-big-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp)
+      stub = Path.join(tmp, "agy")
+      File.write!(stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+    end
+
+    defp stdin_argv(prompt) do
+      assert {:ok, argv} = default_argv(prompt, [])
+      argv
+    end
+
+    defp tmp_of(argv), do: Gemini.prompt_tmpfile(argv)
+
+    test "dispatch: no argv element exceeds MAX_ARG_STRLEN and the full prompt is in the file" do
+      prompt = String.duplicate("x", @max_arg + 10)
+      argv = stdin_argv(prompt)
+
+      assert Enum.all?(argv, &(byte_size(&1) <= @max_arg))
+      tmp = tmp_of(argv)
+      assert is_binary(tmp)
+      assert File.read!(tmp) == prompt
+      assert "-p" in argv
+      File.rm(tmp)
+    end
+
+    test "small prompts keep the inline shape and have no tmpfile" do
+      argv = stdin_argv("small")
+      assert ~s(exec "$@" < /dev/null) in argv
+      assert "small" in argv
+      assert tmp_of(argv) == nil
+    end
+
+    test "nudge and resume with an oversize prompt go over stdin" do
+      first = stdin_argv("small")
+      big = String.duplicate("y", @max_arg + 1)
+
+      assert {:ok, nudged} = Gemini.splice_prompt(first, [big])
+      assert Enum.all?(nudged, &(byte_size(&1) <= @max_arg))
+      assert File.read!(tmp_of(nudged)) == big
+      File.rm(tmp_of(nudged))
+
+      if match?({:ok, {:agy, _}}, Gemini.resolve_executable()) do
+        assert {:ok, resumed} = Gemini.splice_prompt(first, ["--resume", "s1", big])
+        assert Enum.all?(resumed, &(byte_size(&1) <= @max_arg))
+        assert File.read!(tmp_of(resumed)) == big
+        assert "s1" in resumed
+        File.rm(tmp_of(resumed))
+      end
+    end
+
+    test "splicing a small prompt into a stdin-delivery argv returns to the inline shape" do
+      big = String.duplicate("z", @max_arg + 1)
+      argv = stdin_argv(big)
+      tmp = tmp_of(argv)
+
+      assert {:ok, out} = Gemini.splice_prompt(argv, ["short nudge"])
+      assert tmp_of(out) == nil
+      assert "short nudge" in out
+      assert ~s(exec "$@" < /dev/null) in out
+      File.rm(tmp)
+    end
+  end
+
   describe "splice_prompt/2 — resume (bd-b7e33c)" do
     test "agy branch: translates --resume into --conversation <id> and preserves --print-timeout/--model/--effort" do
       argv = [

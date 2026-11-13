@@ -2614,6 +2614,11 @@ defmodule Arbiter.Worker.ClaudeSession do
   @doc false
   @spec open_port(map()) :: port()
   def open_port(%{exec: exec, argv: [_ | rest], cd: cd} = port_args) do
+    # bd-2idusd: refuse an oversize element with a clear error, not a raw exit 7.
+    with {:error, reason} <- Arbiter.Agents.ArgvGuard.check(rest) do
+      raise Arbiter.Agents.ArgvGuard.message(reason)
+    end
+
     base_opts = [
       {:args, rest},
       {:cd, cd},
