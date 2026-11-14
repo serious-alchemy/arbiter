@@ -5,8 +5,8 @@ Thanks for your interest in contributing.
 ## License and the Contributor License Agreement
 
 All contributions to this repository are licensed under the
-[Apache License, Version 2.0](LICENSE), the same license as the rest of the
-project.
+[Functional Source License, Version 1.1, ALv2 Future License
+(FSL-1.1-ALv2)](LICENSE), the same license as the rest of the project.
 
 Before any pull request can be merged, you must sign the project's
 [Contributor License Agreement (CLA.md)](CLA.md). A CLA check runs
@@ -14,7 +14,7 @@ automatically on every pull request and posts instructions for signing on your
 first contribution.
 
 **Why a CLA and not a DCO?** Arbiter follows an open-core model: components
-that start out in this Apache-2.0 repository may later need to move into a
+that start out in this FSL-1.1-ALv2 repository may later need to move into a
 separately licensed, closed-source "Pro" package. A Developer Certificate of
 Origin (DCO) only certifies that you wrote the contribution and have the right
 to submit it — it does not grant the maintainer any right to relicense it. The

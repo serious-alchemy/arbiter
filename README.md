@@ -696,7 +696,13 @@ for how to report it privately.
 
 ## License
 
-Arbiter is licensed under the [Apache License, Version 2.0](LICENSE). Third-party
+Arbiter is licensed under the [Functional Source License, Version 1.1, ALv2 Future
+License (FSL-1.1-ALv2)](LICENSE). The source is public and free to use, modify and
+self-host for any permitted purpose; the license does not allow offering it as a
+competing commercial product or service. Each release automatically converts to
+the Apache License, Version 2.0 on the second anniversary of the date it was made
+available. Releases published before the relicensing remain under Apache-2.0.
+Third-party
 dependencies and their licenses are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 Arbiter follows an open-core model: future commercially-licensed components ship
