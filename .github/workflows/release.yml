@@ -322,7 +322,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=FSL-1.1-ALv2
             org.opencontainers.image.description=Arbiter controller (open-core release)
             arbiter.base-image=${{ env.BASE_IMAGE }}
 
@@ -344,7 +344,7 @@ jobs:
             --provenance=false --sbom=false \
             --file dist/Containerfile.worker-base \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-            --label "org.opencontainers.image.licenses=Apache-2.0" \
+            --label "org.opencontainers.image.licenses=FSL-1.1-ALv2" \
             --label "org.opencontainers.image.description=Arbiter shared worker image base" \
             --tag "${REF}" \
             --metadata-file "${RUNNER_TEMP}/base-metadata.json" \

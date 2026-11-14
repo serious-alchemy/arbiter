@@ -1,12 +1,27 @@
 # Licensing Model & Open-Core Architecture
 
-**Status:** Decided  
-**Date:** 2026-09-18  
+**Status:** Decided — the 2026-09-18 Apache-2.0 decision is **superseded** by §0 (2026-11-14)  
+**Date:** 2026-09-18 (original); 2026-11-14 (FSL revision)  
 **Task:** bd-gjw1ze · **Tracker:** github:1868  
 
 ---
 
-## 1. The Decision, in Short
+## 0. Current Decision (2026-11-14): Core is FSL-1.1-ALv2
+
+> **Supersedes** the 2026-09-18 Apache-2.0 open-core decision recorded in §1–§6 below. Those sections are kept as the historical record; where they conflict with this section, this section governs.
+
+**Decision.** Future releases of the Arbiter core are licensed under the **Functional Source License, Version 1.1, ALv2 Future License (`FSL-1.1-ALv2`)**. The owner is the sole copyright holder (see `NOTICE`).
+
+1. **Delayed conversion to Apache-2.0.** Each release converts automatically to Apache-2.0 on the second anniversary of the date it was made available. Releases already published under Apache-2.0 stay Apache-2.0 permanently (§6 point 2 is unchanged).
+2. **Rationale — supersedes §2.2.** §2.2 rejected BUSL/FSL on the grounds that no source-available license defends Arbiter against a real threat and that it costs OSI status. That reasoning is withdrawn. The goal now is to protect the product against others selling it commercially (a competing paid product or hosted service built from our code) while the code stays public and free to use, modify and self-host for any permitted purpose. FSL's competing-use restriction does that; the two-year conversion keeps the long-run commitment to open source. The accepted cost is that Arbiter is source-available, not OSI-approved open source, until each release converts.
+3. **Package-level boundary stays.** A separate commercial "Arbiter Pro" package, closed-source and distributed through an authenticated private Hex repository, remains the model; there is still no in-repo license zoning and no dual licensing (§1).
+4. **§6 "additive only" is revised.** Point 3 of §6 (no capability subtractions) no longer holds absolutely: some existing team/infrastructure features are planned to move to the commercial tier. Which features, and how they are gated, is a separate design ticket and is deliberately **not** decided or enumerated here. Already-published releases remain Apache-2.0 and forkable regardless.
+
+Elsewhere in this document, "Apache-2.0" describes the 2026-09-18 position and releases published under it. The CLA (§4) already grants the Maintainer relicensing rights, so it covers this change.
+
+---
+
+## 1. The Decision, in Short (superseded 2026-11-14 — see §0)
 
 Arbiter adopts an **open-core** licensing and distribution model:
 
@@ -33,7 +48,7 @@ Drawing the boundary strictly at the **package level** keeps the core repository
 ### 2.1. MIT License
 * **Rationale for rejection:** MIT lacks an explicit patent grant (Section 3 of Apache-2.0) and lacks a patent-retaliation termination clause. In AI orchestration, agent tooling, and developer infrastructure—spaces with high concentrations of aggressive software patent filings—an explicit patent grant is vital protection for both the project and downstream adopters. Furthermore, corporate legal teams regularly clear Apache-2.0 projects without friction, whereas MIT without patent indemnification occasionally prompts extended legal scrutiny.
 
-### 2.2. BUSL-1.1 / Functional Source License (FSL)
+### 2.2. BUSL-1.1 / Functional Source License (FSL) — superseded 2026-11-14 (FSL adopted, see §0)
 * **Rationale for rejection:** Source-available licenses (such as Business Source License 1.1 or FSL) are primarily designed to defend cloud-hosted software products against hyperscalers and managed-service competitors (e.g., AWS launching a hosted wrapper around an open database). Arbiter is a self-hosted control plane that coordinates local git worktrees and agent sessions on developer machines; nobody runs or consumes Arbiter as a generic multi-tenant hosted SaaS. The realistic competitive threat to Arbiter is platform vendors shipping native fleet orchestration within their own developer tools—a scenario no source-available license prevents. In exchange for zero competitive defense, adopting BUSL/FSL imposes a substantial "adoption tax" by forfeiting OSI-approved open-source status, creating friction for corporate evaluation and community contribution.
 
 ### 2.3. AGPLv3 + Commercial Exception
@@ -99,7 +114,7 @@ To maintain trust with the open-source community while sustaining commercial via
 
 1. **Sole Copyright Retains Relicensing Rights:** As sole copyright holder (or via CLA grant), licensing the core codebase under Apache-2.0 grants broad rights to third parties but surrenders none. The author may copy core code into Pro and distribute it under proprietary terms at any time.
 2. **Published Releases are Permanent:** Once a version or module is published under Apache-2.0, that grant is irrevocable. Every release published under Apache-2.0 remains Apache-2.0 forever and remains publicly forkable. Removing a capability from future versions of the core repository does not erase it from the public domain or historical tags.
-3. **Additive Pattern Only (No Capability Subtractions):** Pro features must follow an **additive pattern**: Pro provides more capable implementations behind established core behaviours, or introduces entirely new capabilities that never existed in core. Core capabilities that users depend on must **not** be stripped or retroactively gated behind a paywall. Gating previously open features behind commercial licenses is what caused severe community backlash in the Redis, Elastic, and Terraform relicensing controversies.
+3. **Additive Pattern Only (No Capability Subtractions) — revised 2026-11-14, see §0:** Pro features must follow an **additive pattern**: Pro provides more capable implementations behind established core behaviours, or introduces entirely new capabilities that never existed in core. Core capabilities that users depend on must **not** be stripped or retroactively gated behind a paywall. Gating previously open features behind commercial licenses is what caused severe community backlash in the Redis, Elastic, and Terraform relicensing controversies.
 4. **Operational Consequence:** Any feature or capability intended for Arbiter Pro must **never be shipped in the core repository first**. Once published in core under Apache-2.0, that code is permanently public and cannot be withdrawn.
 
 ---
